@@ -4,6 +4,13 @@
 
 ![License](https://img.shields.io/badge/license-PolyForm_NC_1.0.0-orange)
 
+<img width="2559" height="1362" alt="image" src="https://github.com/user-attachments/assets/1b7ce2bb-cfca-40ef-8224-5f5c8d48481b" />
+
+<img width="2559" height="1362" alt="image" src="https://github.com/user-attachments/assets/ea008f91-fc2f-402c-a7bb-6f3ebc9f3b0d" />
+
+
+
+
 ## 功能
 
 - 📝 **笔记**：Markdown 编辑（md-editor-v3）、目录、格式条、HTML 导出（自包含单文件）、AI 润色
