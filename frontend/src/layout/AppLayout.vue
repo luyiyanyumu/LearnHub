@@ -2,6 +2,7 @@
 import { computed, defineAsyncComponent, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { isDark, toggleTheme } from '../composables/useTheme'
+import { focusMode } from '../composables/useViewMode'
 import AgentPanel from '../components/AgentPanel.vue'
 
 /**
@@ -27,13 +28,23 @@ const activeMenu = computed(() => {
   if (p.startsWith('/notes')) return '/notes'
   if (p.startsWith('/refs')) return '/refs'
   if (p.startsWith('/files')) return '/files'
+  if (p.startsWith('/knowledge')) return '/knowledge'
   return '/'
 })
+
+/** 侧栏导航项：统一线性图标（stroke 风格，16px 视觉） */
+const navItems = [
+  { index: '/', name: '总览', icon: 'M3.5 12l8.5-7.5L20.5 12M5.5 10.5V20h13v-9.5M10 20v-5h4v5' },
+  { index: '/notes', name: '笔记', icon: 'M7 3.5h7a3 3 0 0 1 3 3V20.5H7a3 3 0 0 1-3-3v-11a3 3 0 0 1 3-3ZM10 8h4M10 11.5h4M10 15h2' },
+  { index: '/refs', name: '速查卡', icon: 'M13 2.5 5 10.5V21.5h14V2.5h-6Zm0 0v7h6M8.5 14h7M8.5 17h5' },
+  { index: '/files', name: '资料库', icon: 'M3.5 6.5a2 2 0 0 1 2-2h4l2 2.5h7a2 2 0 0 1 2 2v9.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2Z' },
+  { index: '/knowledge', name: '知识库', icon: 'M12 6.5c-1.8-1.6-4.3-2-7-2v13c2.7 0 5.2.4 7 2 1.8-1.6 4.3-2 7-2v-13c-2.7 0-5.2.4-7 2Zm0 0v13' },
+]
 </script>
 
 <template>
   <div class="layout">
-    <aside class="side">
+    <aside class="side" v-show="!focusMode">
       <div class="logo">
         <div class="logo-mark">
           <span class="logo-l">L</span>
@@ -46,20 +57,11 @@ const activeMenu = computed(() => {
       </div>
 
       <el-menu :default-active="activeMenu" router class="menu">
-        <el-menu-item index="/">
-          <span class="mi-name">总览</span>
-        </el-menu-item>
-        <el-menu-item index="/notes">
-          <span class="mi-name">笔记</span>
-        </el-menu-item>
-        <el-menu-item index="/refs">
-          <span class="mi-name">速查卡</span>
-        </el-menu-item>
-        <el-menu-item index="/files">
-          <span class="mi-name">资料库</span>
-        </el-menu-item>
-        <el-menu-item index="/knowledge">
-          <span class="mi-name">知识库</span>
+        <el-menu-item v-for="n in navItems" :key="n.index" :index="n.index">
+          <svg class="mi-ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path :d="n.icon" />
+          </svg>
+          <span class="mi-name">{{ n.name }}</span>
         </el-menu-item>
       </el-menu>
 
@@ -104,7 +106,7 @@ const activeMenu = computed(() => {
 }
 
 .side {
-  width: 216px;
+  width: 200px;
   flex-shrink: 0;
   background: var(--app-side);
   border-right: 1px solid var(--app-border);
@@ -186,11 +188,27 @@ const activeMenu = computed(() => {
 
 .menu :deep(.el-menu-item) {
   position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
   margin-bottom: 3px;
   border-radius: var(--radius-sm);
-  font-size: 14px;
+  font-size: 13.5px;
   font-weight: 500;
   transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease;
+}
+
+.mi-ico {
+  flex-shrink: 0;
+  opacity: 0.78;
+  transition: opacity var(--dur-fast) ease;
+}
+.menu :deep(.el-menu-item.is-active) .mi-ico {
+  opacity: 1;
+  color: var(--app-brand-deep);
+}
+html.dark .menu :deep(.el-menu-item.is-active) .mi-ico {
+  color: var(--app-brand);
 }
 
 /* hover 用中性色而非品牌色：品牌色要留给 active，稀有才有分量 */

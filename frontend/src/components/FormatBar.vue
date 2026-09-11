@@ -5,6 +5,9 @@ import { BG_COLORS, FONT_SIZES, TEXT_COLORS } from '../utils/richFormat'
 
 const emit = defineEmits(['apply'])
 
+/** bare：嵌入外部工具行时去掉自带的边框/底色/内边距（笔记编辑页顶栏用） */
+defineProps({ bare: { type: Boolean, default: false } })
+
 const textPop = ref(false)
 const bgPop = ref(false)
 const lastTextColor = ref('#f5222d')
@@ -28,8 +31,8 @@ function pickBg(c) {
 </script>
 
 <template>
-  <div class="format-bar">
-    <span class="fb-label">格式</span>
+  <div class="format-bar" :class="{ bare }">
+    <span v-if="!bare" class="fb-label">格式</span>
 
     <!-- 文字颜色 -->
     <el-popover v-model:visible="textPop" placement="bottom-start" :width="290" trigger="click">
@@ -105,6 +108,14 @@ function pickBg(c) {
   padding: 5px 10px;
   border-bottom: 1px solid var(--app-border);
   background: var(--app-bg);
+}
+
+/* 嵌入外部工具行：只保留按钮本身 */
+.format-bar.bare {
+  padding: 0;
+  border-bottom: none;
+  background: transparent;
+  flex-wrap: nowrap;
 }
 
 .fb-label {

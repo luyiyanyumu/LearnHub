@@ -2,7 +2,6 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown } from '@element-plus/icons-vue'
 import { MdEditor, MdPreview } from 'md-editor-v3'
 // 编辑器全局初始化 + 样式（原来在 main.js，为了不占首屏挪到这里；
 // 本页是路由懒加载的，静态 import 不会影响首屏）
@@ -10,6 +9,7 @@ import '../utils/mdEditorSetup'
 import { aiApi, categoryApi, tagApi, noteApi, saveBlob } from '../api'
 import { fixHtmlQuotes } from '../utils/htmlQuotes'
 import { isDark } from '../composables/useTheme'
+import { focusMode } from '../composables/useViewMode'
 import { FORMAT_PRESETS, stripInline } from '../utils/richFormat'
 import { findUnsupported, previewHtmlToMd } from '../utils/htmlToMd'
 import FormatBar from '../components/FormatBar.vue'
@@ -73,7 +73,7 @@ let previewSnapshot = ''
 
 /** 预览区 DOM（限定在本页编辑容器内，避开 AI 弹窗/全局面板里的 MdPreview） */
 function previewEl() {
-  return editorWrapRef.value?.querySelector('.md-editor-preview') || null
+  return editorWrapRef.value?.querySelector('.pane-preview .md-editor-preview') || null
 }
 
 function setEditable(on) {
@@ -109,8 +109,7 @@ async function togglePreviewEdit() {
   }
   previewSnapshot = form.value.content || ''
   previewEditing.value = true
-  editorRef.value?.togglePreviewOnly?.(true)
-  // 等 previewOnly 切换 + markdown 渲染完成再把预览区设为可编辑
+  // 等 Markdown 渲染完成再把预览区设为可编辑
   for (let i = 0; i < 40; i++) {
     await nextTick()
     await new Promise((r) => requestAnimationFrame(r))
@@ -120,7 +119,6 @@ async function togglePreviewEdit() {
     }
   }
   previewEditing.value = false
-  editorRef.value?.togglePreviewOnly?.(false)
   ElMessage.error('预览区没能就绪，请稍后重试')
 }
 
@@ -143,8 +141,6 @@ function exitPreviewEdit() {
   document.removeEventListener('keydown', onPreviewKeydown)
   setEditable(false)
   previewEditing.value = false
-  editorRef.value?.togglePreviewOnly?.(false)
-  maybeOpenCatalog()
 }
 
 /** 放弃预览里的改动：还原进入编辑模式前的源码 */
@@ -218,7 +214,7 @@ async function aiProcess(mode) {
 function aiApply() {
   form.value.content = fixHtmlQuotes(aiResult.value)
   aiDialog.value = false
-  ElMessage.success('已用 AI 结果替换正文，确认无误后点右上角「保存」')
+  ElMessage.success('已用 AI 结果替换正文，确认无误后点「保存」')
 }
 
 /** 唤起全局智能体抽屉（可围绕当前笔记提问） */
@@ -271,19 +267,6 @@ async function loadNote() {
   }
   if (seq !== loadSeq) return
   savedSnapshot = formFingerprint()
-  maybeOpenCatalog()
-}
-
-/** 打开笔记后，若正文含标题，自动展开右侧「目录」（md-editor 自带目录，flat 固定侧栏式） */
-function maybeOpenCatalog() {
-  if (!/^#{1,6}\s/m.test(form.value.content || '')) return
-  // 等编辑器内部就绪再开目录，避免事件发出时目录组件还没挂载
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      const ed = editorRef.value
-      if (ed && typeof ed.toggleCatalog === 'function') ed.toggleCatalog(true)
-    })
-  })
 }
 
 /**
@@ -307,6 +290,9 @@ function onPasteCapture(e) {
   }
 }
 
+/** 最近一次保存成功的时刻（「✓ 已保存 13:42」用） */
+const lastSavedAt = ref(null)
+
 async function save() {
   if (!form.value.title.trim()) {
     ElMessage.warning('标题不能为空')
@@ -329,12 +315,13 @@ async function save() {
       form.value.title = payload.title
       savedSnapshot = formFingerprint()
       justCreatedId = String(created.id)
+      lastSavedAt.value = new Date()
       ElMessage.success('笔记已创建')
       router.replace(`/notes/${created.id}`)
-      maybeOpenCatalog()
     } else {
       await noteApi.update(id.value, payload)
       savedSnapshot = formFingerprint()
+      lastSavedAt.value = new Date()
       ElMessage.success('已保存')
     }
   } finally {
@@ -372,6 +359,205 @@ async function exportNote(fmt = 'md') {
   }
 }
 
+/** Ctrl/⌘+S：整页接管浏览器的「保存网页」，统一走保存笔记 */
+function onGlobalKeydown(e) {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+    e.preventDefault()
+    if (!saving.value) save()
+  }
+}
+
+// ==================================================================
+// 布局：三栏（源码 / 预览 / 大纲）+ 模式（专注 / 阅读 / 预览编辑）
+// ==================================================================
+
+/** 源码栏宽度百分比（预览栏 = 100 - 源码 - 大纲在剩余空间内占比） */
+const editorPct = ref(Number(localStorage.getItem('lh-editor-pct') || 42))
+const outlineOpen = ref(true)
+const readingMode = ref(false)
+const pvScrollRef = ref(null)
+
+watch(editorPct, (v) => localStorage.setItem('lh-editor-pct', String(Math.round(v))))
+
+/** 响应式档位：宽(三栏) / 中(两栏,隐大纲) / 窄(Tab 切换编辑/预览) */
+const layoutMode = ref('wide') // wide | mid | tab
+let resizeObserver = null
+
+function measureLayout() {
+  const w = editorWrapRef.value?.clientWidth || window.innerWidth
+  layoutMode.value = w >= 1280 ? 'wide' : w >= 860 ? 'mid' : 'tab'
+  if (layoutMode.value !== 'wide') outlineOpen.value = false
+}
+
+/** 三栏里预览区随源码栏联动；大纲栏固定 260px（max 15%）由 flex 基准控制 */
+const editorStyle = computed(() => {
+  if (previewEditing.value || readingMode.value || layoutMode.value === 'tab') return {}
+  return { flex: `0 0 ${editorPct.value}%` }
+})
+
+/** 当前左栏是否显示：Tab 模式下由编辑/预览 Tab 决定 */
+const editorTab = ref('edit')
+const showEditorPane = computed(() => {
+  if (previewEditing.value || readingMode.value) return false
+  if (layoutMode.value === 'tab') return editorTab.value === 'edit'
+  return true
+})
+const showPreviewPane = computed(() => {
+  if (readingMode.value) return true
+  if (layoutMode.value === 'tab') return editorTab.value === 'preview' || previewEditing.value
+  return true
+})
+
+// ---- 拖拽调宽 ----
+let dragging = false
+function startDrag(e) {
+  if (layoutMode.value === 'tab') return
+  dragging = true
+  e.preventDefault()
+  const move = (ev) => {
+    if (!dragging || !editorWrapRef.value) return
+    const rect = editorWrapRef.value.getBoundingClientRect()
+    const pct = ((ev.clientX - rect.left) / rect.width) * 100
+    // 两栏时预览占剩余全部；留出最小可读宽度
+    const max = layoutMode.value === 'wide' ? 78 : 72
+    editorPct.value = Math.min(max, Math.max(24, pct))
+  }
+  const up = () => {
+    dragging = false
+    window.removeEventListener('mousemove', move)
+    window.removeEventListener('mouseup', up)
+    document.body.classList.remove('is-col-resizing')
+  }
+  window.addEventListener('mousemove', move)
+  window.addEventListener('mouseup', up)
+  document.body.classList.add('is-col-resizing')
+}
+
+// ---- 大纲：解析标题 / 平滑滚动 / 滚动同步 ----
+const outline = computed(() => {
+  const items = []
+  let inFence = false
+  const lines = (form.value.content || '').split('\n')
+  for (const line of lines) {
+    if (/^\s*(```|~~~)/.test(line)) {
+      inFence = !inFence
+      continue
+    }
+    if (inFence) continue
+    const m = line.match(/^(#{1,3})\s+(.+?)\s*#*$/)
+    if (m) items.push({ level: m[1].length, text: m[2].replace(/<[^<>]{0,200}>/g, '').replace(/[*`~]/g, '').trim() })
+  }
+  return items
+})
+
+const activeIdx = ref(-1)
+
+function scrollToHeading(idx) {
+  const el = pvScrollRef.value
+  if (!el) return
+  const heads = el.querySelectorAll('.md-editor-preview h1, .md-editor-preview h2, .md-editor-preview h3')
+  const target = heads[idx]
+  if (target) el.scrollTo({ top: target.offsetTop - 24, behavior: 'smooth' })
+}
+
+let scrollRaf = 0
+function onPreviewScroll() {
+  if (scrollRaf) return
+  scrollRaf = requestAnimationFrame(() => {
+    scrollRaf = 0
+    const el = pvScrollRef.value
+    if (!el) return
+    const heads = el.querySelectorAll('.md-editor-preview h1, .md-editor-preview h2, .md-editor-preview h3')
+    let cur = -1
+    for (let i = 0; i < heads.length; i++) {
+      if (heads[i].offsetTop - el.scrollTop - 40 <= 0) cur = i
+      else break
+    }
+    activeIdx.value = cur
+  })
+}
+
+// ---- 模式切换 ----
+function toggleFocus() {
+  focusMode.value = !focusMode.value
+  if (focusMode.value) outlineOpen.value = false
+}
+function toggleReading() {
+  readingMode.value = !readingMode.value
+  if (readingMode.value) exitPreviewEdit()
+}
+/** AI 助手下拉：润色/格式/对话/预览编辑 */
+function aiCommand(cmd) {
+  if (cmd === 'chat') aiOpenChat()
+  else if (cmd === '__edit') togglePreviewEdit()
+  else aiProcess(cmd)
+}
+/** 「更多」菜单：导出（函数命令）+ 模式切换（字符串命令） */
+function moreCommand(cmd) {
+  if (typeof cmd === 'function') {
+    cmd()
+    return
+  }
+  if (cmd === 'toggleOutline') outlineOpen.value = !outlineOpen.value
+  else if (cmd === 'toggleFocus') toggleFocus()
+  else if (cmd === 'toggleReading') toggleReading()
+}
+
+// ---- Markdown 插入（第二行工具条；走 md-editor insert 保留撤销历史）----
+function edInsert(builder) {
+  const ed = editorRef.value
+  if (!ed || typeof ed.insert !== 'function') {
+    ElMessage.warning('编辑器尚未就绪，请稍后再试')
+    return
+  }
+  ed.insert(builder)
+}
+const mdBtns = {
+  bold: () => mdWrap('**', '**'),
+  italic: () => mdWrap('*', '*'),
+  strike: () => mdWrap('~~', '~~'),
+  h2: () => mdLinePrefix('## '),
+  h3: () => mdLinePrefix('### '),
+  quote: () => mdLinePrefix('> '),
+  ul: () => mdLinePrefix('- '),
+  ol: () => mdLinePrefix('1. '),
+  inlineCode: () => mdWrap('`', '`'),
+  codeBlock: () => edInsert(() => ({ targetValue: '\n```java\n\n```\n', select: 9 })),
+  link: () => mdWrap('[', '](https://)'),
+  image: () => edInsert(() => ({ targetValue: '![图片描述](https://)', select: 3 })),
+  table: () => edInsert(() => ({ targetValue: '\n| 列A | 列B |\n| --- | --- |\n|  |  |\n', select: 2 })),
+}
+/** 行内包裹：有选中时包住选中文字并保持其选中，无选中时插入「文本」占位 */
+function mdWrap(before, after) {
+  edInsert((selected) => {
+    const inner = selected || '文本'
+    return {
+      targetValue: before + inner + after,
+      select: selected ? [before.length, before.length + inner.length] : before.length,
+    }
+  })
+}
+/** 行前缀（标题/引用/列表）：只在行首插入 */
+function mdLinePrefix(prefix) {
+  edInsert((selected) => {
+    const inner = selected || ''
+    return { targetValue: prefix + inner, select: selected ? [prefix.length, prefix.length + inner.length] : prefix.length }
+  })
+}
+function mdTool(name) {
+  mdBtns[name]?.()
+}
+
+// ---- 保存状态文案 ----
+const fmtTime = (d) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+const saveState = computed(() => {
+  if (saving.value) return { cls: 'saving', text: '正在保存…' }
+  if (lastSavedAt.value && !dirty.value) return { cls: 'saved', text: `已保存 ${fmtTime(lastSavedAt.value)}` }
+  return { cls: 'dirty', text: '未保存' }
+})
+
+// ==================================================================
+
 /**
  * 路由参数变化时要重新加载表单。
  * 这是「跨笔记覆盖」的根因修复：/notes/1 → /notes/2 命中的是同一个路由记录，
@@ -406,89 +592,210 @@ onBeforeRouteLeave(async () => {
 
 onMounted(async () => {
   window.addEventListener('lh-meta-changed', loadMeta)
+  window.addEventListener('keydown', onGlobalKeydown)
+  window.addEventListener('resize', measureLayout)
   await loadMeta()
   loadNote()
+  await nextTick()
+  measureLayout()
+  // 宽屏默认展开大纲（有标题才会显示内容，空内容时大纲区自然为空态）
+  if (layoutMode.value === 'wide' && /^#{1,3}\s/m.test(form.value.content || '')) {
+    outlineOpen.value = true
+  }
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('lh-meta-changed', loadMeta)
+  window.removeEventListener('keydown', onGlobalKeydown)
+  window.removeEventListener('resize', measureLayout)
   document.removeEventListener('keydown', onPreviewKeydown)
+  if (scrollRaf) cancelAnimationFrame(scrollRaf)
+  focusMode.value = false // 专注模式是页面级状态，离开必须复位，否则侧栏消失
 })
 </script>
 
 <template>
-  <div class="edit-page" v-loading="loading">
-    <div class="meta-bar">
-      <el-button link @click="onBack">← 返回列表</el-button>
-      <el-input v-model="form.title" placeholder="输入笔记标题…" class="title-input" maxlength="200" />
-      <el-select v-model="form.categoryId" placeholder="选择分类" clearable style="width: 140px">
+  <div class="edit-page" :class="{ 'is-focus': focusMode, 'is-reading': readingMode }" v-loading="loading">
+    <!-- ======== 顶部第一行：返回 · 标题 · 分类 · 标签 · 保存状态 · AI助手 · 更多 · 保存 ======== -->
+    <div class="ed-top" v-if="!readingMode">
+      <button class="icon-btn" type="button" title="返回列表" @click="onBack">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M19 12H5M11 18l-6-6 6-6" />
+        </svg>
+      </button>
+
+      <input v-model="form.title" class="title-input" placeholder="输入笔记标题…" maxlength="200" />
+
+      <el-select v-model="form.categoryId" placeholder="分类" clearable class="mini-select cat" size="default">
         <el-option v-for="c in categories" :key="c.id" :label="'　'.repeat(c.depth) + c.name" :value="c.id" />
       </el-select>
-      <el-select v-model="form.tagIds" multiple placeholder="标签" clearable style="width: 190px">
+      <el-select v-model="form.tagIds" multiple placeholder="标签" clearable collapse-tags collapse-tags-tooltip class="mini-select tag" size="default">
         <el-option v-for="t in tags" :key="t.id" :label="t.name" :value="t.id" />
       </el-select>
-      <div class="ai-group">
-        <el-button class="ai-btn" :loading="aiBusy" :disabled="aiBusy" @click="aiProcess('polish')">
-          <span class="ai-ico">✨</span> AI 润色
-        </el-button>
-        <el-button class="ai-btn" :loading="aiBusy" :disabled="aiBusy" @click="aiProcess('format')">
-          <span class="ai-ico">🧹</span> 整理格式
-        </el-button>
-        <el-button class="ai-btn" @click="aiOpenChat">🤖 AI 对话</el-button>
-        <el-button
-          class="ai-btn"
-          :type="previewEditing ? 'primary' : 'default'"
-          @click="togglePreviewEdit"
-        >
-          <span class="ai-ico">✍</span> {{ previewEditing ? '退出预览编辑' : '预览编辑' }}
-        </el-button>
-      </div>
-      <el-dropdown v-if="!isNew" trigger="click" @command="exportNote">
-        <el-button>
-          导出<el-icon style="margin-left: 2px"><ArrowDown /></el-icon>
-        </el-button>
+
+      <span class="flex-spacer"></span>
+
+      <span class="save-state" :class="saveState.cls" :title="saveState.text">
+        <i class="ss-dot"></i>{{ saveState.text }}
+      </span>
+
+      <el-dropdown trigger="click" @command="aiCommand">
+        <button class="ai-trigger" type="button" :disabled="aiBusy">
+          <span class="ai-spark">✨</span>{{ aiBusy ? 'AI 处理中…' : 'AI 助手' }}
+        </button>
         <template #dropdown>
           <el-dropdown-menu>
-            <el-dropdown-item command="md">Markdown (.md)</el-dropdown-item>
-            <el-dropdown-item command="html">网页 HTML (.html)</el-dropdown-item>
+            <el-dropdown-item command="polish" :disabled="aiBusy">✨ AI 润色</el-dropdown-item>
+            <el-dropdown-item command="format" :disabled="aiBusy">🧹 整理格式</el-dropdown-item>
+            <el-dropdown-item command="chat" divided>🤖 打开 AI 对话</el-dropdown-item>
+            <el-dropdown-item command="__edit" divided>{{ previewEditing ? '✓ 退出预览编辑' : '✍ 预览编辑（所见即所得）' }}</el-dropdown-item>
           </el-dropdown-menu>
         </template>
       </el-dropdown>
-      <el-button type="primary" :loading="saving" @click="save">{{ isNew ? '创建' : '保存' }}</el-button>
+
+      <el-dropdown trigger="click" @command="moreCommand">
+        <button class="icon-btn" type="button" title="更多">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+            <circle cx="5" cy="12" r="0.6" /><circle cx="12" cy="12" r="0.6" /><circle cx="19" cy="12" r="0.6" />
+          </svg>
+        </button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item v-if="!isNew" command="() => exportNote('md')">⬇ 导出 Markdown (.md)</el-dropdown-item>
+            <el-dropdown-item v-if="!isNew" command="() => exportNote('html')">⬇ 导出网页 HTML</el-dropdown-item>
+            <el-dropdown-item command="toggleOutline" divided>{{ outlineOpen ? '收起大纲' : '展开大纲' }}</el-dropdown-item>
+            <el-dropdown-item command="toggleFocus">🎯 {{ focusMode ? '退出专注模式' : '专注模式（隐藏侧栏与大纲）' }}</el-dropdown-item>
+            <el-dropdown-item command="toggleReading">📖 阅读模式（只看正文）</el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
+
+      <el-button type="primary" class="save-btn" :loading="saving" @click="save">{{ isNew ? '创建' : '保存' }}</el-button>
     </div>
 
+    <!-- 阅读模式下的极简顶栏 -->
+    <div class="read-top" v-if="readingMode">
+      <button class="icon-btn" type="button" @click="onBack" title="返回列表">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M11 18l-6-6 6-6" /></svg>
+      </button>
+      <span class="read-title">{{ form.title || '无标题' }}</span>
+      <button class="read-exit" type="button" @click="toggleReading">✕ 退出阅读</button>
+    </div>
+
+    <!-- ======== 顶部第二行：Markdown + 富文本工具（阅读模式隐藏） ======== -->
+    <div class="ed-tools" v-if="!readingMode && !previewEditing">
+      <template v-if="layoutMode !== 'tab' || editorTab === 'edit'">
+        <button class="tb" type="button" title="加粗" @click="mdTool('bold')"><b>B</b></button>
+        <button class="tb" type="button" title="斜体" @click="mdTool('italic')"><i>I</i></button>
+        <button class="tb" type="button" title="删除线" @click="mdTool('strike')"><s>S</s></button>
+        <button class="tb tb-h" type="button" title="二级标题" @click="mdTool('h2')">H2</button>
+        <button class="tb tb-h" type="button" title="三级标题" @click="mdTool('h3')">H3</button>
+        <i class="tb-sep" />
+        <button class="tb" type="button" title="引用" @click="mdTool('quote')">❝</button>
+        <button class="tb" type="button" title="无序列表" @click="mdTool('ul')">• ≡</button>
+        <button class="tb" type="button" title="有序列表" @click="mdTool('ol')">1. ≡</button>
+        <i class="tb-sep" />
+        <button class="tb" type="button" title="行内代码" @click="mdTool('inlineCode')"><code>`</code></button>
+        <button class="tb" type="button" title="代码块" @click="mdTool('codeBlock')">{ }</button>
+        <button class="tb" type="button" title="链接" @click="mdTool('link')">🔗</button>
+        <button class="tb" type="button" title="图片" @click="mdTool('image')">🖼</button>
+        <button class="tb" type="button" title="表格" @click="mdTool('table')">▦</button>
+
+        <!-- 富文本格式（颜色/字号/上下标等，收在同一个工具行里） -->
+        <FormatBar bare class="ed-format" @apply="applyFormat" />
+      </template>
+    </div>
+
+    <!-- Tab 模式（窄屏）：编辑 / 预览 切换 -->
+    <div class="ed-tabs" v-if="layoutMode === 'tab' && !readingMode && !previewEditing">
+      <button :class="{ on: editorTab === 'edit' }" @click="editorTab = 'edit'">编辑</button>
+      <button :class="{ on: editorTab === 'preview' }" @click="editorTab = 'preview'">预览</button>
+    </div>
+
+    <!-- 预览编辑模式操作条 -->
+    <div v-if="previewEditing" class="preview-edit-bar">
+      <span class="pe-tip">
+        ✍ 预览编辑中：直接改右侧排版内容（Ctrl/⌘+S 同步并退出；Esc 也是「先同步再退出」，只有「放弃改动」才丢弃）
+      </span>
+      <el-button size="small" @click="abandonPreviewEdit">↺ 放弃改动</el-button>
+      <el-button size="small" type="primary" @click="syncPreviewToSource()">✓ 同步到源码</el-button>
+    </div>
+
+    <!-- ======== 三栏主体 ======== -->
     <div
       ref="editorWrapRef"
       class="editor-wrap"
       :class="{ 'is-preview-editing': previewEditing }"
       @paste.capture="onPasteCapture"
     >
-      <!-- 预览编辑模式的操作条：所见即所得改完，反推回 Markdown 源码 -->
-      <div v-if="previewEditing" class="preview-edit-bar">
-        <span class="pe-tip">
-          ✍ 预览编辑中：直接在下方的排版内容里改文字与格式（Ctrl/⌘+S 同步并退出；Esc / 再点按钮也都是「先同步再退出」，只有「放弃改动」才丢弃）
-        </span>
-        <el-button size="small" @click="abandonPreviewEdit">↺ 放弃改动</el-button>
-        <el-button size="small" type="primary" @click="syncPreviewToSource()">✓ 同步到源码</el-button>
-      </div>
+      <!-- 源码栏 -->
+      <section v-show="showEditorPane" class="pane pane-editor" :style="editorStyle">
+        <MdEditor
+          ref="editorRef"
+          v-model="form.content"
+          :placeholder="'支持 Markdown：代码块、表格、链接…\n# 一级标题\n```java\n// 代码示例\n```'"
+          :preview="false"
+          :toolbars="[]"
+          :footers="['markdownTotal', 'scrollSwitch']"
+          language="zh-CN"
+          class="src-editor"
+        />
+      </section>
 
-      <!-- 富文本格式条（md-editor 不支持自定义工具项，故独立成条） -->
-      <FormatBar v-if="!previewEditing" @apply="applyFormat" />
+      <!-- 拖拽分隔条 -->
+      <div
+        v-show="showEditorPane && showPreviewPane && layoutMode !== 'tab'"
+        class="gutter"
+        :class="{ dragging }"
+        @mousedown="startDrag"
+      ><i></i></div>
 
-      <MdEditor
-        ref="editorRef"
-        v-model="form.content"
-        :placeholder="'支持 Markdown：代码块、表格、链接…\n# 一级标题\n```java\n// 代码示例\n```'"
-        catalog-layout="flat"
-        :catalog-max-depth="3"
-        :toolbars="[
-          'bold', 'italic', 'strikeThrough', '|',
-          'title', 'quote', 'unorderedList', 'orderedList', '|',
-          'code', 'inlineCode', 'link', 'image', 'table', '|',
-          'preview', 'catalog',
-        ]"
-        language="zh-CN"
-      />
+      <!-- 预览栏 -->
+      <section v-show="showPreviewPane" class="pane pane-preview">
+        <div ref="pvScrollRef" class="pv-scroll" @scroll="onPreviewScroll">
+          <div class="pv-inner">
+            <MdPreview
+              :modelValue="form.content"
+              :theme="isDark ? 'dark' : 'light'"
+              previewTheme="github"
+              class="pv-md"
+            />
+          </div>
+        </div>
+      </section>
+
+      <!-- 大纲栏 -->
+      <aside v-show="outlineOpen && layoutMode === 'wide' && !previewEditing" class="pane pane-outline">
+        <div class="ol-head">
+          <span>大纲</span>
+          <button class="icon-btn sm" type="button" title="收起大纲" @click="outlineOpen = false">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M9 6l6 6-6 6" /></svg>
+          </button>
+        </div>
+        <div class="ol-list">
+          <div
+            v-for="(h, i) in outline"
+            :key="i"
+            class="ol-item"
+            :class="[`lv${h.level}`, { active: i === activeIdx }]"
+            :title="h.text"
+            @click="scrollToHeading(i)"
+          >{{ h.text }}</div>
+          <div v-if="!outline.length" class="ol-empty">正文里写个标题（# 开头）<br />就会出现在这里</div>
+        </div>
+      </aside>
+
+      <!-- 大纲收起后的展开浮标 -->
+      <button
+        v-if="!outlineOpen && layoutMode === 'wide' && !previewEditing && outline.length"
+        class="outline-fab"
+        type="button"
+        title="展开大纲"
+        @click="outlineOpen = true"
+      >
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M15 6l-6 6 6 6" /></svg>
+        大纲
+      </button>
     </div>
 
     <!-- AI 处理结果预览：确认后再替换正文 -->
@@ -505,47 +812,509 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* 页面即卡片：满幅、无边框，像文档应用而不是后台系统 */
 .edit-page {
   display: flex;
   flex-direction: column;
   height: 100%;
-  padding: 12px 14px;
+  padding: 10px 14px 12px;
+  gap: 0;
+  background: var(--app-bg);
 }
 
-.meta-bar {
+/* ================= 顶部第一行 ================= */
+.ed-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px 8px;
+  /* 窄屏兜底：顶行内容优先保全，放不下时横向滚动而不是截断 */
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.ed-top::-webkit-scrollbar {
+  display: none;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--app-text-2);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease;
+}
+.icon-btn:hover {
+  background: color-mix(in srgb, var(--app-text-1) 6%, transparent);
+  color: var(--app-text-1);
+}
+.icon-btn.sm {
+  width: 24px;
+  height: 24px;
+}
+
+/* 标题输入：无边框大字，像文档标题而不是表单控件 */
+.title-input {
+  flex: 0 1 340px;
+  min-width: 140px;
+  height: 34px;
+  padding: 0 10px;
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--app-text-1);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  outline: none;
+  font-family: inherit;
+  transition: border-color var(--dur-fast) ease, background-color var(--dur-fast) ease;
+}
+.title-input::placeholder {
+  color: var(--app-text-3);
+  font-weight: 400;
+}
+.title-input:hover {
+  border-color: var(--app-border);
+}
+.title-input:focus {
+  border-color: var(--app-brand);
+  background: var(--app-card);
+}
+
+.mini-select {
+  width: 118px;
+  flex-shrink: 0;
+}
+.mini-select.tag {
+  width: 150px;
+}
+
+.flex-spacer {
+  flex: 1;
+}
+
+/* 保存状态：安静的圆点 + 文案，绿/灰/琥珀三态 */
+.save-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--app-text-3);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.ss-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--app-text-3);
+}
+.save-state.dirty .ss-dot {
+  background: #e6a23c;
+}
+.save-state.dirty {
+  color: #b88230;
+}
+.save-state.saving {
+  color: var(--app-text-2);
+}
+.save-state.saving .ss-dot {
+  background: var(--app-brand);
+  animation: ss-pulse 1s ease-in-out infinite;
+}
+.save-state.saved .ss-dot {
+  background: var(--app-brand);
+}
+.save-state.saved {
+  color: var(--app-brand-deep);
+}
+@keyframes ss-pulse {
+  50% { opacity: 0.35; }
+}
+
+/* AI 助手触发钮：文字钮 + 微品牌感 */
+.ai-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--app-text-1);
+  background: var(--app-card);
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color var(--dur-fast) ease, color var(--dur-fast) ease, box-shadow var(--dur-fast) ease;
+  white-space: nowrap;
+}
+.ai-trigger:hover {
+  border-color: color-mix(in srgb, var(--app-brand) 45%, var(--app-border));
+  color: var(--app-brand-deep);
+  box-shadow: var(--shadow-sm);
+}
+.ai-trigger:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.ai-spark {
+  font-size: 12px;
+}
+
+.save-btn {
+  height: 32px;
+  padding: 0 18px;
+  border-radius: 8px;
+}
+
+/* ================= 第二行工具条 ================= */
+.ed-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 2px 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.ed-tools::-webkit-scrollbar {
+  display: none;
+}
+.tb {
+  min-width: 28px;
+  height: 28px;
+  padding: 0 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--app-text-2);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease;
+}
+.tb:hover {
+  background: color-mix(in srgb, var(--app-text-1) 7%, transparent);
+  color: var(--app-text-1);
+}
+.tb:active {
+  background: color-mix(in srgb, var(--app-text-1) 11%, transparent);
+}
+.tb-h {
+  font-size: 12px;
+  font-weight: 700;
+}
+.tb code {
+  font-family: ui-monospace, Consolas, monospace;
+}
+.tb-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--app-border);
+  margin: 0 5px;
+  flex-shrink: 0;
+}
+.ed-format {
+  margin-left: 4px;
+}
+
+/* Tab 模式切换 */
+.ed-tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 0 2px 8px;
+}
+.ed-tabs button {
+  height: 30px;
+  padding: 0 14px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--app-text-2);
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.ed-tabs button.on {
+  background: var(--app-card);
+  color: var(--app-text-1);
+  font-weight: 600;
+  box-shadow: var(--shadow-sm);
+}
+
+/* ================= 三栏主体 ================= */
+.editor-wrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--app-border);
+  background: var(--app-card);
+}
+
+.pane {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 源码栏：极浅灰底，与白色预览形成「工作区 / 成品」的层次 */
+.pane-editor {
+  background: #fafbfb;
+  flex: 1 1 auto;
+}
+.pane-editor :deep(.md-editor) {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+  --md-bk-color: #fafbfb;
+  box-shadow: none;
+}
+html.dark .pane-editor {
+  background: var(--app-card);
+}
+html.dark .pane-editor :deep(.md-editor) {
+  --md-bk-color: var(--app-card);
+}
+/* md-editor 自带工具栏已由页内第二行取代 */
+.pane-editor :deep(.md-editor-toolbar-wrapper),
+.pane-editor :deep(.md-editor-tabview) {
+  display: none;
+}
+
+/* 拖拽分隔条：hover / 拖动中显形 */
+.gutter {
+  flex: 0 0 5px;
+  cursor: col-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  transition: background-color var(--dur-fast) ease;
+  z-index: 2;
+}
+.gutter i {
+  width: 1px;
+  height: 100%;
+  background: var(--app-border);
+  transition: background-color var(--dur-fast) ease, width var(--dur-fast) ease;
+}
+.gutter:hover i,
+.gutter.dragging i {
+  width: 2px;
+  background: var(--app-brand);
+}
+:global(body.is-col-resizing) {
+  cursor: col-resizing;
+  user-select: none;
+}
+
+/* 预览栏：白纸 */
+.pane-preview {
+  flex: 1 1 0;
+  background: var(--app-card);
+}
+.pv-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scroll-behavior: auto;
+}
+/* 正文阅读宽度：居中 790px，长文阅读的黄金区 */
+.pv-inner {
+  max-width: 790px;
+  margin: 0 auto;
+  padding: 26px 34px 48px;
+}
+.pane-preview :deep(.md-editor-preview.md-editor-preview) {
+  background: transparent;
+  line-height: 1.75;
+}
+/* 章节纵向间距加大：H2 是「换章」的呼吸点 */
+.pane-preview :deep(.md-editor-preview.md-editor-preview h1) {
+  margin: 1.7em 0 0.8em;
+}
+.pane-preview :deep(.md-editor-preview.md-editor-preview h2) {
+  margin: 1.8em 0 0.8em;
+}
+.pane-preview :deep(.md-editor-preview.md-editor-preview h3) {
+  margin: 1.5em 0 0.7em;
+}
+.pane-preview :deep(.md-editor-preview.md-editor-preview > *:first-child) {
+  margin-top: 0;
+}
+
+/* 预览区可编辑时的视觉提示 */
+.pane-preview :deep(.lh-preview-editing) {
+  outline: 2px dashed var(--app-brand);
+  outline-offset: -2px;
+  outline-position: inside;
+  border-radius: 6px;
+  cursor: text;
+}
+.pane-preview :deep(.lh-preview-editing:focus) {
+  outline-style: solid;
+}
+
+/* ================= 大纲栏 ================= */
+.pane-outline {
+  flex: 0 0 232px;
+  border-left: 1px solid var(--app-border-weak);
+  background: var(--app-card);
+}
+.ol-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 10px 6px 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--app-text-3);
+}
+.ol-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 2px 8px 14px;
+}
+.ol-item {
+  padding: 5px 8px;
+  font-size: 12.8px;
+  line-height: 1.5;
+  color: var(--app-text-2);
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease;
+}
+.ol-item:hover {
+  background: color-mix(in srgb, var(--app-text-1) 5%, transparent);
+  color: var(--app-text-1);
+}
+.ol-item.lv1 {
+  font-weight: 600;
+  color: var(--app-text-1);
+  padding-left: 8px;
+}
+.ol-item.lv2 {
+  padding-left: 22px;
+}
+.ol-item.lv3 {
+  padding-left: 36px;
+  font-size: 12.3px;
+}
+.ol-item.active {
+  background: var(--app-brand-soft);
+  color: var(--app-brand-deep);
+  font-weight: 600;
+}
+html.dark .ol-item.active {
+  color: var(--app-brand);
+}
+.ol-empty {
+  padding: 18px 12px;
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--app-text-3);
+}
+
+.outline-fab {
+  position: absolute;
+  right: 14px;
+  top: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--app-text-3);
+  background: var(--app-card);
+  border: 1px solid var(--app-border);
+  border-radius: 99px;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+  transition: color var(--dur-fast) ease, border-color var(--dur-fast) ease;
+  z-index: 3;
+}
+.outline-fab:hover {
+  color: var(--app-brand-deep);
+  border-color: color-mix(in srgb, var(--app-brand) 40%, var(--app-border));
+}
+.editor-wrap {
+  position: relative;
+}
+
+/* ================= 预览编辑操作条 / 阅读模式 ================= */
+.preview-edit-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  background: var(--app-brand-soft);
+  border: 1px solid color-mix(in srgb, var(--app-brand) 25%, transparent);
+  border-radius: 8px;
+  margin-bottom: 8px;
+}
+.pe-tip {
+  flex: 1 1 260px;
+  font-size: 12.5px;
+  color: var(--app-brand-deep);
+}
+
+.read-top {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 12px;
-  flex-wrap: wrap;
+  padding: 4px 2px 10px;
 }
-
-.title-input {
+.read-title {
   flex: 1;
-  min-width: 200px;
-  font-size: 15px;
-  font-weight: 500;
+  font-size: 16px;
+  font-weight: 650;
+  color: var(--app-text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-
-.ai-group {
-  display: flex;
-  gap: 6px;
-}
-
-.ai-btn {
-  margin-left: 0 !important;
-  border-color: var(--app-border);
+.read-exit {
+  height: 30px;
+  padding: 0 12px;
+  font-size: 12.5px;
+  font-family: inherit;
   color: var(--app-text-2);
+  background: var(--app-card);
+  border: 1px solid var(--app-border);
+  border-radius: 99px;
+  cursor: pointer;
 }
-
-.ai-btn:hover {
-  border-color: var(--app-brand);
+.read-exit:hover {
   color: var(--app-brand-deep);
-  background: var(--app-brand-soft);
+  border-color: color-mix(in srgb, var(--app-brand) 40%, var(--app-border));
 }
 
-.ai-ico {
-  font-size: 13px;
+/* 专注模式：编辑区整体浮起来一点，四周留白加大 */
+.edit-page.is-focus {
+  padding: 14px 26px 18px;
 }
 
 .ai-preview {
@@ -556,60 +1325,7 @@ onBeforeUnmount(() => {
   overflow: auto;
   background: var(--app-bg);
 }
-
 .ai-preview :deep(.md-editor-preview) {
   background: transparent;
-}
-
-.editor-wrap {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  background: var(--app-card);
-  border: 1px solid var(--app-border);
-  border-radius: var(--radius);
-  overflow: hidden;
-}
-
-.editor-wrap :deep(.md-editor) {
-  flex: 1;
-  min-height: 0;
-  height: auto;
-}
-
-/* 预览编辑操作条 */
-.preview-edit-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  padding: 6px 10px;
-  background: var(--app-brand-soft);
-  border-bottom: 1px solid var(--app-border);
-}
-
-.pe-tip {
-  flex: 1 1 260px;
-  font-size: 12.5px;
-  color: var(--app-brand-deep);
-}
-
-/* 预览编辑模式下必须隐藏 md-editor 自带工具栏：
-   它仍然可点，会把 ** 之类写进隐藏的源码并触发预览重渲染，冲掉用户正在做的所见即所得改动 */
-.editor-wrap.is-preview-editing :deep(.md-editor-toolbar-wrapper) {
-  display: none;
-}
-
-/* 预览区可编辑时的视觉提示 */
-.editor-wrap :deep(.lh-preview-editing) {
-  outline: 2px dashed var(--app-brand);
-  outline-offset: 6px;
-  border-radius: 6px;
-  cursor: text;
-}
-
-.editor-wrap :deep(.lh-preview-editing:focus) {
-  outline-style: solid;
 }
 </style>

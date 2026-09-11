@@ -21,13 +21,17 @@
   /* EP 默认 4px 圆角偏"工具感"，统一提到 8px（输入框/下拉/小按钮） */
   --el-border-radius-base: 8px;
   --el-border-radius-small: 6px;
+  /* 控件统一 36px 高（EP 默认 32px）—— 按钮/输入框/选择器一次到位 */
+  --el-component-size: 36px;
 
-  /* --- 应用语义 token --- */
-  --app-bg: #f2f6f5;          /* 页面底色：冷青白，比卡片低一档，拉开层次 */
+  /* --- 应用语义 token ---
+     2026-09-11 编辑页 UI 重构对齐 Notion/Linear 系：
+     底色更中性（#F7F8FA）、边框浅灰（#E8EAED）、圆角统一 8px、控件 36px 高 */
+  --app-bg: #f7f8fa;          /* 页面底色：中性冷灰白 */
   --app-side: #ffffff;        /* 侧栏 */
   --app-card: #ffffff;
-  --app-border: #e3e9e8;      /* 常规描边 */
-  --app-border-weak: #ecf1f0; /* 更弱的一档：卡片内部分隔线用 */
+  --app-border: #e8eaed;      /* 常规描边 */
+  --app-border-weak: #eef0f2; /* 更弱的一档：卡片内部分隔线用 */
   --app-text-1: #1f2d2a;      /* 主文本：带青的近黑，比纯黑柔和 */
   --app-text-2: #5a6b67;      /* 次级文本 */
   --app-text-3: #8a9995;      /* 弱化文本 */
@@ -35,16 +39,16 @@
   --app-brand-deep: #0b7f72;
   --app-brand-soft: #e2f5f1;
   --app-brand-glow: rgba(14, 159, 142, 0.12);
-  --app-code-bg: #eef4f3;
+  --app-code-bg: #f2f4f5;
 
   /* 分层阴影：两层小阴影叠出"浮起但不夸张"的质感（单层大阴影容易显得廉价） */
   --shadow-sm: 0 1px 2px rgba(16, 63, 57, 0.04), 0 2px 6px rgba(16, 63, 57, 0.03);
   --shadow-md: 0 2px 4px rgba(16, 63, 57, 0.05), 0 12px 28px -8px rgba(16, 63, 57, 0.14);
   --shadow-lg: 0 4px 12px rgba(16, 63, 57, 0.06), 0 24px 56px -12px rgba(16, 63, 57, 0.2);
 
-  --radius: 12px;
-  --radius-sm: 9px;
-  --radius-lg: 16px;
+  --radius: 8px;
+  --radius-sm: 6px;
+  --radius-lg: 12px;
 
   /* 统一缓动：ease-out-quint，减速自然、无回弹（回弹显得廉价） */
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
@@ -93,6 +97,8 @@ body,
 body {
   /* 原生系统字体栈：零加载成本、原生质感（每个平台都是自家最舒服的字） */
   font-family: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  /* 正文默认 14px：界面信息的基准字号（阅读区另有 15px 的排版体系） */
+  font-size: 14px;
   background: var(--app-bg);
   color: var(--app-text-1);
   -webkit-font-smoothing: antialiased;
