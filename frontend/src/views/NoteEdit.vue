@@ -958,7 +958,7 @@ onBeforeUnmount(() => {
       </section>
 
       <!-- 大纲栏 -->
-      <aside v-show="outlineOpen && layoutMode === 'wide' && !previewEditing" class="pane pane-outline">
+      <aside v-show="outlineOpen && layoutMode === 'wide'" class="pane pane-outline">
         <div class="ol-head">
           <span>大纲</span>
           <button class="icon-btn sm" type="button" title="收起大纲" @click="outlineOpen = false">
@@ -980,7 +980,7 @@ onBeforeUnmount(() => {
 
       <!-- 大纲收起后的展开浮标 -->
       <button
-        v-if="!outlineOpen && layoutMode === 'wide' && !previewEditing && outline.length"
+        v-if="!outlineOpen && layoutMode === 'wide' && outline.length"
         class="outline-fab"
         type="button"
         title="展开大纲"
