@@ -485,12 +485,14 @@ function onPreviewScroll() {
     scrollRaf = 0
     const el = pvScrollRef.value
     if (!el) return
-    // 反向联动：预览滚 → 源码跟（互锁窗口内的是程序触发的滚动，跳过）
+    // 反向联动：预览滚 → 源码跟（互锁窗口内的是程序触发的滚动，跳过；锚点对齐）
     if (Date.now() - scrollSyncLock >= SCROLL_SYNC_LOCK_MS) {
       const ed = editorScrollEl()
-      if (ed) {
+      if (ed && bothScrollable(el, ed)) {
         scrollSyncLock = Date.now()
-        syncScrollRatio(el, ed)
+        scrollSyncSource = 'preview'
+        syncFromPreview(el, ed)
+        scheduleScrollResync()
       }
     }
     const heads = el.querySelectorAll('.md-editor-preview h1, .md-editor-preview h2, .md-editor-preview h3')
@@ -503,9 +505,12 @@ function onPreviewScroll() {
   })
 }
 
-// ---- 源码区 ↔ 预览区 滚动联动 ----
-// 三栏重构弃用了 md-editor 内部分屏，它自带的编辑/预览滚动同步随之失效，
-// 这里按「滚动比例」自行实现双向联动（源码长 ≠ 预览长，按位置比例对齐最稳）。
+// ---- 源码区 ↔ 预览区 滚动联动（data-line 锚点对齐） ----
+// 三栏重构弃用了 md-editor 内部分屏，它自带的编辑/预览滚动同步随之失效。
+// 按比例同步在代码块多/行高差异大时会错位（两侧内容"长度分布"不一致），
+// 改用锚点对齐：markdown-it 渲染时给预览块级元素标注 data-line=源码行号，
+// CodeMirror 每个逻辑行是一个 .cm-line（DOM 顺序即行号），
+// 双向把"滚动位置"翻译成"源码行号（带小数）"，再映射到对方的对应元素位置。
 const SCROLL_SYNC_LOCK_MS = 120
 /** 互锁时间戳：程序设置 scrollTop 会触发对方的 scroll 事件，窗口期内忽略，防来回抖动 */
 let scrollSyncLock = 0
@@ -515,7 +520,137 @@ function editorScrollEl() {
   return editorWrapRef.value?.querySelector('.pane-editor .cm-scroller') || null
 }
 
-/** 把 fromEl 的滚动位置按比例映射到 toEl（任一方不可滚动/被隐藏时不动） */
+/** 元素顶部相对滚动容器视口的偏移（rect 差值法，不依赖 offsetParent 链） */
+function topWithin(el, scroller) {
+  return el.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop
+}
+
+/** CodeMirror 内部 EditorView（.cm-content 上挂有非公开的 cmTile.view）。
+ *  CodeMirror 虚拟化渲染（DOM 只有视口附近的行，未渲染区域用 .cm-gap 占位），
+ *  DOM 行元素的 index 不等于行号；行高也因软换行不均（20/40/260px…）。
+ *  lineBlockAtHeight/lineBlockAt 是官方 API，能精确做「滚动位置 ↔ 行号」换算。 */
+function cmView(ed) {
+  const v = ed.querySelector('.cm-content')?.cmTile?.view
+  return v && typeof v.lineBlockAtHeight === 'function' && v.state?.doc ? v : null
+}
+
+/** content 顶在滚动坐标系中的偏移（rect 差值法实时测量） */
+function contentScrollOffset(ed) {
+  const content = ed.querySelector('.cm-content')
+  if (!content) return 0
+  return content.getBoundingClientRect().top - ed.getBoundingClientRect().top + ed.scrollTop
+}
+
+/** 源码区顶部行号（带小数 = 行内滚动比例）。优先 CM 内部 view（精确），失败回退固定行高换算 */
+function editorTopLine(ed) {
+  const v = cmView(ed)
+  if (v) {
+    try {
+      const docY = Math.max(ed.scrollTop - contentScrollOffset(ed), 0)
+      const blk = v.lineBlockAtHeight(docY)
+      const ln = v.state.doc.lineAt(blk.from)
+      let n = ln.number - 1
+      let frac = (docY - blk.top) / Math.max(blk.height, 1)
+      // 行边界归属：视口顶恰在行 n+1 顶部时 lineBlockAtHeight 返回行 n 且 frac=1，进位
+      if (frac >= 0.999) {
+        n += 1
+        frac = 0
+      }
+      return n + Math.min(Math.max(frac, 0), 1)
+    } catch {
+      /* 回退到几何换算 */
+    }
+  }
+  const content = ed.querySelector('.cm-content')
+  const lineEl = ed.querySelector('.cm-line')
+  if (!content || !lineEl) return null
+  const h = parseFloat(getComputedStyle(lineEl).lineHeight) || 20
+  const padTop = contentScrollOffset(ed) + (parseFloat(getComputedStyle(content).paddingTop) || 0)
+  return Math.max(ed.scrollTop - padTop, 0) / h
+}
+
+/** 预览区 data-line 锚点列表（markdown-it 标注的源码行号，DOM 顺序即升序） */
+function previewAnchors(pv) {
+  const els = pv.querySelectorAll('.md-editor-preview [data-line]')
+  const list = []
+  for (const el of els) {
+    const n = parseInt(el.dataset.line, 10)
+    if (Number.isFinite(n)) list.push({ line: n, el })
+  }
+  return list
+}
+
+/** 源码行号（带小数）→ 预览滚动位置：≤行号的最大锚点对齐视口顶；
+ *  相邻锚点行差 ≤ MAX_INTERP_LINES 时按行差插值（滚动连续），更大跨度直接吸附锚点
+ *  （锚点段内的内容分布与行数不成比例，大跨度插值会失真数百像素） */
+const MAX_INTERP_LINES = 8
+function previewScrollForLine(pv, anchors, line) {
+  let lo = 0
+  let hi = anchors.length - 1
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1
+    if (anchors[mid].line <= line) lo = mid
+    else hi = mid - 1
+  }
+  const a = anchors[lo]
+  const top = topWithin(a.el, pv)
+  const b = anchors[lo + 1]
+  if (!b || b.line <= a.line || b.line - a.line > MAX_INTERP_LINES) return top
+  const frac = Math.min(Math.max((line - a.line) / (b.line - a.line), 0), 1)
+  return top + frac * (topWithin(b.el, pv) - top)
+}
+
+/** 预览顶部 → 源码行号（带小数）：可见顶部锚点的行号 + 相邻锚点间的位置插值 */
+function previewTopLine(pv, anchors) {
+  if (!anchors.length) return null
+  let lo = 0
+  let hi = anchors.length - 1
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1
+    if (topWithin(anchors[mid].el, pv) <= pv.scrollTop + 1) lo = mid
+    else hi = mid - 1
+  }
+  const a = anchors[lo]
+  const top = topWithin(a.el, pv)
+  const b = anchors[lo + 1]
+  if (!b) return a.line
+  if (b.line <= a.line || b.line - a.line > MAX_INTERP_LINES) return a.line
+  const h = Math.max(topWithin(b.el, pv) - top, 1)
+  const frac = Math.min(Math.max((pv.scrollTop - top) / h, 0), 1)
+  return a.line + frac * (b.line - a.line)
+}
+
+/** 源码行号（带小数）→ 源码区滚动位置（与 editorTopLine 互逆；优先 CM 内部 view） */
+function editorScrollForLine(ed, line) {
+  const v = cmView(ed)
+  if (v) {
+    try {
+      const off = contentScrollOffset(ed)
+      const total = v.state.doc.lines
+      const i = Math.max(Math.min(Math.floor(line), total - 1), 0)
+      const ln = v.state.doc.line(i + 1) // doc.line 是 1-based
+      const blk = v.lineBlockAt(ln.from)
+      if (i === total - 1) return blk.top + blk.height + off
+      const frac = Math.min(Math.max(line - i, 0), 1)
+      return blk.top + frac * blk.height + off
+    } catch {
+      /* 回退到几何换算 */
+    }
+  }
+  const content = ed.querySelector('.cm-content')
+  const lineEl = ed.querySelector('.cm-line')
+  if (!content || !lineEl) return line * 20
+  const h = parseFloat(getComputedStyle(lineEl).lineHeight) || 20
+  const padTop = contentScrollOffset(ed) + (parseFloat(getComputedStyle(content).paddingTop) || 0)
+  return padTop + line * h
+}
+
+/** 任一方不可滚动/被隐藏（阅读模式、Tab 单栏）时不联动 */
+function bothScrollable(a, b) {
+  return a.scrollHeight - a.clientHeight > 1 && b.scrollHeight - b.clientHeight > 1
+}
+
+/** 按比例同步（兜底：预览无锚点时使用） */
 function syncScrollRatio(fromEl, toEl) {
   const fromMax = fromEl.scrollHeight - fromEl.clientHeight
   const toMax = toEl.scrollHeight - toEl.clientHeight
@@ -523,14 +658,57 @@ function syncScrollRatio(fromEl, toEl) {
   toEl.scrollTop = (fromEl.scrollTop / fromMax) * toMax
 }
 
-/** 源码区滚动 → 预览区跟随 */
+/** 源码区顶部行号 → 预览（锚点对齐；无锚点退回比例兜底） */
+function syncFromEditor(ed, pv) {
+  const anchors = previewAnchors(pv)
+  const line = editorTopLine(ed)
+  if (line == null || !anchors.length) {
+    syncScrollRatio(ed, pv)
+    return
+  }
+  pv.scrollTop = previewScrollForLine(pv, anchors, line)
+}
+
+/** 预览顶部 → 源码区（锚点对齐；无锚点退回比例兜底） */
+function syncFromPreview(pv, ed) {
+  const anchors = previewAnchors(pv)
+  const line = previewTopLine(pv, anchors)
+  if (line == null) {
+    syncScrollRatio(pv, ed)
+    return
+  }
+  ed.scrollTop = editorScrollForLine(ed, line)
+}
+
+/** 最近一次用户滚动的来源侧（决定尾随重同步的方向） */
+let scrollSyncSource = 'editor'
+let scrollSyncTimer = 0
+/**
+ * 尾随重同步：跳滚到未渲染区域时，CodeMirror 的高度图是估算值（行渲染后实际位置会偏移），
+ * 初次联动可能落在估算位置上；锁窗口过期后再按原方向校正一次，用渲染后的精确高度收敛。
+ */
+function scheduleScrollResync() {
+  clearTimeout(scrollSyncTimer)
+  scrollSyncTimer = setTimeout(() => {
+    const ed = editorScrollEl()
+    const pv = pvScrollRef.value
+    if (!ed || !pv || !bothScrollable(ed, pv)) return
+    scrollSyncLock = Date.now() // 程序触发的滚动不吃回对方的 scroll 事件
+    if (scrollSyncSource === 'editor') syncFromEditor(ed, pv)
+    else syncFromPreview(pv, ed)
+  }, SCROLL_SYNC_LOCK_MS + 60)
+}
+
+/** 源码区滚动 → 预览区跟随（锚点对齐） */
 function onEditorScroll() {
   if (Date.now() - scrollSyncLock < SCROLL_SYNC_LOCK_MS) return
   const ed = editorScrollEl()
   const pv = pvScrollRef.value
-  if (!ed || !pv) return
+  if (!ed || !pv || !bothScrollable(ed, pv)) return
   scrollSyncLock = Date.now()
-  syncScrollRatio(ed, pv)
+  scrollSyncSource = 'editor'
+  syncFromEditor(ed, pv)
+  scheduleScrollResync()
 }
 
 /** CodeMirror 滚动容器可能比页面晚一帧才出现，绑定失败返回 false 供重试 */
@@ -806,6 +984,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('keydown', onPreviewKeydown)
   const ed = editorScrollEl()
   if (ed) ed.removeEventListener('scroll', onEditorScroll)
+  clearTimeout(scrollSyncTimer)
   if (scrollRaf) cancelAnimationFrame(scrollRaf)
   focusMode.value = false // 专注模式是页面级状态，离开必须复位，否则侧栏消失
 })
