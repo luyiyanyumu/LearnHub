@@ -12,6 +12,7 @@ import org.dyh.learnhub.dto.NoteDTO;
 import org.dyh.learnhub.dto.QuickRefDTO;
 import org.dyh.learnhub.entity.Category;
 import org.dyh.learnhub.service.CategoryService;
+import org.dyh.learnhub.service.KnowledgeService;
 import org.dyh.learnhub.service.NoteService;
 import org.dyh.learnhub.service.QuickRefService;
 import org.dyh.learnhub.service.SettingsService;
@@ -24,13 +25,14 @@ import java.net.http.HttpTimeoutException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 智能体编排服务。
  * <ul>
  *   <li>polish：对一段 Markdown 做「语言润色」或「整理格式」，纯文本对话，无工具</li>
  *   <li>chat：带 function-calling 的对话循环。模型要操作数据时由本地工具执行
- *       （create_note / update_note / query_notes / get_note / list_categories / create_quick_ref），
+ *       （create_note / update_note / query_notes / search_knowledge / get_note / list_categories / create_quick_ref），
  *       全部为读 + 新增/更新，不提供删除，避免破坏用户数据</li>
  * </ul>
  */
@@ -75,6 +77,7 @@ public class AgentService {
     private final CategoryService categoryService;
     private final QuickRefService quickRefService;
     private final SettingsService settingsService;
+    private final KnowledgeService knowledgeService;
 
     // ------------------------------------------------------------------
     // 1. 语言润色 / 整理格式（编辑器内调用，无工具）
@@ -527,6 +530,8 @@ public class AgentService {
                 return updateNote(args, events);
             case "query_notes":
                 return queryNotes(args);
+            case "search_knowledge":
+                return searchKnowledge(args);
             case "get_note":
                 return getNote(args);
             case "list_categories":
@@ -595,9 +600,33 @@ public class AgentService {
         return okNote(vo);
     }
 
+    /**
+     * 跨「笔记 + 速查卡」全库检索（知识库工具）。
+     * 与 query_notes 的区别：覆盖速查卡，返回统一片段，回答里引用用户已有知识时优先用它；
+     * 需要某篇笔记全文时再用 get_note 跟进。
+     */
+    private String searchKnowledge(JsonNode args) {
+        String kw = args.path("keyword").asText("").trim();
+        Map<String, Object> res = knowledgeService.search(kw);
+        ObjectNode out = objectMapper.createObjectNode();
+        out.put("ok", true);
+        out.put("keyword", kw);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> items = (List<Map<String, Object>>) res.get("items");
+        ArrayNode arr = out.putArray("items");
+        for (Map<String, Object> it : items) {
+            ObjectNode o = arr.addObject();
+            o.put("type", String.valueOf(it.get("type")));
+            o.put("id", ((Number) it.get("id")).longValue());
+            o.put("title", nullTo((String) it.get("title")));
+            o.put("category", nullTo((String) it.get("categoryName")));
+            o.put("snippet", nullTo((String) it.get("snippet")));
+        }
+        return out.toString();
+    }
+
     /** 检索笔记：标题+摘要，控制 token */
-    private String queryNotes(JsonNode args) {
-        String kw = args.path("keyword").asText("");
+    private String queryNotes(JsonNode args) {        String kw = args.path("keyword").asText("");
         ObjectNode out = objectMapper.createObjectNode();
         out.put("ok", true);
         ArrayNode arr = out.putArray("notes");
@@ -753,6 +782,7 @@ public class AgentService {
             2. 用简体中文，语气务实、直接、有耐心；涉及代码必须用 Markdown 代码块并标注语言。
             3. 回答较长时用标题 / 列表 / 表格分节，不要堆一大段；能给出命令/代码就尽量给全。
             4. 你拥有操作本工作台数据的能力：把知识点沉淀成「笔记」，把短平快的命令与易错点沉淀成「速查卡」，也可以检索或读取用户已有的笔记、分类。
+            8. 用户的工作台就是他的知识库：回答技术问题前，先用 search_knowledge 检索用户自己记过的相关内容；如果用户笔记里的说法与通用答案有出入，指出差异并尊重用户自己的记录（用词可以是“你之前记的是…”）。
             5. 只有用户明确要求“存成笔记 / 做个速查卡 / 记下来”，或者你认为该知识点非常值得沉淀时才主动调用创建类工具；普通答疑不要擅自写入。
             6. update_note 只在用户明确让你补充/修改某篇笔记时使用。
             7. 工具执行结果以 JSON 返回，把它们自然地总结给用户听，不要复述原始 JSON。
@@ -776,6 +806,9 @@ public class AgentService {
         defs.add(tool("query_notes",
                 "按关键词检索用户已有笔记，返回标题+摘要列表（不含全文）。回答前若想参考用户以前学过什么可以调用。",
                 List.of(param("keyword", "string", "检索关键词（可空，空则取最近笔记）", false))));
+        defs.add(tool("search_knowledge",
+                "跨「笔记 + 速查卡」全库检索，返回带上下文片段的统一列表。回答用户提问前，若问题可能与用户已记录的知识相关（报错排查、命令用法、概念解释等），应优先调用本工具参考用户已有知识；需要某篇笔记全文时再用 get_note 跟进。",
+                List.of(param("keyword", "string", "检索关键词（可空，空则返回最近知识）", false))));
         defs.add(tool("get_note",
                 "读取某篇笔记的完整 Markdown 正文。",
                 List.of(param("note_id", "integer", "笔记 id", true))));

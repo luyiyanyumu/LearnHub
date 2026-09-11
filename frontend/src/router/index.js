@@ -12,6 +12,7 @@ const routes = [
       { path: 'notes/:id', name: 'noteEdit', component: () => import('../views/NoteEdit.vue'), meta: { title: '编辑笔记' } },
       { path: 'refs', name: 'refs', component: () => import('../views/QuickRefs.vue'), meta: { title: '速查卡' } },
       { path: 'files', name: 'files', component: () => import('../views/FileLibrary.vue'), meta: { title: '资料库' } },
+      { path: 'knowledge', name: 'knowledge', component: () => import('../views/Knowledge.vue'), meta: { title: '知识库' } },
     ],
   },
 ]

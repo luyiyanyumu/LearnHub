@@ -58,6 +58,9 @@ const activeMenu = computed(() => {
         <el-menu-item index="/files">
           <span class="mi-name">资料库</span>
         </el-menu-item>
+        <el-menu-item index="/knowledge">
+          <span class="mi-name">知识库</span>
+        </el-menu-item>
       </el-menu>
 
       <div class="side-foot">

@@ -57,6 +57,11 @@ export const statsApi = {
   dashboard: () => request.get('/stats'),
 }
 
+export const knowledgeApi = {
+  /** 统一检索：{ keyword, total, items:[{type:'note'|'quick_ref', id, title, snippet, categoryName, updatedAt}] }；kw 空则返回最近知识 */
+  search: (kw) => request.get('/knowledge/search', { params: { kw } }),
+}
+
 // AI 相关请求的统一超时：思考模式（DeepSeek V4 / Kimi K3 / GLM-5.3 等）会让长文处理
 // 比 90 秒慢得多（实测 4863 字润色 81.6s，更长文档直接破 90s），而对齐后端 HttpClient 的 300s。
 const AI_TIMEOUT = 300000
