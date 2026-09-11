@@ -1359,6 +1359,11 @@ html.dark .pane-editor :deep(.md-editor) {
   margin: 0 auto;
   padding: 26px 34px 48px;
 }
+/* 预览编辑：编辑优先，放开阅读限宽占满预览栏，大屏不再两侧大片留白 */
+.editor-wrap.is-preview-editing .pv-inner {
+  max-width: 100%;
+  padding: 22px 28px 48px;
+}
 .pane-preview :deep(.md-editor-preview.md-editor-preview) {
   background: transparent;
   line-height: 1.75;
@@ -1377,16 +1382,24 @@ html.dark .pane-editor :deep(.md-editor) {
   margin-top: 0;
 }
 
-/* 预览区可编辑时的视觉提示 */
-.pane-preview :deep(.lh-preview-editing) {
-  outline: 2px dashed var(--app-brand);
-  outline-offset: -2px;
-  outline-position: inside;
-  border-radius: 6px;
+/* 预览区可编辑：精致「编辑画布」——柔边 + 极淡品牌底 + 外发光，替代生硬虚线。
+   注意 .md-editor-preview.md-editor-preview 已声明 background:transparent（更高特异性），
+   故这里双写 .lh-preview-editing 类名压回去。 */
+.pane-preview :deep(.md-editor-preview.lh-preview-editing.lh-preview-editing) {
+  outline: none;
+  border: 1px solid color-mix(in srgb, var(--app-brand) 30%, var(--app-border));
+  background: color-mix(in srgb, var(--app-brand) 2.5%, var(--app-card));
+  border-radius: 12px;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--app-brand) 6%, transparent);
   cursor: text;
+  transition: border-color var(--dur-fast) ease, box-shadow var(--dur-fast) ease;
 }
-.pane-preview :deep(.lh-preview-editing:focus) {
-  outline-style: solid;
+.pane-preview :deep(.md-editor-preview.lh-preview-editing.lh-preview-editing:hover) {
+  border-color: color-mix(in srgb, var(--app-brand) 50%, var(--app-border));
+}
+.pane-preview :deep(.md-editor-preview.lh-preview-editing.lh-preview-editing:focus) {
+  border-color: var(--app-brand);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--app-brand) 14%, transparent);
 }
 
 /* ================= 大纲栏 ================= */
