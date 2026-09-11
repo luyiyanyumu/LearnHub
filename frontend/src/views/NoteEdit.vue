@@ -1362,7 +1362,7 @@ html.dark .pane-editor :deep(.md-editor) {
 /* 预览编辑：编辑优先，放开阅读限宽占满预览栏，大屏不再两侧大片留白 */
 .editor-wrap.is-preview-editing .pv-inner {
   max-width: 100%;
-  padding: 22px 28px 48px;
+  padding: 28px 34px 56px;
 }
 .pane-preview :deep(.md-editor-preview.md-editor-preview) {
   background: transparent;
@@ -1382,24 +1382,25 @@ html.dark .pane-editor :deep(.md-editor) {
   margin-top: 0;
 }
 
-/* 预览区可编辑：精致「编辑画布」——柔边 + 极淡品牌底 + 外发光，替代生硬虚线。
+/* 预览区可编辑：中性「编辑画布」——无品牌色，靠留白与圆角区分；
+   内边距让内容与边框有呼吸（padding 是纯视觉，不影响 innerHTML 反推）。
    注意 .md-editor-preview.md-editor-preview 已声明 background:transparent（更高特异性），
    故这里双写 .lh-preview-editing 类名压回去。 */
 .pane-preview :deep(.md-editor-preview.lh-preview-editing.lh-preview-editing) {
   outline: none;
-  border: 1px solid color-mix(in srgb, var(--app-brand) 30%, var(--app-border));
-  background: color-mix(in srgb, var(--app-brand) 2.5%, var(--app-card));
+  border: 1px solid var(--app-border);
+  background: color-mix(in srgb, var(--app-text-1) 2.5%, var(--app-card));
   border-radius: 12px;
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--app-brand) 6%, transparent);
+  padding: 24px 30px 32px;
   cursor: text;
   transition: border-color var(--dur-fast) ease, box-shadow var(--dur-fast) ease;
 }
 .pane-preview :deep(.md-editor-preview.lh-preview-editing.lh-preview-editing:hover) {
-  border-color: color-mix(in srgb, var(--app-brand) 50%, var(--app-border));
+  border-color: color-mix(in srgb, var(--app-text-1) 24%, var(--app-border));
 }
 .pane-preview :deep(.md-editor-preview.lh-preview-editing.lh-preview-editing:focus) {
-  border-color: var(--app-brand);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--app-brand) 14%, transparent);
+  border-color: color-mix(in srgb, var(--app-text-1) 42%, var(--app-border));
+  box-shadow: var(--shadow-sm);
 }
 
 /* ================= 大纲栏 ================= */
@@ -1500,16 +1501,16 @@ html.dark .ol-item.active {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  padding: 6px 10px;
-  background: var(--app-brand-soft);
-  border: 1px solid color-mix(in srgb, var(--app-brand) 25%, transparent);
+  padding: 6px 12px;
+  background: var(--app-card);
+  border: 1px solid var(--app-border);
   border-radius: 8px;
   margin-bottom: 8px;
 }
 .pe-tip {
   flex: 1 1 260px;
   font-size: 12.5px;
-  color: var(--app-brand-deep);
+  color: var(--app-text-2);
 }
 
 .read-top {
