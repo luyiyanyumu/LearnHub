@@ -124,7 +124,9 @@ onBeforeUnmount(() => {
       <el-select v-model="uploadCategoryId" placeholder="上传到分类（可选）" clearable style="width: 160px">
         <el-option v-for="c in categories" :key="c.id" :label="'　'.repeat(c.depth) + c.name" :value="c.id" />
       </el-select>
-      <el-button type="primary" :loading="uploading" @click="pickUpload">⬆ 上传资料</el-button>
+      <el-button type="primary" :loading="uploading" @click="pickUpload">
+        <span class="btn-ico"><svg viewBox="0 0 24 24"><path d="M12 16V4.5M6.5 10 12 4.5 17.5 10M4.5 19.5h15" /></svg></span>上传资料
+      </el-button>
       <input ref="uploadInput" type="file" multiple hidden @change="onFileChosen" />
     </div>
 

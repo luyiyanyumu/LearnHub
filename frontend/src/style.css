@@ -632,6 +632,54 @@ html.dark .md-editor-preview.md-editor-preview .hljs-deletion {
   background: rgba(19, 194, 194, 0.08);
 }
 
+/* ============ 下拉菜单图标（通用） ============
+   Element Plus 的下拉面板会被 teleport 到 body，scoped 样式够不到，
+   因此这里放全局类：菜单项左侧一枚 14px 线性图标，替代彩色 emoji。 */
+.dd-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-right: 8px;
+  color: var(--app-text-3);
+  vertical-align: -2px;
+  flex-shrink: 0;
+}
+.dd-ico svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.el-dropdown-menu__item:hover .dd-ico {
+  color: var(--el-color-primary);
+}
+
+/* 按钮内联图标：颜色继承按钮自身，不抢主色 */
+.btn-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-right: 5px;
+  vertical-align: -2px;
+  color: inherit;
+}
+.btn-ico svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 /* 动效克制原则的最后一块拼图：尊重系统"减少动态效果"设置 */
 @media (prefers-reduced-motion: reduce) {
   *,

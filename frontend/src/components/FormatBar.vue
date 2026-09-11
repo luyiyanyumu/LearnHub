@@ -87,14 +87,21 @@ function pickBg(c) {
 
     <i class="fb-sep" />
 
-    <button class="fb-btn" type="button" title="整段居中" @click="apply('center')">≡</button>
-    <button class="fb-btn" type="button" title="插入折叠块" @click="apply('details')">📁</button>
-    <button class="fb-btn" type="button" title="插入提示块 :::tip" @click="apply('callout')">💬</button>
+    <button class="fb-btn" type="button" title="整段居中" @click="apply('center')">
+      <svg viewBox="0 0 24 24"><path d="M4.5 6h15M7.5 12h9M5.5 18h13" /></svg>
+    </button>
+    <button class="fb-btn" type="button" title="插入折叠块" @click="apply('details')">
+      <svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2" /><path d="m9.5 10 2 2-2 2M13.5 14h3" /></svg>
+    </button>
+    <button class="fb-btn" type="button" title="插入提示块 :::tip" @click="apply('callout')">
+      <svg viewBox="0 0 24 24"><path d="M5 5.5h14a1 1 0 0 1 1 1v8.5a1 1 0 0 1-1 1h-7l-3.5 3v-3H5a1 1 0 0 1-1-1V6.5a1 1 0 0 1 1-1Z" /></svg>
+    </button>
 
     <i class="fb-sep" />
 
     <button class="fb-btn fb-clear" type="button" title="清除选中文字的内联格式" @click="apply('clear')">
-      ⌫ 清格式
+      <svg viewBox="0 0 24 24"><path d="m14.5 5.5 4 4L10 18H6.5l-2-2 10-10.5ZM8 18h11" /></svg>
+      <span class="fb-clear-txt">清格式</span>
     </button>
   </div>
 </template>
@@ -149,6 +156,22 @@ function pickBg(c) {
   color: var(--app-brand-deep);
 }
 
+/* 线性图标：与笔记编辑页 .tb svg 同规格，保证两条工具行视觉一致 */
+.fb-btn svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.fb-btn svg .fill {
+  fill: currentColor;
+  stroke: none;
+}
+
 .fb-a {
   font-weight: 700;
   font-size: 14px;
@@ -189,5 +212,31 @@ function pickBg(c) {
 
 .fb-clear {
   font-size: 12px;
+}
+
+.fb-clear-txt {
+  font-size: 12px;
+  line-height: 1;
+}
+
+/* ===== bare：嵌入笔记编辑页工具行时，与 .tb 按钮完全同规格 ===== */
+.format-bar.bare .fb-btn {
+  height: 28px;
+  min-width: 28px;
+  border: none;
+  border-radius: 6px;
+}
+
+.format-bar.bare .fb-btn:hover {
+  background: color-mix(in srgb, var(--app-text-1) 7%, transparent);
+  color: var(--app-text-1);
+}
+
+.format-bar.bare .fb-btn:active {
+  background: color-mix(in srgb, var(--app-text-1) 11%, transparent);
+}
+
+.format-bar.bare .fb-sep {
+  margin: 0 5px;
 }
 </style>

@@ -216,7 +216,9 @@ function openFromEvent() {
               </div>
             </div>
           </div>
-          <button class="icon-btn" type="button" @click="open = false" title="收起">✕</button>
+          <button class="icon-btn" type="button" @click="open = false" title="收起">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg>
+          </button>
         </header>
 
         <div v-if="!configured" class="cfg-tip">
@@ -227,7 +229,7 @@ function openFromEvent() {
 
         <div ref="listRef" class="msg-list">
           <div v-if="!messages.length" class="welcome">
-            <p class="welcome-t">你好，我是你的代码学习搭子 🤖</p>
+            <p class="welcome-t">你好，我是你的代码学习搭子</p>
             <p class="welcome-s">可以问我任何编程/IT 问题；讲到值得沉淀的知识点，点「保存为笔记」就能存进工作台。</p>
             <div class="chips">
               <button v-for="s in SUGGESTIONS" :key="s" type="button" class="chip" @click="send(s)">{{ s }}</button>
@@ -250,7 +252,9 @@ function openFromEvent() {
                   <div class="md-body"><MdPreview :modelValue="fixHtmlQuotes(m.content || '')" :theme="isDark ? 'dark' : 'light'" previewTheme="github" /></div>
                   <!-- 每次回答后：询问是否沉淀 -->
                   <div v-if="m.content && !m.saved" class="msg-actions">
-                    <button type="button" class="act-btn primary" @click="askSave(m)">📌 保存为笔记</button>
+                    <button type="button" class="act-btn primary" @click="askSave(m)">
+                      <span class="btn-ico"><svg viewBox="0 0 24 24"><path d="M6.5 3.5h11v17l-5.5-4-5.5 4z" /></svg></span>保存为笔记
+                    </button>
                     <button type="button" class="act-btn" @click="copyText(m.content)">复制</button>
                   </div>
                   <div v-else-if="m.saved" class="saved-tag">✓ 已保存为笔记</div>
@@ -282,7 +286,7 @@ function openFromEvent() {
     </el-drawer>
 
     <!-- 保存为笔记对话框 -->
-    <el-dialog v-model="saveVisible" title="📌 保存为笔记" width="560px" top="12vh" destroy-on-close>
+    <el-dialog v-model="saveVisible" title="保存为笔记" width="560px" top="12vh" destroy-on-close>
       <div class="save-form">
         <el-input v-model="saveForm.title" placeholder="笔记标题" maxlength="120" />
         <el-select v-model="saveForm.categoryId" placeholder="选择分类（可选）" clearable style="width: 100%">
@@ -583,6 +587,8 @@ html.dark .cfg-tip {
   border-top: 1px dashed var(--app-border);
 }
 .act-btn {
+  display: inline-flex;
+  align-items: center;
   border: 1px solid var(--app-border);
   background: var(--app-card);
   color: var(--app-text-2);

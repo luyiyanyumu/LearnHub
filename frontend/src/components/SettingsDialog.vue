@@ -140,7 +140,7 @@ const MODEL_GROUPS = [
     ],
   },
   {
-    label: '⚠️ 已失效（调用会返回 400，仅用于识别错误配置）',
+    label: '已失效（调用会返回 400，仅用于识别错误配置）',
     options: [
       { value: 'deepseek-v4-pro-0813', label: 'deepseek-v4-pro-0813 · 带日期的快照名，官方已不收', disabled: true },
       { value: 'deepseek-v4-flash-0731', label: 'deepseek-v4-flash-0731 · 带日期的快照名，官方已不收', disabled: true },
@@ -508,16 +508,16 @@ function notifyMetaChanged() {
           <section class="sec">
             <h4 class="sec-title">界面风格</h4>
             <el-radio-group v-model="themeMode" @change="(m) => setThemeMode(m)">
-              <el-radio-button value="light">☀ 浅色</el-radio-button>
-              <el-radio-button value="dark">🌙 深色</el-radio-button>
-              <el-radio-button value="auto">🖥 跟随系统</el-radio-button>
+              <el-radio-button value="light">浅色</el-radio-button>
+              <el-radio-button value="dark">深色</el-radio-button>
+              <el-radio-button value="auto">跟随系统</el-radio-button>
             </el-radio-group>
             <p class="hint">切换即时预览；侧栏的太阳/月亮按钮也随时可切</p>
           </section>
 
           <section class="sec">
             <h4 class="sec-title">
-              🔌 API 接入
+              API 接入
               <el-tag v-if="overridden.baseUrl || overridden.apiKey || overridden.model" size="small" type="warning" effect="plain">已自定义</el-tag>
               <el-select
                 v-model="presetLabel"
@@ -696,7 +696,7 @@ function notifyMetaChanged() {
 
           <section class="sec">
             <h4 class="sec-title">
-              ✨ 润色提示词
+              润色提示词
               <el-tag v-if="overridden.polishPrompt" size="small" type="warning" effect="plain">已自定义</el-tag>
               <el-link v-if="overridden.polishPrompt" type="primary" :underline="false" class="reset-link" @click="resetField('polishPrompt')">恢复默认</el-link>
             </h4>
@@ -710,7 +710,7 @@ function notifyMetaChanged() {
 
           <section class="sec">
             <h4 class="sec-title">
-              🧹 格式提示词
+              格式提示词
               <el-tag v-if="overridden.formatPrompt" size="small" type="warning" effect="plain">已自定义</el-tag>
               <el-link v-if="overridden.formatPrompt" type="primary" :underline="false" class="reset-link" @click="resetField('formatPrompt')">恢复默认</el-link>
             </h4>

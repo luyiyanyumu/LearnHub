@@ -641,14 +641,27 @@ onBeforeUnmount(() => {
 
       <el-dropdown trigger="click" @command="aiCommand">
         <button class="ai-trigger" type="button" :disabled="aiBusy">
-          <span class="ai-spark">✨</span>{{ aiBusy ? 'AI 处理中…' : 'AI 助手' }}
+          <span class="ai-spark">
+            <svg viewBox="0 0 24 24"><path d="M12 3.8l1.85 4.55L18.4 10.2l-4.55 1.85L12 16.6l-1.85-4.55L5.6 10.2l4.55-1.85z" /></svg>
+          </span>{{ aiBusy ? 'AI 处理中…' : 'AI 助手' }}
         </button>
         <template #dropdown>
           <el-dropdown-menu>
-            <el-dropdown-item command="polish" :disabled="aiBusy">✨ AI 润色</el-dropdown-item>
-            <el-dropdown-item command="format" :disabled="aiBusy">🧹 整理格式</el-dropdown-item>
-            <el-dropdown-item command="chat" divided>🤖 打开 AI 对话</el-dropdown-item>
-            <el-dropdown-item command="__edit" divided>{{ previewEditing ? '✓ 退出预览编辑' : '✍ 预览编辑（所见即所得）' }}</el-dropdown-item>
+            <el-dropdown-item command="polish" :disabled="aiBusy">
+              <span class="dd-ico"><svg viewBox="0 0 24 24"><path d="M12 3.8l1.85 4.55L18.4 10.2l-4.55 1.85L12 16.6l-1.85-4.55L5.6 10.2l4.55-1.85z" /><path d="M18.6 16.2l.7 1.7 1.7.7-1.7.7-.7 1.7-.7-1.7-1.7-.7 1.7-.7z" /></svg></span>AI 润色
+            </el-dropdown-item>
+            <el-dropdown-item command="format" :disabled="aiBusy">
+              <span class="dd-ico"><svg viewBox="0 0 24 24"><path d="M5 19.5 14.6 9.9M13.2 8.5l3 3" /><path d="M18.4 3.4l.62 1.58 1.58.62-1.58.62-.62 1.58-.62-1.58-1.58-.62 1.58-.62z" /></svg></span>整理格式
+            </el-dropdown-item>
+            <el-dropdown-item command="chat" divided>
+              <span class="dd-ico"><svg viewBox="0 0 24 24"><path d="M5 5.5h14a1 1 0 0 1 1 1v8.5a1 1 0 0 1-1 1h-7l-3.5 3v-3H5a1 1 0 0 1-1-1V6.5a1 1 0 0 1 1-1Z" /></svg></span>打开 AI 对话
+            </el-dropdown-item>
+            <el-dropdown-item command="__edit" divided>
+              <span class="dd-ico">
+                <svg v-if="previewEditing" viewBox="0 0 24 24"><path d="M5 12.5 10 17.5 19 7" /></svg>
+                <svg v-else viewBox="0 0 24 24"><path d="M4 20h4L18.5 9.5l-4-4L4 16v4Z" /><path d="M13.5 6.5l4 4" /></svg>
+              </span>{{ previewEditing ? '退出预览编辑' : '预览编辑（所见即所得）' }}
+            </el-dropdown-item>
           </el-dropdown-menu>
         </template>
       </el-dropdown>
@@ -661,11 +674,24 @@ onBeforeUnmount(() => {
         </button>
         <template #dropdown>
           <el-dropdown-menu>
-            <el-dropdown-item v-if="!isNew" command="() => exportNote('md')">⬇ 导出 Markdown (.md)</el-dropdown-item>
-            <el-dropdown-item v-if="!isNew" command="() => exportNote('html')">⬇ 导出网页 HTML</el-dropdown-item>
-            <el-dropdown-item command="toggleOutline" divided>{{ outlineOpen ? '收起大纲' : '展开大纲' }}</el-dropdown-item>
-            <el-dropdown-item command="toggleFocus">🎯 {{ focusMode ? '退出专注模式' : '专注模式（隐藏侧栏与大纲）' }}</el-dropdown-item>
-            <el-dropdown-item command="toggleReading">📖 阅读模式（只看正文）</el-dropdown-item>
+            <el-dropdown-item v-if="!isNew" command="() => exportNote('md')">
+              <span class="dd-ico"><svg viewBox="0 0 24 24"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19h14" /></svg></span>导出 Markdown (.md)
+            </el-dropdown-item>
+            <el-dropdown-item v-if="!isNew" command="() => exportNote('html')">
+              <span class="dd-ico"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Z" /><path d="M3.4 12h17.2M12 3c2.35 2.55 3.55 5.55 3.55 9S14.35 18.45 12 21c-2.35-2.55-3.55-5.55-3.55-9S9.65 5.55 12 3Z" /></svg></span>导出网页 HTML
+            </el-dropdown-item>
+            <el-dropdown-item command="toggleOutline" divided>
+              <span class="dd-ico"><svg viewBox="0 0 24 24"><path d="M5 6h14M5 12h9M5 18h12" /></svg></span>{{ outlineOpen ? '收起大纲' : '展开大纲' }}
+            </el-dropdown-item>
+            <el-dropdown-item command="toggleFocus">
+              <span class="dd-ico">
+                <svg v-if="focusMode" viewBox="0 0 24 24"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" /></svg>
+                <svg v-else viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></svg>
+              </span>{{ focusMode ? '退出专注模式' : '专注模式（隐藏侧栏与大纲）' }}
+            </el-dropdown-item>
+            <el-dropdown-item command="toggleReading">
+              <span class="dd-ico"><svg viewBox="0 0 24 24"><path d="M5 4.5h5.5a2 2 0 0 1 2 2v13a2 2 0 0 0-2-2H5zM19 4.5h-5.5a2 2 0 0 0-2 2v13a2 2 0 0 1 2-2H19z" /></svg></span>阅读模式（只看正文）
+            </el-dropdown-item>
           </el-dropdown-menu>
         </template>
       </el-dropdown>
@@ -679,27 +705,45 @@ onBeforeUnmount(() => {
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M11 18l-6-6 6-6" /></svg>
       </button>
       <span class="read-title">{{ form.title || '无标题' }}</span>
-      <button class="read-exit" type="button" @click="toggleReading">✕ 退出阅读</button>
+      <button class="read-exit" type="button" @click="toggleReading">
+        <span class="btn-ico"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" /></svg></span>退出阅读
+      </button>
     </div>
 
     <!-- ======== 顶部第二行：Markdown + 富文本工具（阅读模式隐藏） ======== -->
     <div class="ed-tools" v-if="!readingMode && !previewEditing">
       <template v-if="layoutMode !== 'tab' || editorTab === 'edit'">
-        <button class="tb" type="button" title="加粗" @click="mdTool('bold')"><b>B</b></button>
-        <button class="tb" type="button" title="斜体" @click="mdTool('italic')"><i>I</i></button>
-        <button class="tb" type="button" title="删除线" @click="mdTool('strike')"><s>S</s></button>
+        <button class="tb tb-txt" type="button" title="加粗" @click="mdTool('bold')"><b>B</b></button>
+        <button class="tb tb-txt" type="button" title="斜体" @click="mdTool('italic')"><i>I</i></button>
+        <button class="tb tb-txt" type="button" title="删除线" @click="mdTool('strike')"><s>S</s></button>
         <button class="tb tb-h" type="button" title="二级标题" @click="mdTool('h2')">H2</button>
         <button class="tb tb-h" type="button" title="三级标题" @click="mdTool('h3')">H3</button>
         <i class="tb-sep" />
-        <button class="tb" type="button" title="引用" @click="mdTool('quote')">❝</button>
-        <button class="tb" type="button" title="无序列表" @click="mdTool('ul')">• ≡</button>
-        <button class="tb" type="button" title="有序列表" @click="mdTool('ol')">1. ≡</button>
+        <button class="tb" type="button" title="引用" @click="mdTool('quote')">
+          <svg viewBox="0 0 24 24"><path d="M9.5 7.5c-2.6.6-4 2.3-4 5v4h5v-5h-3c0-1.6.7-2.7 2-3.2Zm9 0c-2.6.6-4 2.3-4 5v4h5v-5h-3c0-1.6.7-2.7 2-3.2Z" /></svg>
+        </button>
+        <button class="tb" type="button" title="无序列表" @click="mdTool('ul')">
+          <svg viewBox="0 0 24 24"><circle cx="5" cy="6.5" r="1.1" class="fill" /><circle cx="5" cy="12" r="1.1" class="fill" /><circle cx="5" cy="17.5" r="1.1" class="fill" /><path d="M9.5 6.5h10M9.5 12h10M9.5 17.5h10" /></svg>
+        </button>
+        <button class="tb" type="button" title="有序列表" @click="mdTool('ol')">
+          <svg viewBox="0 0 24 24"><path d="M9.5 6.5h10M9.5 12h10M9.5 17.5h10" /><path d="M4 5.2 5.2 4.5V8M3.8 10.7c.2-.5.8-.8 1.3-.6.6.2.9.8.6 1.3l-1.9 2.4h2.4M3.9 16.5h1.3c.5 0 .9.4.9.9s-.4.8-.9.8H4.7c.5 0 .9.4.9.8 0 .5-.4.9-.9.9H3.9" /></svg>
+        </button>
         <i class="tb-sep" />
-        <button class="tb" type="button" title="行内代码" @click="mdTool('inlineCode')"><code>`</code></button>
-        <button class="tb" type="button" title="代码块" @click="mdTool('codeBlock')">{ }</button>
-        <button class="tb" type="button" title="链接" @click="mdTool('link')">🔗</button>
-        <button class="tb" type="button" title="图片" @click="mdTool('image')">🖼</button>
-        <button class="tb" type="button" title="表格" @click="mdTool('table')">▦</button>
+        <button class="tb" type="button" title="行内代码" @click="mdTool('inlineCode')">
+          <svg viewBox="0 0 24 24"><path d="m9 8.5-3.5 3.5L9 15.5M15 8.5l3.5 3.5L15 15.5" /></svg>
+        </button>
+        <button class="tb" type="button" title="代码块" @click="mdTool('codeBlock')">
+          <svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2" /><path d="m9 10-1.8 2L9 14M15 10l1.8 2L15 14" /></svg>
+        </button>
+        <button class="tb" type="button" title="链接" @click="mdTool('link')">
+          <svg viewBox="0 0 24 24"><path d="M10.5 13.5a3.5 3.5 0 0 0 5 0l3-3a3.5 3.5 0 1 0-5-5l-1.2 1.2M13.5 10.5a3.5 3.5 0 0 0-5 0l-3 3a3.5 3.5 0 1 0 5 5l1.2-1.2" /></svg>
+        </button>
+        <button class="tb" type="button" title="图片" @click="mdTool('image')">
+          <svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2" /><circle cx="9" cy="10" r="1.4" /><path d="m5.5 17.5 4.5-4.5 3 3 2.5-2.5 3 3" /></svg>
+        </button>
+        <button class="tb" type="button" title="表格" @click="mdTool('table')">
+          <svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2" /><path d="M4 10.2h16M4 14.6h16M10 5v14M15.2 5v14" /></svg>
+        </button>
 
         <!-- 富文本格式（颜色/字号/上下标等，收在同一个工具行里） -->
         <FormatBar bare class="ed-format" @apply="applyFormat" />
@@ -715,10 +759,14 @@ onBeforeUnmount(() => {
     <!-- 预览编辑模式操作条 -->
     <div v-if="previewEditing" class="preview-edit-bar">
       <span class="pe-tip">
-        ✍ 预览编辑中：直接改右侧排版内容（Ctrl/⌘+S 同步并退出；Esc 也是「先同步再退出」，只有「放弃改动」才丢弃）
+        <span class="btn-ico"><svg viewBox="0 0 24 24"><path d="M4 20h4L18.5 9.5l-4-4L4 16v4Z" /><path d="M13.5 6.5l4 4" /></svg></span>预览编辑中：直接改右侧排版内容（Ctrl/⌘+S 同步并退出；Esc 也是「先同步再退出」，只有「放弃改动」才丢弃）
       </span>
-      <el-button size="small" @click="abandonPreviewEdit">↺ 放弃改动</el-button>
-      <el-button size="small" type="primary" @click="syncPreviewToSource()">✓ 同步到源码</el-button>
+      <el-button size="small" @click="abandonPreviewEdit">
+        <span class="btn-ico"><svg viewBox="0 0 24 24"><path d="M4.5 9.5h9a5 5 0 0 1 0 10H8M4.5 9.5 8 6M4.5 9.5 8 13" /></svg></span>放弃改动
+      </el-button>
+      <el-button size="small" type="primary" @click="syncPreviewToSource()">
+        <span class="btn-ico"><svg viewBox="0 0 24 24"><path d="M5 12.5 10 17.5 19 7" /></svg></span>同步到源码
+      </el-button>
     </div>
 
     <!-- ======== 三栏主体 ======== -->
@@ -990,7 +1038,7 @@ onBeforeUnmount(() => {
 .tb {
   min-width: 28px;
   height: 28px;
-  padding: 0 7px;
+  padding: 0 6px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1004,6 +1052,31 @@ onBeforeUnmount(() => {
   cursor: pointer;
   white-space: nowrap;
   transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease;
+}
+.tb svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.tb svg .fill {
+  fill: currentColor;
+  stroke: none;
+}
+/* 字母类按钮（B/I/S/H2/H3）走文字，与图标按钮同视觉重量 */
+.tb-txt b {
+  font-size: 13.5px;
+}
+.tb-txt i {
+  font-style: italic;
+  font-family: Georgia, serif;
+  font-size: 14px;
+}
+.tb-txt s {
+  text-decoration-thickness: 1.2px;
 }
 .tb:hover {
   background: color-mix(in srgb, var(--app-text-1) 7%, transparent);
@@ -1027,7 +1100,7 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
 }
 .ed-format {
-  margin-left: 4px;
+  flex: none;
 }
 
 /* Tab 模式切换 */
@@ -1297,6 +1370,8 @@ html.dark .ol-item.active {
   text-overflow: ellipsis;
 }
 .read-exit {
+  display: inline-flex;
+  align-items: center;
   height: 30px;
   padding: 0 12px;
   font-size: 12.5px;
