@@ -2,7 +2,7 @@
 
 个人知识工作台 —— 管理 Markdown 学习笔记、命令/API 速查卡，支持分类、标签、关键词搜索，并内置 **DeepSeek AI 智能体**（笔记润色 / 代码问答 / 快速建卡）。
 
-![License](https://img.shields.io/badge/license-MIT-green)
+![License](https://img.shields.io/badge/license-PolyForm_NC_1.0.0-orange)
 
 ## 功能
 
@@ -111,4 +111,6 @@ npm run dev      # http://localhost:5174（端口固定，被占用会直接报�
 
 ## License
 
-[MIT](LICENSE) © 2026 dyh
+[PolyForm Noncommercial 1.0.0](LICENSE) © 2026 dyh
+
+**个人与非商业组织可自由使用、修改、分发**（学习、研究、爱好项目、公益/教育机构等）。**任何商业用途均需另行获得作者授权**，包括但不限于：出售本软件或包含本软件的服务、收费提供、与付费产品捆绑、企业内部业务使用。商用授权请联系作者。
