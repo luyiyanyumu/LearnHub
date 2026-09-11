@@ -1,0 +1,638 @@
+/* ============================================================
+   learn-hub 设计系统 —— 语义化 token（浅色/深色双主题）
+   品牌色：teal 青绿（活力学习感）
+   风格基调：「安静的高级感」—— 克制、精致、有层次。
+   手段：原生系统字体 + 更深的留白节奏 + 分层细阴影 + 统一缓动曲线，
+   品牌色依旧只做稀有强调（60-30-10）。
+   ============================================================ */
+
+:root {
+  /* --- 品牌主色（Element Plus 色阶）--- */
+  --el-color-primary: #0e9f8e;
+  /* EP 内部用它拼 rgba() 做淡色底，不覆盖的话某些半透明背景还会是 EP 默认蓝 */
+  --el-color-primary-rgb: 14, 159, 142;
+  --el-color-primary-light-3: #43b8a6;
+  --el-color-primary-light-5: #71ccbd;
+  --el-color-primary-light-7: #a0ddd2;
+  --el-color-primary-light-8: #bce8e0;
+  --el-color-primary-light-9: #dbf3ef;
+  --el-color-primary-dark-2: #0b7f72;
+
+  /* EP 默认 4px 圆角偏"工具感"，统一提到 8px（输入框/下拉/小按钮） */
+  --el-border-radius-base: 8px;
+  --el-border-radius-small: 6px;
+
+  /* --- 应用语义 token --- */
+  --app-bg: #f2f6f5;          /* 页面底色：冷青白，比卡片低一档，拉开层次 */
+  --app-side: #ffffff;        /* 侧栏 */
+  --app-card: #ffffff;
+  --app-border: #e3e9e8;      /* 常规描边 */
+  --app-border-weak: #ecf1f0; /* 更弱的一档：卡片内部分隔线用 */
+  --app-text-1: #1f2d2a;      /* 主文本：带青的近黑，比纯黑柔和 */
+  --app-text-2: #5a6b67;      /* 次级文本 */
+  --app-text-3: #8a9995;      /* 弱化文本 */
+  --app-brand: #0e9f8e;
+  --app-brand-deep: #0b7f72;
+  --app-brand-soft: #e2f5f1;
+  --app-brand-glow: rgba(14, 159, 142, 0.12);
+  --app-code-bg: #eef4f3;
+
+  /* 分层阴影：两层小阴影叠出"浮起但不夸张"的质感（单层大阴影容易显得廉价） */
+  --shadow-sm: 0 1px 2px rgba(16, 63, 57, 0.04), 0 2px 6px rgba(16, 63, 57, 0.03);
+  --shadow-md: 0 2px 4px rgba(16, 63, 57, 0.05), 0 12px 28px -8px rgba(16, 63, 57, 0.14);
+  --shadow-lg: 0 4px 12px rgba(16, 63, 57, 0.06), 0 24px 56px -12px rgba(16, 63, 57, 0.2);
+
+  --radius: 12px;
+  --radius-sm: 9px;
+  --radius-lg: 16px;
+
+  /* 统一缓动：ease-out-quint，减速自然、无回弹（回弹显得廉价） */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-fast: 0.15s;
+  --dur: 0.25s;
+  --dur-slow: 0.35s;
+}
+
+html.dark {
+  --el-color-primary: #2dd4bf;
+  --el-color-primary-rgb: 45, 212, 191;
+  --el-color-primary-light-3: #25b3a2;
+  --el-color-primary-light-5: #1d9387;
+  --el-color-primary-light-7: #15706a;
+  --el-color-primary-light-8: #115e59;
+  --el-color-primary-light-9: #0d4b47;
+  --el-color-primary-dark-2: #7fe0d3;
+
+  --app-bg: #0e1514;
+  --app-side: #131b1a;
+  --app-card: #182221;
+  --app-border: #273331;
+  --app-border-weak: #1f2a28;
+  --app-text-1: #e7eeec;
+  --app-text-2: #a2b3af;
+  --app-text-3: #667974;
+  --app-brand: #2dd4bf;
+  --app-brand-deep: #5eead4;
+  --app-brand-soft: #12332e;
+  --app-brand-glow: rgba(45, 212, 191, 0.14);
+  --app-code-bg: #0c1110;
+  /* 深色模式的层级感靠表面色差而不是阴影（阴影在暗底上几乎不可见） */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.5);
+}
+
+/* --- 基础 --- */
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  /* 原生系统字体栈：零加载成本、原生质感（每个平台都是自家最舒服的字） */
+  font-family: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  background: var(--app-bg);
+  color: var(--app-text-1);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-kerning: normal;
+  transition: background-color var(--dur) ease, color var(--dur) ease;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* 文本选中色跟随品牌，细节里的"被设计过" */
+::selection {
+  background: color-mix(in srgb, var(--app-brand) 20%, transparent);
+}
+
+/* 键盘可达性：焦点环统一走品牌色（鼠标点击不出现，Tab 才出现） */
+:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--app-brand) 55%, transparent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* 滚动条跟随主题：更细、更透明，存在但不抢眼 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--app-text-3) 38%, transparent);
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--app-text-3) 58%, transparent);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* --- 通用工具 --- */
+.page {
+  /* 留白节奏：从 18/20 提到 24/28，内容与画布之间有呼吸感 */
+  padding: 24px 28px;
+  animation: pageIn var(--dur-slow) var(--ease) both;
+}
+
+@keyframes pageIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.page-h2 {
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+  margin: 0;
+  color: var(--app-text-1);
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.toolbar .spacer {
+  flex: 1;
+}
+
+.tip {
+  font-size: 12px;
+  color: var(--app-text-3);
+}
+
+/* ============================================================
+   Element Plus 组件级覆盖
+   选择器刻意「双写类名」（.el-card.el-card），把特异性从 (0,1,0) 提到 (0,2,0)。
+   原因：改成按需引入后，EP 的组件 CSS 是跟着组件模块、在路由懒加载时才注入的，
+   注入顺序排在 style.css 之后；而 EP 自己也在 .el-card / .el-table / .el-tag 上
+   定义了同名变量与属性，特异性相同 → 后注入的赢 → 我们的覆盖会被吃掉
+   （开发环境表现为卡片圆角 12px 变 4px、表格底色变白，构建产物却是对的）。
+   双写之后与加载顺序无关，开发和生产表现一致。
+   注意：不加 !important，是为了还能被下面 html.dark 的规则按特异性正常压过。
+   ============================================================ */
+
+/* Element Plus 卡片/弹层主题对齐 */
+.el-card.el-card {
+  --el-card-border-color: var(--app-border);
+  --el-card-bg-color: var(--app-card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm) !important;
+  transition: box-shadow var(--dur) var(--ease), transform var(--dur) var(--ease),
+    border-color var(--dur) var(--ease);
+  color: var(--app-text-1);
+}
+
+.el-card.is-hover-shadow:hover {
+  box-shadow: var(--shadow-md) !important;
+}
+
+.el-table.el-table {
+  --el-table-header-bg-color: transparent;
+  --el-table-tr-bg-color: var(--app-card);
+  --el-table-row-hover-bg-color: var(--app-brand-soft);
+  --el-table-border-color: var(--app-border);
+  --el-table-text-color: var(--app-text-1);
+  /* 表头刻意比正文更轻：数据表的"高级感"一半在安静的表头 */
+  --el-table-header-text-color: var(--app-text-3);
+  color: var(--app-text-1);
+}
+
+.el-table.el-table .el-table__header th .cell {
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.el-tag.el-tag {
+  border-radius: 6px;
+}
+
+/* 弹窗：更大圆角 + 长阴影，浮层是"最高一层的表面" */
+.el-dialog.el-dialog {
+  --el-dialog-border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+}
+
+/* 白字只给「实心」主色按钮。
+   ⚠️ 不能写成 .el-button--primary 一刀切：plain（浅底）和 link（文字链）形态的
+   文字颜色走的是同一个变量，强制白字会让它们白底白字 ——
+   设置面板里的「＋ 新建顶级分类」(plain) 和「改名」(link) 就是这么看不见的。 */
+.el-button--primary.el-button--primary:not(.is-plain):not(.is-link):not(.is-text) {
+  --el-button-text-color: #ffffff;
+}
+
+html.dark .el-button--primary:not(.is-plain):not(.is-link):not(.is-text) {
+  --el-button-text-color: #06231f; /* 暗色主色偏亮，需深色文字保证对比度 */
+}
+
+/* md-editor-v3 暗色适配：用语义变量覆盖其 CSS 变量组 */
+.md-editor,
+.md-editor-previewOnly {
+  --md-color: var(--app-text-1);
+  --md-hover-color: var(--app-text-2);
+  --md-bk-color: var(--app-card);
+  --md-bk-color-outstand: var(--app-bg);
+  --md-bk-hover-color: var(--app-brand-soft);
+  --md-border-color: var(--app-border);
+  --md-box-shadow: var(--shadow-md);
+  --md-caret-color: var(--app-brand);
+}
+
+/* 传了 theme="dark" 后 md-editor 自带暗色 CSS 会在 .-dark 上把 --md-bk-color
+   重设为 github-dark 的 #0d1117（后注入 + 同特异性会赢）→ 气泡比面板黑一圈。
+   双写类把特异性抬回 (0,2,0)+html.dark，让它继续用项目色板。 */
+html.dark .md-editor.md-editor,
+html.dark .md-editor-previewOnly.md-editor-previewOnly {
+  --md-color: var(--app-text-1);
+  --md-bk-color: var(--app-card);
+  --md-bk-color-outstand: var(--app-bg);
+  --md-border-color: var(--app-border);
+}
+html.dark .md-editor-preview .markdown-body,
+html.dark .md-editor-previewOnly .markdown-body {
+  background: transparent;
+}
+
+/* 修复“穿模”：md-editor 代码块头部自带 position:sticky + z-index:10000，
+   会盖过 el-dialog 等浮层（z-index≈2000），导致“复制代码”条悬浮在弹窗之上。
+   这里改回普通文档流（GitHub 式常驻头部）并压低层级。 */
+.md-editor-preview .md-editor-preview .md-editor-code .md-editor-code-head,
+.md-editor-preview .md-editor-code .md-editor-code-head {
+  position: relative !important;
+  top: auto !important;
+  z-index: 1 !important;
+}
+
+/* ============================================================
+   Markdown 预览排版精修（AgentPanel 智能体回答 / 笔记预览 / 预览编辑共用）
+   选择器双写 .md-editor-preview.md-editor-preview：预览 CSS 在路由懒加载时才注入，
+   同特异性会被后注入的 md-editor 自带样式盖掉（和 el-card 双写同理）。
+   基调：正文 15px/1.8（中文阅读舒适区），标题用字重和留白分层，
+   引用「细色条无底色」，表格 hairline + 斑马纹 —— 安静、可长时间阅读。
+   ============================================================ */
+.md-editor-preview.md-editor-preview {
+  font-size: 15px;
+  line-height: 1.8;
+  color: var(--app-text-1);
+}
+
+.md-editor-preview.md-editor-preview p {
+  margin: 0.9em 0;
+  text-wrap: pretty;
+}
+
+.md-editor-preview.md-editor-preview h1,
+.md-editor-preview.md-editor-preview h2,
+.md-editor-preview.md-editor-preview h3,
+.md-editor-preview.md-editor-preview h4 {
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.4;
+  color: var(--app-text-1);
+}
+
+.md-editor-preview.md-editor-preview h1 {
+  font-size: 1.65em;
+  margin: 1.4em 0 0.7em;
+}
+
+.md-editor-preview.md-editor-preview h2 {
+  font-size: 1.35em;
+  margin: 1.4em 0 0.7em;
+  padding-bottom: 0.32em;
+  border-bottom: 1px solid var(--app-border-weak); /* GitHub 式章节点线 */
+}
+
+.md-editor-preview.md-editor-preview h3 {
+  font-size: 1.16em;
+  margin: 1.25em 0 0.6em;
+}
+
+.md-editor-preview.md-editor-preview h4,
+.md-editor-preview.md-editor-preview h5,
+.md-editor-preview.md-editor-preview h6 {
+  font-size: 1em;
+  margin: 1.2em 0 0.5em;
+}
+
+.md-editor-preview.md-editor-preview ul,
+.md-editor-preview.md-editor-preview ol {
+  padding-left: 1.5em;
+  margin: 0.8em 0;
+}
+
+.md-editor-preview.md-editor-preview li {
+  margin: 0.3em 0;
+}
+
+.md-editor-preview.md-editor-preview li::marker {
+  color: var(--app-text-3); /* 列表圆点/数字退后一步，正文站前排 */
+}
+
+.md-editor-preview.md-editor-preview blockquote {
+  margin: 1em 0;
+  padding: 0.1em 1.1em;
+  border-left: 3px solid color-mix(in srgb, var(--app-brand) 45%, transparent);
+  background: transparent; /* 无底色：引用是"旁白"，不是"卡片" */
+  color: var(--app-text-2);
+}
+
+.md-editor-preview.md-editor-preview blockquote p {
+  margin: 0.6em 0;
+}
+
+.md-editor-preview.md-editor-preview hr {
+  margin: 2em 0;
+  border: none;
+  border-top: 1px solid var(--app-border-weak);
+}
+
+.md-editor-preview.md-editor-preview a {
+  color: var(--app-brand-deep);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--app-brand) 40%, transparent);
+  text-underline-offset: 3px;
+  transition: text-decoration-color var(--dur-fast) ease;
+}
+
+.md-editor-preview.md-editor-preview a:hover {
+  text-decoration-color: var(--app-brand);
+}
+
+.md-editor-preview.md-editor-preview img {
+  max-width: 100%;
+  border-radius: 10px;
+}
+
+/* 行内代码：品牌深色当签名，块内不换行溢出 */
+.md-editor-preview.md-editor-preview code {
+  font-family: ui-monospace, 'Cascadia Code', Consolas, 'Courier New', monospace;
+  font-size: 0.875em;
+  font-variant-ligatures: none;
+}
+
+.md-editor-preview.md-editor-preview code:not(.md-editor-code-block) {
+  padding: 0.14em 0.45em;
+  border-radius: 5px;
+  background: var(--app-code-bg);
+  color: var(--app-brand-deep);
+}
+
+html.dark .md-editor-preview.md-editor-preview code:not(.md-editor-code-block) {
+  color: var(--app-brand-deep);
+}
+
+.md-editor-preview.md-editor-preview kbd {
+  padding: 0.14em 0.45em;
+  border: 1px solid var(--app-border);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--app-card);
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 0.85em;
+}
+
+.md-editor-preview.md-editor-preview input[type='checkbox'] {
+  accent-color: var(--app-brand);
+}
+
+/* 表格：hairline + 斑马纹 + 安静表头 */
+.md-editor-preview.md-editor-preview table {
+  margin: 1em 0;
+  border-collapse: collapse;
+  width: auto;
+  max-width: 100%;
+  display: block; /* 允许横向滚动而不撑破容器 */
+  overflow-x: auto;
+  font-size: 0.93em;
+}
+
+.md-editor-preview.md-editor-preview th,
+.md-editor-preview.md-editor-preview td {
+  border: 1px solid var(--app-border-weak);
+  padding: 0.45em 0.9em;
+}
+
+.md-editor-preview.md-editor-preview th {
+  background: color-mix(in srgb, var(--app-bg) 60%, transparent);
+  font-size: 0.92em;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--app-text-3);
+}
+
+.md-editor-preview.md-editor-preview tbody tr:nth-child(2n) {
+  background: color-mix(in srgb, var(--app-bg) 45%, transparent);
+}
+
+/* ============================================================
+   代码块：结构是 <details class="md-editor-code"><summary>头部</summary>
+   <pre><code><span class="md-editor-code-block">…</span></code></pre></details>
+   ============================================================ */
+.md-editor-preview.md-editor-preview .md-editor-code {
+  margin: 1.1em 0;
+  border: 1px solid var(--app-border-weak);
+  border-radius: 10px;
+  background: var(--app-code-bg);
+  overflow: hidden;
+}
+
+.md-editor-preview.md-editor-preview .md-editor-code-head {
+  background: color-mix(in srgb, var(--app-bg) 55%, transparent);
+  border-bottom: 1px solid var(--app-border-weak);
+}
+
+.md-editor-preview.md-editor-preview .md-editor-code-lang {
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  color: var(--app-text-3);
+}
+
+.md-editor-preview.md-editor-preview .md-editor-copy-button {
+  color: var(--app-text-3);
+  transition: color var(--dur-fast) ease;
+}
+
+.md-editor-preview.md-editor-preview .md-editor-copy-button:hover {
+  color: var(--app-brand-deep);
+}
+
+.md-editor-preview.md-editor-preview pre {
+  margin: 0;
+}
+
+.md-editor-preview.md-editor-preview .md-editor-code pre code {
+  font-size: 13.5px;
+  line-height: 1.7;
+}
+
+/* --- 低饱和代码高亮（与品牌同源派生，light/dark 各一份）--- */
+.md-editor-preview.md-editor-preview .hljs-comment,
+.md-editor-preview.md-editor-preview .hljs-quote,
+.md-editor-preview.md-editor-preview .hljs-meta {
+  color: var(--app-text-3);
+  font-style: italic;
+}
+
+.md-editor-preview.md-editor-preview .hljs-keyword,
+.md-editor-preview.md-editor-preview .hljs-selector-tag,
+.md-editor-preview.md-editor-preview .hljs-doctag {
+  color: #0b7f72; /* = --app-brand-deep：关键词继承品牌 */
+  font-weight: 500;
+}
+
+.md-editor-preview.md-editor-preview .hljs-string,
+.md-editor-preview.md-editor-preview .hljs-regexp,
+.md-editor-preview.md-editor-preview .hljs-addition {
+  color: #35774a;
+}
+
+.md-editor-preview.md-editor-preview .hljs-number,
+.md-editor-preview.md-editor-preview .hljs-literal {
+  color: #b0632a;
+}
+
+.md-editor-preview.md-editor-preview .hljs-title,
+.md-editor-preview.md-editor-preview .hljs-function .hljs-title,
+.md-editor-preview.md-editor-preview .hljs-title.function_ {
+  color: #3567a8;
+}
+
+.md-editor-preview.md-editor-preview .hljs-attr,
+.md-editor-preview.md-editor-preview .hljs-attribute,
+.md-editor-preview.md-editor-preview .hljs-variable,
+.md-editor-preview.md-editor-preview .hljs-template-variable {
+  color: #7a5bab;
+}
+
+.md-editor-preview.md-editor-preview .hljs-type,
+.md-editor-preview.md-editor-preview .hljs-built_in,
+.md-editor-preview.md-editor-preview .hljs-class .hljs-title,
+.md-editor-preview.md-editor-preview .hljs-title.class_ {
+  color: #2a7d83;
+}
+
+.md-editor-preview.md-editor-preview .hljs-section,
+.md-editor-preview.md-editor-preview .hljs-name,
+.md-editor-preview.md-editor-preview .hljs-tag {
+  color: #0b7f72;
+}
+
+.md-editor-preview.md-editor-preview .hljs-deletion {
+  color: #a33b3b;
+  background: rgba(163, 59, 59, 0.1);
+}
+
+/* 深色：色相不变、亮度上移，饱和度整体压低避免"霓虹感" */
+html.dark .md-editor-preview.md-editor-preview .hljs-keyword,
+html.dark .md-editor-preview.md-editor-preview .hljs-selector-tag,
+html.dark .md-editor-preview.md-editor-preview .hljs-section,
+html.dark .md-editor-preview.md-editor-preview .hljs-name,
+html.dark .md-editor-preview.md-editor-preview .hljs-tag,
+html.dark .md-editor-preview.md-editor-preview .hljs-doctag {
+  color: #3dbfa9;
+}
+
+html.dark .md-editor-preview.md-editor-preview .hljs-string,
+html.dark .md-editor-preview.md-editor-preview .hljs-regexp,
+html.dark .md-editor-preview.md-editor-preview .hljs-addition {
+  color: #85c294;
+}
+
+html.dark .md-editor-preview.md-editor-preview .hljs-number,
+html.dark .md-editor-preview.md-editor-preview .hljs-literal {
+  color: #d9a05e;
+}
+
+html.dark .md-editor-preview.md-editor-preview .hljs-title,
+html.dark .md-editor-preview.md-editor-preview .hljs-title.function_ {
+  color: #82aade;
+}
+
+html.dark .md-editor-preview.md-editor-preview .hljs-attr,
+html.dark .md-editor-preview.md-editor-preview .hljs-attribute,
+html.dark .md-editor-preview.md-editor-preview .hljs-variable,
+html.dark .md-editor-preview.md-editor-preview .hljs-template-variable {
+  color: #ab8ccc;
+}
+
+html.dark .md-editor-preview.md-editor-preview .hljs-type,
+html.dark .md-editor-preview.md-editor-preview .hljs-built_in,
+html.dark .md-editor-preview.md-editor-preview .hljs-title.class_ {
+  color: #5cbfc6;
+}
+
+html.dark .md-editor-preview.md-editor-preview .hljs-comment,
+html.dark .md-editor-preview.md-editor-preview .hljs-quote,
+html.dark .md-editor-preview.md-editor-preview .hljs-meta {
+  color: #5f7370;
+}
+
+html.dark .md-editor-preview.md-editor-preview .hljs-deletion {
+  color: #d98a8a;
+  background: rgba(217, 138, 138, 0.12);
+}
+
+/* :::名称 … ::: 彩色提示块（语雀等平台粘贴兼容，插件见 utils/mdCallout.js）。
+   半透明底色 + 左侧色条，浅色/深色主题下都可读 */
+.md-callout {
+  margin: 12px 0;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border-left: 4px solid #909399;
+  background: rgba(144, 147, 153, 0.08);
+}
+.md-callout p {
+  margin: 4px 0;
+}
+.md-callout-success {
+  border-left-color: #52c41a;
+  background: rgba(82, 196, 26, 0.08);
+}
+.md-callout-info,
+.md-callout-note {
+  border-left-color: #409eff;
+  background: rgba(64, 158, 255, 0.08);
+}
+.md-callout-warning,
+.md-callout-attention {
+  border-left-color: #e6a23c;
+  background: rgba(230, 162, 60, 0.1);
+}
+.md-callout-danger,
+.md-callout-error {
+  border-left-color: #f56c6c;
+  background: rgba(245, 108, 108, 0.08);
+}
+.md-callout-tip {
+  border-left-color: #13c2c2;
+  background: rgba(19, 194, 194, 0.08);
+}
+
+/* 动效克制原则的最后一块拼图：尊重系统"减少动态效果"设置 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

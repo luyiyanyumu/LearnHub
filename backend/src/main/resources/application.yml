@@ -1,0 +1,44 @@
+server:
+  port: 18080
+
+spring:
+  application:
+    name: learn-hub-backend
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 60MB
+  datasource:
+    url: jdbc:mysql://localhost:3306/learn_hub?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: root123456
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+      data-locations: classpath:data.sql
+      encoding: utf-8
+      continue-on-error: false
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+
+logging:
+  level:
+    org.dyh.learnhub: debug
+
+# ===== AI 智能体配置（DeepSeek V4）=====
+# 注意：模型名/地址/密钥等均可在「设置 → 外观与 AI」里覆盖，数据库优先、yml 只作兜底
+ai:
+  deepseek:
+    base-url: https://api.deepseek.com
+    api-key: ${DEEPSEEK_API_KEY:}
+    model: deepseek-flash
+    temperature: 0.4

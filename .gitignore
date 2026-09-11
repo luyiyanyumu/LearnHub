@@ -1,0 +1,32 @@
+# ===== 密钥与环境 =====
+# 任何 .env 都只留在本地，绝不提交（密钥写在 backend/.env）
+**/.env
+.env.local
+*.pem
+
+# ===== Java / Maven =====
+backend/target/
+*.class
+*.jar
+# 注意：不能写 !backend/target/*.jar 反选构建产物 —— Git 规定「父目录被排除后，
+# 其中的文件无法再被反选」，所以这条死规则曾经误导过人。29M 的 jar 不进仓库，
+# clone 后用 mvn -DskipTests package 现场构建（见 README 快速开始）。
+hs_err_pid*
+
+# ===== Node / Vite =====
+frontend/node_modules/
+frontend/dist/
+# 临时编译校验输出目录（校验编译用 --outDir 指到这类目录，避免清空 dist）
+frontend/.vite-*/
+# 其他一次性脚手架目录统一用 .tmp- 前缀（robocopy 中转目录、导出校验输出等），
+# 用完即删，但万一忘了也不能进版本库
+frontend/.tmp-*/
+npm-debug.log*
+
+# ===== 运行日志 / 系统 =====
+*.log
+dev.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

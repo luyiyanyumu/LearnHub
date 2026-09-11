@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="rjRCtbeF6iaf2s5hZirMTC">
+<head data-page-node-id="jMDdJxCsF7EyWHn4khWAHp">
+<meta charset="UTF-8" data-page-node-id="H5Ax49qMzDJ3vpFsE1Q0dk">
+<meta name="viewport" content="width=device-width, initial-scale=1.0" data-page-node-id="kkUvs0i5GEebO29w0SQpm5">
+<title>md 导出功能演示</title>
+<style>
+pre code.hljs {
+  display: block;
+  overflow-x: auto;
+  padding: 1em
+}
+code.hljs {
+  padding: 3px 5px
+}
+/*!
+  Theme: GitHub
+  Description: Light theme as seen on github.com
+  Author: github.com
+  Maintainer: @Hirse
+  Updated: 2021-05-15
+
+  Outdated base version: https://github.com/primer/github-syntax-light
+  Current colors taken from GitHub's CSS
+*/
+.hljs {
+  color: #24292e;
+  background: #ffffff
+}
+.hljs-doctag,
+.hljs-keyword,
+.hljs-meta .hljs-keyword,
+.hljs-template-tag,
+.hljs-template-variable,
+.hljs-type,
+.hljs-variable.language_ {
+  /* prettylights-syntax-keyword */
+  color: #d73a49
+}
+.hljs-title,
+.hljs-title.class_,
+.hljs-title.class_.inherited__,
+.hljs-title.function_ {
+  /* prettylights-syntax-entity */
+  color: #6f42c1
+}
+.hljs-attr,
+.hljs-attribute,
+.hljs-literal,
+.hljs-meta,
+.hljs-number,
+.hljs-operator,
+.hljs-variable,
+.hljs-selector-attr,
+.hljs-selector-class,
+.hljs-selector-id {
+  /* prettylights-syntax-constant */
+  color: #005cc5
+}
+.hljs-regexp,
+.hljs-string,
+.hljs-meta .hljs-string {
+  /* prettylights-syntax-string */
+  color: #032f62
+}
+.hljs-built_in,
+.hljs-symbol {
+  /* prettylights-syntax-variable */
+  color: #e36209
+}
+.hljs-comment,
+.hljs-code,
+.hljs-formula {
+  /* prettylights-syntax-comment */
+  color: #6a737d
+}
+.hljs-name,
+.hljs-quote,
+.hljs-selector-tag,
+.hljs-selector-pseudo {
+  /* prettylights-syntax-entity-tag */
+  color: #22863a
+}
+.hljs-subst {
+  /* prettylights-syntax-storage-modifier-import */
+  color: #24292e
+}
+.hljs-section {
+  /* prettylights-syntax-markup-heading */
+  color: #005cc5;
+  font-weight: bold
+}
+.hljs-bullet {
+  /* prettylights-syntax-markup-list */
+  color: #735c0f
+}
+.hljs-emphasis {
+  /* prettylights-syntax-markup-italic */
+  color: #24292e;
+  font-style: italic
+}
+.hljs-strong {
+  /* prettylights-syntax-markup-bold */
+  color: #24292e;
+  font-weight: bold
+}
+.hljs-addition {
+  /* prettylights-syntax-markup-inserted */
+  color: #22863a;
+  background-color: #f0fff4
+}
+.hljs-deletion {
+  /* prettylights-syntax-markup-deleted */
+  color: #b31d28;
+  background-color: #ffeef0
+}
+.hljs-char.escape_,
+.hljs-link,
+.hljs-params,
+.hljs-property,
+.hljs-punctuation,
+.hljs-tag {
+  /* purposely ignored */
+  
+}
+
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  color: #1f2328;
+  background: #ffffff;
+  line-height: 1.75;
+  -webkit-font-smoothing: antialiased;
+}
+.container {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 48px 28px 72px;
+}
+.doc-head { border-bottom: 1px solid #d0d7de; padding-bottom: 20px; margin-bottom: 28px; }
+.doc-head h1 { margin: 0 0 10px; font-size: 30px; line-height: 1.35; }
+.doc-meta { color: #6e7781; font-size: 13px; }
+.markdown-body > *:first-child { margin-top: 0; }
+.markdown-body h1, .markdown-body h2 { border-bottom: 1px solid #d8dee4; padding-bottom: .3em; }
+.markdown-body h1 { font-size: 1.75em; }
+.markdown-body h2 { font-size: 1.4em; }
+.markdown-body h3 { font-size: 1.2em; }
+.markdown-body h4 { font-size: 1.05em; }
+.markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4 {
+  margin: 1.4em 0 .6em; font-weight: 600; line-height: 1.35;
+}
+.markdown-body p { margin: .8em 0; }
+.markdown-body a { color: #0969da; text-decoration: none; }
+.markdown-body a:hover { text-decoration: underline; }
+.markdown-body img { max-width: 100%; }
+.markdown-body blockquote {
+  margin: 1em 0; padding: .1em 1em; color: #57606a;
+  border-left: 4px solid #d0d7de; background: #f6f8fa;
+}
+.markdown-body code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 86%;
+  background: rgba(175,184,193,.2);
+  padding: .15em .4em; border-radius: 6px;
+}
+.markdown-body pre {
+  background: #f6f8fa; border: 1px solid #d0d7de;
+  border-radius: 8px; padding: 14px 16px; overflow-x: auto;
+  margin: 1em 0; line-height: 1.6;
+}
+.markdown-body pre code { background: none; padding: 0; font-size: 88%; }
+.hljs { display: block; overflow-x: auto; }
+.markdown-body ul, .markdown-body ol { padding-left: 2em; margin: .6em 0; }
+.markdown-body li { margin: .25em 0; }
+.markdown-body li .task-check { display: inline-block; width: 1.2em; color: #57606a; }
+.markdown-body table {
+  border-collapse: collapse; margin: 1em 0; width: 100%;
+  display: block; overflow-x: auto;
+}
+.markdown-body th, .markdown-body td {
+  border: 1px solid #d0d7de; padding: 6px 13px;
+}
+.markdown-body th { background: #f6f8fa; font-weight: 600; }
+.markdown-body hr { border: 0; border-top: 2px solid #d8dee4; margin: 2em 0; }
+.markdown-body del { color: #6e7781; }
+.doc-foot {
+  margin-top: 48px; padding-top: 16px; border-top: 1px solid #d0d7de;
+  color: #8c959f; font-size: 12px; text-align: center;
+}
+@media (prefers-color-scheme: dark) {
+  body { color: #e6edf3; background: #0d1117; }
+  .doc-head { border-color: #30363d; }
+  .doc-meta { color: #8b949e; }
+  .markdown-body h1, .markdown-body h2 { border-color: #21262d; }
+  .markdown-body a { color: #4493f8; }
+  .markdown-body blockquote { color: #8b949e; border-color: #30363d; background: #161b22; }
+  .markdown-body code { background: rgba(110,118,129,.25); }
+  .markdown-body pre { background: #161b22; border-color: #30363d; }
+  .markdown-body th { background: #161b22; }
+  .markdown-body th, .markdown-body td { border-color: #30363d; }
+  .markdown-body hr { border-color: #21262d; }
+  .markdown-body del { color: #8b949e; }
+  .doc-foot { border-color: #30363d; color: #6e7681; }
+  .markdown-body li .task-check { color: #8b949e; }
+}
+
+@media (prefers-color-scheme: dark) {
+pre code.hljs {
+  display: block;
+  overflow-x: auto;
+  padding: 1em
+}
+code.hljs {
+  padding: 3px 5px
+}
+/*!
+  Theme: GitHub Dark
+  Description: Dark theme as seen on github.com
+  Author: github.com
+  Maintainer: @Hirse
+  Updated: 2021-05-15
+
+  Outdated base version: https://github.com/primer/github-syntax-dark
+  Current colors taken from GitHub's CSS
+*/
+.hljs {
+  color: #c9d1d9;
+  background: #0d1117
+}
+.hljs-doctag,
+.hljs-keyword,
+.hljs-meta .hljs-keyword,
+.hljs-template-tag,
+.hljs-template-variable,
+.hljs-type,
+.hljs-variable.language_ {
+  /* prettylights-syntax-keyword */
+  color: #ff7b72
+}
+.hljs-title,
+.hljs-title.class_,
+.hljs-title.class_.inherited__,
+.hljs-title.function_ {
+  /* prettylights-syntax-entity */
+  color: #d2a8ff
+}
+.hljs-attr,
+.hljs-attribute,
+.hljs-literal,
+.hljs-meta,
+.hljs-number,
+.hljs-operator,
+.hljs-variable,
+.hljs-selector-attr,
+.hljs-selector-class,
+.hljs-selector-id {
+  /* prettylights-syntax-constant */
+  color: #79c0ff
+}
+.hljs-regexp,
+.hljs-string,
+.hljs-meta .hljs-string {
+  /* prettylights-syntax-string */
+  color: #a5d6ff
+}
+.hljs-built_in,
+.hljs-symbol {
+  /* prettylights-syntax-variable */
+  color: #ffa657
+}
+.hljs-comment,
+.hljs-code,
+.hljs-formula {
+  /* prettylights-syntax-comment */
+  color: #8b949e
+}
+.hljs-name,
+.hljs-quote,
+.hljs-selector-tag,
+.hljs-selector-pseudo {
+  /* prettylights-syntax-entity-tag */
+  color: #7ee787
+}
+.hljs-subst {
+  /* prettylights-syntax-storage-modifier-import */
+  color: #c9d1d9
+}
+.hljs-section {
+  /* prettylights-syntax-markup-heading */
+  color: #1f6feb;
+  font-weight: bold
+}
+.hljs-bullet {
+  /* prettylights-syntax-markup-list */
+  color: #f2cc60
+}
+.hljs-emphasis {
+  /* prettylights-syntax-markup-italic */
+  color: #c9d1d9;
+  font-style: italic
+}
+.hljs-strong {
+  /* prettylights-syntax-markup-bold */
+  color: #c9d1d9;
+  font-weight: bold
+}
+.hljs-addition {
+  /* prettylights-syntax-markup-inserted */
+  color: #aff5b4;
+  background-color: #033a16
+}
+.hljs-deletion {
+  /* prettylights-syntax-markup-deleted */
+  color: #ffdcd7;
+  background-color: #67060c
+}
+.hljs-char.escape_,
+.hljs-link,
+.hljs-params,
+.hljs-property,
+.hljs-punctuation,
+.hljs-tag {
+  /* purposely ignored */
+  
+}
+}
+</style>
+</head>
+<body data-page-node-id="4O82311Odui1OwX0P2SvWg">
+<div class="container" data-page-node-id="DdxGI5D6PvFx7hMOGjzkCK">
+  <header class="doc-head" data-page-node-id="0BuWQbF2qt6PRt2W0lxN7r">
+    <h1 data-page-node-id="2D1c5qyGCimZLUboolffUL">md 导出功能演示</h1>
+    <div class="doc-meta" data-page-node-id="uuMmEMe8b5yHgqbu6kNuCz">后端开发 · #SpringBoot #AI智能体　·　更新于 2026-09-09 12:48</div>
+  </header>
+  <article class="markdown-body" data-page-node-id="QVmi7QgIPMMgRxigbFNdbk">
+<h2 data-page-node-id="GrZsMLL6LpDlLW283uVXof">学习目标</h2>
+<ul data-page-node-id="CcmDF55eJIffuuqbadekor">
+<li data-page-node-id="mWUUoXMFj3jaDh5rAzjhs0"><span class="task-check on" data-page-node-id="Irk1NU4qigClPGDKTxwN10">✓</span>搞懂 <code data-page-node-id="XQ6uHlxKYaXFgHtKzgjM3g">MyBatis-Plus</code> 的条件构造器</li>
+<li data-page-node-id="ueqsDOTJrar5iMZyDcICd3"><span class="task-check " data-page-node-id="HWRQyNdaYaflxih0CkH5eD">○</span>把智能体的函数调用循环改成可配置轮数</li>
+<li data-page-node-id="Fa9zynA6CMj2PLVCNQTj1A"><span class="task-check " data-page-node-id="TdVtJ1HwTIYTKQd7tPL8cy">○</span>复盘 Spring 事务传播行为</li>
+</ul>
+<h2 data-page-node-id="AxzWhXPJkEAuhBjb6Efxwg">今日代码：DeepSeekClient 高亮示例</h2>
+<pre class="hljs" data-page-node-id="VenFUyyNNU3PNgjSrBgEFo"><code data-page-node-id="f3BfGPRMbzZrYr5sZXRhkz"><span class="hljs-keyword" data-page-node-id="ae8UbH2jFzPDII2giQQHkO">public</span> <span class="hljs-type" data-page-node-id="mEBzQVKzDGcF6wEMIwlW1U">String</span> <span class="hljs-title function_" data-page-node-id="u63ptFdRfytndBZsjCqpsr">chat</span><span class="hljs-params" data-page-node-id="eL5gTXxv6qv5EfLZLWrxX9">(List&lt;Message&gt; history)</span> {
+    <span class="hljs-type" data-page-node-id="Fkczf0Qr0PQH7DHlVoQfl5">HttpRequest</span> <span class="hljs-variable" data-page-node-id="SuIueAClECkDpWDl1Agz6j">req</span> <span class="hljs-operator" data-page-node-id="rf1GAQje3lshCHbqzNK4aU">=</span> HttpRequest.newBuilder()
+        .header(<span class="hljs-string" data-page-node-id="F9U5odiVYWifb18jITsLAx">&quot;Authorization&quot;</span>, <span class="hljs-string" data-page-node-id="XH25tHWIrIoOBPW8G5P34D">&quot;Bearer &quot;</span> + apiKey)
+        .POST(BodyPublishers.ofString(body))
+        .build();
+    <span class="hljs-keyword" data-page-node-id="XCSoh6deZ5EdTNU5iqWiAu">return</span> client.send(req, BodyHandlers.ofString()).body();
+}
+</code></pre>
+<h2 data-page-node-id="LWOQFAqciz37wE9dJIZSf0">造价类比</h2>
+<table data-page-node-id="AX7GNyB9Gh2kNmcLiYcZfw">
+<thead data-page-node-id="Wr4qMWITXPTqPBIQusmtCS">
+<tr data-page-node-id="Zb0WHQlZsZJLA2rBEjShOf">
+<th data-page-node-id="uXUBCFE3401VUX8CDttfjT">前端概念</th>
+<th data-page-node-id="PF7BvBcsEemlYcUJIM4yqF">造价类比</th>
+</tr>
+</thead>
+<tbody data-page-node-id="C85lHJ05lVT6O8PZwj7wQB">
+<tr data-page-node-id="CeZXuLbhVB7bUxIjHmuFzn">
+<td data-page-node-id="IopEW0ODSbKN2SP1yRUZsq">组件 Component</td>
+<td data-page-node-id="wTXhHWQUYkTfHAR2MZfHnU">预制构件</td>
+</tr>
+<tr data-page-node-id="ZDohHNvBTYAVgPTOuRblGJ">
+<td data-page-node-id="i8EPlj3dzp9ibev7y3GKNP">状态 State</td>
+<td data-page-node-id="zdKQRXs7jDS982LpVWGykj">现场签证单</td>
+</tr>
+<tr data-page-node-id="odGwT4BNuA8H5iWb5ez8DR">
+<td data-page-node-id="y2Coqg55WXz8YgaAwGCYnL">Props 传参</td>
+<td data-page-node-id="p6yunjtr0hXxeuFF3MzJKE">图纸交底</td>
+</tr>
+</tbody>
+</table>
+<blockquote data-page-node-id="3Eoi4vUWEb9hJK4ULErIyX">
+<p data-page-node-id="qlVUKsC2QPCQZDE3DdtDku">提示：导出的 HTML 是<strong data-page-node-id="fHVB69UHPZsT826wsBIX5l">单文件自包含</strong>的，发给别人直接双击就能看，<s data-page-node-id="9V4AJU7kb5UhMHfhuiIAqP">不需要装任何东西</s>。</p>
+</blockquote>
+<p data-page-node-id="llKry29XIc3QG29ltCp47R">详情见 <a href="http://localhost:5173" data-page-node-id="adit9JRlztbC6iDNH0rKJ4">learn-hub 项目</a>。</p>
+
+  </article>
+  <footer class="doc-foot" data-page-node-id="gRcHEbB2izfQEfg342Cwfy">由 learn-hub 笔记工作台导出 · 2026/9/9 12:49:48</footer>
+</div>
+</body>
+</html>
