@@ -1,4 +1,4 @@
-# LearnHub · IT 学习工作台
+# LearnHub · IT 学习工作台 V 1.0
 
 个人知识工作台 —— 管理 Markdown 学习笔记、命令/API 速查卡，支持分类、标签、关键词搜索，并内置 **DeepSeek AI 智能体**（笔记润色 / 代码问答 / 快速建卡）。
 
@@ -14,13 +14,13 @@
 
 ## 技术栈
 
-| 层 | 技术 |
-|---|---|
-| 前端 | Vue 3 + Vite + Element Plus（按需引入）+ Vue Router + md-editor-v3 + axios |
-| 后端 | Spring Boot 3.5.16 + MyBatis-Plus 3.5.17 + Validation |
-| 数据库 | MySQL 8（Docker 容器 `learn-hub-mysql`，库 `learn_hub`） |
-| AI | DeepSeek API（OpenAI 兼容协议，手写客户端，无 SDK 依赖） |
-| 环境 | JDK 21 (Temurin) + Maven 3.9+ + Node 18+ |
+| 层   | 技术                                                                   |
+| --- | -------------------------------------------------------------------- |
+| 前端  | Vue 3 + Vite + Element Plus（按需引入）+ Vue Router + md-editor-v3 + axios |
+| 后端  | Spring Boot 3.5.16 + MyBatis-Plus 3.5.17 + Validation                |
+| 数据库 | MySQL 8（Docker 容器 `learn-hub-mysql`，库 `learn_hub`）                   |
+| AI  | DeepSeek API（OpenAI 兼容协议，手写客户端，无 SDK 依赖）                             |
+| 环境  | JDK 21 (Temurin) + Maven 3.9+ + Node 18+                             |
 
 ## 目录结构
 
@@ -47,11 +47,11 @@ learn-hub/
 
 JDK 21、Maven 3.9+、Node 18+、Docker（含 MySQL 8 镜像）。
 
-### 1. 数据库（首次）
+### 1. 数据库（首次自行安装mysql）
 
 ```bash
 docker run -d --name learn-hub-mysql \
-  -e MYSQL_ROOT_PASSWORD=root123456 -e MYSQL_DATABASE=learn_hub \
+  -e MYSQL_ROOT_PASSWORD=密码自设 -e MYSQL_DATABASE=learn_hub \
   -p 3306:3306 mysql:8 \
   --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
 ```
@@ -88,18 +88,18 @@ npm run dev      # http://localhost:5174（端口固定，被占用会直接报�
 
 ## 主要接口
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | /api/stats | 工作台总览统计 |
-| GET/POST/PUT/DELETE | /api/categories[/{id}] | 分类树管理 |
-| GET/POST | /api/tags | 标签列表 / 新增 |
-| GET/POST/PUT/DELETE | /api/notes[/{id}] | 笔记 CRUD（支持 categoryId/tagId/kw 过滤分页） |
-| GET/POST/PUT/DELETE | /api/quick-refs[/{id}] | 速查卡 CRUD |
-| GET | /api/ai/status | AI 配置状态（不回传密钥） |
-| POST | /api/ai/polish | 笔记全文润色（分块 + 超时保护） |
-| POST | /api/ai/chat | 智能体对话（工具循环 ≤8 轮） |
-| POST | /api/ai/test | 连通性测试 |
-| GET/PUT | /api/settings | AI 设置（模型/温度/思考模式等） |
+| 方法                  | 路径                     | 说明                                   |
+| ------------------- | ---------------------- | ------------------------------------ |
+| GET                 | /api/stats             | 工作台总览统计                              |
+| GET/POST/PUT/DELETE | /api/categories[/{id}] | 分类树管理                                |
+| GET/POST            | /api/tags              | 标签列表 / 新增                            |
+| GET/POST/PUT/DELETE | /api/notes[/{id}]      | 笔记 CRUD（支持 categoryId/tagId/kw 过滤分页） |
+| GET/POST/PUT/DELETE | /api/quick-refs[/{id}] | 速查卡 CRUD                             |
+| GET                 | /api/ai/status         | AI 配置状态（不回传密钥）                       |
+| POST                | /api/ai/polish         | 笔记全文润色（分块 + 超时保护）                    |
+| POST                | /api/ai/chat           | 智能体对话（工具循环 ≤8 轮）                     |
+| POST                | /api/ai/test           | 连通性测试                                |
+| GET/PUT             | /api/settings          | AI 设置（模型/温度/思考模式等）                   |
 
 ## 常见问题
 
