@@ -485,6 +485,14 @@ function onPreviewScroll() {
     scrollRaf = 0
     const el = pvScrollRef.value
     if (!el) return
+    // 反向联动：预览滚 → 源码跟（互锁窗口内的是程序触发的滚动，跳过）
+    if (Date.now() - scrollSyncLock >= SCROLL_SYNC_LOCK_MS) {
+      const ed = editorScrollEl()
+      if (ed) {
+        scrollSyncLock = Date.now()
+        syncScrollRatio(el, ed)
+      }
+    }
     const heads = el.querySelectorAll('.md-editor-preview h1, .md-editor-preview h2, .md-editor-preview h3')
     let cur = -1
     for (let i = 0; i < heads.length; i++) {
@@ -493,6 +501,44 @@ function onPreviewScroll() {
     }
     activeIdx.value = cur
   })
+}
+
+// ---- 源码区 ↔ 预览区 滚动联动 ----
+// 三栏重构弃用了 md-editor 内部分屏，它自带的编辑/预览滚动同步随之失效，
+// 这里按「滚动比例」自行实现双向联动（源码长 ≠ 预览长，按位置比例对齐最稳）。
+const SCROLL_SYNC_LOCK_MS = 120
+/** 互锁时间戳：程序设置 scrollTop 会触发对方的 scroll 事件，窗口期内忽略，防来回抖动 */
+let scrollSyncLock = 0
+
+/** 源码编辑器（CodeMirror）的滚动容器 */
+function editorScrollEl() {
+  return editorWrapRef.value?.querySelector('.pane-editor .cm-scroller') || null
+}
+
+/** 把 fromEl 的滚动位置按比例映射到 toEl（任一方不可滚动/被隐藏时不动） */
+function syncScrollRatio(fromEl, toEl) {
+  const fromMax = fromEl.scrollHeight - fromEl.clientHeight
+  const toMax = toEl.scrollHeight - toEl.clientHeight
+  if (fromMax <= 1 || toMax <= 1) return
+  toEl.scrollTop = (fromEl.scrollTop / fromMax) * toMax
+}
+
+/** 源码区滚动 → 预览区跟随 */
+function onEditorScroll() {
+  if (Date.now() - scrollSyncLock < SCROLL_SYNC_LOCK_MS) return
+  const ed = editorScrollEl()
+  const pv = pvScrollRef.value
+  if (!ed || !pv) return
+  scrollSyncLock = Date.now()
+  syncScrollRatio(ed, pv)
+}
+
+/** CodeMirror 滚动容器可能比页面晚一帧才出现，绑定失败返回 false 供重试 */
+function bindEditorScroll() {
+  const el = editorScrollEl()
+  if (!el) return false
+  el.addEventListener('scroll', onEditorScroll, { passive: true })
+  return true
 }
 
 // ---- 模式切换 ----
@@ -747,6 +793,10 @@ onMounted(async () => {
   if (layoutMode.value === 'wide' && /^#{1,3}\s/m.test(form.value.content || '')) {
     outlineOpen.value = true
   }
+  // 源码区 ↔ 预览区 滚动联动：CodeMirror 滚动容器可能晚一拍出现，重试几帧
+  for (let i = 0; i < 10 && !bindEditorScroll(); i++) {
+    await new Promise((r) => requestAnimationFrame(r))
+  }
 })
 
 onBeforeUnmount(() => {
@@ -754,6 +804,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('resize', measureLayout)
   document.removeEventListener('keydown', onPreviewKeydown)
+  const ed = editorScrollEl()
+  if (ed) ed.removeEventListener('scroll', onEditorScroll)
   if (scrollRaf) cancelAnimationFrame(scrollRaf)
   focusMode.value = false // 专注模式是页面级状态，离开必须复位，否则侧栏消失
 })
