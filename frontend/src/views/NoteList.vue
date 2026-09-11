@@ -140,7 +140,7 @@ async function reloadMeta() {
     </div>
 
     <el-card shadow="never" v-loading="loading || exporting">
-      <el-table :data="list">
+      <el-table :data="list" class="note-table">
         <el-table-column label="标题" min-width="220">
           <template #default="{ row }">
             <a class="title-link" @click="router.push(`/notes/${row.id}`)">{{ row.title }}</a>
@@ -218,6 +218,12 @@ async function reloadMeta() {
 
 .tag-item {
   margin-right: 4px;
+}
+
+/* 操作列「编辑/导出/删除」基线对齐：el-dropdown 是 inline-flex，
+   基线比两侧 inline-block 的 link 按钮偏上 2px，强制 middle 对齐 */
+.note-table :deep(.el-dropdown) {
+  vertical-align: middle;
 }
 
 .pager {
