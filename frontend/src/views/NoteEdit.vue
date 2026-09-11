@@ -49,6 +49,7 @@ let justCreatedId = null
 // ---- 格式条（RGB 颜色 / 语雀风格内联格式）----
 /** 把选中文字包进对应标签；md-editor 的 insert() 会自动保留撤销历史 */
 function applyFormat({ kind, value }) {
+  if (previewEditing.value) return previewApplyFormat({ kind, value })
   const ed = editorRef.value
   if (!ed || typeof ed.insert !== 'function') {
     ElMessage.warning('编辑器尚未就绪，请稍后再试')
@@ -70,6 +71,19 @@ function applyFormat({ kind, value }) {
 const previewEditing = ref(false)
 /** 进入编辑模式时的源码快照，用于「放弃改动」 */
 let previewSnapshot = ''
+
+/** 预览区最近一次选区：点工具条会夺走焦点，靠它恢复后再执行格式命令 */
+let savedPreviewRange = null
+
+/** 用户在预览里选中文字时记住选区；点工具条失焦后据此恢复 */
+function onPreviewSelectionChange() {
+  if (!previewEditing.value) return
+  const el = previewEl()
+  const sel = window.getSelection()
+  if (el && sel && sel.rangeCount > 0 && sel.anchorNode && el.contains(sel.anchorNode)) {
+    savedPreviewRange = sel.getRangeAt(0).cloneRange()
+  }
+}
 
 /** 预览区 DOM（限定在本页编辑容器内，避开 AI 弹窗/全局面板里的 MdPreview） */
 function previewEl() {
@@ -109,6 +123,8 @@ async function togglePreviewEdit() {
   }
   previewSnapshot = form.value.content || ''
   previewEditing.value = true
+  savedPreviewRange = null
+  document.addEventListener('selectionchange', onPreviewSelectionChange)
   // 等 Markdown 渲染完成再把预览区设为可编辑
   for (let i = 0; i < 40; i++) {
     await nextTick()
@@ -139,6 +155,8 @@ function onPreviewKeydown(e) {
  */
 function exitPreviewEdit() {
   document.removeEventListener('keydown', onPreviewKeydown)
+  document.removeEventListener('selectionchange', onPreviewSelectionChange)
+  savedPreviewRange = null
   setEditable(false)
   previewEditing.value = false
 }
@@ -545,7 +563,134 @@ function mdLinePrefix(prefix) {
   })
 }
 function mdTool(name) {
+  if (previewEditing.value) return previewMdTool(name)
   mdBtns[name]?.()
+}
+
+// ---- 预览编辑：直接在可编辑预览区套格式（execCommand/insertHTML，反推时由 Turndown 还原）----
+
+/** HTML 转义：把纯文本安全塞进 <code>/<font> 等标签，避免被当成标签解析 */
+function escapeHtml(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/** 聚焦预览区并恢复上一次保存的选区（点工具条会夺走焦点） */
+function previewFocusAndRestore() {
+  const el = previewEl()
+  if (!el) return false
+  el.focus()
+  const sel = window.getSelection()
+  if (sel && savedPreviewRange) {
+    try {
+      sel.removeAllRanges()
+      sel.addRange(savedPreviewRange)
+    } catch (_) { /* 选区可能已失效，忽略 */ }
+  }
+  return true
+}
+
+/** 恢复选区后取当前选中的纯文本（先恢复再读，否则失焦后读到的是空串） */
+function previewSelText() {
+  if (!previewFocusAndRestore()) return ''
+  const sel = window.getSelection()
+  return sel ? sel.toString() : ''
+}
+
+/** 在预览区执行一条 execCommand，随后刷新保存的选区方便连续操作 */
+function previewExec(command, value = null) {
+  if (!previewFocusAndRestore()) return
+  try {
+    document.execCommand(command, false, value)
+  } catch (e) {
+    ElMessage.warning('当前选择不支持该格式')
+    return
+  }
+  const sel = window.getSelection()
+  if (sel && sel.rangeCount > 0) savedPreviewRange = sel.getRangeAt(0).cloneRange()
+}
+
+/** 在预览区插入 HTML 片段（表格/图片/块级等 execCommand 覆盖不到的） */
+function previewInsertHtml(html) {
+  if (!previewFocusAndRestore()) return
+  document.execCommand('insertHTML', false, html)
+  const sel = window.getSelection()
+  if (sel && sel.rangeCount > 0) savedPreviewRange = sel.getRangeAt(0).cloneRange()
+}
+
+/** 用标签包住预览里的选中文字（无选中时插入占位） */
+function previewWrap(before, after, placeholder = '文本') {
+  if (!previewFocusAndRestore()) return
+  const sel = window.getSelection()
+  const text = sel ? sel.toString() : ''
+  document.execCommand('insertHTML', false, before + escapeHtml(text || placeholder) + after)
+  const s2 = window.getSelection()
+  if (s2 && s2.rangeCount > 0) savedPreviewRange = s2.getRangeAt(0).cloneRange()
+}
+
+/** Markdown 工具条 → 预览区等价操作（Turndown 可反向还原的标签/命令） */
+function previewMdTool(name) {
+  switch (name) {
+    case 'bold': return previewExec('bold')
+    case 'italic': return previewExec('italic')
+    case 'strike': return previewExec('strikeThrough')
+    case 'h2': return previewExec('formatBlock', 'h2')
+    case 'h3': return previewExec('formatBlock', 'h3')
+    case 'quote': return previewExec('formatBlock', 'blockquote')
+    case 'ul': return previewExec('insertUnorderedList')
+    case 'ol': return previewExec('insertOrderedList')
+    case 'inlineCode': return previewWrap('<code>', '</code>', '代码')
+    case 'link': {
+      const text = previewSelText()
+      const url = window.prompt('链接地址', 'https://')
+      if (url == null || !url.trim()) return
+      previewInsertHtml(`<a href="${url.trim()}">${escapeHtml(text || url.trim())}</a>`)
+      return
+    }
+    case 'image': {
+      const url = window.prompt('图片地址', 'https://')
+      if (url == null || !url.trim()) return
+      previewInsertHtml(`<img src="${url.trim()}" alt="图片描述" />`)
+      return
+    }
+    case 'codeBlock': {
+      const text = previewSelText()
+      previewInsertHtml(`<pre><code class="language-java">${escapeHtml(text)}</code></pre>`)
+      return
+    }
+    case 'table':
+      return previewInsertHtml('<table><thead><tr><th>列A</th><th>列B</th></tr></thead><tbody><tr><td> </td><td> </td></tr></tbody></table>')
+  }
+}
+
+/** 富文本格式条（颜色/字号/上下标等）→ 预览区等价操作 */
+function previewApplyFormat({ kind, value }) {
+  switch (kind) {
+    case 'color': return previewWrap(`<font style="color: ${value}">`, '</font>')
+    case 'bg': return previewWrap(`<font style="background-color: ${value}">`, '</font>')
+    case 'size': return previewWrap(`<font style="font-size: ${value}px">`, '</font>')
+    case 'mark': return previewWrap('<mark>', '</mark>', '高亮文字')
+    case 'underline': return previewExec('underline')
+    case 'strike': return previewExec('strikeThrough')
+    case 'sup': return previewWrap('<sup>', '</sup>', '2')
+    case 'sub': return previewWrap('<sub>', '</sub>', '2')
+    case 'center': {
+      const text = previewSelText()
+      return previewInsertHtml(`<p style="text-align: center">${escapeHtml(text || '居中文字')}</p>`)
+    }
+    case 'details': {
+      const text = previewSelText()
+      return previewInsertHtml(`<details><summary>点击展开</summary>${escapeHtml(text || '折叠内容')}</details>`)
+    }
+    case 'callout': {
+      const text = previewSelText()
+      return previewInsertHtml(`<div class="md-callout md-callout-tip"><p>${escapeHtml(text || '提示内容')}</p></div>`)
+    }
+    case 'clear': {
+      const text = previewSelText()
+      if (text) previewInsertHtml(escapeHtml(text))
+      return
+    }
+  }
 }
 
 // ---- 保存状态文案 ----
@@ -710,9 +855,9 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
-    <!-- ======== 顶部第二行：Markdown + 富文本工具（阅读模式隐藏） ======== -->
-    <div class="ed-tools" v-if="!readingMode && !previewEditing">
-      <template v-if="layoutMode !== 'tab' || editorTab === 'edit'">
+    <!-- ======== 顶部第二行：Markdown + 富文本工具（阅读模式隐藏；预览编辑时保留，作用于预览区） ======== -->
+    <div class="ed-tools" v-if="!readingMode" @mousedown.prevent>
+      <template v-if="layoutMode !== 'tab' || editorTab === 'edit' || previewEditing">
         <button class="tb tb-txt" type="button" title="加粗" @click="mdTool('bold')"><b>B</b></button>
         <button class="tb tb-txt" type="button" title="斜体" @click="mdTool('italic')"><i>I</i></button>
         <button class="tb tb-txt" type="button" title="删除线" @click="mdTool('strike')"><s>S</s></button>
@@ -759,7 +904,7 @@ onBeforeUnmount(() => {
     <!-- 预览编辑模式操作条 -->
     <div v-if="previewEditing" class="preview-edit-bar">
       <span class="pe-tip">
-        <span class="btn-ico"><svg viewBox="0 0 24 24"><path d="M4 20h4L18.5 9.5l-4-4L4 16v4Z" /><path d="M13.5 6.5l4 4" /></svg></span>预览编辑中：直接改右侧排版内容（Ctrl/⌘+S 同步并退出；Esc 也是「先同步再退出」，只有「放弃改动」才丢弃）
+        <span class="btn-ico"><svg viewBox="0 0 24 24"><path d="M4 20h4L18.5 9.5l-4-4L4 16v4Z" /><path d="M13.5 6.5l4 4" /></svg></span>预览编辑中：直接改右侧内容，上方工具条可加粗/标题/颜色等格式（Ctrl/⌘+S 同步并退出；Esc 也是「先同步再退出」）
       </span>
       <el-button size="small" @click="abandonPreviewEdit">
         <span class="btn-ico"><svg viewBox="0 0 24 24"><path d="M4.5 9.5h9a5 5 0 0 1 0 10H8M4.5 9.5 8 6M4.5 9.5 8 13" /></svg></span>放弃改动
