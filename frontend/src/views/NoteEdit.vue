@@ -98,11 +98,18 @@ function setEditable(on) {
     el.classList.add('lh-preview-editing')
     el.addEventListener('paste', onPreviewPaste)
     el.addEventListener('mouseover', onPreviewBlockHover)
+    el.addEventListener('beforeinput', onPreviewBeforeInput)
+    pvResetHistory()
   } else {
     el.removeAttribute('contenteditable')
     el.classList.remove('lh-preview-editing')
     el.removeEventListener('paste', onPreviewPaste)
     el.removeEventListener('mouseover', onPreviewBlockHover)
+    el.removeEventListener('beforeinput', onPreviewBeforeInput)
+    pvUndoStack = []
+    pvRedoStack = []
+    clearTimeout(pvInputTimer)
+    pvInputTimer = null
     hideBlockHandle()
   }
   return true
@@ -147,6 +154,20 @@ function onPreviewKeydown(e) {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
     e.preventDefault()
     syncPreviewToSource()
+  }
+  // 撤销/重做走快照栈（浏览器原生撤销对 DOM 直接替换无效，且与快照栈会打架）
+  if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+    const k = e.key.toLowerCase()
+    if (k === 'z') {
+      e.preventDefault()
+      previewUndoRedo(e.shiftKey)
+      return
+    }
+    if (k === 'y') {
+      e.preventDefault()
+      previewUndoRedo(true)
+      return
+    }
   }
   // Esc 同样是「同步后退出」。要丢弃请用操作条上的「↺ 放弃改动」，
   // 这样任何一条退出路径都不会悄悄吃掉用户的改动。
@@ -984,6 +1005,7 @@ function previewSelText() {
 /** 在预览区执行一条 execCommand，随后刷新保存的选区方便连续操作 */
 function previewExec(command, value = null) {
   if (!previewFocusAndRestore()) return
+  pvPushUndo()
   try {
     document.execCommand(command, false, value)
   } catch (e) {
@@ -994,9 +1016,69 @@ function previewExec(command, value = null) {
   if (sel && sel.rangeCount > 0) savedPreviewRange = sel.getRangeAt(0).cloneRange()
 }
 
+// ---- 预览编辑撤销/重做：innerHTML 快照栈 ----
+// 浏览器 execCommand('undo') 只能撤销它自己记录的命令，块手柄/工具条里大量操作是
+// DOM 直接替换（replaceWith/innerHTML），不在浏览器撤销栈里 → 点撤销毫无反应。
+// 所以预览编辑模式改为自己维护快照栈：任何修改前压栈，撤销/重做就是换快照。
+const PV_UNDO_MAX = 40
+let pvUndoStack = []
+let pvRedoStack = []
+let pvInputTimer = null
+
+function pvSnapshotHtml() {
+  const el = previewEl()
+  return el ? el.innerHTML : null
+}
+
+/** 即将修改预览 DOM 前调用：把当前状态压入撤销栈（并清空重做栈） */
+function pvPushUndo() {
+  const html = pvSnapshotHtml()
+  if (html == null) return
+  if (pvUndoStack[pvUndoStack.length - 1] !== html) {
+    pvUndoStack.push(html)
+    if (pvUndoStack.length > PV_UNDO_MAX) pvUndoStack.shift()
+  }
+  pvRedoStack = []
+}
+
+/** 连续键盘输入合并为一个撤销单元（800ms 防抖，只在输入前记一次） */
+function onPreviewBeforeInput() {
+  if (pvInputTimer) return
+  pvPushUndo()
+  pvInputTimer = setTimeout(() => { pvInputTimer = null }, 800)
+}
+
+function previewUndoRedo(redo) {
+  const cur = pvSnapshotHtml()
+  if (cur == null) return
+  const from = redo ? pvRedoStack : pvUndoStack
+  const to = redo ? pvUndoStack : pvRedoStack
+  let html = from.pop()
+  while (html != null && html === cur) html = from.pop() // 跳过与当前相同的快照
+  if (html == null) {
+    ElMessage.info(redo ? '没有可重做的操作' : '没有可撤销的操作')
+    return
+  }
+  to.push(cur)
+  const el = previewEl()
+  el.innerHTML = html
+  el.querySelectorAll('.lh-block-hover').forEach((n) => n.classList.remove('lh-block-hover')) // 快照里可能带着 hover 高亮
+  savedPreviewRange = null
+  hideBlockHandle()
+}
+
+function pvResetHistory() {
+  pvUndoStack = []
+  pvRedoStack = []
+  clearTimeout(pvInputTimer)
+  pvInputTimer = null
+  pvPushUndo() // 进入编辑时的初始快照作为撤销底线
+}
+
 /** 在预览区插入 HTML 片段（表格/图片/块级等 execCommand 覆盖不到的） */
 function previewInsertHtml(html) {
   if (!previewFocusAndRestore()) return
+  pvPushUndo()
   document.execCommand('insertHTML', false, html)
   const sel = window.getSelection()
   if (sel && sel.rangeCount > 0) savedPreviewRange = sel.getRangeAt(0).cloneRange()
@@ -1005,6 +1087,7 @@ function previewInsertHtml(html) {
 /** 用标签包住预览里的选中文字（无选中时插入占位） */
 function previewWrap(before, after, placeholder = '文本') {
   if (!previewFocusAndRestore()) return
+  pvPushUndo()
   const sel = window.getSelection()
   const text = sel ? sel.toString() : ''
   document.execCommand('insertHTML', false, before + escapeHtml(text || placeholder) + after)
@@ -1015,8 +1098,8 @@ function previewWrap(before, after, placeholder = '文本') {
 /** Markdown 工具条 → 预览区等价操作（Turndown 可反向还原的标签/命令） */
 function previewMdTool(name) {
   switch (name) {
-    case 'undo': return previewExec('undo')
-    case 'redo': return previewExec('redo')
+    case 'undo': return previewUndoRedo(false)
+    case 'redo': return previewUndoRedo(true)
     case 'bold': return previewExec('bold')
     case 'italic': return previewExec('italic')
     case 'strike': return previewExec('strikeThrough')
@@ -1076,6 +1159,7 @@ function previewApplyFormat({ kind, value }) {
       const sel = window.getSelection()
       const blk = sel?.anchorNode ? findHoverBlock(sel.anchorNode) : null
       if (blk && !['UL', 'OL', 'TABLE', 'HR'].includes(blk.tagName)) {
+        pvPushUndo()
         blk.style.textAlign = value === 'left' ? '' : value
       }
       return
@@ -1305,6 +1389,7 @@ function convertBlockToList(blk, tag, todo = false) {
 function blockConvert(key) {
   const blk = hoverBlockEl
   if (!blk) return
+  pvPushUndo()
   switch (key) {
     case 'h1':
     case 'h2':
@@ -1375,6 +1460,7 @@ function blockConvert(key) {
 async function blockOp(cmd) {
   const blk = hoverBlockEl
   if (!blk) return
+  if (cmd !== 'copy') pvPushUndo() // 纯复制不改 DOM，不入撤销栈
   switch (cmd) {
     case 'delete':
       blk.remove()
