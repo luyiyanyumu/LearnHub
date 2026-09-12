@@ -761,11 +761,13 @@ function edInsert(builder) {
   ed.insert(builder)
 }
 const mdBtns = {
+  undo: () => mdUndoRedo(false),
+  redo: () => mdUndoRedo(true),
   bold: () => mdWrap('**', '**'),
   italic: () => mdWrap('*', '*'),
   strike: () => mdWrap('~~', '~~'),
   underline: () => mdWrap('<u>', '</u>'),
-  para: () => editorRef.value?.focus?.(), // 「正文」在源码模式即纯文本，无需插入
+  para: () => mdLinePrefix(''), // 「正文」= 剥掉行首的标题/引用/列表前缀
   h1: () => mdLinePrefix('# '),
   h2: () => mdLinePrefix('## '),
   h3: () => mdLinePrefix('### '),
@@ -791,8 +793,32 @@ function mdWrap(before, after) {
     }
   })
 }
-/** 行前缀（标题/引用/列表）：只在行首插入 */
+/** 行前缀（标题/引用/列表/正文）：走 CM 内部 view 精确落到行首——
+ *  选区可在行任意位置；先剥掉已有行前缀再套新的（切换级别/类型即替换而非叠加，
+ *  前缀落不到行首会导致大纲/渲染都不认）。失败回退旧的选区前插入行为。 */
+const LINE_PREFIX_RE = /^(#{1,6}\s+|>\s+|[-*+]\s+\[[ xX]\]\s+|[-*+]\s+|\d+\.\s+)/
 function mdLinePrefix(prefix) {
+  const ed = editorScrollEl()
+  const v = ed ? cmView(ed) : null
+  if (v) {
+    try {
+      const { from, to } = v.state.selection.main
+      const startLine = v.state.doc.lineAt(from)
+      const endLine = v.state.doc.lineAt(to)
+      const changes = []
+      for (let l = startLine.number; l <= endLine.number; l++) {
+        const line = v.state.doc.line(l)
+        const old = line.text.match(LINE_PREFIX_RE)
+        if (old) changes.push({ from: line.from, to: line.from + old[0].length, insert: '' })
+        if (prefix) changes.push({ from: line.from, insert: prefix })
+      }
+      if (changes.length) v.dispatch({ changes })
+      v.contentDOM?.focus?.()
+      return
+    } catch {
+      /* 回退旧逻辑 */
+    }
+  }
   edInsert((selected) => {
     const inner = selected || ''
     return { targetValue: prefix + inner, select: selected ? [prefix.length, prefix.length + inner.length] : prefix.length }
@@ -801,6 +827,87 @@ function mdLinePrefix(prefix) {
 function mdTool(name) {
   if (previewEditing.value) return previewMdTool(name)
   mdBtns[name]?.()
+}
+
+// ---- 撤销 / 重做 ----
+/** 源码模式：CodeMirror 用自己的 history（execCommand 无效），
+ *  合成 Ctrl+Z / Ctrl+Shift+Z 键盘事件交给 CM 的 keymap 处理 */
+function mdUndoRedo(redo) {
+  const content = editorScrollEl()?.querySelector('.cm-content')
+  if (!content) return
+  content.focus()
+  const fire = (key, code, shiftKey) =>
+    content.dispatchEvent(
+      new KeyboardEvent('keydown', { key, code, ctrlKey: true, shiftKey, bubbles: true, cancelable: true })
+    )
+  if (!redo) {
+    fire('z', 'KeyZ', false)
+    return
+  }
+  // CM6 重做绑定：Windows/Linux 是 Ctrl+Y，macOS 才是 Cmd+Shift+Z —— 先试 Y，文档没变再补 Shift+Z
+  const v = cmView(editorScrollEl())
+  const before = v ? v.state.doc.toString() : null
+  fire('y', 'KeyY', false)
+  if (v && v.state.doc.toString() === before) fire('z', 'KeyZ', true)
+}
+
+// ---- 格式刷（语雀式：取源选区格式 → 刷到目标选区）----
+const formatPainter = reactive({ active: false, before: '', after: '' })
+
+/** 采集源码选区的最外层格式包裹（** * ~~ ` 或 <font>/<mark> 等内联标签） */
+function collectSourceFormat() {
+  const v = cmView(editorScrollEl())
+  if (!v) return false
+  const { from, to } = v.state.selection.main
+  if (from === to) return false
+  const text = v.state.sliceDoc(from, to)
+  let m = text.match(/^(\*\*|~~|\*)([\s\S]+)\1$/) || text.match(/^(`)([\s\S]+)`$/)
+  if (m) {
+    formatPainter.before = m[1]
+    formatPainter.after = m[1]
+    return true
+  }
+  m = text.match(/^(<(font|mark|u|s|sup|sub|code)\b[^>]*>)([\s\S]+)<\/\2>$/)
+  if (m) {
+    formatPainter.before = m[1]
+    formatPainter.after = `</${m[2]}>`
+    return true
+  }
+  return false
+}
+
+/** 采集预览选区的内联格式标签链（font/mark/u/s/sup/sub/b/i/code 及其样式） */
+function collectPreviewFormat() {
+  const el = previewEl()
+  const sel = window.getSelection()
+  if (!el || !sel || sel.isCollapsed || !sel.anchorNode) return false
+  let node = sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement
+  const chain = []
+  while (node && node !== el && el.contains(node)) {
+    if (/^(FONT|MARK|U|S|STRIKE|DEL|SUP|SUB|B|STRONG|I|EM|CODE)$/.test(node.tagName)) chain.unshift(node)
+    node = node.parentElement
+  }
+  if (!chain.length) return false
+  formatPainter.before = chain.map((n) => n.outerHTML.slice(0, n.outerHTML.indexOf('>') + 1)).join('')
+  formatPainter.after = chain.map((n) => `</${n.tagName.toLowerCase()}>`).reverse().join('')
+  return true
+}
+
+/** 格式刷按钮：第一次点 = 取格式；第二次点（选中目标后）= 刷上并复位 */
+function formatPainterClick() {
+  if (!formatPainter.active) {
+    const got = previewEditing.value ? collectPreviewFormat() : collectSourceFormat()
+    if (!got) {
+      ElMessage.info('先拖选一段带格式（加粗/颜色/高亮等）的文字')
+      return
+    }
+    formatPainter.active = true
+    ElMessage.success('已取格式，选中目标文字后再点一次格式刷')
+    return
+  }
+  if (previewEditing.value) previewWrap(formatPainter.before, formatPainter.after, '文本')
+  else mdWrap(formatPainter.before, formatPainter.after)
+  formatPainter.active = false
 }
 
 // ---- 工具条「正文∨」与「对齐∨」下拉（语雀式，自绘小浮层，风格同块菜单）----
@@ -908,6 +1015,8 @@ function previewWrap(before, after, placeholder = '文本') {
 /** Markdown 工具条 → 预览区等价操作（Turndown 可反向还原的标签/命令） */
 function previewMdTool(name) {
   switch (name) {
+    case 'undo': return previewExec('undo')
+    case 'redo': return previewExec('redo')
     case 'bold': return previewExec('bold')
     case 'italic': return previewExec('italic')
     case 'strike': return previewExec('strikeThrough')
@@ -1486,6 +1595,19 @@ onBeforeUnmount(() => {
     <!-- ======== 顶部第二行：语雀式工具条（阅读模式隐藏；预览编辑时保留，作用于预览区） ======== -->
     <div class="ed-tools" v-if="!readingMode" @mousedown.prevent>
       <template v-if="layoutMode !== 'tab' || editorTab === 'edit' || previewEditing">
+        <!-- 撤销/重做/格式刷（语雀最左组） -->
+        <button class="tb" type="button" title="撤销 (Ctrl+Z)" @click="mdTool('undo')">
+          <svg viewBox="0 0 24 24"><path d="M8.5 5.5 4.5 9.5l4 4M4.5 9.5h9a5.5 5.5 0 0 1 0 11h-2" /></svg>
+        </button>
+        <button class="tb" type="button" title="重做 (Ctrl+Y)" @click="mdTool('redo')">
+          <svg viewBox="0 0 24 24"><path d="m15.5 5.5 4 4-4 4M19.5 9.5h-9a5.5 5.5 0 0 0 0 11h2" /></svg>
+        </button>
+        <button class="tb" type="button" :class="{ on: formatPainter.active }" title="格式刷：先选带格式文字点我，再选目标文字点我" @click="formatPainterClick">
+          <svg viewBox="0 0 24 24"><path d="M15.5 3.5l5 5M8 21l3.5-3.5M10.5 17 14.5 8c.4-.8 1.4-1 2.1-.6l2.2 1.5c.8.4 1 1.4.6 2.1l-4.9 7M3 21c0-1.8 1.3-2.8 2.7-2.8 1.3 0 2 .9 2 1.9 0 1.4-2.1 1.7-4.7.9Z" /></svg>
+        </button>
+
+        <i class="tb-sep" />
+
         <!-- 段落类型（语雀「正文 ∨」） -->
         <div class="tb-dd">
           <button class="tb tb-para" type="button" :class="{ on: paraMenuOpen }" title="段落类型"
