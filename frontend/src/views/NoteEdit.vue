@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { MdEditor, MdPreview } from 'md-editor-v3'
@@ -97,10 +97,13 @@ function setEditable(on) {
     el.setAttribute('contenteditable', 'true')
     el.classList.add('lh-preview-editing')
     el.addEventListener('paste', onPreviewPaste)
+    el.addEventListener('mouseover', onPreviewBlockHover)
   } else {
     el.removeAttribute('contenteditable')
     el.classList.remove('lh-preview-editing')
     el.removeEventListener('paste', onPreviewPaste)
+    el.removeEventListener('mouseover', onPreviewBlockHover)
+    hideBlockHandle()
   }
   return true
 }
@@ -125,6 +128,7 @@ async function togglePreviewEdit() {
   previewEditing.value = true
   savedPreviewRange = null
   document.addEventListener('selectionchange', onPreviewSelectionChange)
+  document.addEventListener('mousedown', onDocMouseDown)
   // 等 Markdown 渲染完成再把预览区设为可编辑
   for (let i = 0; i < 40; i++) {
     await nextTick()
@@ -156,6 +160,8 @@ function onPreviewKeydown(e) {
 function exitPreviewEdit() {
   document.removeEventListener('keydown', onPreviewKeydown)
   document.removeEventListener('selectionchange', onPreviewSelectionChange)
+  document.removeEventListener('mousedown', onDocMouseDown)
+  clearTimeout(hideHandleTimer)
   savedPreviewRange = null
   setEditable(false)
   previewEditing.value = false
@@ -917,6 +923,331 @@ function previewApplyFormat({ kind, value }) {
   }
 }
 
+// ---- 预览编辑：块级操作手柄（参考语雀：hover 块左侧 ⋮⋮ → 转化为/删除/复制/剪切/缩进/下方添加）----
+// 块操作直接走 DOM 替换（不依赖选区，比 execCommand 可靠），产物沿用现有约定
+// （pre>code.language-java / div.md-callout-tip / details…），同步时由 Turndown 反推。
+const blockHandle = reactive({
+  visible: false, // 手柄是否显示
+  menuOpen: false, // 菜单是否打开
+  convOpen: false, // 「转化为」副面板
+  x: 0, // 手柄位置（相对 .pv-scroll 的内容坐标，随滚动自然跟随）
+  y: 0,
+  menuUp: false, // 菜单向上展开（块靠近底部时）
+  kind: 'p', // 当前块标签名（小写），控制缩进项可用性
+  canIndent: false,
+  canOutdent: false,
+})
+/** 当前手柄指向的块元素（非响应式，避免 deep reactive 包装 DOM） */
+let hoverBlockEl = null
+let handleHovering = false
+let hideHandleTimer = 0
+
+/** 可被手柄操作的块级元素 */
+const BLOCK_SEL = 'h1,h2,h3,h4,h5,h6,p,pre,blockquote,table,ul,ol,details,figure'
+
+/** 从鼠标/选区目标向上找可操作块；列表内优先取最近的 li */
+function findHoverBlock(target) {
+  const el = previewEl()
+  if (!el || !target) return null
+  const node = target.nodeType === 1 ? target : target.parentElement
+  if (!node || !el.contains(node)) return null
+  const li = node.closest('li')
+  if (li && el.contains(li)) return li
+  const blk = node.closest(BLOCK_SEL)
+  if (!blk || !el.contains(blk)) return null
+  return blk
+}
+
+function clearBlockHover() {
+  if (hoverBlockEl) hoverBlockEl.classList.remove('lh-block-hover')
+  hoverBlockEl = null
+}
+
+function hideBlockHandle() {
+  blockHandle.visible = false
+  blockHandle.menuOpen = false
+  blockHandle.convOpen = false
+  clearBlockHover()
+}
+
+function hideBlockHandleSoon() {
+  clearTimeout(hideHandleTimer)
+  hideHandleTimer = setTimeout(() => {
+    if (!blockHandle.menuOpen && !handleHovering) hideBlockHandle()
+  }, 180)
+}
+
+/** 把 ⋮⋮ 手柄定位到块左缘外侧并高亮块 */
+function showBlockHandle(blk) {
+  const pv = pvScrollRef.value
+  if (!pv) return
+  clearBlockHover()
+  hoverBlockEl = blk
+  blk.classList.add('lh-block-hover')
+  const r = blk.getBoundingClientRect()
+  const pvr = pv.getBoundingClientRect()
+  blockHandle.x = r.left - pvr.left - 30
+  blockHandle.y = r.top - pvr.top + pv.scrollTop - 2
+  blockHandle.menuUp = r.top - pvr.top > pv.clientHeight - 380
+  blockHandle.kind = blk.tagName.toLowerCase()
+  blockHandle.canIndent =
+    blk.tagName === 'LI' && !!blk.previousElementSibling
+  blockHandle.canOutdent =
+    blk.tagName === 'LI' && !!blk.parentElement?.parentElement?.closest('li')
+  blockHandle.visible = true
+}
+
+/** 预览区鼠标移动：识别 hover 的块并移动手柄 */
+function onPreviewBlockHover(e) {
+  if (!previewEditing.value) return
+  if (blockHandle.menuOpen) return // 菜单开着时手柄固定
+  const blk = findHoverBlock(e.target)
+  if (!blk) {
+    hideBlockHandleSoon()
+    return
+  }
+  clearTimeout(hideHandleTimer)
+  if (blk !== hoverBlockEl) showBlockHandle(blk)
+}
+
+function onHandleEnter() {
+  handleHovering = true
+  clearTimeout(hideHandleTimer)
+}
+function onHandleLeave() {
+  handleHovering = false
+  hideBlockHandleSoon()
+}
+function toggleBlockMenu() {
+  blockHandle.menuOpen = !blockHandle.menuOpen
+  blockHandle.convOpen = false
+}
+/** 点击菜单/手柄以外的任何地方 → 收起手柄 */
+function onDocMouseDown(e) {
+  if (!blockHandle.visible) return
+  if (e.target.closest?.('.block-handle')) return
+  hideBlockHandle()
+}
+
+// ---- 块「转化为」 ----
+
+/** 「转化为」候选项（顺序对齐语雀） */
+const CONV_ITEMS = [
+  { key: 'h1', label: '一级标题', txt: 'H1' },
+  { key: 'h2', label: '二级标题', txt: 'H2' },
+  { key: 'h3', label: '三级标题', txt: 'H3' },
+  { key: 'h4', label: '四级标题', txt: 'H4' },
+  { key: 'h5', label: '五级标题', txt: 'H5' },
+  { key: 'h6', label: '六级标题', txt: 'H6' },
+  { key: 'p', label: '正文', txt: 'T' },
+  { key: 'ul', label: '无序列表', icon: '<circle cx="5" cy="7" r="1.2" class="fill"/><circle cx="5" cy="12" r="1.2" class="fill"/><circle cx="5" cy="17" r="1.2" class="fill"/><path d="M9 7h10M9 12h10M9 17h10"/>' },
+  { key: 'ol', label: '有序列表', icon: '<path d="M9.5 6.5h10M9.5 12h10M9.5 17.5h10"/><path d="M4 5.2 5.2 4.5V8M3.8 10.7c.2-.5.8-.8 1.3-.6.6.2.9.8.6 1.3l-1.9 2.4h2.4"/>' },
+  { key: 'todo', label: '待办', icon: '<rect x="4" y="4.5" width="15" height="15" rx="2"/><path d="m8 12 2.5 2.5L16 9"/>' },
+  { key: 'code', label: '代码块', icon: '<rect x="4" y="5" width="16" height="14" rx="2"/><path d="m9.5 10-1.8 2 1.8 2M14.5 10l1.8 2-1.8 2"/>' },
+  { key: 'callout', label: '高亮块', icon: '<rect x="4" y="5" width="16" height="14" rx="2"/><path d="M8 9.5h8M8 12h8M8 14.5h5"/>' },
+  { key: 'quote', label: '引用', icon: '<path d="M9.5 7.5c-2.6.6-4 2.3-4 5v4h5v-5h-3c0-1.6.7-2.7 2-3.2Zm9 0c-2.6.6-4 2.3-4 5v4h5v-5h-3c0-1.6.7-2.7 2-3.2Z"/>' },
+  { key: 'details', label: '折叠块', icon: '<path d="M4 6h16M4 12h10M4 18h10"/><path d="m17 10 3 3-3 3"/>' },
+]
+
+/** 换标签（保留 innerHTML） */
+function swapBlockTag(el, tag) {
+  const n = document.createElement(tag)
+  n.innerHTML = el.innerHTML
+  el.replaceWith(n)
+  return n
+}
+
+/** 把 li 从列表中摘出换成新块，列表其余部分按前后段保留 */
+function splitListAround(li, newBlock) {
+  const list = li.parentElement
+  const sibs = [...list.children]
+  const idx = sibs.indexOf(li)
+  const frag = document.createDocumentFragment()
+  if (idx > 0) {
+    const l1 = document.createElement(list.tagName.toLowerCase())
+    sibs.slice(0, idx).forEach((n) => l1.appendChild(n))
+    frag.appendChild(l1)
+  }
+  frag.appendChild(newBlock)
+  if (idx < sibs.length - 1) {
+    const l2 = document.createElement(list.tagName.toLowerCase())
+    sibs.slice(idx + 1).forEach((n) => l2.appendChild(n))
+    frag.appendChild(l2)
+  }
+  list.replaceWith(frag)
+}
+
+/** 块 → 指定标签（li 摘出列表；pre 取纯文本） */
+function convertBlockToTag(blk, tag) {
+  if (blk.tagName === 'LI') {
+    const n = document.createElement(tag)
+    n.innerHTML = blk.innerHTML
+    splitListAround(blk, n)
+    return
+  }
+  if (blk.tagName === 'PRE' || blk.tagName === 'TABLE' || blk.tagName === 'DETAILS') {
+    const n = document.createElement(tag)
+    n.textContent = blk.innerText
+    blk.replaceWith(n)
+    return
+  }
+  swapBlockTag(blk, tag)
+}
+
+/** 块 → 列表（ul/ol/待办）；li 时只换父列表类型或补 checkbox */
+function convertBlockToList(blk, tag, todo = false) {
+  if (blk.tagName === 'LI') {
+    const list = blk.parentElement
+    if (todo) {
+      if (!blk.querySelector(':scope > input[type="checkbox"]')) {
+        const cb = document.createElement('input')
+        cb.type = 'checkbox'
+        cb.disabled = true
+        blk.prepend(cb, ' ')
+      }
+      return
+    }
+    if (list.tagName.toLowerCase() !== tag) swapBlockTag(list, tag)
+    return
+  }
+  const li = document.createElement('li')
+  if (todo) {
+    const cb = document.createElement('input')
+    cb.type = 'checkbox'
+    cb.disabled = true
+    li.appendChild(cb)
+    li.appendChild(document.createTextNode(' '))
+  }
+  if (blk.tagName === 'PRE' || blk.tagName === 'TABLE' || blk.tagName === 'DETAILS') {
+    li.appendChild(document.createTextNode(blk.innerText))
+  } else {
+    li.innerHTML += blk.innerHTML
+  }
+  const list = document.createElement(tag)
+  list.appendChild(li)
+  blk.replaceWith(list)
+}
+
+/** 执行「转化为」 */
+function blockConvert(key) {
+  const blk = hoverBlockEl
+  if (!blk) return
+  switch (key) {
+    case 'h1':
+    case 'h2':
+    case 'h3':
+    case 'h4':
+    case 'h5':
+    case 'h6':
+    case 'p':
+      convertBlockToTag(blk, key)
+      break
+    case 'ul':
+      convertBlockToList(blk, 'ul')
+      break
+    case 'ol':
+      convertBlockToList(blk, 'ol')
+      break
+    case 'todo':
+      convertBlockToList(blk, 'ul', true)
+      break
+    case 'code': {
+      if (blk.tagName === 'PRE') break
+      const pre = document.createElement('pre')
+      const code = document.createElement('code')
+      code.className = 'language-java'
+      code.textContent = blk.innerText
+      pre.appendChild(code)
+      blk.replaceWith(pre)
+      break
+    }
+    case 'quote': {
+      if (blk.tagName === 'BLOCKQUOTE') break
+      const q = document.createElement('blockquote')
+      const inner = document.createElement(blk.tagName === 'PRE' || blk.tagName === 'TABLE' ? 'p' : blk.tagName.toLowerCase())
+      if (inner.tagName === 'LI') inner.tagName = 'p'
+      if (blk.tagName === 'PRE' || blk.tagName === 'TABLE' || blk.tagName === 'DETAILS') inner.textContent = blk.innerText
+      else inner.innerHTML = blk.innerHTML
+      q.appendChild(inner)
+      blk.replaceWith(q)
+      break
+    }
+    case 'callout': {
+      const d = document.createElement('div')
+      d.className = 'md-callout md-callout-tip'
+      const p = document.createElement('p')
+      if (blk.tagName === 'PRE' || blk.tagName === 'TABLE' || blk.tagName === 'DETAILS') p.textContent = blk.innerText
+      else p.innerHTML = blk.innerHTML
+      d.appendChild(p)
+      blk.replaceWith(d)
+      break
+    }
+    case 'details': {
+      const det = document.createElement('details')
+      const sum = document.createElement('summary')
+      sum.textContent = (blk.innerText.split('\n')[0] || '').trim().slice(0, 30) || '点击展开'
+      const p = document.createElement('p')
+      if (blk.tagName === 'PRE' || blk.tagName === 'TABLE' || blk.tagName === 'DETAILS') p.textContent = blk.innerText
+      else p.innerHTML = blk.innerHTML
+      det.appendChild(sum)
+      det.appendChild(p)
+      blk.replaceWith(det)
+      break
+    }
+  }
+  hideBlockHandle()
+}
+
+/** 块操作：删除/复制/剪切/缩进/减少缩进/下方添加 */
+async function blockOp(cmd) {
+  const blk = hoverBlockEl
+  if (!blk) return
+  switch (cmd) {
+    case 'delete':
+      blk.remove()
+      break
+    case 'copy':
+    case 'cut': {
+      try {
+        await navigator.clipboard.writeText(blk.innerText)
+        ElMessage.success(cmd === 'copy' ? '已复制该块' : '已剪切该块')
+      } catch {
+        ElMessage.warning('剪贴板不可用')
+      }
+      if (cmd === 'cut') blk.remove()
+      break
+    }
+    case 'indent': {
+      if (blk.tagName !== 'LI') break
+      const prev = blk.previousElementSibling
+      if (prev && prev.tagName === 'LI') {
+        let sub = prev.querySelector(':scope > ul, :scope > ol')
+        if (!sub) {
+          sub = document.createElement(blk.parentElement.tagName.toLowerCase())
+          prev.appendChild(sub)
+        }
+        sub.appendChild(blk)
+      }
+      break
+    }
+    case 'outdent': {
+      if (blk.tagName !== 'LI') break
+      const list = blk.parentElement
+      const parentLi = list.parentElement?.closest('li')
+      if (parentLi) {
+        parentLi.after(blk)
+        if (!list.children.length) list.remove()
+      }
+      break
+    }
+    case 'addBelow':
+      blk.insertAdjacentHTML('afterend', '<p><br></p>')
+      break
+  }
+  hideBlockHandle()
+}
+
+
 // ---- 保存状态文案 ----
 const fmtTime = (d) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 const saveState = computed(() => {
@@ -1184,6 +1515,64 @@ onBeforeUnmount(() => {
               previewTheme="github"
               class="pv-md"
             />
+          </div>
+
+          <!-- 预览编辑：块操作手柄（语雀式 ⋮⋮） -->
+          <div
+            v-if="previewEditing && blockHandle.visible"
+            class="block-handle"
+            :style="{ top: blockHandle.y + 'px', left: blockHandle.x + 'px' }"
+            @mouseenter="onHandleEnter"
+            @mouseleave="onHandleLeave"
+          >
+            <button class="bh-btn" type="button" title="块操作" @mousedown.prevent @click.stop="toggleBlockMenu">
+              <svg viewBox="0 0 24 24"><circle cx="9" cy="6" r="1.3" class="fill" /><circle cx="15" cy="6" r="1.3" class="fill" /><circle cx="9" cy="12" r="1.3" class="fill" /><circle cx="15" cy="12" r="1.3" class="fill" /><circle cx="9" cy="18" r="1.3" class="fill" /><circle cx="15" cy="18" r="1.3" class="fill" /></svg>
+            </button>
+            <div v-if="blockHandle.menuOpen" class="block-menu" :class="{ up: blockHandle.menuUp }" @mousedown.prevent @click.stop>
+              <div class="bm-item" @click="blockHandle.convOpen = !blockHandle.convOpen">
+                <svg viewBox="0 0 24 24"><path d="M4 8h11M15 8l-2.5-2.5M15 8l-2.5 2.5M20 16H9M9 16l2.5-2.5M9 16l2.5 2.5" /></svg>
+                转化为<span class="bm-arrow">›</span>
+              </div>
+              <div class="bm-item" @click="blockOp('delete')">
+                <svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M8 7l.7 12h6.6L16 7" /></svg>
+                删除
+              </div>
+              <div class="bm-item" @click="blockOp('copy')">
+                <svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V6a2 2 0 0 1 2-2h9" /></svg>
+                复制
+              </div>
+              <div class="bm-item" @click="blockOp('cut')">
+                <svg viewBox="0 0 24 24"><circle cx="7" cy="7" r="2.2" /><circle cx="7" cy="17" r="2.2" /><path d="M8.8 8.8 20 19M8.8 15.2 20 5" /></svg>
+                剪切
+              </div>
+              <div class="bm-item" :class="{ disabled: !blockHandle.canIndent }" @click="blockHandle.canIndent && blockOp('indent')">
+                <svg viewBox="0 0 24 24"><path d="M4 6h16M10 11h10M10 16h10M4 21h16M4.5 9.5 7 12l-2.5 2.5" /></svg>
+                缩进
+              </div>
+              <div class="bm-item" :class="{ disabled: !blockHandle.canOutdent }" @click="blockHandle.canOutdent && blockOp('outdent')">
+                <svg viewBox="0 0 24 24"><path d="M4 6h16M10 11h10M10 16h10M4 21h16M7 9.5 4.5 12 7 14.5" /></svg>
+                减少缩进
+              </div>
+              <div class="bm-item" @click="blockOp('addBelow')">
+                <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+                在下方添加段落
+              </div>
+
+              <!-- 「转化为」副面板 -->
+              <div v-if="blockHandle.convOpen" class="bm-conv">
+                <button
+                  v-for="c in CONV_ITEMS"
+                  :key="c.key"
+                  class="bm-conv-item"
+                  type="button"
+                  @click="blockConvert(c.key)"
+                >
+                  <span v-if="c.txt" class="bci bci-txt">{{ c.txt }}</span>
+                  <svg v-else class="bci" viewBox="0 0 24 24" v-html="c.icon"></svg>
+                  {{ c.label }}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </section>
@@ -1595,6 +1984,166 @@ html.dark .pane-editor :deep(.md-editor) {
   max-width: 100%;
   padding: 28px 34px 56px;
 }
+
+/* ---- 预览编辑：块操作手柄（语雀式 ⋮⋮） ---- */
+/* 手柄/菜单用 .pv-scroll 内容坐标绝对定位（relative 后随滚动自然跟随，无需监听重算） */
+.pv-scroll {
+  position: relative;
+}
+/* hover 块的浅色高亮（双写类名压过 .md-editor-preview 的背景声明） */
+.pane-preview :deep(.lh-block-hover.lh-block-hover) {
+  background: color-mix(in srgb, var(--app-brand) 6%, transparent);
+  border-radius: 6px;
+  transition: background var(--dur-fast) var(--ease);
+}
+.block-handle {
+  position: absolute;
+  z-index: 30;
+}
+.bh-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--app-card);
+  color: var(--app-text-3);
+  cursor: grab;
+  box-shadow: var(--shadow-sm);
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+}
+.bh-btn:hover {
+  color: var(--app-text-1);
+  background: color-mix(in srgb, var(--app-text-1) 5%, var(--app-card));
+}
+.bh-btn svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+}
+.bh-btn svg .fill {
+  fill: currentColor;
+  stroke: none;
+}
+.block-menu {
+  position: absolute;
+  top: 27px;
+  left: 0;
+  min-width: 172px;
+  padding: 5px;
+  background: var(--app-card);
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-md);
+  z-index: 31;
+}
+.block-menu.up {
+  top: auto;
+  bottom: 27px;
+}
+.bm-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 10px;
+  font-size: 13px;
+  color: var(--app-text-1);
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--dur-fast) var(--ease);
+}
+.bm-item:hover {
+  background: var(--app-brand-soft);
+}
+.bm-item.disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+.bm-item.disabled:hover {
+  background: transparent;
+}
+.bm-item svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  fill: none;
+  stroke: var(--app-text-2);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.bm-arrow {
+  margin-left: auto;
+  color: var(--app-text-3);
+  font-size: 13px;
+}
+/* 「转化为」副面板：语雀同款网格，贴在主菜单右侧 */
+.bm-conv {
+  position: absolute;
+  left: calc(100% + 8px);
+  top: -1px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  width: 264px;
+  padding: 5px;
+  background: var(--app-card);
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-md);
+}
+.bm-conv-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  font-size: 13px;
+  color: var(--app-text-1);
+  background: none;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--dur-fast) var(--ease);
+}
+.bm-conv-item:hover {
+  background: var(--app-brand-soft);
+}
+.bci {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--app-text-2);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.bci .fill {
+  fill: currentColor;
+  stroke: none;
+}
+.bci-txt {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.2px;
+}
+/* 副面板向上展开时贴主菜单底部对齐 */
+.block-menu.up .bm-conv {
+  top: auto;
+  bottom: -1px;
+}
+
 .pane-preview :deep(.md-editor-preview.md-editor-preview) {
   background: transparent;
   line-height: 1.75;
