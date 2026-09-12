@@ -106,6 +106,11 @@ export const FORMAT_PRESETS = {
   sup: () => wrapSelection('<sup>', '</sup>', '2'),
   sub: () => wrapSelection('<sub>', '</sub>', '2'),
   center: () => insertBlock('<p style="text-align: center">$1</p>', '居中文字'),
+  // 段落对齐（语雀对齐∨下拉）：左对齐 = 纯文本不包裹
+  align: (v) =>
+    v === 'left'
+      ? (selected) => ({ targetValue: selected || '', select: false })
+      : insertBlock(`<p style="text-align: ${v}">$1</p>`, v === 'right' ? '右对齐文字' : '居中文字'),
   details: () =>
     insertBlock('<details>\n<summary>点击展开</summary>\n\n$1\n\n</details>', '折叠内容'),
   callout: () => insertBlock(':::tip\n$1\n:::', '提示内容'),

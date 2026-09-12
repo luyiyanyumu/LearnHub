@@ -50,11 +50,12 @@ function pickBg(c) {
       />
     </el-popover>
 
-    <!-- 背景颜色 -->
+    <!-- 背景颜色（语雀式：高亮笔 + 底部色条指示当前色） -->
     <el-popover v-model:visible="bgPop" placement="bottom-start" :width="290" trigger="click">
       <template #reference>
         <button class="fb-btn" type="button" title="背景颜色（行内高亮）">
-          <span class="fb-a fb-bg" :style="{ background: lastBgColor }">A</span>
+          <svg class="fb-hl" viewBox="0 0 24 24"><path d="m9 11-4 4v3h3l4-4M13 5l6 6M9.5 15.5 15 4.8c.5-.8 1.5-1 2.2-.5l3.5 2.6c.8.5 1 1.5.5 2.2L15.5 14.5M4 20h16" /></svg>
+          <i class="fb-caret" :style="{ background: lastBgColor }" />
         </button>
       </template>
       <ColorPicker
@@ -65,10 +66,11 @@ function pickBg(c) {
       />
     </el-popover>
 
-    <!-- 字号 -->
+    <!-- 字号（语雀「字号 ∨」文字下拉） -->
     <el-dropdown trigger="click" @command="(v) => apply('size', v)">
-      <button class="fb-btn" type="button" title="字号">
-        <span class="fb-a fb-size">A<sup>+</sup></span>
+      <button class="fb-btn fb-size-dd" type="button" title="字号">
+        <span class="fb-size-txt">字号</span>
+        <svg class="fb-dd-caret" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5" /></svg>
       </button>
       <template #dropdown>
         <el-dropdown-menu>
@@ -80,16 +82,14 @@ function pickBg(c) {
     <i class="fb-sep" />
 
     <button class="fb-btn" type="button" title="下划线" @click="apply('underline')"><u>U</u></button>
-    <button class="fb-btn" type="button" title="删除线" @click="apply('strike')"><s>S</s></button>
     <button class="fb-btn" type="button" title="上标" @click="apply('sup')">x<sup>2</sup></button>
     <button class="fb-btn" type="button" title="下标" @click="apply('sub')">x<sub>2</sub></button>
-    <button class="fb-btn" type="button" title="荧光高亮" @click="apply('mark')"><mark class="fb-mark">H</mark></button>
+    <button class="fb-btn" type="button" title="荧光高亮" @click="apply('mark')">
+      <svg viewBox="0 0 24 24"><path d="m12 3 1.8 4.6L18.5 9l-4.7 1.4L12 15l-1.8-4.6L5.5 9l4.7-1.4L12 3ZM5 19h14" /></svg>
+    </button>
 
     <i class="fb-sep" />
 
-    <button class="fb-btn" type="button" title="整段居中" @click="apply('center')">
-      <svg viewBox="0 0 24 24"><path d="M4.5 6h15M7.5 12h9M5.5 18h13" /></svg>
-    </button>
     <button class="fb-btn" type="button" title="插入折叠块" @click="apply('details')">
       <svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2" /><path d="m9.5 10 2 2-2 2M13.5 14h3" /></svg>
     </button>
@@ -192,6 +192,29 @@ function pickBg(c) {
   color: #262626;
   padding: 0 3px;
   border-radius: 2px;
+}
+
+/* 背景色按钮的高亮笔图标（15px，略小于通用 16px 规格，与 A 视觉重量一致） */
+.fb-btn svg.fb-hl {
+  width: 15px;
+  height: 15px;
+}
+
+/* 字号「∨」文字下拉（语雀式） */
+.fb-size-txt {
+  font-size: 13px;
+  color: var(--app-text-2);
+}
+.fb-btn svg.fb-dd-caret {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  margin-left: 1px;
+  opacity: 0.7;
 }
 
 .fb-caret {

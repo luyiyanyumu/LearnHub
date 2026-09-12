@@ -764,11 +764,17 @@ const mdBtns = {
   bold: () => mdWrap('**', '**'),
   italic: () => mdWrap('*', '*'),
   strike: () => mdWrap('~~', '~~'),
+  underline: () => mdWrap('<u>', '</u>'),
+  para: () => editorRef.value?.focus?.(), // 「正文」在源码模式即纯文本，无需插入
+  h1: () => mdLinePrefix('# '),
   h2: () => mdLinePrefix('## '),
   h3: () => mdLinePrefix('### '),
+  h4: () => mdLinePrefix('#### '),
   quote: () => mdLinePrefix('> '),
   ul: () => mdLinePrefix('- '),
   ol: () => mdLinePrefix('1. '),
+  todo: () => mdLinePrefix('- [ ] '),
+  hr: () => edInsert(() => ({ targetValue: '\n\n---\n\n', select: 5 })),
   inlineCode: () => mdWrap('`', '`'),
   codeBlock: () => edInsert(() => ({ targetValue: '\n```java\n\n```\n', select: 9 })),
   link: () => mdWrap('[', '](https://)'),
@@ -795,6 +801,48 @@ function mdLinePrefix(prefix) {
 function mdTool(name) {
   if (previewEditing.value) return previewMdTool(name)
   mdBtns[name]?.()
+}
+
+// ---- 工具条「正文∨」与「对齐∨」下拉（语雀式，自绘小浮层，风格同块菜单）----
+const paraMenuOpen = ref(false)
+const alignMenuOpen = ref(false)
+/** 菜单 fixed 定位坐标（.ed-tools 有 overflow-x:auto，absolute 会被裁，必须 fixed） */
+const toolMenuPos = ref({ x: 0, y: 0 })
+function openToolMenu(which, e) {
+  const willOpen = which === 'para' ? !paraMenuOpen.value : !alignMenuOpen.value
+  if (willOpen) {
+    const r = e.currentTarget.getBoundingClientRect()
+    toolMenuPos.value = { x: r.left, y: r.bottom + 5 }
+  }
+  paraMenuOpen.value = which === 'para' ? willOpen : false
+  alignMenuOpen.value = which === 'align' ? willOpen : false
+}
+const PARA_ITEMS = [
+  { key: 'para', label: '正文' },
+  { key: 'h1', label: '一级标题' },
+  { key: 'h2', label: '二级标题' },
+  { key: 'h3', label: '三级标题' },
+  { key: 'h4', label: '四级标题' },
+  { key: 'quote', label: '引用' },
+]
+const ALIGN_ITEMS = [
+  { key: 'left', label: '左对齐', icon: '<path d="M4.5 6h15M4.5 12h9M4.5 18h13"/>' },
+  { key: 'center', label: '居中', icon: '<path d="M4.5 6h15M7.5 12h9M5.5 18h13"/>' },
+  { key: 'right', label: '右对齐', icon: '<path d="M4.5 6h15M10.5 12h9M9.5 18h11"/>' },
+]
+function pickPara(key) {
+  paraMenuOpen.value = false
+  mdTool(key)
+}
+function pickAlign(key) {
+  alignMenuOpen.value = false
+  applyFormat({ kind: 'align', value: key })
+}
+/** 点下拉以外区域收起（与块手柄的 onDocMouseDown 同一套路） */
+function onDocDownToolMenus(e) {
+  if (e.target.closest?.('.tb-dd') || e.target.closest?.('.tb-menu')) return
+  paraMenuOpen.value = false
+  alignMenuOpen.value = false
 }
 
 // ---- 预览编辑：直接在可编辑预览区套格式（execCommand/insertHTML，反推时由 Turndown 还原）----
@@ -863,11 +911,17 @@ function previewMdTool(name) {
     case 'bold': return previewExec('bold')
     case 'italic': return previewExec('italic')
     case 'strike': return previewExec('strikeThrough')
+    case 'underline': return previewExec('underline')
+    case 'para': return previewExec('formatBlock', 'p')
+    case 'h1': return previewExec('formatBlock', 'h1')
     case 'h2': return previewExec('formatBlock', 'h2')
     case 'h3': return previewExec('formatBlock', 'h3')
+    case 'h4': return previewExec('formatBlock', 'h4')
     case 'quote': return previewExec('formatBlock', 'blockquote')
     case 'ul': return previewExec('insertUnorderedList')
     case 'ol': return previewExec('insertOrderedList')
+    case 'todo': return previewInsertHtml('<ul><li><input type="checkbox" disabled> 任务</li></ul>')
+    case 'hr': return previewInsertHtml('<hr>')
     case 'inlineCode': return previewWrap('<code>', '</code>', '代码')
     case 'link': {
       const text = previewSelText()
@@ -906,6 +960,16 @@ function previewApplyFormat({ kind, value }) {
     case 'center': {
       const text = previewSelText()
       return previewInsertHtml(`<p style="text-align: center">${escapeHtml(text || '居中文字')}</p>`)
+    }
+    case 'align': {
+      // 段落对齐：作用于光标所在块（左对齐 = 移除对齐样式）
+      if (!previewFocusAndRestore()) return
+      const sel = window.getSelection()
+      const blk = sel?.anchorNode ? findHoverBlock(sel.anchorNode) : null
+      if (blk && !['UL', 'OL', 'TABLE', 'HR'].includes(blk.tagName)) {
+        blk.style.textAlign = value === 'left' ? '' : value
+      }
+      return
     }
     case 'details': {
       const text = previewSelText()
@@ -1294,6 +1358,7 @@ onMounted(async () => {
   window.addEventListener('lh-meta-changed', loadMeta)
   window.addEventListener('keydown', onGlobalKeydown)
   window.addEventListener('resize', measureLayout)
+  document.addEventListener('mousedown', onDocDownToolMenus)
   await loadMeta()
   loadNote()
   await nextTick()
@@ -1312,6 +1377,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('lh-meta-changed', loadMeta)
   window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('resize', measureLayout)
+  document.removeEventListener('mousedown', onDocDownToolMenus)
   document.removeEventListener('keydown', onPreviewKeydown)
   const ed = editorScrollEl()
   if (ed) ed.removeEventListener('scroll', onEditorScroll)
@@ -1417,30 +1483,70 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
-    <!-- ======== 顶部第二行：Markdown + 富文本工具（阅读模式隐藏；预览编辑时保留，作用于预览区） ======== -->
+    <!-- ======== 顶部第二行：语雀式工具条（阅读模式隐藏；预览编辑时保留，作用于预览区） ======== -->
     <div class="ed-tools" v-if="!readingMode" @mousedown.prevent>
       <template v-if="layoutMode !== 'tab' || editorTab === 'edit' || previewEditing">
+        <!-- 段落类型（语雀「正文 ∨」） -->
+        <div class="tb-dd">
+          <button class="tb tb-para" type="button" :class="{ on: paraMenuOpen }" title="段落类型"
+            @click="openToolMenu('para', $event)">
+            正文<svg class="tb-caret" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5" /></svg>
+          </button>
+          <div v-if="paraMenuOpen" class="tb-menu" :style="{ left: toolMenuPos.x + 'px', top: toolMenuPos.y + 'px' }" @mousedown.prevent @click.stop>
+            <button v-for="it in PARA_ITEMS" :key="it.key" class="tb-menu-item" type="button" @click="pickPara(it.key)">
+              <span class="tbm-key" :class="{ txt: it.key === 'para' }">{{ it.key === 'para' ? 'T' : it.key === 'quote' ? '❝' : it.key.toUpperCase() }}</span>{{ it.label }}
+            </button>
+          </div>
+        </div>
+
+        <i class="tb-sep" />
+
         <button class="tb tb-txt" type="button" title="加粗" @click="mdTool('bold')"><b>B</b></button>
         <button class="tb tb-txt" type="button" title="斜体" @click="mdTool('italic')"><i>I</i></button>
         <button class="tb tb-txt" type="button" title="删除线" @click="mdTool('strike')"><s>S</s></button>
-        <button class="tb tb-h" type="button" title="二级标题" @click="mdTool('h2')">H2</button>
-        <button class="tb tb-h" type="button" title="三级标题" @click="mdTool('h3')">H3</button>
+        <button class="tb tb-txt" type="button" title="下划线" @click="mdTool('underline')"><u>U</u></button>
+
+        <!-- 颜色/字号/上下标/高亮（FormatBar：色条指示 + 字号∨） -->
         <i class="tb-sep" />
-        <button class="tb" type="button" title="引用" @click="mdTool('quote')">
-          <svg viewBox="0 0 24 24"><path d="M9.5 7.5c-2.6.6-4 2.3-4 5v4h5v-5h-3c0-1.6.7-2.7 2-3.2Zm9 0c-2.6.6-4 2.3-4 5v4h5v-5h-3c0-1.6.7-2.7 2-3.2Z" /></svg>
-        </button>
+        <FormatBar bare class="ed-format" @apply="applyFormat" />
+        <i class="tb-sep" />
+
+        <!-- 对齐（语雀「对齐 ∨」） -->
+        <div class="tb-dd">
+          <button class="tb" type="button" :class="{ on: alignMenuOpen }" title="对齐方式"
+            @click="openToolMenu('align', $event)">
+            <svg viewBox="0 0 24 24"><path d="M4.5 6h15M7.5 12h9M5.5 18h13" /></svg>
+            <svg class="tb-caret" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5" /></svg>
+          </button>
+          <div v-if="alignMenuOpen" class="tb-menu" :style="{ left: toolMenuPos.x + 'px', top: toolMenuPos.y + 'px' }" @mousedown.prevent @click.stop>
+            <button v-for="it in ALIGN_ITEMS" :key="it.key" class="tb-menu-item" type="button" @click="pickAlign(it.key)">
+              <svg viewBox="0 0 24 24" v-html="it.icon"></svg>{{ it.label }}
+            </button>
+          </div>
+        </div>
         <button class="tb" type="button" title="无序列表" @click="mdTool('ul')">
           <svg viewBox="0 0 24 24"><circle cx="5" cy="6.5" r="1.1" class="fill" /><circle cx="5" cy="12" r="1.1" class="fill" /><circle cx="5" cy="17.5" r="1.1" class="fill" /><path d="M9.5 6.5h10M9.5 12h10M9.5 17.5h10" /></svg>
         </button>
         <button class="tb" type="button" title="有序列表" @click="mdTool('ol')">
           <svg viewBox="0 0 24 24"><path d="M9.5 6.5h10M9.5 12h10M9.5 17.5h10" /><path d="M4 5.2 5.2 4.5V8M3.8 10.7c.2-.5.8-.8 1.3-.6.6.2.9.8.6 1.3l-1.9 2.4h2.4M3.9 16.5h1.3c.5 0 .9.4.9.9s-.4.8-.9.8H4.7c.5 0 .9.4.9.8 0 .5-.4.9-.9.9H3.9" /></svg>
         </button>
+        <button class="tb" type="button" title="任务列表" @click="mdTool('todo')">
+          <svg viewBox="0 0 24 24"><rect x="4" y="4.5" width="15" height="15" rx="2" /><path d="m8 12 2.5 2.5L16 9" /></svg>
+        </button>
+
         <i class="tb-sep" />
+
         <button class="tb" type="button" title="行内代码" @click="mdTool('inlineCode')">
           <svg viewBox="0 0 24 24"><path d="m9 8.5-3.5 3.5L9 15.5M15 8.5l3.5 3.5L15 15.5" /></svg>
         </button>
         <button class="tb" type="button" title="代码块" @click="mdTool('codeBlock')">
           <svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2" /><path d="m9 10-1.8 2L9 14M15 10l1.8 2L15 14" /></svg>
+        </button>
+        <button class="tb" type="button" title="引用" @click="mdTool('quote')">
+          <svg viewBox="0 0 24 24"><path d="M9.5 7.5c-2.6.6-4 2.3-4 5v4h5v-5h-3c0-1.6.7-2.7 2-3.2Zm9 0c-2.6.6-4 2.3-4 5v4h5v-5h-3c0-1.6.7-2.7 2-3.2Z" /></svg>
+        </button>
+        <button class="tb" type="button" title="分割线" @click="mdTool('hr')">
+          <svg viewBox="0 0 24 24"><path d="M4 12h16" stroke-width="1.8" /></svg>
         </button>
         <button class="tb" type="button" title="链接" @click="mdTool('link')">
           <svg viewBox="0 0 24 24"><path d="M10.5 13.5a3.5 3.5 0 0 0 5 0l3-3a3.5 3.5 0 1 0-5-5l-1.2 1.2M13.5 10.5a3.5 3.5 0 0 0-5 0l-3 3a3.5 3.5 0 1 0 5 5l1.2-1.2" /></svg>
@@ -1451,9 +1557,6 @@ onBeforeUnmount(() => {
         <button class="tb" type="button" title="表格" @click="mdTool('table')">
           <svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2" /><path d="M4 10.2h16M4 14.6h16M10 5v14M15.2 5v14" /></svg>
         </button>
-
-        <!-- 富文本格式（颜色/字号/上下标等，收在同一个工具行里） -->
-        <FormatBar bare class="ed-format" @apply="applyFormat" />
       </template>
     </div>
 
@@ -1867,6 +1970,79 @@ onBeforeUnmount(() => {
 .ed-format {
   flex: none;
 }
+
+/* 「正文∨」「对齐∨」下拉（语雀式小浮层，视觉与块菜单一致） */
+.tb-dd {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+.tb-para {
+  gap: 3px;
+  font-size: 13px;
+  padding: 0 4px 0 9px;
+}
+.tb svg.tb-caret {
+  width: 11px;
+  height: 11px;
+  stroke-width: 2;
+  opacity: 0.65;
+}
+.tb.on {
+  background: color-mix(in srgb, var(--app-text-1) 7%, transparent);
+  color: var(--app-text-1);
+}
+.tb-menu {
+  position: fixed; /* .ed-tools 有 overflow-x:auto，absolute 会被裁；fixed 按视口坐标定位 */
+  min-width: 132px;
+  padding: 5px;
+  background: var(--app-card);
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-md);
+  z-index: 2000;
+}
+.tb-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 10px;
+  font-size: 13px;
+  color: var(--app-text-1);
+  background: none;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+  transition: background var(--dur-fast) var(--ease);
+}
+.tb-menu-item:hover {
+  background: var(--app-brand-soft);
+}
+.tb-menu-item svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  fill: none;
+  stroke: var(--app-text-2);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.tbm-key {
+  width: 18px;
+  flex: none;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--app-text-3);
+  letter-spacing: -0.2px;
+}
+.tbm-key.txt {
+  font-size: 13px;
+}
+
 
 /* Tab 模式切换 */
 .ed-tabs {
