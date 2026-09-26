@@ -52,6 +52,31 @@
             <artifactId>lombok</artifactId>
             <optional>true</optional>
         </dependency>
+        <!-- 资料库文档抽文：把 PDF / Office 的正文抽出来，资料才能进检索、wiki 与图谱。
+             没有这两个库，资料就只能按文件名检索 —— 而"资料库融进知识库"的关键正是正文可检索。 -->
+        <dependency>
+            <groupId>org.apache.pdfbox</groupId>
+            <artifactId>pdfbox</artifactId>
+            <version>3.0.3</version>
+            <exclusions>
+                <!-- Spring 自带 spring-jcl（commons-logging 的 API 实现）：
+                     两个同时在类路径上会触发 "Standard Commons Logging discovery" 警告 -->
+                <exclusion>
+                    <groupId>commons-logging</groupId>
+                    <artifactId>commons-logging</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.poi</groupId>
+            <artifactId>poi-ooxml</artifactId>
+            <version>5.3.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.poi</groupId>
+            <artifactId>poi-scratchpad</artifactId>
+            <version>5.3.0</version>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>

@@ -23,6 +23,16 @@ frontend/.vite-*/
 frontend/.tmp-*/
 npm-debug.log*
 
+# ===== 技能备份 =====
+# 在设置里「上传技能」覆盖 SKILL.md 前，旧版本会备份到这里（时间戳文件名，一次一个快照）。
+# 属于本机工作快照，不进版本库 —— 真正要留的版本应该提交 skills/<id>/SKILL.md 本身。
+skills/.history/
+
+# ===== 运行时上传数据 =====
+# 资料库上传的原始文件（用户数据，且可能是版权文档）不进版本库：
+# 库里的 file_info 只记 storeName，文件本身由使用者本地上传产生。
+backend/uploads/
+
 # ===== 运行日志 / 系统 =====
 *.log
 dev.log

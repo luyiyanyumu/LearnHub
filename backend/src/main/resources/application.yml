@@ -9,7 +9,11 @@ spring:
       max-file-size: 50MB
       max-request-size: 60MB
   datasource:
-    url: jdbc:mysql://localhost:3306/learn_hub?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    # 注意：宿主机 3306 已被另一个项目（报销系统）的 reimb-mysql-local 容器占用，
+    # 且其 root 密码与本项目不同 —— 若连 3306 会报
+    # "Access denied for user 'root'@'172.17.0.1'"，后端启动即失败。
+    # 因此 learn-hub-mysql 固定映射到 3307（见 README「数据库」一节）。
+    url: jdbc:mysql://localhost:3307/learn_hub?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
     username: root
     password: root123456
     driver-class-name: com.mysql.cj.jdbc.Driver
@@ -42,3 +46,11 @@ ai:
     api-key: ${DEEPSEEK_API_KEY:}
     model: deepseek-flash
     temperature: 0.4
+
+# ===== 技能目录（润色 / 整理格式的提示词）=====
+# 留空 = 自动探测：./skills → ../skills → ../../skills
+#   （README 的启动方式是在 backend/ 下 java -jar，因此实际命中的是 ../skills）
+# 只有自动探测不奏效时才需要显式指定，例如 --learnhub.skills-dir=D:/xxx/skills
+# 技能文件每次请求实时读取：改完存盘即生效，不用重启后端。详见 skills/README.md
+learnhub:
+  skills-dir: ${LEARNHUB_SKILLS_DIR:}
