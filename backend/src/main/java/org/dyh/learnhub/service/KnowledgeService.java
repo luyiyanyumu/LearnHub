@@ -14,9 +14,12 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * 知识库统一检索：把「笔记」和「速查卡」两块知识源合并成一个搜索入口。
+ * 知识库统一检索：把「笔记」「速查卡」「资料库」三块知识源合并成一个搜索入口。
  * <p>
- * 个人规模（几百条）用 LIKE 全文匹配足够，不引入全文索引；
+ * 资料库是 2026-09 接进来的第三源：上传时抽出的正文（文本/PDF/Office）与手填说明一起参与匹配。
+ * 之所以接在这里：前端检索页与智能体的 {@code search_knowledge} 工具都走这个收口，
+ * 改一处两处同时生效。
+ * <p>个人规模（几百条）用 LIKE 全文匹配足够，不引入全文索引；
  * 返回统一形状 {type, id, title, snippet, categoryName, updatedAt} 供前端聚合展示、
  * 也供 AI 智能体的 search_knowledge 工具直接消费。
  */
@@ -25,10 +28,13 @@ public class KnowledgeService {
 
     private final NoteService noteService;
     private final QuickRefService quickRefService;
+    private final FileStorageService fileStorageService;
 
-    public KnowledgeService(NoteService noteService, QuickRefService quickRefService) {
+    public KnowledgeService(NoteService noteService, QuickRefService quickRefService,
+                            FileStorageService fileStorageService) {
         this.noteService = noteService;
         this.quickRefService = quickRefService;
+        this.fileStorageService = fileStorageService;
     }
 
     /** 每类知识源最多返回条数 */
@@ -80,11 +86,73 @@ public class KnowledgeService {
             items.add(item);
         });
 
+        // 第三源：资料库（上传时抽取的正文 + 手填说明）
+        items.addAll(fileItems(keyword));
+
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("keyword", keyword);
         out.put("total", items.size());
         out.put("items", items);
         return out;
+    }
+
+    /** 只跑词面检索（体检用：与语义检索做对照） */
+    public List<Map<String, Object>> keywordOnly(String kw) {
+        String keyword = kw == null ? "" : kw.trim();
+        List<Map<String, Object>> items = new ArrayList<>();
+        for (NoteVO n : noteService.page(null, null, keyword, 1, PER_SOURCE_LIMIT).getList()) {
+            Map<String, Object> it = new LinkedHashMap<>();
+            it.put("type", "note");
+            it.put("id", n.getId());
+            it.put("title", n.getTitle());
+            it.put("snippet", snippet(n.getSummary(), null, keyword));
+            items.add(it);
+        }
+        quickRefService.list(null, keyword).stream().limit(PER_SOURCE_LIMIT).forEach(r -> {
+            Map<String, Object> it = new LinkedHashMap<>();
+            it.put("type", "quick_ref");
+            it.put("id", r.getId());
+            it.put("title", r.getTitle());
+            it.put("snippet", snippet(null, r.getContent(), keyword));
+            items.add(it);
+        });
+        for (Map<String, Object> f : fileStorageService.searchFiles(keyword, PER_SOURCE_LIMIT)) {
+            Map<String, Object> it = new LinkedHashMap<>();
+            it.put("type", "file");
+            it.put("id", ((Number) f.get("id")).longValue());
+            it.put("title", str(f.get("originName")));
+            it.put("snippet", snippet(str(f.get("summary")), str(f.get("text")), keyword));
+            items.add(it);
+        }
+        return items;
+    }
+
+    /** 资料库来源：文件名 / 手填说明 / 抽取正文三处一起匹配 */
+    private List<Map<String, Object>> fileItems(String keyword) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Map<String, Object> f : fileStorageService.searchFiles(keyword, PER_SOURCE_LIMIT)) {
+            String name = str(f.get("originName"));
+            String summary = str(f.get("summary"));
+            String text = str(f.get("text"));
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("type", "file");
+            item.put("id", ((Number) f.get("id")).longValue());
+            item.put("title", name);
+            // 有正文就用正文做命中窗口（能看出"为什么搜到它"），否则退回手填说明
+            item.put("snippet", snippet(summary, text, keyword));
+            item.put("categoryName", str(f.get("categoryName")));
+            item.put("ext", str(f.get("ext")));
+            item.put("textChars", f.get("textChars") == null ? 0 : f.get("textChars"));
+            item.put("textStatus", str(f.get("textStatus")));
+            Object createdAt = f.get("createdAt");
+            item.put("updatedAt", createdAt == null ? null : String.valueOf(createdAt).replace('T', ' '));
+            out.add(item);
+        }
+        return out;
+    }
+
+    private static String str(Object o) {
+        return o == null ? "" : String.valueOf(o);
     }
 
     /**
