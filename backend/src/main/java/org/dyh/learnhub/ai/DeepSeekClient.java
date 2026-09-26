@@ -9,6 +9,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.dyh.learnhub.config.AiProperties;
 import org.dyh.learnhub.service.SettingsService;
 import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -36,6 +37,10 @@ public class DeepSeekClient {
     private final AiProperties props;
     private final SettingsService settingsService;
     private final ObjectMapper objectMapper;
+    /** 模型配置档案：当前的模型/基址/密钥都来自**激活档案**（可无限新增多个） */
+    private final org.dyh.learnhub.service.ModelProfileService profiles;
+    /** 任务分工表：wiki / 重排等任务可能指向另一个档案，所以这里要按任务解析而不是只认激活档案 */
+    private final ModelRouting routing;
 
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(15))
@@ -48,53 +53,142 @@ public class DeepSeekClient {
         return k != null && !k.isBlank();
     }
 
-    /** 当前生效模型（设置面板可改） */
+    /**
+     * 当前生效模型 —— **来自当前激活的模型档案**。
+     * <p>2026-09 改造：原来读的是单个设置键 {@code ai.model}，只能配一个模型；
+     * 现在可以是任意多个档案（DeepSeek / Kimi / 本地 Ollama…），这里返回激活档案的那个。
+     */
     public String model() {
-        return settingsService.effective(SettingsService.KEY_MODEL);
+        org.dyh.learnhub.service.ModelProfileService.Target t = profiles.resolve(null);
+        return t.model() != null ? t.model() : settingsService.effective(SettingsService.KEY_MODEL);
     }
 
-    /** 当前生效 API 地址（设置面板可改，支持任意 OpenAI 兼容服务/中转） */
+    /** 当前生效 API 地址（激活档案的基址） */
     public String baseUrl() {
-        String v = settingsService.effective(SettingsService.KEY_BASE_URL);
+        org.dyh.learnhub.service.ModelProfileService.Target t = profiles.resolve(null);
+        String v = t.baseUrl() != null ? t.baseUrl() : settingsService.effective(SettingsService.KEY_BASE_URL);
         return normalizeBase(v);
     }
 
-    /** 当前生效 API Key：设置面板覆盖优先，其次 .env / application.yml */
+    /** 当前生效 API Key：激活档案优先，其次老设置，最后 .env / application.yml */
     public String apiKey() {
+        org.dyh.learnhub.service.ModelProfileService.Target t = profiles.resolve(null);
+        if (StringUtils.hasText(t.apiKey())) {
+            return t.apiKey().trim();
+        }
         String v = settingsService.effective(SettingsService.KEY_API_KEY);
         return v != null && !v.isBlank() ? v.trim() : props.getApiKey();
     }
 
-    /** 当前生效最大输出 token（默认 8192，避免长文被截断） */
+    // ------------------------------------------------------------------
+    // 生成参数：**优先取模型档案上的值，没配才用全局默认**
+    //
+    // 为什么参数要跟着档案走：本地 qwen3:8b 与云端 deepseek-flash 想要的并不一样 ——
+    // 小模型要更小的输出上限、思考型模型下发温度会被忽略、机械任务要关掉思考才快。
+    // 全局单值等于逼所有模型共用一套折中值。
+    //
+    // 无参版本委托给**当前激活档案**，于是所有既有调用点（line 14 处）自动跟随，
+    // 不必逐个改；明确用了别的档案的地方（wiki/重排/核对…）传档案 id 即可。
+    // ------------------------------------------------------------------
+
+    /** 输出上限（默认 8192，避免长文被截断）。优先档案上的值 */
     public int maxTokens() {
-        String v = settingsService.effective(SettingsService.KEY_MAX_TOKENS);
+        return maxTokensOf(profiles.activeId());
+    }
+
+    public int maxTokensOf(String profileId) {
+        Integer v = profiles.resolve(profileId).maxTokens();
+        if (v != null && v > 0) {
+            return v;
+        }
         try {
-            int n = Integer.parseInt(v == null ? "" : v.trim());
+            int n = Integer.parseInt(orEmpty(settingsService.effective(SettingsService.KEY_MAX_TOKENS)));
             return n > 0 ? n : 8192;
         } catch (NumberFormatException e) {
             return 8192;
         }
     }
 
-    /** 当前生效温度（设置面板可改；思考模式下服务端会忽略它） */
+    /** 温度（思考模式下服务端会忽略它）。优先档案上的值 */
     public double temperature() {
-        String v = settingsService.effective(SettingsService.KEY_TEMPERATURE);
+        return temperatureOf(profiles.activeId());
+    }
+
+    public double temperatureOf(String profileId) {
+        java.math.BigDecimal v = profiles.resolve(profileId).temperature();
+        if (v != null) {
+            double d = v.doubleValue();
+            if (d >= 0 && d <= 2) {
+                return d;
+            }
+        }
         try {
-            double d = Double.parseDouble(v == null ? "" : v.trim());
+            double d = Double.parseDouble(orEmpty(settingsService.effective(SettingsService.KEY_TEMPERATURE)));
             return d >= 0 && d <= 2 ? d : props.getTemperature();
         } catch (NumberFormatException e) {
             return props.getTemperature();
         }
     }
 
-    /** 思考模式：null/空 = 自动（由模型决定），"enabled"/"disabled" = 强制开关 */
+    /** 思考模式：null/空 = 自动（由模型决定），"enabled"/"disabled" = 强制开关。优先档案上的值 */
     public String thinking() {
-        return settingsService.effective(SettingsService.KEY_THINKING);
+        return thinkingOf(profiles.activeId());
     }
 
-    /** 思考强度：null/空 = 服务端默认，可选 low / high / max */
+    public String thinkingOf(String profileId) {
+        String v = profiles.resolve(profileId).thinking();
+        return StringUtils.hasText(v) ? v : settingsService.effective(SettingsService.KEY_THINKING);
+    }
+
+    /** 思考强度：null/空 = 服务端默认。优先档案上的值 */
     public String reasoningEffort() {
-        return settingsService.effective(SettingsService.KEY_REASONING_EFFORT);
+        return reasoningEffortOf(profiles.activeId());
+    }
+
+    public String reasoningEffortOf(String profileId) {
+        String v = profiles.resolve(profileId).reasoningEffort();
+        return StringUtils.hasText(v) ? v : settingsService.effective(SettingsService.KEY_REASONING_EFFORT);
+    }
+
+    private static String orEmpty(String s) {
+        return s == null ? "" : s.trim();
+    }
+
+    // ------------------------------------------------------------------
+    // 长文生成（主题 wiki）用的模型目标：可选覆写，留空跟随主模型
+    // ------------------------------------------------------------------
+
+    /**
+     * wiki 生成用的接口地址 —— **由"主题 wiki"这个任务指向的档案**决定。
+     * <p>旧语义是"一个独立的本地目标，留空跟随主模型"；现在等价于
+     * "wiki 任务的档案 = 主档案 → 跟随；指向本地档案 → 零成本"。语义一致，表达更自由。
+     */
+    public String wikiBaseUrl() {
+        org.dyh.learnhub.service.ModelProfileService.Target t = profiles.resolve(routing.targetIdOf(ModelRouting.TASK_WIKI));
+        String v = t.baseUrl();
+        return v == null || v.isBlank() ? baseUrl() : normalizeBase(v);
+    }
+
+    public String wikiModel() {
+        org.dyh.learnhub.service.ModelProfileService.Target t = profiles.resolve(routing.targetIdOf(ModelRouting.TASK_WIKI));
+        return t.model() == null || t.model().isBlank() ? model() : t.model();
+    }
+
+    /** 独立目标可以不配密钥（Ollama 不需要）；档案没配则复用主 Key */
+    public String wikiApiKey() {
+        org.dyh.learnhub.service.ModelProfileService.Target t = profiles.resolve(routing.targetIdOf(ModelRouting.TASK_WIKI));
+        if (StringUtils.hasText(t.apiKey())) {
+            return t.apiKey().trim();
+        }
+        // 换了服务端却留空 Key：不要拿 DeepSeek 的密钥去请求别人的服务
+        boolean sameTarget = java.util.Objects.equals(t.baseUrl(), baseUrl());
+        return sameTarget ? apiKey() : "";
+    }
+
+    /** wiki 是否用了**另一个**目标：决定要不要关掉 DeepSeek 专有的 thinking 参数 */
+    public boolean wikiUsesSeparateTarget() {
+        org.dyh.learnhub.service.ModelProfileService.Target t = profiles.resolve(routing.targetIdOf(ModelRouting.TASK_WIKI));
+        return t.id() != null && !java.util.Objects.equals(t.id(), profiles.activeId());
     }
 
     // ------------------------------------------------------------------
@@ -223,30 +317,13 @@ public class DeepSeekClient {
     }
 
     /**
-     * 最完整的一次补全请求。
+     * 请求体构造（chat 与 chatStream 共用）。
      *
-     * @param thinking        思考模式："enabled"/"disabled"/null（自动）
-     * @param reasoningEffort 思考强度："low"/"high"/"max"/null（服务端默认）
+     * @param stream 是否流式：流式时不要 thinking 输出混进正文（由服务端处理），仅加 stream 字段
      */
-    public JsonNode chat(List<?> messages, List<?> tools,
-                         String baseUrl, String apiKey, String model,
-                         int maxTokens, double temperature,
-                         String thinking, String reasoningEffort) throws Exception {
-        return chat(messages, tools, baseUrl, apiKey, model, maxTokens, temperature,
-                thinking, reasoningEffort, DEFAULT_TIMEOUT);
-    }
-
-    /**
-     * 同上，外加显式超时。
-     *
-     * @param timeout 本次 HTTP 请求的超时。上层按「整轮还剩多少预算」传进来，
-     *                目的是保证「一轮内多次请求的总耗时」也不超过前端超时。
-     */
-    public JsonNode chat(List<?> messages, List<?> tools,
-                         String baseUrl, String apiKey, String model,
-                         int maxTokens, double temperature,
-                         String thinking, String reasoningEffort,
-                         Duration timeout) throws Exception {
+    private ObjectNode buildBody(List<?> messages, List<?> tools, String baseUrl, String model,
+                                 int maxTokens, double temperature,
+                                 String thinking, String reasoningEffort, boolean stream) {
         ObjectNode body = objectMapper.createObjectNode();
         body.put("model", model);
         // 显式给出 max_tokens：不传时服务端默认偏小，长文润色会被截断。
@@ -281,12 +358,93 @@ public class DeepSeekClient {
             }
             body.put("tool_choice", "auto");
         }
-
-        String payload = objectMapper.writeValueAsString(body);
-        // 便于学习/排查：把实际发出的请求体打出来（不含密钥，密钥在 header 里）
-        if (log.isDebugEnabled()) {
-            log.debug("AI 请求体: {}", truncate(payload, 600));
+        if (stream) {
+            body.put("stream", true);
         }
+        return body;
+    }
+
+    /**
+     * 流式补全：每收到一段增量文本就回调一次已累计的字符数。
+     * <p>
+     * 为什么 wiki 生成要走流式：本地小模型出一页要 20~35 秒，非流式在这段时间里界面上只能干等。
+     * 流式能给出**真实的**"已生成 N 字"，也顺带避免长输出撞上整体超时。
+     * 返回的是拼接后的完整正文；解析不了的行直接忽略（SSE 里可能有 keep-alive 注释）。
+     *
+     * @param onChars 累计字符数回调（用于进度）；可为 null
+     */
+    public String chatStream(List<?> messages, String baseUrl, String apiKey, String model,
+                             int maxTokens, double temperature, String thinking, String reasoningEffort,
+                             Duration timeout, java.util.function.IntConsumer onChars) throws Exception {
+        String payload = objectMapper.writeValueAsString(
+                buildBody(messages, null, baseUrl, model, maxTokens, temperature, thinking, reasoningEffort, true));
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(normalizeBase(baseUrl) + "/chat/completions"))
+                .timeout(timeout)
+                .header("Content-Type", "application/json; charset=utf-8")
+                .header("Authorization", "Bearer " + apiKey)
+                .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
+                .build();
+
+        HttpResponse<java.util.stream.Stream<String>> response =
+                http.send(request, HttpResponse.BodyHandlers.ofLines());
+        if (response.statusCode() != 200) {
+            String err = response.body().limit(4).reduce("", (a, b) -> a + b);
+            log.error("AI 流式调用失败 status={} body={}", response.statusCode(), truncate(err, 200));
+            throw new RuntimeException("AI 服务调用失败(" + response.statusCode() + "): " + truncate(err, 200));
+        }
+        StringBuilder acc = new StringBuilder();
+        response.body().forEach(line -> {
+            if (line == null || line.isEmpty() || !line.startsWith("data:")) {
+                return;
+            }
+            String data = line.substring(5).trim();
+            if (data.isEmpty() || "[DONE]".equals(data)) {
+                return;
+            }
+            try {
+                JsonNode delta = objectMapper.readTree(data).path("choices").path(0).path("delta");
+                String piece = delta.path("content").asText("");
+                if (!piece.isEmpty()) {
+                    acc.append(piece);
+                    if (onChars != null) {
+                        onChars.accept(acc.length());
+                    }
+                }
+            } catch (Exception ignored) {
+                // 单行解析失败不影响整体：SSE 里可能夹着非 data 行或半截 JSON
+            }
+        });
+        return acc.toString();
+    }
+
+    /**
+     * 最完整的一次补全请求。
+     *
+     * @param thinking        思考模式："enabled"/"disabled"/null（自动）
+     * @param reasoningEffort 思考强度："low"/"high"/"max"/null（服务端默认）
+     */
+    public JsonNode chat(List<?> messages, List<?> tools,
+                         String baseUrl, String apiKey, String model,
+                         int maxTokens, double temperature,
+                         String thinking, String reasoningEffort) throws Exception {
+        return chat(messages, tools, baseUrl, apiKey, model, maxTokens, temperature,
+                thinking, reasoningEffort, DEFAULT_TIMEOUT);
+    }
+
+    /**
+     * 同上，外加显式超时。
+     *
+     * @param timeout 本次 HTTP 请求的超时。上层按「整轮还剩多少预算」传进来，
+     *                目的是保证「一轮内多次请求的总耗时」也不超过前端超时。
+     */
+    public JsonNode chat(List<?> messages, List<?> tools,
+                         String baseUrl, String apiKey, String model,
+                         int maxTokens, double temperature,
+                         String thinking, String reasoningEffort,
+                         Duration timeout) throws Exception {
+        String payload = objectMapper.writeValueAsString(
+                buildBody(messages, tools, baseUrl, model, maxTokens, temperature, thinking, reasoningEffort, false));
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(normalizeBase(baseUrl) + "/chat/completions"))
                 .timeout(timeout)
@@ -300,7 +458,9 @@ public class DeepSeekClient {
         long cost = System.currentTimeMillis() - start;
         if (response.statusCode() != 200) {
             log.error("AI 服务调用失败 status={} body={} cost={}ms", response.statusCode(), response.body(), cost);
-            throw new RuntimeException("AI 服务调用失败(" + response.statusCode() + "): " + truncate(response.body(), 300));
+            throw new RuntimeException(authHint(response.statusCode())
+                    + "AI 服务调用失败(" + response.statusCode() + "): " + truncate(response.body(), 300)
+                    + "　【目标：" + normalizeBase(baseUrl) + " / " + model + "】");
         }
         JsonNode root = objectMapper.readTree(response.body());
         JsonNode choice = root.path("choices").path(0);
@@ -314,7 +474,7 @@ public class DeepSeekClient {
             log.warn("AI 输出被 max_tokens={} 截断，建议调大设置里的最大输出 token", maxTokens);
         }
         log.info("AI 请求完成 cost={}ms 模型={} 消息数={} 思考={} finish={}",
-                cost, model, messages.size(), thinkingOn ? "on" : "off", finish);
+                cost, model, messages.size(), isThinkingOn(model, thinking) ? "on" : "off", finish);
         return message;
     }
 
@@ -323,5 +483,23 @@ public class DeepSeekClient {
             return "";
         }
         return s.length() > max ? s.substring(0, max) + "…" : s;
+    }
+
+    /**
+     * 鉴权类失败的**人话提示**。
+     *
+     * <p>不加这一段，用户看到的是"AI 服务调用失败(401): {"error":{"message":"Authentication Fails,
+     * Your api key: null is invalid"…}}" —— 要自己从 JSON 里读出"密钥没配"。
+     * 实测就踩过：清空某个档案的密钥后，用它对话只报 500，得翻日志才知道是 401。
+     * 这里把最常见的三类直接说清，并点明是**哪个档案**（基址+模型名由调用方拼在后面）。
+     */
+    private static String authHint(int status) {
+        return switch (status) {
+            case 401, 403 -> "【模型鉴权失败】该档案的 API Key 无效或未配置 —— 去「设置 → 模型档案与分工」填好密钥，"
+                    + "或用「设置 → 模型参数」把这条档案的「测试连接」跑通。原始错误：";
+            case 404 -> "【接口地址或模型名不对】404 多为基址缺 /v1，或模型名该账号没有。原始错误：";
+            case 429 -> "【被限流或额度用尽】稍后重试，或换一条档案。原始错误：";
+            default -> "";
+        };
     }
 }
