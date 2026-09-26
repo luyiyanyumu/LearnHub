@@ -3,12 +3,14 @@ package org.dyh.learnhub.service;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import lombok.RequiredArgsConstructor;
+import org.dyh.learnhub.common.KnowledgeChangedEvent;
 import org.dyh.learnhub.dto.QuickRefDTO;
 import org.dyh.learnhub.entity.Category;
 import org.dyh.learnhub.entity.QuickRef;
 import org.dyh.learnhub.mapper.CategoryMapper;
 import org.dyh.learnhub.mapper.QuickRefMapper;
 import org.dyh.learnhub.vo.QuickRefVO;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -24,6 +26,8 @@ public class QuickRefService {
 
     private final QuickRefMapper quickRefMapper;
     private final CategoryMapper categoryMapper;
+    /** 内容变更广播：页面保存、智能体写入都会发；wiki 的自动增量更新订阅它 */
+    private final ApplicationEventPublisher events;
 
     /** 速查卡列表：支持分类 / 关键词过滤 */
     public List<QuickRefVO> list(Long categoryId, String kw) {
@@ -64,6 +68,7 @@ public class QuickRefService {
         QuickRef ref = new QuickRef();
         apply(ref, dto);
         quickRefMapper.insert(ref);
+        publishChanged(dto.getCategoryId());
         return detail(ref.getId());
     }
 
@@ -80,12 +85,30 @@ public class QuickRefService {
                 .set(QuickRef::getTitle, dto.getTitle().trim())
                 .set(QuickRef::getContent, dto.getContent())
                 .set(QuickRef::getCategoryId, dto.getCategoryId()));
+        publishChanged(exist.getCategoryId(), dto.getCategoryId());
         return detail(id);
     }
 
     @Transactional
     public void delete(Long id) {
+        QuickRef exist = quickRefMapper.selectById(id);
         quickRefMapper.deleteById(id);
+        if (exist != null) {
+            publishChanged(exist.getCategoryId());
+        }
+    }
+
+    /** 内容变更通知：wiki 的自动增量更新靠它（见 WikiService#onKnowledgeChanged） */
+    private void publishChanged(Long... categoryIds) {
+        java.util.Set<Long> ids = new java.util.LinkedHashSet<>();
+        for (Long id : categoryIds) {
+            if (id != null) {
+                ids.add(id);
+            }
+        }
+        if (!ids.isEmpty()) {
+            events.publishEvent(new KnowledgeChangedEvent(ids, "quick_ref"));
+        }
     }
 
     private void apply(QuickRef ref, QuickRefDTO dto) {

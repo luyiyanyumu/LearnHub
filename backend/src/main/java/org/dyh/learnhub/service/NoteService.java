@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
+import org.dyh.learnhub.common.KnowledgeChangedEvent;
 import org.dyh.learnhub.common.PageResult;
 import org.dyh.learnhub.dto.NoteDTO;
 import org.dyh.learnhub.dto.NoteTagRow;
@@ -14,6 +15,7 @@ import org.dyh.learnhub.mapper.CategoryMapper;
 import org.dyh.learnhub.mapper.NoteMapper;
 import org.dyh.learnhub.mapper.TagMapper;
 import org.dyh.learnhub.vo.NoteVO;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.CollectionUtils;
@@ -33,6 +35,8 @@ public class NoteService {
     private final NoteMapper noteMapper;
     private final CategoryMapper categoryMapper;
     private final TagMapper tagMapper;
+    /** 内容变更广播：页面保存、智能体写入都会发；wiki 的自动增量更新订阅它 */
+    private final ApplicationEventPublisher events;
 
     /**
      * 列表/总览用的查询骨架：刻意只选这几列，**不含 content**。
@@ -130,6 +134,8 @@ public class NoteService {
         note.setCategoryId(dto.getCategoryId());
         noteMapper.insert(note);
         saveTags(note.getId(), dto.getTagIds());
+        // 通知 wiki：该分类的主题页已过期，按需在后台增量重生成
+        publishChanged(dto.getCategoryId());
         return detail(note.getId());
     }
 
@@ -161,13 +167,33 @@ public class NoteService {
             noteMapper.deleteNoteTags(id);
             saveTags(id, dto.getTagIds());
         }
+        // 新旧分类都要通知：改分类后，旧分类的主题页也少了一条素材
+        publishChanged(exist.getCategoryId(), dto.getCategoryId());
         return detail(id);
+    }
+
+    /** 内容变更通知：wiki 的自动增量更新靠它（见 WikiService#onKnowledgeChanged） */
+    private void publishChanged(Long... categoryIds) {
+        java.util.Set<Long> ids = new java.util.LinkedHashSet<>();
+        for (Long id : categoryIds) {
+            if (id != null) {
+                ids.add(id);
+            }
+        }
+        if (!ids.isEmpty()) {
+            events.publishEvent(new KnowledgeChangedEvent(ids, "note"));
+        }
     }
 
     @Transactional
     public void delete(Long id) {
+        // 先取分类：删完再查就没有这条记录了，而 wiki 需要知道该刷新哪个主题
+        Note exist = noteMapper.selectById(id);
         noteMapper.deleteById(id);
         noteMapper.deleteNoteTags(id);
+        if (exist != null) {
+            publishChanged(exist.getCategoryId());
+        }
     }
 
     /** 保存标签关联；tagIds 中的标签若不存在则自动创建 */
