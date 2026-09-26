@@ -66,13 +66,106 @@ export const knowledgeApi = {
 // 比 90 秒慢得多（实测 4863 字润色 81.6s，更长文档直接破 90s），而对齐后端 HttpClient 的 300s。
 const AI_TIMEOUT = 300000
 
+/**
+ * 流式润色 / 整理格式：边处理边回报分段进度。
+ *
+ * 为什么不用 axios：要逐段读响应流。而 axios 的响应拦截器做的是「一次性 json 解包 + 统一报错」，
+ * 对 SSE 不适用，所以这里用 fetch 手工读流，并**自行复刻拦截器的报错文案**
+ * （err.response.data.msg → err.message → '网络错误'），保证错误提示风格与其他接口一致。
+ *
+ * @param {{text:string, mode:'polish'|'format'}} data
+ * @param {(event:string, payload:object)=>void} [onEvent] 事件回调：progress / done / failed
+ * @param {AbortSignal} [signal] 用于「取消处理」
+ * @returns {Promise<string>} 处理后的 Markdown
+ */
+async function polishStream(data, onEvent, signal) {
+  let resp
+  try {
+    resp = await fetch('/api/ai/polish-stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+      signal,
+    })
+  } catch (e) {
+    // 主动取消：抛一个可识别的错误，调用方静默处理
+    if (e?.name === 'AbortError') throw new Error('已取消处理')
+    throw new Error('网络错误：' + (e?.message || '无法连接后端'))
+  }
+
+  if (!resp.ok) {
+    let msg = `请求失败（HTTP ${resp.status}）`
+    try {
+      const j = await resp.json() // 后端异常时仍返回统一 Result 结构
+      if (j?.msg) msg = j.msg
+    } catch {
+      /* 非 JSON 响应，保留默认文案 */
+    }
+    throw new Error(msg)
+  }
+  if (!resp.body) throw new Error('浏览器不支持流式响应，无法读取进度')
+
+  const reader = resp.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  let content = ''
+  let failure = null
+
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    // SSE 以「空行」分隔事件；最后一段可能不完整，留在 buf 里等下一块数据
+    const blocks = buf.split('\n\n')
+    buf = blocks.pop() ?? ''
+    for (const block of blocks) {
+      let event = 'message'
+      let payloadText = ''
+      for (const line of block.split('\n')) {
+        if (line.startsWith('event:')) event = line.slice(6).trim()
+        else if (line.startsWith('data:')) payloadText += line.slice(5).trim()
+      }
+      if (!payloadText) continue
+      let payload
+      try {
+        payload = JSON.parse(payloadText)
+      } catch {
+        continue // 半截 JSON（极少见）直接跳过，不影响最终结果
+      }
+      if (event === 'done') content = payload.content || ''
+      else if (event === 'failed') failure = payload.message || 'AI 服务异常'
+      else onEvent?.(event, payload)
+    }
+  }
+
+  if (failure) throw new Error(failure)
+  return content
+}
+
 export const aiApi = {
   /** 配置状态：{ configured, model } */
   status: () => request.get('/ai/status'),
-  /** 语言润色 / 整理格式：{ text, mode: 'polish'|'format' } → 处理后的 Markdown */
+  /** 语言润色 / 整理格式：{ text, mode: 'polish'|'format' } → 处理后的 Markdown（无进度） */
   polish: (data) => request.post('/ai/polish', data, { timeout: AI_TIMEOUT }),
-  /** 智能体对话：{ message, history, noteId?, noteTitle?, noteContext? } → AiChatVO（最多 8 轮工具调用，耗时叠加） */
+  /** 同上，但带分段进度（SSE）。编辑器里的润色/整理格式走这个 */
+  polishStream: (data, onEvent, signal) => polishStream(data, onEvent, signal),
+  /** 智能体对话：{ message, sessionId, history?, noteId?, noteTitle?, noteContext? } → AiChatVO（最多 8 轮工具调用，耗时叠加） */
   chat: (data) => request.post('/ai/chat', data, { timeout: AI_TIMEOUT }),
+  /** 会话回看：把事件日志投影成气泡列表（刷新页面后靠它恢复对话） */
+  session: (id) => request.get(`/ai/sessions/${id}`),
+  /** 清空一个会话（含其事件） */
+  deleteSession: (id) => request.delete(`/ai/sessions/${id}`),
+  /** 确认执行一个待确认的写操作（在此之前数据库零改动） */
+  approveAction: (id) => request.post(`/ai/actions/${id}/approve`),
+  /** 取消一个待确认的写操作 */
+  rejectAction: (id) => request.post(`/ai/actions/${id}/reject`),
+  /** 技能清单：润色/整理格式的提示词来自 skills/<id>/SKILL.md，这里只做只读展示 */
+  skills: () => request.get('/ai/skills'),
+  /**
+   * 上传 / 替换一个技能：把 content 写成 skills/<id>/SKILL.md
+   * 元数据（frontmatter）默认沿用原值；上传内容自带 frontmatter 时才一起替换
+   */
+  saveSkill: (id, data) => request.put(`/ai/skills/${id}`, data),
   /** 连通性测试：用传入的（含未保存的）配置发一次最小请求 → 成功文案 */
   test: (data) => request.post('/ai/test', data || {}, { timeout: AI_TIMEOUT }),
 }
@@ -84,6 +177,112 @@ export const settingsApi = {
   update: (data) => request.put('/settings', data),
 }
 
+/** 知识图谱：结构边现算，语义边由模型推断（rebuild 会花 token，需用户主动点） */
+/**
+ * 模型配置档案 + 智能体会话。
+ *
+ * 为什么单独一块：模型配置从"主模型 / 本地目标二选一"改成了**可无限新增的档案列表**，
+ * 每个任务（对话/wiki/实体/影响/自检/图谱/抽取/重排/核对）各指一个档案；
+ * 而"哪一次对话用哪个模型"由会话记住。这两件事是一体的。
+ */
+export const modelApi = {
+  /** 档案清单（**不含明文密钥**，只有 hasKey 与 keyHint）+ 提供方预设 + 任务分工 */
+  profiles: () => request.get('/model/profiles'),
+  createProfile: (body) => request.post('/model/profiles', body),
+  /** 更新；body.apiKey 传 '__KEEP__' 表示不改密钥（界面回传的是掩码） */
+  updateProfile: (id, body) => request.put(`/model/profiles/${id}`, body),
+  removeProfile: (id) => request.delete(`/model/profiles/${id}`),
+  activateProfile: (id) => request.post(`/model/profiles/${id}/activate`, {}),
+  /** 连通性探测：真实发一次最小请求，返回 ok / 耗时 / 失败原因与提示 */
+  testProfile: (id) => request.post(`/model/profiles/${id}/test`, {}, { timeout: 60000 }),
+  migrate: () => request.post('/model/profiles/migrate', {}),
+  routing: () => request.get('/model/routing'),
+
+  // ---- 会话（右边栏"新开/切换/删除"用）----
+  sessions: (limit) => request.get('/model/sessions', { params: { limit } }),
+  newSession: (body) => request.post('/model/sessions', body || {}),
+  removeSession: (id) => request.delete(`/model/sessions/${id}`),
+  renameSession: (id, title) => request.put(`/model/sessions/${id}/title`, { title }),
+  /** 会话指定模型档案；profileId 传空 = 跟随任务分工表 */
+  setSessionModel: (id, profileId) => request.put(`/model/sessions/${id}/model`, { profileId }),
+}
+
+/**
+ * 代码库（独立于知识库）。
+ *
+ * 为什么单开一块：代码的信号密度天生低（样板/依赖/测试），混进知识检索会把个人笔记挤下去。
+ * 三种检索模式对应三类问题：symbol=在哪定义（精确）、keyword=我写过什么（模糊）、all=默认合并。
+ */
+export const codeApi = {
+  stats: () => request.get('/code/stats'),
+  repos: () => request.get('/code/repos'),
+  saveRepo: (id, data) => (id ? request.put(`/code/repos/${id}`, data) : request.post('/code/repos', data)),
+  removeRepo: (id) => request.delete(`/code/repos/${id}`),
+  snippets: (params) => request.get('/code/snippets', { params }),
+  snippet: (id) => request.get(`/code/snippets/${id}`),
+  saveSnippet: (id, data) => (id ? request.put(`/code/snippets/${id}`, data) : request.post('/code/snippets', data)),
+  removeSnippet: (id) => request.delete(`/code/snippets/${id}`),
+  /** mode: symbol | keyword | all */
+  search: (q, params) => request.get('/code/search', { params: { q, ...params } }),
+  /** 文件夹导入：files = [{path, text}]，后端负责识别语言与过滤噪声 */
+  importFolder: (data) => request.post('/code/import-folder', data, { timeout: 120000 }),
+}
+
+export const kgApi = {  graph: () => request.get('/kg/graph'),
+  /** 版本指纹：前端按秒轮询，变了才重画图（"实时"的实现方式） */
+  version: () => request.get('/kg/version'),
+  rebuild: () => request.post('/kg/rebuild', {}, { timeout: AI_TIMEOUT }),
+
+  // ---------------- 概念层（真正的知识图谱：实体 + 三元组） ----------------
+  /** 概念图：实体 + 三元组 + 本体（关系词表与传递/对称属性） */
+  concept: () => request.get('/kg/concept'),
+  /** 跑构建流水线：素材 → 抽三元组 → 链接入库 → 规则推理 → 实体向量化 */
+  buildConcept: () => request.post('/kg/concept/build', {}, { timeout: 60000 }),
+  /** 构建进度（阶段/百分比/已抽三元组数） */
+  conceptJob: (jobId) => request.get(`/kg/concept/jobs/${jobId}`),
+  /** 邻居展开（多跳子图）：id 可以是概念名，会按别名解析 */
+  neighbors: (id, hops) => request.get('/kg/concept/neighbors', { params: { id, hops } }),
+  /** 两个概念之间的最短路径 */
+  path: (from, to) => request.get('/kg/concept/path', { params: { from, to } }),
+  /** 只跑规则推理，不调模型（免费） */
+  reason: () => request.post('/kg/concept/reason', {}),
+  /** 疑似重复实体（只提示，合并要人工确认） */
+  duplicates: () => request.get('/kg/concept/duplicates'),
+  merge: (from, to) => request.post('/kg/concept/merge', {}, { params: { from, to } }),
+  /** 实体识别探针：给一句话，看认出哪些概念 */
+  recognize: (q) => request.get('/kg/concept/recognize', { params: { q } }),
+  removeConceptNode: (id) => request.delete(`/kg/concept/nodes/${id}`),
+  removeConceptRelation: (id) => request.delete(`/kg/concept/relations/${id}`),
+}
+
+/** LLM wiki：按主题（分类/标签）生成，落库缓存，素材变了可自动增量重生成 */
+export const wikiApi = {
+  topics: () => request.get('/wiki/topics'),
+  page: (topicKey) => request.get(`/wiki/pages/${topicKey}`),
+  /** 可选生成目标（主模型 / 本地或自建）+ 当前选择 */
+  models: () => request.get('/wiki/models'),
+  /** 发起生成：立刻返回任务（含 jobId），进度用 job() 轮询 */
+  generate: (topicKey, target) =>
+    request.post(`/wiki/pages/${topicKey}/generate`, {}, { params: { target }, timeout: 30000 }),
+  /** 删除一页编译产物（原始素材一行不动；主题页/实体页/自检页下次生成会回来） */
+  removePage: (topicKey) => request.delete(`/wiki/pages/${topicKey}`),
+  /** 生成任务进度（阶段 / 百分比 / 已生成字数 / 质量结论） */
+  job: (jobId) => request.get(`/wiki/jobs/${jobId}`),
+  /** 编译实体/概念页 + 索引页（后台任务） */
+  compileEntities: () => request.post('/wiki/entities/compile', {}, { timeout: 30000 }),
+  entityJob: (jobId) => request.get(`/wiki/entities/jobs/${jobId}`),
+  /** 影响分析探针：给定新素材，模型认为该更新哪些页 */
+  impact: (text) => request.post('/wiki/impact', { text }, { timeout: 120000 }),
+  /** ③ 局部重编译：影响分析 → 只重建受影响的页（进度复用 job()） */
+  recompile: () => request.post('/wiki/recompile', {}, { timeout: 30000 }),
+  /** ④ 语义自检：代码检查 + 模型检查 → 写入 lint 页 */
+  lint: () => request.post('/wiki/lint', {}, { timeout: 300000 }),
+  /** 模型分工表：每个任务走云端还是本地（含为什么） */
+  modelRouting: () => request.get('/wiki/model-routing'),
+  autoRefresh: () => request.get('/wiki/auto-refresh'),
+  setAutoRefresh: (on) => request.put(`/wiki/auto-refresh?on=${on ? 'true' : 'false'}`),
+}
+
 export const fileApi = {
   list: (params) => request.get('/files', { params }),
   upload: (file, categoryId) => {
@@ -92,9 +291,35 @@ export const fileApi = {
     if (categoryId) fd.append('categoryId', categoryId)
     return request.post('/files/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
   },
+  /** 抽取出来的正文（阅读器用；**不含在 detail 里**，因为正文动辄十几万字） */
+  text: (id) => request.get(`/files/${id}/text`),
+  /** 分段翻译（阅读器用）：只接受一段，超长会被后端拒绝并说明上限 */
+  translate: (id, text, targetLang) => request.post(`/files/${id}/translate`, { text, targetLang }, { timeout: 180000 }),
+  /** 翻译能力：用哪个档案翻、单段上限多少 */
+  translateCaps: () => request.get('/files/translate/capabilities'),  /** 保存阅读位置（页码/缩放/模式）—— 阅读器防抖调用 */
+  saveReading: (id, body) => request.put(`/files/${id}/reading-state`, body),
+  /** 内联打开原文的地址（浏览器原生渲染 PDF/图片/文本，用于在线阅读） */
+  rawUrl: (id) => `/api/files/${id}/raw`,
   /** 下载二进制：返回 axios response（blob） */
   download: (id) => request.get(`/files/${id}/download`, { responseType: 'blob' }),
   remove: (id) => request.delete(`/files/${id}`),
+  /** 资料详情（分类名 + 抽取状态） */
+  detail: (id) => request.get(`/files/${id}`),
+  /** 更新手填说明 —— 抽不出正文的资料（图片/压缩包）靠它进检索 */
+  updateSummary: (id, summary) => request.put(`/files/${id}/summary`, { summary }),
+  /** 换分类（资料按分类进知识图谱） */
+  updateCategory: (id, categoryId) => request.put(`/files/${id}/category`, { categoryId }),
+  /** 重新抽取正文 */
+  reextract: (id) => request.post(`/files/${id}/reextract`),
+}
+
+/** 语义检索（向量索引）：状态 / 重建（带进度）/ 检索体检 */
+export const kbApi = {
+  status: () => request.get('/kb/status'),
+  rebuild: () => request.post('/kb/rebuild', {}, { timeout: 30000 }),
+  job: (jobId) => request.get(`/kb/jobs/${jobId}`),
+  /** 同一问题对比「词面 vs 语义」的命中差异 —— 这是"资料进去了没有"的可验证方式 */
+  probe: (q) => request.get('/kb/probe', { params: { q }, timeout: 60000 }),
 }
 
 /** 触发浏览器保存文件 */

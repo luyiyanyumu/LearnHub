@@ -9,10 +9,13 @@ import java.util.regex.Pattern;
  * 带脱敏的 {@link StdOutImpl}：SQL 照旧打到控制台（方便学 SQL、排查问题），
  * 但把「不该出现在日志里」的内容遮掉。
  *
- * <p><b>它解决的具体问题：</b>应用设置（API Key、润色/格式提示词）都存在 app_setting 表里，
+ * <p><b>它解决的具体问题：</b>应用设置（API Key、对话提示词）都存在 app_setting 表里，
  * 而 application.yml 配了 {@code mybatis-plus.configuration.log-impl=...StdOutImpl}。
  * StdOutImpl 会把每条 SQL 的<b>参数值原样打印</b>，于是每次保存设置，
  * 完整密钥与提示词全文就进了控制台和日志文件。
+ *
+ * <p>（润色 / 整理格式的提示词已改存 {@code skills/<id>/SKILL.md} 文件，不再经过这张表；
+ * 但对话提示词仍在表里、仍可能长达几千字，所以下面两条处理都还有必要。）
  *
  * <p>这里只做两件事，其余一律透传（不影响正常看 SQL）：
  * <ol>

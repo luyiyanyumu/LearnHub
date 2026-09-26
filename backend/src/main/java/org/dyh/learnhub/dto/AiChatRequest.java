@@ -9,8 +9,11 @@ import java.util.List;
 /**
  * 智能体对话请求。
  * <p>
- * 服务端无状态：前端把最近的历史（含上一条 assistant 回复）整体带回；
- * 若从笔记编辑页发起，可附带当前笔记 id 与标题作为上下文。
+ * 2026-09 起上下文由**服务端会话**维护：带上 {@code sessionId} 即可续聊，
+ * 历史由后端从事件日志里投影，前端不必再自己拼。
+ * <p>
+ * {@code history} 仅为**兼容老前端**保留：当带了 sessionId 时它被忽略；
+ * 没带 sessionId 时（升级过渡期里浏览器可能还缓存着旧包）用它兜底，避免突然"失忆"。
  */
 @Data
 public class AiChatRequest {
@@ -18,7 +21,16 @@ public class AiChatRequest {
     @NotBlank(message = "消息不能为空")
     private String message;
 
-    /** 历史消息（不含本次 message），按时间正序，最多保留 12 条 */
+    /**
+     * 本会话使用的模型档案 id（可空 = 跟随任务分工表）。
+     * <p>界面上在智能体面板里切换模型时带上来，实现"每个会话各自选模型"。
+     */
+    private String modelProfileId;
+
+    /** 会话 id；为空 = 开一个新会话，响应里会带回实际使用的 id */
+    private String sessionId;
+
+    /** 历史消息（兼容旧调用方；有 sessionId 时忽略） */
     private List<AiChatMessage> history = new ArrayList<>();
 
     /** 关联的笔记 id（编辑页发起时可选） */

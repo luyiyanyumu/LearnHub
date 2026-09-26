@@ -10,7 +10,13 @@ export const themeMode = ref('auto')
 
 function apply(dark) {
   isDark.value = dark
-  document.documentElement.classList.toggle('dark', dark)
+  const root = document.documentElement
+  // 切换瞬间先禁掉过渡：否则背景/描边等各处元素各自播放 0.25s 过渡，
+  // 会出现"半浅半深"的中间帧（快速连点主题按钮时尤其明显）。
+  root.classList.add('theme-switching')
+  root.classList.toggle('dark', dark)
+  // 双 rAF：等新主题真正完成一次绘制后再恢复过渡
+  requestAnimationFrame(() => requestAnimationFrame(() => root.classList.remove('theme-switching')))
 }
 
 function systemDark() {

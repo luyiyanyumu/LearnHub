@@ -32,16 +32,40 @@ public class SettingsController {
     }
 
     /** API 字段名 → 内部设置键 */
-    private static final Map<String, String> FIELD_MAPPING = Map.of(
-            "model", SettingsService.KEY_MODEL,
-            "baseUrl", SettingsService.KEY_BASE_URL,
-            "apiKey", SettingsService.KEY_API_KEY,
-            "maxTokens", SettingsService.KEY_MAX_TOKENS,
-            "temperature", SettingsService.KEY_TEMPERATURE,
-            "thinking", SettingsService.KEY_THINKING,
-            "reasoningEffort", SettingsService.KEY_REASONING_EFFORT,
-            "polishPrompt", SettingsService.KEY_POLISH_PROMPT,
-            "formatPrompt", SettingsService.KEY_FORMAT_PROMPT);
+    private static final Map<String, String> FIELD_MAPPING = Map.ofEntries(
+            Map.entry("model", SettingsService.KEY_MODEL),
+            Map.entry("baseUrl", SettingsService.KEY_BASE_URL),
+            Map.entry("apiKey", SettingsService.KEY_API_KEY),
+            Map.entry("maxTokens", SettingsService.KEY_MAX_TOKENS),
+            Map.entry("temperature", SettingsService.KEY_TEMPERATURE),
+            Map.entry("thinking", SettingsService.KEY_THINKING),
+            Map.entry("reasoningEffort", SettingsService.KEY_REASONING_EFFORT),
+            // 注意：polishPrompt / formatPrompt 已移除 —— 润色与格式的提示词改为技能文件
+            // （skills/<id>/SKILL.md），见 SkillService 与 skills/README.md。
+            // 前端若还在送这两个字段会得到 400，这是故意的：避免"改了半天没生效"。
+            Map.entry("chatPrompt", SettingsService.KEY_CHAT_PROMPT),
+            // 联网总开关（搜索端点/模型是部署级设置，走 ai.search_base_url / ai.search_model，不进面板）
+            Map.entry("webEnabled", SettingsService.KEY_WEB_ENABLED),
+            // 长文生成（主题 wiki）用的模型：留空跟随主模型；配本机 Ollama 可让这块零成本
+            Map.entry("wikiBaseUrl", SettingsService.KEY_WIKI_BASE_URL),
+            Map.entry("wikiModel", SettingsService.KEY_WIKI_MODEL),
+            Map.entry("wikiApiKey", SettingsService.KEY_WIKI_API_KEY),
+            // 检索词自动扩展（仅第一遍无命中时启用）
+            Map.entry("queryRewrite", SettingsService.KEY_QUERY_REWRITE),
+            Map.entry("autoRecompile", SettingsService.KEY_AUTO_RECOMPILE),
+            Map.entry("modelForChat", SettingsService.modelForTaskKey("chat")),
+            Map.entry("modelForWiki", SettingsService.modelForTaskKey("wiki")),
+            Map.entry("modelForEntity", SettingsService.modelForTaskKey("entity")),
+            Map.entry("modelForImpact", SettingsService.modelForTaskKey("impact")),
+            Map.entry("modelForLint", SettingsService.modelForTaskKey("lint")),
+            Map.entry("modelForGraph", SettingsService.modelForTaskKey("graph")),
+            // 这三个是后加的任务。漏登记的表现是"改这一行没反应"：
+            // 后端返回 400「不支持的设置项」，而前端当时把异常吞掉了，界面上什么都不显示。
+            // 约定：凡 ModelRouting 里登记过的任务，这里必须有对应字段名。
+            Map.entry("modelForTriple", SettingsService.modelForTaskKey("triple")),
+            Map.entry("modelForRerank", SettingsService.modelForTaskKey("rerank")),
+            Map.entry("modelForGrounding", SettingsService.modelForTaskKey("grounding")),
+            Map.entry("modelForRewrite", SettingsService.modelForTaskKey("rewrite")));
 
     @PutMapping
     public Result<Map<String, Object>> update(@RequestBody Map<String, String> body) {

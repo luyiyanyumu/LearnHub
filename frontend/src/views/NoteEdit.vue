@@ -13,6 +13,8 @@ import { focusMode } from '../composables/useViewMode'
 import { FORMAT_PRESETS, stripInline } from '../utils/richFormat'
 import { findUnsupported, previewHtmlToMd } from '../utils/htmlToMd'
 import FormatBar from '../components/FormatBar.vue'
+import { findTable, addRow, deleteRow, addCol, deleteCol, setHeaderRow, alignColumn, deleteTable } from '../utils/mdTable'
+import { ensureColgroup, findColgroup } from '../utils/tableResize'
 
 const route = useRoute()
 const router = useRouter()
@@ -26,6 +28,7 @@ const editorWrapRef = ref(null)
 const categories = ref([])
 const tags = ref([])
 const form = ref({ title: '', content: '', categoryId: undefined, tagIds: [] })
+const titleInputRef = ref(null)
 
 /**
  * 表单指纹：用来判断「有没有未保存的改动」。
@@ -45,6 +48,53 @@ const dirty = computed(() => formFingerprint() !== savedSnapshot)
 
 /** 刚创建并跳转过来的笔记 id：用来跳过随之而来的那次重复加载 */
 let justCreatedId = null
+
+/**
+ * 新建笔记的骨架模板：把《美化规范》直接摆成「可填空」的形式。
+ * 内容与 skills/markdown-beautify/REFERENCE.md 第 4 节样例保持一致，改这里要同步那份参考。
+ * 注意 FENCE 不能直接写成三个反引号 —— 模板本身是 JS 模板字符串，反引号会提前闭合。
+ */
+const FENCE = '```'
+const NEW_NOTE_TEMPLATE = `## 一、核心概念
+
+先给结论，再给依据。关键术语用 **加粗**，命令与字段名用 \`行内代码\`，风险点用 <font style="color: rgb(245, 34, 45)">红色</font> 标出。
+
+:::tip
+小技巧放这里 —— 一个提示块只讲一件事，收尾的 ::: 不能漏。
+:::
+
+### 1. 示例代码
+
+${FENCE}java
+// 代码块必须写语言名，否则不高亮
+public class Hello {
+    public static void main(String[] args) {
+        System.out.println("Hello");
+    }
+}
+${FENCE}
+
+### 2. 对比与结论
+
+| 对比项 | 方案 A | 方案 B |
+| --- | :---: | :---: |
+| 复杂度 | 低 | 高 |
+| 适用场景 | 简单流程 | 高并发 |
+
+<details>
+<summary>延伸阅读与推导过程（点击展开）</summary>
+
+展开内容按正常 Markdown 写，注意前后各留一个空行，否则不会被解析。
+
+</details>
+
+- [x] 已完成
+- [ ] 待办
+
+---
+
+<font style="font-size: 12px">注：脚注与补充说明用 12px 小字；正文不要设字号。</font>
+`
 
 // ---- 格式条（RGB 颜色 / 语雀风格内联格式）----
 /** 把选中文字包进对应标签；md-editor 的 insert() 会自动保留撤销历史 */
@@ -67,13 +117,29 @@ function applyFormat({ kind, value }) {
   if (preset) ed.insert(preset(value))
 }
 
-// ---- 预览编辑（所见即所得，改完反推回 Markdown 源码）----
+// ---- 预览区直接编辑（所见即所得，改完反推回 Markdown 源码）----
+// 取舍说明：不再有「进入 / 退出预览编辑」这个模式开关，右侧预览区常驻可编辑，
+// 由「焦点」决定工具条作用于哪一侧：
+//   · 焦点在预览区 → previewEditing = true → 工具条 / 格式刷 / 表格栏作用于预览 DOM
+//   · 焦点离开预览区 → 自动静默同步回 Markdown 源码
+// 为什么同步只放在「失焦」时：同步会写 form.content，MdPreview 随之重渲染，
+// 正在输入的光标会丢；失焦时用户已不在预览里输入，重渲染才是安全的。
 const previewEditing = ref(false)
-/** 进入编辑模式时的源码快照，用于「放弃改动」 */
-let previewSnapshot = ''
 
-/** 预览区最近一次选区：点工具条会夺走焦点，靠它恢复后再执行格式命令 */
+/** 预览区最近一次选区：点工具条会夺走焦点（工具条带 @mousedown.prevent，实际不会失焦），靠它恢复后再执行格式命令 */
 let savedPreviewRange = null
+
+/** 失焦后延迟判定用：点击取色器 / 段落菜单等浮层时焦点可能瞬时离开，
+ *  等一拍再用 document.activeElement 复核，避免把「点浮层」误判成「离开编辑」 */
+let previewBlurTimer = null
+
+/**
+ * 预览里是否有「尚未反推回源码」的改动。
+ * 不能再用 previewEditing 判断：失焦后它已经变回 false，
+ * 但改动可能因为反推失败（含不支持的内联标签）还留在预览 DOM 里 ——
+ * 那种情况必须拦住保存，否则改动会静默丢失。
+ */
+let previewUnsynced = false
 
 /** 用户在预览里选中文字时记住选区；点工具条失焦后据此恢复 */
 function onPreviewSelectionChange() {
@@ -83,6 +149,8 @@ function onPreviewSelectionChange() {
   if (el && sel && sel.rangeCount > 0 && sel.anchorNode && el.contains(sel.anchorNode)) {
     savedPreviewRange = sel.getRangeAt(0).cloneRange()
   }
+  // 表格操作栏与行列高亮跟随光标
+  updateTableState()
 }
 
 /** 预览区 DOM（限定在本页编辑容器内，避开 AI 弹窗/全局面板里的 MdPreview） */
@@ -90,29 +158,52 @@ function previewEl() {
   return editorWrapRef.value?.querySelector('.pane-preview .md-editor-preview') || null
 }
 
-function setEditable(on) {
+/**
+ * 让预览区可编辑。**只挂一次，且不再撤销**。
+ * 以前「退出编辑」会 removeAttribute('contenteditable')，普通 div 随即失去可聚焦性，
+ * 于是「点击预览就进入编辑」再也触发不了 —— 这正是改成常驻可编辑的原因。
+ * @returns {boolean} 是否已就绪（预览区 DOM 还没渲染出来时返回 false）
+ */
+function attachPreviewEditable() {
   const el = previewEl()
   if (!el) return false
-  if (on) {
-    el.setAttribute('contenteditable', 'true')
-    el.classList.add('lh-preview-editing')
-    el.addEventListener('paste', onPreviewPaste)
-    el.addEventListener('mouseover', onPreviewBlockHover)
-    el.addEventListener('beforeinput', onPreviewBeforeInput)
-    pvResetHistory()
-  } else {
-    el.removeAttribute('contenteditable')
-    el.classList.remove('lh-preview-editing')
-    el.removeEventListener('paste', onPreviewPaste)
-    el.removeEventListener('mouseover', onPreviewBlockHover)
-    el.removeEventListener('beforeinput', onPreviewBeforeInput)
-    pvUndoStack = []
-    pvRedoStack = []
-    clearTimeout(pvInputTimer)
-    pvInputTimer = null
-    hideBlockHandle()
-  }
+  // 这些属性每次都对齐（幂等）：本函数是懒触发的，而 HMR 热更新后原 DOM 可能还在、
+  // dataset 标记也还在，若直接提前 return，新加的属性就永远补不上。
+  el.setAttribute('contenteditable', 'true')
+  // 关掉浏览器拼写检查：笔记里全是 spring_factories / AutoConfiguration.imports 这类标识符，
+  // contenteditable 默认开启拼写检查，于是它们被英文词典逐条标红波浪线（中文不查，只有这些"疑似单词"被误报）。
+  // 源码区不受影响 —— CodeMirror 自己设了 spellcheck=false。
+  el.setAttribute('spellcheck', 'false')
+  el.setAttribute('autocorrect', 'off')
+  el.setAttribute('autocapitalize', 'off')
+  if (el.dataset.lhEditable === '1') return true
+  el.dataset.lhEditable = '1'
+  el.classList.add('lh-preview-editing')
+  el.addEventListener('paste', onPreviewPaste)
+  el.addEventListener('mouseover', onPreviewBlockHover)
+  el.addEventListener('beforeinput', onPreviewBeforeInput)
   return true
+}
+
+/** 阅读模式下把预览区还原成只读（正文只读，不可误改） */
+function detachPreviewEditable() {
+  const el = previewEl()
+  if (!el) return
+  delete el.dataset.lhEditable
+  el.removeAttribute('contenteditable')
+  el.removeAttribute('spellcheck')
+  el.removeAttribute('autocorrect')
+  el.removeAttribute('autocapitalize')
+  el.classList.remove('lh-preview-editing')
+  el.removeEventListener('paste', onPreviewPaste)
+  el.removeEventListener('mouseover', onPreviewBlockHover)
+  el.removeEventListener('beforeinput', onPreviewBeforeInput)
+  pvUndoStack = []
+  pvRedoStack = []
+  clearTimeout(pvInputTimer)
+  pvInputTimer = null
+  previewUnsynced = false
+  hideBlockHandle()
 }
 
 /** 预览区粘贴：统一按纯文本插入，避免把外部网页/Word 的样式噪音带进来 */
@@ -124,29 +215,50 @@ function onPreviewPaste(e) {
   document.execCommand('insertText', false, raw)
 }
 
-async function togglePreviewEdit() {
-  if (previewEditing.value) {
-    // 再点一次 = 退出，但**先同步**：以前这里是直接退出，
-    // 预览里改的内容会静默消失（旁边虽然有个「放弃改动」，但「退出」不该等于「放弃」）。
-    syncPreviewToSource(true)
-    return
-  }
-  previewSnapshot = form.value.content || ''
+/**
+ * 焦点进入预览区 = 开始编辑（自动进入，不再需要任何模式开关）。
+ * 可编辑性由 @mouseenter / @click 提前挂好，这里只负责切状态。
+ */
+function onPreviewFocusIn() {
+  if (readingMode.value || previewEditing.value) return
+  if (!attachPreviewEditable()) return
+  pvResetHistory()
   previewEditing.value = true
   savedPreviewRange = null
   document.addEventListener('selectionchange', onPreviewSelectionChange)
   document.addEventListener('mousedown', onDocMouseDown)
-  // 等 Markdown 渲染完成再把预览区设为可编辑
-  for (let i = 0; i < 40; i++) {
-    await nextTick()
-    await new Promise((r) => requestAnimationFrame(r))
-    if (setEditable(true)) {
-      document.addEventListener('keydown', onPreviewKeydown)
+  document.addEventListener('keydown', onPreviewKeydown)
+  // 把光标放进可编辑区：空正文时用户点的是「占位提示」，不这样做还得再点一次
+  previewEl()?.focus()
+}
+
+/** 焦点离开预览区 = 结束编辑，并把改动静默同步回 Markdown 源码 */
+function onPreviewFocusOut() {
+  if (!previewEditing.value) return
+  clearTimeout(previewBlurTimer)
+  previewBlurTimer = setTimeout(() => {
+    // 复核一次：焦点可能仍在编辑面内（例如刚点开取色器、段落菜单、块菜单）
+    const ae = document.activeElement
+    const el = previewEl()
+    if (el && ae && el.contains(ae)) return
+    if (ae && ae.closest && ae.closest('.ed-tools, .tb-menu, .block-menu, .color-picker')) return
+    if (document.querySelector('.tb-menu, .block-menu, .color-picker')) return
+    // 没有改动就不必反推（反推会重写 form.content，导致预览区白重渲染一次）
+    if (!previewUnsynced) {
+      exitPreviewEdit()
       return
     }
-  }
-  previewEditing.value = false
-  ElMessage.error('预览区没能就绪，请稍后重试')
+    syncPreviewToSource(true)
+  }, 160)
+}
+
+/**
+ * 点击预览区：兜住「点在不可聚焦区域」的情况（空正文占位、块之间的空白等）。
+ * 这些地方点下去不产生 focusin，不补这一下用户会以为右侧不能编辑。
+ */
+function onPreviewClick() {
+  if (readingMode.value || previewEditing.value) return
+  onPreviewFocusIn()
 }
 
 function onPreviewKeydown(e) {
@@ -175,36 +287,31 @@ function onPreviewKeydown(e) {
 }
 
 /**
- * 离开预览编辑模式（纯退出，不做同步）。
- * 只应由 syncPreviewToSource / abandonPreviewEdit 调用。
+ * 结束编辑态。**只清状态，不再撤销可编辑性** —— 预览区常驻可编辑，
+ * 否则普通 div 失去可聚焦性，「再点进去就编辑」会失效（见 attachPreviewEditable）。
  */
 function exitPreviewEdit() {
   document.removeEventListener('keydown', onPreviewKeydown)
   document.removeEventListener('selectionchange', onPreviewSelectionChange)
   document.removeEventListener('mousedown', onDocMouseDown)
   clearTimeout(hideHandleTimer)
+  clearTimeout(previewBlurTimer)
   savedPreviewRange = null
-  setEditable(false)
+  pvClearTableHl()
+  hideBlockHandle()
   previewEditing.value = false
-}
-
-/** 放弃预览里的改动：还原进入编辑模式前的源码 */
-function abandonPreviewEdit() {
-  form.value.content = previewSnapshot
-  exitPreviewEdit()
-  ElMessage.info('已放弃预览里的改动')
 }
 
 /**
  * 把预览区当前的富文本反推回 Markdown 源码。
- * @param {boolean} silent 静默「无需同步」的提示（出错仍然会提示）
- * @returns {boolean} 是否成功（失败时已给出提示，且**保持在编辑态**，不会丢改动）
+ * @param {boolean} silent 静默模式：正常路径不弹提示（出错仍然会提示）
+ * @returns {boolean} 是否成功（失败时已给出提示，且不会改动源码，也不会丢预览里的改动）
  */
 function syncPreviewToSource(silent = false) {
   const el = previewEl()
   if (!el) {
     // 这是异常状态（预览区都没了就无从反推），无论 silent 都要报出来，
-    // 否则用户点「退出」会毫无反应。
+    // 否则用户点了操作却毫无反应。
     ElMessage.error('预览区不存在，无法同步')
     return false
   }
@@ -214,14 +321,14 @@ function syncPreviewToSource(silent = false) {
     return false
   }
   const md = fixHtmlQuotes(previewHtmlToMd(el.innerHTML))
-  if (md === (form.value.content || '').trim()) {
-    exitPreviewEdit()
-    if (!silent) ElMessage.info('预览内容与源码一致，无需同步')
-    return true
-  }
-  form.value.content = md
+  const changed = md !== (form.value.content || '').trim()
+  if (changed) form.value.content = md
+  previewUnsynced = false
   exitPreviewEdit()
-  ElMessage.success('已把预览里的修改同步回 Markdown 源码，确认后点「保存」')
+  if (!silent) {
+    if (changed) ElMessage.success('已把预览里的修改同步回 Markdown 源码，确认后点「保存」')
+    else ElMessage.info('预览内容与源码一致，无需同步')
+  }
   return true
 }
 
@@ -231,6 +338,69 @@ const aiDialog = ref(false)
 const aiLabel = ref('')
 const aiResult = ref('')
 
+/**
+ * 处理进度：**真实进度**，不是假走条。
+ * 后端按 4000 字分段串行处理，每段开始前推一个 SSE 事件，这里据此显示「第 i/N 段 + 已用时间」。
+ * 单段的耗时不可预估（思考型模型单段可能 1–3 分钟），所以：
+ *   · total > 1 → 用「已完成段数」算百分比（每段开始前更新，段内不动，故不会假涨）
+ *   · total = 1 → 用不确定态（indeterminate），因为没有可推进的刻度
+ */
+const aiProgress = ref({ total: 0, index: 0, percent: 0, elapsed: 0, phase: '' })
+let aiTimer = null
+let aiAbort = null
+
+function startAiProgress() {
+  aiProgress.value = { total: 0, index: 0, percent: 0, elapsed: 0, phase: '正在连接 AI…' }
+  clearInterval(aiTimer)
+  const t0 = Date.now()
+  // 秒级计时器：长等待时「已用 42s」比一个静止的转圈更能安抚人
+  aiTimer = setInterval(() => {
+    aiProgress.value.elapsed = Math.floor((Date.now() - t0) / 1000)
+  }, 1000)
+}
+
+function stopAiProgress() {
+  clearInterval(aiTimer)
+  aiTimer = null
+}
+
+/** SSE 事件 → 进度状态 */
+function onAiProgress(event, payload) {
+  if (event !== 'progress') return
+  if (payload.stage === 'start') {
+    aiProgress.value.total = payload.total
+    aiProgress.value.phase = payload.total > 1 ? `共 ${payload.total} 段，逐段处理` : '正在处理'
+    return
+  }
+  if (payload.stage === 'chunk') {
+    const total = payload.total || aiProgress.value.total
+    aiProgress.value.total = total
+    aiProgress.value.index = payload.index
+    // 段内不推进：第 i 段开始时已完成 i-1 段
+    aiProgress.value.percent = total > 1 ? Math.round(((payload.index - 1) / total) * 100) : 0
+    aiProgress.value.phase = total > 1
+      ? `正在处理第 ${payload.index}/${total} 段`
+      : '正在处理（整篇一次完成）'
+  }
+}
+
+/** 取消处理：中断流式请求（后端任务会在当前段结束后自然收尾） */
+function cancelAiProcess() {
+  if (aiAbort) {
+    aiAbort.abort()
+    aiAbort = null
+  }
+  stopAiProgress()
+  aiBusy.value = false
+  aiDialog.value = false
+  ElMessage.info('已取消 AI 处理')
+}
+
+/** 弹窗关闭：处理中关掉等于取消，避免请求在后台白跑 */
+function onAiDialogClose() {
+  if (aiBusy.value) cancelAiProcess()
+}
+
 async function aiProcess(mode) {
   const content = form.value.content || ''
   if (!content.trim()) {
@@ -239,18 +409,29 @@ async function aiProcess(mode) {
   }
   aiBusy.value = true
   aiLabel.value = mode === 'format' ? 'AI 整理格式' : 'AI 润色'
+  aiResult.value = ''
+  // 先开弹窗：进度就显示在弹窗里，而不是让用户对着一个不动的按钮等三分钟
+  aiDialog.value = true
+  startAiProgress()
+  aiAbort = new AbortController()
   try {
-    const out = await aiApi.polish({ text: content, mode })
+    const out = await aiApi.polishStream({ text: content, mode }, onAiProgress, aiAbort.signal)
+    aiProgress.value.percent = 100
     // 原样返回 = 模型判断无可改动，明确告知而不是让人以为没生效
     if (out.trim() === content.trim()) {
+      aiDialog.value = false
       ElMessage.info('AI 检查后认为当前内容已足够规范，未做改动')
       return
     }
     aiResult.value = out
-    aiDialog.value = true
   } catch (e) {
-    /* 拦截器已提示错误 */
+    aiDialog.value = false
+    // 流式绕过了 axios 拦截器，错误提示要在这里补上（文案风格与拦截器保持一致）
+    const msg = e?.message || 'AI 处理失败'
+    if (msg !== '已取消处理') ElMessage.error(msg)
   } finally {
+    aiAbort = null
+    stopAiProgress()
     aiBusy.value = false
   }
 }
@@ -262,10 +443,9 @@ function aiApply() {
   ElMessage.success('已用 AI 结果替换正文，确认无误后点「保存」')
 }
 
-/** 唤起全局智能体抽屉（可围绕当前笔记提问） */
-function aiOpenChat() {
-  window.dispatchEvent(new CustomEvent('lh-agent-open'))
-}
+// 注：打开 AI 对话的唯一入口是右下角常驻的智能体悬浮按钮（顶栏原来的「打开 AI 对话」菜单项
+// 与之重复，已移除）。若将来需要在页面内程序化唤起它，派发下面这个 window 事件即可：
+//   window.dispatchEvent(new CustomEvent('lh-agent-open'))   // AgentPanel 监听此事件
 
 async function loadMeta() {
   categories.value = flatten(await categoryApi.tree())
@@ -290,9 +470,14 @@ async function loadNote() {
     // 「编辑 A → 新建」时组件同样会被复用：必须把表单清空，
     // 否则新建的笔记里会残留上一篇文章的正文。
     loadSeq++
-    form.value = { title: '', content: '', categoryId: undefined, tagIds: [] }
+    // 新笔记预置骨架模板：等于把《美化规范》变成可填空的表单，
+    // 顺手也就有了「新建笔记模板」这个入口（老笔记可用「更多 → 插入模板」）。
+    form.value = { title: '', content: NEW_NOTE_TEMPLATE, categoryId: undefined, tagIds: [] }
     loading.value = false
+    // 注意顺序：先铺模板再取指纹，这样刚建的空笔记不算「有未保存改动」，不会一进来就弹离开确认
     savedSnapshot = formFingerprint()
+    // 新建时自动聚焦标题，省一次手点（同时覆盖「编辑 A → 新建」的复用场景）
+    nextTick(() => titleInputRef.value?.focus())
     return
   }
   const seq = ++loadSeq
@@ -343,8 +528,8 @@ async function save() {
     ElMessage.warning('标题不能为空')
     return
   }
-  // 预览编辑模式下直接保存会丢掉预览里的改动，先自动同步回源码
-  if (previewEditing.value && !syncPreviewToSource(true)) return
+  // 预览里还有没反推回源码的改动时，直接保存会把它丢掉 —— 先自动同步（失败则中止保存）
+  if (previewUnsynced && !syncPreviewToSource(true)) return
   saving.value = true
   try {
     const payload = {
@@ -428,30 +613,56 @@ watch(editorPct, (v) => localStorage.setItem('lh-editor-pct', String(Math.round(
 const layoutMode = ref('wide') // wide | mid | tab
 let resizeObserver = null
 
+// ---- 第二行工具条：窄屏横向滚动（滚轮横向滚动 + 左右边缘渐隐提示）----
+const toolsRef = ref(null)
+const toolsScroll = reactive({ left: false, right: false })
+function updateToolsScroll() {
+  const el = toolsRef.value
+  if (!el) return
+  const max = el.scrollWidth - el.clientWidth
+  toolsScroll.left = el.scrollLeft > 1
+  toolsScroll.right = el.scrollLeft < max - 1
+}
+/** 有横向溢出时把纵向滚轮转成横向滚动，避免窄屏下工具条被悄悄截断 */
+function onToolsWheel(e) {
+  const el = toolsRef.value
+  if (!el || el.scrollWidth <= el.clientWidth) return
+  if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return
+  e.preventDefault()
+  el.scrollLeft += e.deltaY
+}
+
 function measureLayout() {
   const w = editorWrapRef.value?.clientWidth || window.innerWidth
   layoutMode.value = w >= 1280 ? 'wide' : w >= 860 ? 'mid' : 'tab'
   if (layoutMode.value !== 'wide') outlineOpen.value = false
+  updateToolsScroll()
 }
 
 /** 三栏里预览区随源码栏联动；大纲栏固定 260px（max 15%）由 flex 基准控制 */
 const editorStyle = computed(() => {
-  if (previewEditing.value || readingMode.value || layoutMode.value === 'tab') return {}
+  // 注意：这里**不再**随 previewEditing 变化 —— 右侧已常驻可编辑，
+  // 若点一下预览就改分栏比例，每次进入编辑都会重排一次，观感上像页面在抖。
+  if (readingMode.value || layoutMode.value === 'tab') return {}
   return { flex: `0 0 ${editorPct.value}%` }
 })
 
 /** 当前左栏是否显示：Tab 模式下由编辑/预览 Tab 决定 */
 const editorTab = ref('edit')
 const showEditorPane = computed(() => {
-  if (previewEditing.value || readingMode.value) return false
+  // 右侧可编辑时仍保留左侧源码栏：并排对照写作才是这个页面的主体形态
+  if (readingMode.value) return false
   if (layoutMode.value === 'tab') return editorTab.value === 'edit'
   return true
 })
 const showPreviewPane = computed(() => {
   if (readingMode.value) return true
-  if (layoutMode.value === 'tab') return editorTab.value === 'preview' || previewEditing.value
+  if (layoutMode.value === 'tab') return editorTab.value === 'preview'
   return true
 })
+
+/** 工具条是否有内容可显示：Tab 模式下切到「预览」且非预览编辑时为空，避免出现空卡片 */
+const showTools = computed(() => layoutMode.value !== 'tab' || editorTab.value === 'edit' || previewEditing.value)
 
 // ---- 拖拽调宽 ----
 let dragging = false
@@ -753,14 +964,16 @@ function toggleFocus() {
 }
 function toggleReading() {
   readingMode.value = !readingMode.value
-  if (readingMode.value) exitPreviewEdit()
+  if (readingMode.value) {
+    // 只读：退出编辑态并把预览区还原为不可编辑
+    exitPreviewEdit()
+    detachPreviewEditable()
+  } else {
+    // 退出阅读模式后恢复「点右侧即可编辑」
+    nextTick(() => attachPreviewEditable())
+  }
 }
-/** AI 助手下拉：润色/格式/对话/预览编辑 */
-function aiCommand(cmd) {
-  if (cmd === 'chat') aiOpenChat()
-  else if (cmd === '__edit') togglePreviewEdit()
-  else aiProcess(cmd)
-}
+
 /** 「更多」菜单：导出（函数命令）+ 模式切换（字符串命令） */
 function moreCommand(cmd) {
   if (typeof cmd === 'function') {
@@ -770,6 +983,13 @@ function moreCommand(cmd) {
   if (cmd === 'toggleOutline') outlineOpen.value = !outlineOpen.value
   else if (cmd === 'toggleFocus') toggleFocus()
   else if (cmd === 'toggleReading') toggleReading()
+  else if (cmd === 'insertTemplate') insertTemplate()
+}
+
+/** 在光标处插入笔记骨架模板（走 md-editor insert，保留撤销历史） */
+function insertTemplate() {
+  edInsert(() => ({ targetValue: `\n\n${NEW_NOTE_TEMPLATE}\n\n`, select: false }))
+  ElMessage.success('已插入模板，按需删改')
 }
 
 // ---- Markdown 插入（第二行工具条；走 md-editor insert 保留撤销历史）----
@@ -1027,7 +1247,11 @@ let pvInputTimer = null
 
 function pvSnapshotHtml() {
   const el = previewEl()
-  return el ? el.innerHTML : null
+  if (!el) return null
+  // 剥离表格行列高亮类，避免污染撤销快照
+  el.querySelectorAll('.lh-cell-row, .lh-cell-col')
+    .forEach((n) => n.classList.remove('lh-cell-row', 'lh-cell-col'))
+  return el.innerHTML
 }
 
 /** 即将修改预览 DOM 前调用：把当前状态压入撤销栈（并清空重做栈） */
@@ -1039,6 +1263,7 @@ function pvPushUndo() {
     if (pvUndoStack.length > PV_UNDO_MAX) pvUndoStack.shift()
   }
   pvRedoStack = []
+  previewUnsynced = true // 有改动待反推回源码
 }
 
 /** 连续键盘输入合并为一个撤销单元（800ms 防抖，只在输入前记一次） */
@@ -1073,6 +1298,7 @@ function pvResetHistory() {
   clearTimeout(pvInputTimer)
   pvInputTimer = null
   pvPushUndo() // 进入编辑时的初始快照作为撤销底线
+  previewUnsynced = false // 初始快照不算「待同步的改动」
 }
 
 /** 在预览区插入 HTML 片段（表格/图片/块级等 execCommand 覆盖不到的） */
@@ -1515,6 +1741,271 @@ const saveState = computed(() => {
   return { cls: 'dirty', text: '未保存' }
 })
 
+// ---- 表格操作（源码 Markdown 表格 + 预览编辑渲染表格，共用一套操作栏）----
+const tableInfo = ref(null)
+
+/** 预览编辑：光标所在的表格单元格（td/th），不在表格内返回 null */
+function pvActiveCell() {
+  const el = previewEl()
+  const sel = window.getSelection()
+  if (!el || !sel?.anchorNode || !el.contains(sel.anchorNode)) return null
+  const node = sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement
+  return node?.closest?.('td, th') || null
+}
+
+/** 预览编辑：清除表格行列高亮 */
+function pvClearTableHl() {
+  previewEl()?.querySelectorAll('.lh-cell-row, .lh-cell-col')
+    .forEach((n) => n.classList.remove('lh-cell-row', 'lh-cell-col'))
+}
+
+/** 预览编辑：高亮光标所在的行与列（跟随光标） */
+function pvRefreshTableHl() {
+  pvClearTableHl()
+  const cell = pvActiveCell()
+  if (!cell) return
+  const col = cell.cellIndex
+  for (const c of cell.parentElement.children) c.classList.add('lh-cell-row')
+  const table = cell.closest('table')
+  for (const r of Array.from(table.rows)) {
+    if (r.cells[col]) r.cells[col].classList.add('lh-cell-col')
+  }
+}
+
+/** 刷新表格操作栏显隐与可用性（源码 / 预览编辑两种模式） */
+function updateTableState() {
+  if (previewEditing.value) {
+    const cell = pvActiveCell()
+    if (!cell) {
+      tableInfo.value = null
+      pvClearTableHl()
+      return
+    }
+    const table = cell.closest('table')
+    tableInfo.value = {
+      mode: 'preview',
+      canDeleteRow: table.rows.length > 1,
+      canDeleteCol: (table.rows[0]?.cells.length || 0) > 1,
+      canSetHeader: false,
+      canAlign: false,
+    }
+    pvRefreshTableHl()
+    return
+  }
+  pvClearTableHl()
+  const view = editorRef.value?.getEditorView?.()
+  if (!view || !showEditorPane.value) {
+    tableInfo.value = null
+    return
+  }
+  const t = findTable(view, view.state.selection.main.head)
+  const canDel = t ? t.sepIndex === -1 || t.cursorLine > t.sepIndex : false
+  tableInfo.value = t
+    ? {
+        mode: 'source',
+        colCount: t.colCount,
+        canDeleteRow: canDel,
+        canDeleteCol: t.colCount > 1,
+        canSetHeader: canDel,
+        canAlign: t.sepIndex >= 0,
+      }
+    : null
+}
+
+const TABLE_OPS = {
+  rowAbove: (view, pos) => addRow(view, pos, 'above'),
+  rowBelow: (view, pos) => addRow(view, pos, 'below'),
+  rowDelete: (view, pos) => deleteRow(view, pos),
+  colLeft: (view, pos) => addCol(view, pos, 'left'),
+  colRight: (view, pos) => addCol(view, pos, 'right'),
+  colDelete: (view, pos) => deleteCol(view, pos),
+  setHeader: (view, pos) => setHeaderRow(view, pos),
+  alignLeft: (view, pos) => alignColumn(view, pos, 'left'),
+  alignCenter: (view, pos) => alignColumn(view, pos, 'center'),
+  alignRight: (view, pos) => alignColumn(view, pos, 'right'),
+  deleteTable: (view, pos) => deleteTable(view, pos),
+}
+
+/** 源码模式：执行表格操作（直接改 CodeMirror 文档，md-editor 内部同步回 v-model） */
+function sourceTableOp(key) {
+  const view = editorRef.value?.getEditorView?.()
+  if (!view) return
+  const fn = TABLE_OPS[key]
+  if (!fn) return
+  const edit = fn(view, view.state.selection.main.head)
+  if (!edit) return
+  view.dispatch({
+    changes: { from: edit.from, to: edit.to, insert: edit.insert },
+    selection: { anchor: edit.select },
+  })
+  view.focus()
+  updateTableState()
+}
+
+// ---- 预览编辑：表格 DOM 操作（改渲染后的 <table>，同步时由 Turndown 反推回 Markdown）----
+function pvCellTemplate(isHead) {
+  const c = document.createElement(isHead ? 'th' : 'td')
+  c.appendChild(document.createElement('br'))
+  return c
+}
+
+function pvAddRow(where) {
+  const cell = pvActiveCell()
+  if (!cell) return
+  const tr = cell.parentElement
+  const isHead = tr.parentElement.tagName === 'THEAD'
+  const colCount = tr.cells.length
+  pvClearTableHl()
+  pvPushUndo()
+  const newTr = document.createElement('tr')
+  for (let i = 0; i < colCount; i++) newTr.appendChild(pvCellTemplate(isHead))
+  tr.parentElement.insertBefore(newTr, where === 'above' ? tr : tr.nextSibling)
+}
+
+function pvDeleteRow() {
+  const cell = pvActiveCell()
+  if (!cell) return
+  const table = cell.closest('table')
+  if (table.rows.length <= 1) return
+  const tr = cell.parentElement
+  const section = tr.parentElement
+  pvClearTableHl()
+  pvPushUndo()
+  section.removeChild(tr)
+  if (!section.children.length) section.remove()
+}
+
+function pvAddCol(where) {
+  const cell = pvActiveCell()
+  if (!cell) return
+  const table = cell.closest('table')
+  const insertAt = where === 'left' ? cell.cellIndex : cell.cellIndex + 1
+  pvClearTableHl()
+  pvPushUndo()
+  for (const tr of Array.from(table.rows)) {
+    const isHead = tr.parentElement.tagName === 'THEAD'
+    tr.insertBefore(pvCellTemplate(isHead), tr.cells[insertAt] || null)
+  }
+}
+
+function pvDeleteCol() {
+  const cell = pvActiveCell()
+  if (!cell) return
+  const table = cell.closest('table')
+  if ((table.rows[0]?.cells.length || 0) <= 1) return
+  const col = cell.cellIndex
+  pvClearTableHl()
+  pvPushUndo()
+  for (const tr of Array.from(table.rows)) {
+    if (tr.cells[col]) tr.cells[col].remove()
+  }
+}
+
+function pvDeleteTable() {
+  const cell = pvActiveCell()
+  if (!cell) return
+  pvClearTableHl()
+  pvPushUndo()
+  cell.closest('table').remove()
+  hideBlockHandle()
+}
+
+function previewTableOp(key) {
+  switch (key) {
+    case 'rowAbove': pvAddRow('above'); break
+    case 'rowBelow': pvAddRow('below'); break
+    case 'rowDelete': pvDeleteRow(); break
+    case 'colLeft': pvAddCol('left'); break
+    case 'colRight': pvAddCol('right'); break
+    case 'colDelete': pvDeleteCol(); break
+    case 'deleteTable': pvDeleteTable(); break
+  }
+  updateTableState()
+}
+
+/** 表格操作入口：按当前模式分发 */
+function tableOp(key) {
+  if (previewEditing.value) previewTableOp(key)
+  else sourceTableOp(key)
+}
+
+// 切到「预览」标签 / 阅读模式时源码栏隐藏，及时收起表格操作栏
+watch(showEditorPane, () => updateTableState())
+watch(previewEditing, () => updateTableState())
+
+// ---- 预览编辑：拖动调节表格列宽 / 行高 ----
+let resizeCursor = ''
+let resizeDrag = null
+
+function setResizeCursor(c) {
+  if (resizeCursor === c) return
+  resizeCursor = c
+  if (pvScrollRef.value) pvScrollRef.value.style.cursor = c || ''
+}
+
+/** 悬停检测：贴近单元格右缘 = 调列宽，下缘 = 调行高 */
+function onTableResizeMove(e) {
+  if (resizeDrag) {
+    onTableResizeDrag(e)
+    return
+  }
+  if (!previewEditing.value) {
+    setResizeCursor('')
+    return
+  }
+  const cell = e.target?.closest?.('td, th')
+  const el = previewEl()
+  if (!cell || !el || !el.contains(cell)) {
+    setResizeCursor('')
+    return
+  }
+  const r = cell.getBoundingClientRect()
+  if (e.clientX >= r.right - 5 && e.clientX <= r.right + 2) setResizeCursor('col-resize')
+  else if (e.clientY >= r.bottom - 5 && e.clientY <= r.bottom + 2) setResizeCursor('row-resize')
+  else setResizeCursor('')
+}
+
+function onTableResizeDown(e) {
+  if (!resizeCursor || !previewEditing.value) return
+  const cell = e.target?.closest?.('td, th')
+  if (!cell) return
+  const type = resizeCursor === 'col-resize' ? 'col' : 'row'
+  const table = cell.closest('table')
+  const tr = cell.parentElement
+  e.preventDefault()
+  e.stopPropagation()
+  // 一次拖拽 = 一个撤销单元：开始前压一次快照
+  pvPushUndo()
+  resizeDrag = {
+    type, table, tr, col: cell.cellIndex,
+    startX: e.clientX, startY: e.clientY,
+    startSize: type === 'col' ? cell.getBoundingClientRect().width : tr.getBoundingClientRect().height,
+  }
+  window.addEventListener('mousemove', onTableResizeDrag)
+  window.addEventListener('mouseup', onTableResizeUp)
+  document.body.classList.add('is-col-resizing')
+}
+
+function onTableResizeDrag(e) {
+  const d = resizeDrag
+  if (!d) return
+  if (d.type === 'col') {
+    ensureColgroup(d.table)
+    const colEl = findColgroup(d.table)?.children[d.col]
+    if (colEl) colEl.style.width = Math.max(40, d.startSize + (e.clientX - d.startX)) + 'px'
+  } else {
+    d.tr.style.height = Math.max(24, d.startSize + (e.clientY - d.startY)) + 'px'
+  }
+}
+
+function onTableResizeUp() {
+  resizeDrag = null
+  window.removeEventListener('mousemove', onTableResizeDrag)
+  window.removeEventListener('mouseup', onTableResizeUp)
+  document.body.classList.remove('is-col-resizing')
+  updateTableState()
+}
+
 // ==================================================================
 
 /**
@@ -1566,6 +2057,13 @@ onMounted(async () => {
   for (let i = 0; i < 10 && !bindEditorScroll(); i++) {
     await new Promise((r) => requestAnimationFrame(r))
   }
+  // 表格操作栏：跟随光标位置（键盘/鼠标移动后刷新是否处于表格内）
+  editorWrapRef.value?.addEventListener('keyup', updateTableState)
+  editorWrapRef.value?.addEventListener('mouseup', updateTableState)
+  // 表格列宽/行高拖动调节（预览编辑模式）
+  pvScrollRef.value?.addEventListener('mousemove', onTableResizeMove)
+  pvScrollRef.value?.addEventListener('mousedown', onTableResizeDown)
+  updateTableState()
 })
 
 onBeforeUnmount(() => {
@@ -1576,8 +2074,20 @@ onBeforeUnmount(() => {
   document.removeEventListener('keydown', onPreviewKeydown)
   const ed = editorScrollEl()
   if (ed) ed.removeEventListener('scroll', onEditorScroll)
+  editorWrapRef.value?.removeEventListener('keyup', updateTableState)
+  editorWrapRef.value?.removeEventListener('mouseup', updateTableState)
+  pvScrollRef.value?.removeEventListener('mousemove', onTableResizeMove)
+  pvScrollRef.value?.removeEventListener('mousedown', onTableResizeDown)
+  window.removeEventListener('mousemove', onTableResizeDrag)
+  window.removeEventListener('mouseup', onTableResizeUp)
   clearTimeout(scrollSyncTimer)
   if (scrollRaf) cancelAnimationFrame(scrollRaf)
+  // AI 处理：清掉进度计时器并中断流式请求，避免离开页面后请求与定时器继续跑
+  stopAiProgress()
+  if (aiAbort) {
+    aiAbort.abort()
+    aiAbort = null
+  }
   focusMode.value = false // 专注模式是页面级状态，离开必须复位，否则侧栏消失
 })
 </script>
@@ -1592,7 +2102,7 @@ onBeforeUnmount(() => {
         </svg>
       </button>
 
-      <input v-model="form.title" class="title-input" placeholder="输入笔记标题…" maxlength="200" />
+      <input ref="titleInputRef" v-model="form.title" class="title-input" placeholder="输入笔记标题…" maxlength="200" />
 
       <el-select v-model="form.categoryId" placeholder="分类" clearable class="mini-select cat" size="default">
         <el-option v-for="c in categories" :key="c.id" :label="'　'.repeat(c.depth) + c.name" :value="c.id" />
@@ -1607,32 +2117,36 @@ onBeforeUnmount(() => {
         <i class="ss-dot"></i>{{ saveState.text }}
       </span>
 
-      <el-dropdown trigger="click" @command="aiCommand">
-        <button class="ai-trigger" type="button" :disabled="aiBusy">
-          <span class="ai-spark">
-            <svg viewBox="0 0 24 24"><path d="M12 3.8l1.85 4.55L18.4 10.2l-4.55 1.85L12 16.6l-1.85-4.55L5.6 10.2l4.55-1.85z" /></svg>
-          </span>{{ aiBusy ? 'AI 处理中…' : 'AI 助手' }}
-        </button>
-        <template #dropdown>
-          <el-dropdown-menu>
-            <el-dropdown-item command="polish" :disabled="aiBusy">
-              <span class="dd-ico"><svg viewBox="0 0 24 24"><path d="M12 3.8l1.85 4.55L18.4 10.2l-4.55 1.85L12 16.6l-1.85-4.55L5.6 10.2l4.55-1.85z" /><path d="M18.6 16.2l.7 1.7 1.7.7-1.7.7-.7 1.7-.7-1.7-1.7-.7 1.7-.7z" /></svg></span>AI 润色
-            </el-dropdown-item>
-            <el-dropdown-item command="format" :disabled="aiBusy">
-              <span class="dd-ico"><svg viewBox="0 0 24 24"><path d="M5 19.5 14.6 9.9M13.2 8.5l3 3" /><path d="M18.4 3.4l.62 1.58 1.58.62-1.58.62-.62 1.58-.62-1.58-1.58-.62 1.58-.62z" /></svg></span>整理格式
-            </el-dropdown-item>
-            <el-dropdown-item command="chat" divided>
-              <span class="dd-ico"><svg viewBox="0 0 24 24"><path d="M5 5.5h14a1 1 0 0 1 1 1v8.5a1 1 0 0 1-1 1h-7l-3.5 3v-3H5a1 1 0 0 1-1-1V6.5a1 1 0 0 1 1-1Z" /></svg></span>打开 AI 对话
-            </el-dropdown-item>
-            <el-dropdown-item command="__edit" divided>
-              <span class="dd-ico">
-                <svg v-if="previewEditing" viewBox="0 0 24 24"><path d="M5 12.5 10 17.5 19 7" /></svg>
-                <svg v-else viewBox="0 0 24 24"><path d="M4 20h4L18.5 9.5l-4-4L4 16v4Z" /><path d="M13.5 6.5l4 4" /></svg>
-              </span>{{ previewEditing ? '退出预览编辑' : '预览编辑（所见即所得）' }}
-            </el-dropdown-item>
-          </el-dropdown-menu>
-        </template>
-      </el-dropdown>
+      <!-- AI 动作直接放顶栏：原来是「点开 AI 助手 → 再选一项」，两步。
+           「打开 AI 对话」已移除 —— 右下角本来就有常驻的智能体悬浮入口，属于重复入口。
+           默认无边框保持安静，hover 才浮出底色；实心主操作只留给右侧「保存」。 -->
+      <button
+        class="ai-act"
+        type="button"
+        :disabled="aiBusy"
+        title="AI 润色：修正错别字、语病、术语大小写与标点（长文自动分段，弹窗内显示进度）"
+        @click="aiProcess('polish')"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 3.8l1.85 4.55L18.4 10.2l-4.55 1.85L12 16.6l-1.85-4.55L5.6 10.2l4.55-1.85z" />
+          <path d="M18.6 16.2l.7 1.7 1.7.7-1.7.7-.7 1.7-.7-1.7-1.7-.7 1.7-.7z" />
+        </svg>
+        <span>润色</span>
+      </button>
+
+      <button
+        class="ai-act"
+        type="button"
+        :disabled="aiBusy"
+        title="整理格式：规范标题层级、列表、表格与代码块语言标注（长文自动分段，弹窗内显示进度）"
+        @click="aiProcess('format')"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 19.5 14.6 9.9M13.2 8.5l3 3" />
+          <path d="M18.4 3.4l.62 1.58 1.58.62-1.58.62-.62 1.58-.62-1.58-1.58-.62 1.58-.62z" />
+        </svg>
+        <span>整理格式</span>
+      </button>
 
       <el-dropdown trigger="click" @command="moreCommand">
         <button class="icon-btn" type="button" title="更多">
@@ -1647,6 +2161,9 @@ onBeforeUnmount(() => {
             </el-dropdown-item>
             <el-dropdown-item v-if="!isNew" command="() => exportNote('html')">
               <span class="dd-ico"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Z" /><path d="M3.4 12h17.2M12 3c2.35 2.55 3.55 5.55 3.55 9S14.35 18.45 12 21c-2.35-2.55-3.55-5.55-3.55-9S9.65 5.55 12 3Z" /></svg></span>导出网页 HTML
+            </el-dropdown-item>
+            <el-dropdown-item command="insertTemplate" divided>
+              <span class="dd-ico"><svg viewBox="0 0 24 24"><path d="M5 4.5h9l5 5v10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-14a1 1 0 0 1 1-1Z" /><path d="M14 4.5v5h5M8 14h8M8 17h5" /></svg></span>插入 Markdown 模板
             </el-dropdown-item>
             <el-dropdown-item command="toggleOutline" divided>
               <span class="dd-ico"><svg viewBox="0 0 24 24"><path d="M5 6h14M5 12h9M5 18h12" /></svg></span>{{ outlineOpen ? '收起大纲' : '展开大纲' }}
@@ -1678,9 +2195,17 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
-    <!-- ======== 顶部第二行：语雀式工具条（阅读模式隐藏；预览编辑时保留，作用于预览区） ======== -->
-    <div class="ed-tools" v-if="!readingMode" @mousedown.prevent>
-      <template v-if="layoutMode !== 'tab' || editorTab === 'edit' || previewEditing">
+    <!-- ======== 顶部第二行：语雀式工具条（阅读模式隐藏；作用于当前有焦点的编辑区：源码栏或右侧预览） ======== -->
+    <div
+      ref="toolsRef"
+      class="ed-tools"
+      :class="{ 'has-left': toolsScroll.left, 'has-right': toolsScroll.right }"
+      v-if="!readingMode && showTools"
+      @mousedown.prevent
+      @scroll="updateToolsScroll"
+      @wheel="onToolsWheel"
+    >
+      <template v-if="showTools">
         <!-- 撤销/重做/格式刷（语雀最左组） -->
         <button class="tb" type="button" title="撤销 (Ctrl+Z)" @click="mdTool('undo')">
           <svg viewBox="0 0 24 24"><path d="M8.5 5.5 4.5 9.5l4 4M4.5 9.5h9a5.5 5.5 0 0 1 0 11h-2" /></svg>
@@ -1768,23 +2293,58 @@ onBeforeUnmount(() => {
       </template>
     </div>
 
+    <!-- 表格操作栏：光标位于表格内时出现（源码模式 & 预览编辑模式共用） -->
+    <div v-if="tableInfo" class="table-bar">
+      <span class="tbl-label">
+        <svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2" /><path d="M4 10h16M4 15h16M10 5v14M15 5v14" /></svg>
+        表格
+      </span>
+      <button class="tbl-btn" type="button" @click="tableOp('rowAbove')">
+        <svg viewBox="0 0 24 24"><path d="M4 17.5h16" /><path d="M12 17.5V6.5M8 10.5l4-4 4 4" /></svg>上方加行
+      </button>
+      <button class="tbl-btn" type="button" @click="tableOp('rowBelow')">
+        <svg viewBox="0 0 24 24"><path d="M4 6.5h16" /><path d="M12 6.5v11M8 13.5l4 4 4-4" /></svg>下方加行
+      </button>
+      <button class="tbl-btn" type="button" :disabled="!tableInfo.canDeleteRow" @click="tableOp('rowDelete')">
+        <svg viewBox="0 0 24 24"><path d="M4 12h16" /><path d="M8.5 8.5l7 7M15.5 8.5l-7 7" /></svg>删行
+      </button>
+      <i class="tbl-sep"></i>
+      <button class="tbl-btn" type="button" @click="tableOp('colLeft')">
+        <svg viewBox="0 0 24 24"><path d="M17.5 4v16" /><path d="M17.5 12H6.5M10 8.5 6.5 12l3.5 3.5" /></svg>左加列
+      </button>
+      <button class="tbl-btn" type="button" @click="tableOp('colRight')">
+        <svg viewBox="0 0 24 24"><path d="M6.5 4v16" /><path d="M6.5 12h11M13.5 8.5l3.5 3.5-3.5 3.5" /></svg>右加列
+      </button>
+      <button class="tbl-btn" type="button" :disabled="!tableInfo.canDeleteCol" @click="tableOp('colDelete')">
+        <svg viewBox="0 0 24 24"><path d="M12 4v16" /><path d="M8.5 9l7 6M15.5 9l-7 6" /></svg>删列
+      </button>
+
+      <template v-if="tableInfo.mode === 'source'">
+        <i class="tbl-sep"></i>
+        <button class="tbl-btn" type="button" :disabled="!tableInfo.canSetHeader" @click="tableOp('setHeader')">
+          <svg viewBox="0 0 24 24"><path d="M6 4v16M18 4v16M6 12h12" /></svg>设为表头
+        </button>
+        <button class="tbl-btn tbl-icon" type="button" :disabled="!tableInfo.canAlign" title="左对齐" @click="tableOp('alignLeft')">
+          <svg viewBox="0 0 24 24"><path d="M4.5 6h15M4.5 12h9M4.5 18h13" /></svg>
+        </button>
+        <button class="tbl-btn tbl-icon" type="button" :disabled="!tableInfo.canAlign" title="居中" @click="tableOp('alignCenter')">
+          <svg viewBox="0 0 24 24"><path d="M4.5 6h15M7.5 12h9M5.5 18h13" /></svg>
+        </button>
+        <button class="tbl-btn tbl-icon" type="button" :disabled="!tableInfo.canAlign" title="右对齐" @click="tableOp('alignRight')">
+          <svg viewBox="0 0 24 24"><path d="M4.5 6h15M10.5 12h9M9.5 18h11" /></svg>
+        </button>
+      </template>
+
+      <i class="tbl-sep"></i>
+      <button class="tbl-btn tbl-danger" type="button" @click="tableOp('deleteTable')">
+        <svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M8.5 7l.6 12h5.8l.6-12M10 11v4M14 11v4" /></svg>删除表格
+      </button>
+    </div>
+
     <!-- Tab 模式（窄屏）：编辑 / 预览 切换 -->
     <div class="ed-tabs" v-if="layoutMode === 'tab' && !readingMode && !previewEditing">
       <button :class="{ on: editorTab === 'edit' }" @click="editorTab = 'edit'">编辑</button>
       <button :class="{ on: editorTab === 'preview' }" @click="editorTab = 'preview'">预览</button>
-    </div>
-
-    <!-- 预览编辑模式操作条 -->
-    <div v-if="previewEditing" class="preview-edit-bar">
-      <span class="pe-tip">
-        <span class="btn-ico"><svg viewBox="0 0 24 24"><path d="M4 20h4L18.5 9.5l-4-4L4 16v4Z" /><path d="M13.5 6.5l4 4" /></svg></span>预览编辑中：直接改右侧内容，上方工具条可加粗/标题/颜色等格式（Ctrl/⌘+S 同步并退出；Esc 也是「先同步再退出」）
-      </span>
-      <el-button size="small" @click="abandonPreviewEdit">
-        <span class="btn-ico"><svg viewBox="0 0 24 24"><path d="M4.5 9.5h9a5 5 0 0 1 0 10H8M4.5 9.5 8 6M4.5 9.5 8 13" /></svg></span>放弃改动
-      </el-button>
-      <el-button size="small" type="primary" @click="syncPreviewToSource()">
-        <span class="btn-ico"><svg viewBox="0 0 24 24"><path d="M5 12.5 10 17.5 19 7" /></svg></span>同步到源码
-      </el-button>
     </div>
 
     <!-- ======== 三栏主体 ======== -->
@@ -1816,10 +2376,26 @@ onBeforeUnmount(() => {
         @mousedown="startDrag"
       ><i></i></div>
 
-      <!-- 预览栏 -->
-      <section v-show="showPreviewPane" class="pane pane-preview">
+      <!-- 预览栏：常驻可编辑（鼠标移入即挂上可编辑，点击进入编辑，失焦自动同步回源码） -->
+      <section
+        v-show="showPreviewPane"
+        class="pane pane-preview"
+        @mouseenter="attachPreviewEditable"
+        @focusin="onPreviewFocusIn"
+        @focusout="onPreviewFocusOut"
+        @click="onPreviewClick"
+      >
         <div ref="pvScrollRef" class="pv-scroll" @scroll="onPreviewScroll">
           <div class="pv-inner">
+            <!-- 空正文时的引导占位（点右侧任意处即可开始编辑，占位随即让位） -->
+            <div v-if="!previewEditing && !(form.content || '').trim()" class="pv-empty">
+              <svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M7 3.5h7a3 3 0 0 1 3 3V20.5H7a3 3 0 0 1-3-3v-11a3 3 0 0 1 3-3Z" />
+                <path d="M10 9h4M10 12h4M10 15h2" />
+              </svg>
+              <div class="pv-empty-t">在这里直接写</div>
+              <div class="pv-empty-s">右侧所见即所得：选中文字后用上方工具条加粗 / 改色 / 设字号，写完点别处即自动同步回 Markdown</div>
+            </div>
             <MdPreview
               :modelValue="form.content"
               :theme="isDark ? 'dark' : 'light'"
@@ -1922,14 +2498,41 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
-    <!-- AI 处理结果预览：确认后再替换正文 -->
-    <el-dialog v-model="aiDialog" :title="`${aiLabel}结果预览`" width="760px" top="6vh" destroy-on-close>
-      <div class="ai-preview">
+    <!-- AI 处理：处理中显示真实分段进度，完成后转为结果预览 -->
+    <el-dialog
+      v-model="aiDialog"
+      :title="aiBusy ? `${aiLabel}进行中` : `${aiLabel}结果预览`"
+      width="760px"
+      top="6vh"
+      destroy-on-close
+      append-to-body
+      @close="onAiDialogClose"
+    >
+      <div v-if="aiBusy" class="ai-progress">
+        <el-progress
+          :percentage="aiProgress.total > 1 ? aiProgress.percent : 100"
+          :indeterminate="aiProgress.total <= 1"
+          :stroke-width="6"
+          :show-text="false"
+        />
+        <div class="ai-progress-row">
+          <span class="ai-progress-phase">{{ aiProgress.phase }}</span>
+          <span class="ai-progress-time">已用 {{ aiProgress.elapsed }}s</span>
+        </div>
+        <p class="ai-progress-tip">
+          长文按 4000 字分段逐段处理，思考型模型单段可能耗时 1–3 分钟；进度按「已完成段数」推进，段内不动属正常。
+          可继续等待，或点「取消处理」中止。
+        </p>
+      </div>
+      <div v-else class="ai-preview">
         <MdPreview :modelValue="fixHtmlQuotes(aiResult) || '*空内容*'" :theme="isDark ? 'dark' : 'light'" previewTheme="github" />
       </div>
       <template #footer>
-        <el-button @click="aiDialog = false">取消</el-button>
-        <el-button type="primary" @click="aiApply">替换正文</el-button>
+        <el-button v-if="aiBusy" @click="cancelAiProcess">取消处理</el-button>
+        <template v-else>
+          <el-button @click="aiDialog = false">取消</el-button>
+          <el-button type="primary" @click="aiApply">替换正文</el-button>
+        </template>
       </template>
     </el-dialog>
   </div>
@@ -2011,6 +2614,11 @@ onBeforeUnmount(() => {
   border-color: var(--app-brand);
   background: var(--app-card);
 }
+/* P4：基础规则里的 outline:none 会抹掉键盘焦点环，这里为键盘导航补回 */
+.title-input:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--app-brand) 55%, transparent);
+  outline-offset: 2px;
+}
 
 .mini-select {
   width: 118px;
@@ -2063,34 +2671,46 @@ onBeforeUnmount(() => {
   50% { opacity: 0.35; }
 }
 
-/* AI 助手触发钮：文字钮 + 微品牌感 */
-.ai-trigger {
+/* 顶栏 AI 动作按钮（润色 / 整理格式）：默认安静 —— 无边框、无底色，hover 才浮出。
+   实心主操作只留给右侧「保存」：两个都抢眼的话，主次就没了。 */
+.ai-act {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  height: 32px;
-  padding: 0 12px;
+  gap: 5px;
+  height: 30px;
+  padding: 0 9px;
+  flex-shrink: 0;
   font-size: 13px;
   font-family: inherit;
-  color: var(--app-text-1);
-  background: var(--app-card);
-  border: 1px solid var(--app-border);
+  color: var(--app-text-2);
+  background: transparent;
+  border: 1px solid transparent;
   border-radius: 8px;
   cursor: pointer;
-  transition: border-color var(--dur-fast) ease, color var(--dur-fast) ease, box-shadow var(--dur-fast) ease;
   white-space: nowrap;
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease;
 }
-.ai-trigger:hover {
-  border-color: color-mix(in srgb, var(--app-brand) 45%, var(--app-border));
-  color: var(--app-brand-deep);
-  box-shadow: var(--shadow-sm);
+.ai-act:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--app-text-1) 6%, transparent);
+  color: var(--app-text-1);
 }
-.ai-trigger:disabled {
-  opacity: 0.6;
+.ai-act:active:not(:disabled) {
+  background: color-mix(in srgb, var(--app-text-1) 10%, transparent);
+}
+.ai-act:disabled {
+  opacity: 0.55;
   cursor: default;
 }
-.ai-spark {
-  font-size: 12px;
+/* 与顶栏其它图标同规格：15px 线性描边（返回、更多都是这一套） */
+.ai-act svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .save-btn {
@@ -2099,17 +2719,51 @@ onBeforeUnmount(() => {
   border-radius: 8px;
 }
 
-/* ================= 第二行工具条 ================= */
+/* ================= 第二行工具条 =================
+   卡片式工具栏：与「预览编辑操作条」同一视觉语言（卡片底 + 细描边 + 圆角），
+   让这一排按钮从「贴边的图标」变成一块有触感的控制面板。 */
 .ed-tools {
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 2px 2px 6px;
+  padding: 5px 6px;
+  margin-bottom: 8px;
   overflow-x: auto;
   scrollbar-width: none;
+  position: relative;
+  background: var(--app-card);
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
 }
 .ed-tools::-webkit-scrollbar {
   display: none;
+}
+/* 窄屏溢出时左右边缘渐隐，提示「还有更多工具可横向滚动」 */
+.ed-tools::before,
+.ed-tools::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 26px;
+  pointer-events: none;
+  z-index: 2;
+  opacity: 0;
+  transition: opacity var(--dur-fast) ease;
+}
+.ed-tools::before {
+  left: 0;
+  background: linear-gradient(90deg, var(--app-card), transparent);
+}
+.ed-tools::after {
+  right: 0;
+  background: linear-gradient(-90deg, var(--app-card), transparent);
+}
+.ed-tools.has-left::before {
+  opacity: 1;
+}
+.ed-tools.has-right::after {
+  opacity: 1;
 }
 .tb {
   min-width: 28px;
@@ -2127,7 +2781,7 @@ onBeforeUnmount(() => {
   border-radius: 6px;
   cursor: pointer;
   white-space: nowrap;
-  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease;
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, transform var(--dur-fast) ease;
 }
 .tb svg {
   width: 16px;
@@ -2155,11 +2809,12 @@ onBeforeUnmount(() => {
   text-decoration-thickness: 1.2px;
 }
 .tb:hover {
-  background: color-mix(in srgb, var(--app-text-1) 7%, transparent);
+  background: color-mix(in srgb, var(--app-text-1) 8%, transparent);
   color: var(--app-text-1);
 }
 .tb:active {
-  background: color-mix(in srgb, var(--app-text-1) 11%, transparent);
+  background: color-mix(in srgb, var(--app-text-1) 13%, transparent);
+  transform: scale(0.93);
 }
 .tb-h {
   font-size: 12px;
@@ -2170,9 +2825,9 @@ onBeforeUnmount(() => {
 }
 .tb-sep {
   width: 1px;
-  height: 16px;
-  background: var(--app-border);
-  margin: 0 5px;
+  height: 18px;
+  background: var(--app-border-weak);
+  margin: 0 7px;
   flex-shrink: 0;
 }
 .ed-format {
@@ -2197,8 +2852,11 @@ onBeforeUnmount(() => {
   opacity: 0.65;
 }
 .tb.on {
-  background: color-mix(in srgb, var(--app-text-1) 7%, transparent);
-  color: var(--app-text-1);
+  background: var(--app-brand-soft);
+  color: var(--app-brand-deep);
+}
+html.dark .tb.on {
+  color: var(--app-brand);
 }
 .tb-menu {
   position: fixed; /* .ed-tools 有 overflow-x:auto，absolute 会被裁；fixed 按视口坐标定位 */
@@ -2209,6 +2867,18 @@ onBeforeUnmount(() => {
   border-radius: 10px;
   box-shadow: var(--shadow-md);
   z-index: 2000;
+  animation: toolMenuIn var(--dur-fast) var(--ease) both;
+  transform-origin: top left;
+}
+@keyframes toolMenuIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 .tb-menu-item {
   display: flex;
@@ -2224,10 +2894,14 @@ onBeforeUnmount(() => {
   cursor: pointer;
   text-align: left;
   white-space: nowrap;
-  transition: background var(--dur-fast) var(--ease);
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 }
 .tb-menu-item:hover {
   background: var(--app-brand-soft);
+  color: var(--app-brand-deep);
+}
+.tb-menu-item:hover svg {
+  stroke: var(--app-brand-deep);
 }
 .tb-menu-item svg {
   width: 15px;
@@ -2240,15 +2914,122 @@ onBeforeUnmount(() => {
   stroke-linejoin: round;
 }
 .tbm-key {
-  width: 18px;
+  width: 20px;
+  height: 18px;
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   font-size: 11px;
   font-weight: 700;
   color: var(--app-text-3);
   letter-spacing: -0.2px;
+  background: var(--app-bg);
+  border-radius: 5px;
 }
 .tbm-key.txt {
   font-size: 13px;
+}
+
+
+/* ---- 表格操作栏（光标在表格内出现）---- */
+.table-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 8px;
+  margin-bottom: 8px;
+  background: var(--app-card);
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+}
+.tbl-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--app-text-3);
+  margin-right: 4px;
+}
+.tbl-label svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.tbl-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 8px;
+  font-size: 12px;
+  color: var(--app-text-2);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease;
+}
+.tbl-btn:hover {
+  background: color-mix(in srgb, var(--app-text-1) 7%, transparent);
+  color: var(--app-text-1);
+}
+.tbl-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.tbl-btn svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.tbl-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--app-border-weak);
+  margin: 0 4px;
+  flex-shrink: 0;
+}
+.tbl-btn.tbl-icon {
+  padding: 0 6px;
+}
+.tbl-danger {
+  color: #c0392b;
+}
+.tbl-danger:hover {
+  background: rgba(192, 57, 43, 0.08);
+  color: #c0392b;
+}
+html.dark .tbl-danger {
+  color: #e07b70;
+}
+html.dark .tbl-danger:hover {
+  background: rgba(224, 123, 112, 0.12);
+}
+
+/* 预览编辑：表格当前行/列高亮（交点更深一档） */
+.pane-preview :deep(td.lh-cell-row),
+.pane-preview :deep(th.lh-cell-row) {
+  background: color-mix(in srgb, var(--app-brand) 6%, transparent);
+}
+.pane-preview :deep(td.lh-cell-col),
+.pane-preview :deep(th.lh-cell-col) {
+  background: color-mix(in srgb, var(--app-brand) 6%, transparent);
+}
+.pane-preview :deep(td.lh-cell-row.lh-cell-col),
+.pane-preview :deep(th.lh-cell-row.lh-cell-col) {
+  background: color-mix(in srgb, var(--app-brand) 13%, transparent);
 }
 
 
@@ -2321,7 +3102,7 @@ html.dark .pane-editor :deep(.md-editor) {
 
 /* 拖拽分隔条：hover / 拖动中显形 */
 .gutter {
-  flex: 0 0 5px;
+  flex: 0 0 9px;
   cursor: col-resize;
   display: flex;
   align-items: center;
@@ -2357,17 +3138,40 @@ html.dark .pane-editor :deep(.md-editor) {
   overflow-y: auto;
   scroll-behavior: auto;
 }
-/* 正文阅读宽度：居中 790px，长文阅读的黄金区 */
+/* 正文宽度：铺满预览栏。
+   原来是居中 790px 的「阅读黄金区」，但右侧现在常驻可编辑，编辑时两侧大片留白很别扭，
+   而聚焦/失焦来回切换限宽又会让正文左右跳动 —— 所以干脆统一铺满，不再区分阅读/编辑。 */
 .pv-inner {
-  max-width: 790px;
-  margin: 0 auto;
-  padding: 26px 34px 48px;
-}
-/* 预览编辑：编辑优先，放开阅读限宽占满预览栏，大屏不再两侧大片留白 */
-.editor-wrap.is-preview-editing .pv-inner {
   max-width: 100%;
-  padding: 28px 34px 56px;
+  margin: 0 auto;
+  padding: 24px 26px 48px;
 }
+
+/* 空正文引导占位：弱化居中，与大纲空态同一视觉语言 */
+.pv-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  color: var(--app-text-3);
+  padding: 88px 20px 20px;
+}
+.pv-empty svg {
+  opacity: 0.45;
+}
+.pv-empty-t {
+  margin-top: 14px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--app-text-2);
+}
+.pv-empty-s {
+  margin-top: 6px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  max-width: 320px;
+}
+/* 预览编辑：限宽已统一放开（见 .pv-inner），这里不再单独覆盖，避免聚焦时宽度跳变 */
 
 /* ---- 预览编辑：块操作手柄（语雀式 ⋮⋮） ---- */
 /* 手柄/菜单用 .pv-scroll 内容坐标绝对定位（relative 后随滚动自然跟随，无需监听重算） */
@@ -2531,6 +3335,10 @@ html.dark .pane-editor :deep(.md-editor) {
 .pane-preview :deep(.md-editor-preview.md-editor-preview) {
   background: transparent;
   line-height: 1.75;
+  /* 库自带 .md-editor-preview { padding-inline: 20px; padding-block: 10px }，
+     外层的 .md-editor-preview-wrapper / .md-editor-content 则没有内边距。
+     这里归零，左右 gutter 统一由 .pv-inner 控制 —— 否则 26px + 20px 叠成 46px，就不是「铺满」了。 */
+  padding: 0;
 }
 /* 章节纵向间距加大：H2 是「换章」的呼吸点 */
 .pane-preview :deep(.md-editor-preview.md-editor-preview h1) {
@@ -2546,25 +3354,16 @@ html.dark .pane-editor :deep(.md-editor) {
   margin-top: 0;
 }
 
-/* 预览区可编辑：中性「编辑画布」——无品牌色，靠留白与圆角区分；
-   内边距让内容与边框有呼吸（padding 是纯视觉，不影响 innerHTML 反推）。
-   注意 .md-editor-preview.md-editor-preview 已声明 background:transparent（更高特异性），
-   故这里双写 .lh-preview-editing 类名压回去。 */
+/* 预览区可编辑：**去掉「内嵌画布」**——原先这里有一圈描边 + 浅底 + 圆角 + 内边距，
+   视觉上像是预览栏里又嵌了一张卡片，边框还很扎眼。现在右侧就是一个平铺的编辑面。
+   注意两点：
+   1) 不要再给它加 :focus-visible 焦点环 —— contenteditable 即使由鼠标点击获得焦点
+      也会匹配 :focus-visible（浏览器把它当作支持键盘输入的元素），加了就会常驻一圈亮色描边。
+      位置提示交给光标本身就够了。
+   2) 底色靠 .pane-preview 的 --app-card，这里保持透明（基础规则已声明 transparent）。 */
 .pane-preview :deep(.md-editor-preview.lh-preview-editing.lh-preview-editing) {
   outline: none;
-  border: 1px solid var(--app-border);
-  background: color-mix(in srgb, var(--app-text-1) 2.5%, var(--app-card));
-  border-radius: 12px;
-  padding: 24px 30px 32px;
   cursor: text;
-  transition: border-color var(--dur-fast) ease, box-shadow var(--dur-fast) ease;
-}
-.pane-preview :deep(.md-editor-preview.lh-preview-editing.lh-preview-editing:hover) {
-  border-color: color-mix(in srgb, var(--app-text-1) 24%, var(--app-border));
-}
-.pane-preview :deep(.md-editor-preview.lh-preview-editing.lh-preview-editing:focus) {
-  border-color: color-mix(in srgb, var(--app-text-1) 42%, var(--app-border));
-  box-shadow: var(--shadow-sm);
 }
 
 /* ================= 大纲栏 ================= */
@@ -2659,24 +3458,7 @@ html.dark .ol-item.active {
   position: relative;
 }
 
-/* ================= 预览编辑操作条 / 阅读模式 ================= */
-.preview-edit-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  padding: 6px 12px;
-  background: var(--app-card);
-  border: 1px solid var(--app-border);
-  border-radius: 8px;
-  margin-bottom: 8px;
-}
-.pe-tip {
-  flex: 1 1 260px;
-  font-size: 12.5px;
-  color: var(--app-text-2);
-}
-
+/* ================= 阅读模式 ================= */
 .read-top {
   display: flex;
   align-items: center;
@@ -2725,5 +3507,37 @@ html.dark .ol-item.active {
 }
 .ai-preview :deep(.md-editor-preview) {
   background: transparent;
+}
+
+/* ---- AI 处理进度（分段串行，按已完成段数推进）---- */
+.ai-progress {
+  padding: 8px 2px 4px;
+}
+
+.ai-progress-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.ai-progress-phase {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--app-text-1);
+}
+
+.ai-progress-time {
+  font-size: 12px;
+  color: var(--app-text-2);
+  font-variant-numeric: tabular-nums; /* 秒数跳动时宽度不抖 */
+}
+
+.ai-progress-tip {
+  margin: 12px 0 0;
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--app-text-2);
 }
 </style>

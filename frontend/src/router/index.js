@@ -13,6 +13,8 @@ const routes = [
       { path: 'refs', name: 'refs', component: () => import('../views/QuickRefs.vue'), meta: { title: '速查卡' } },
       { path: 'files', name: 'files', component: () => import('../views/FileLibrary.vue'), meta: { title: '资料库' } },
       { path: 'knowledge', name: 'knowledge', component: () => import('../views/Knowledge.vue'), meta: { title: '知识库' } },
+    { path: 'agent', name: 'agent', component: () => import('../views/AgentSessions.vue'), meta: { title: '智能体' } },
+    { path: 'code', name: 'code', component: () => import('../views/CodeLibrary.vue'), meta: { title: '代码库' } },
     ],
   },
 ]

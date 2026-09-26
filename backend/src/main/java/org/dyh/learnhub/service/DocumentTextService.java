@@ -262,16 +262,70 @@ public class DocumentTextService {
         }
     }
 
-    /** 归一化：CRLF → LF、去掉零宽字符、压掉三连以上空行、去掉行尾空白 */
+    /** 归一化：CRLF → LF、去掉零宽字符、压掉三连以上空行、去掉行尾空白，并修掉双重编码乱码 */
     static String tidy(String s) {
         if (s == null) {
             return "";
         }
-        return s.replace("\r\n", "\n").replace('\r', '\n')
+        return repairMojibake(s.replace("\r\n", "\n").replace('\r', '\n')
                 .replace("\uFEFF", "").replace("\u0000", "")
                 .replaceAll("(?m)[ \t]+$", "")
                 .replaceAll("\n{3,}", "\n\n")
-                .trim();
+                .trim());
+    }
+
+    /**
+     * 修掉"UTF-8 字节被当成 Latin-1 读进来"的乱码。
+     *
+     * <p>PDF 里 ToUnicode 映射不全的字体（论文中的 – ’ ∗ 这类符号最常见）会被 PDFBox 映射成
+     * U+0080~U+00FF 的**原始字节值**，于是正文里出现 "â€“" 这种双重编码 —— 界面上看是乱码，
+     * 检索时也永远匹配不上。做法是把连续的 0x80~0xFF 片段当成字节重新按 UTF-8 解一次：
+     * 解得开就替换，解不开（真正的 Latin-1 文本，如 "café"）原样保留。
+     */
+    public static String repairMojibake(String s) {
+        if (s == null || s.isEmpty()) {
+            return s;
+        }
+        StringBuilder out = new StringBuilder(s.length());
+        int i = 0;
+        while (i < s.length()) {
+            char c = s.charAt(i);
+            if (c < 0x80 || c > 0xFF) {
+                out.append(c);
+                i++;
+                continue;
+            }
+            int j = i;
+            while (j < s.length() && s.charAt(j) >= 0x80 && s.charAt(j) <= 0xFF) {
+                j++;
+            }
+            String run = s.substring(i, j);
+            String fixed = decodeLatin1AsUtf8(run);
+            out.append(fixed != null ? fixed : run);
+            i = j;
+        }
+        return out.toString();
+    }
+
+    /** 把一段 U+0080~U+00FF 当作原始字节按 UTF-8 解；解不出或有控制字符就返回 null（保持原样） */
+    private static String decodeLatin1AsUtf8(String run) {
+        if (run.length() < 2) {
+            return null;
+        }
+        byte[] bytes = new byte[run.length()];
+        for (int i = 0; i < run.length(); i++) {
+            bytes[i] = (byte) run.charAt(i);
+        }
+        String decoded = decodeStrict(bytes, StandardCharsets.UTF_8);
+        if (decoded == null) {
+            return null;
+        }
+        for (char c : decoded.toCharArray()) {
+            if (c < 0x20 || (c >= 0x7F && c <= 0xA0)) {
+                return null;   // 解出来是控制字符：说明这本来就不是 UTF-8 字节序列
+            }
+        }
+        return decoded;
     }
 
     private static String brief(String s) {

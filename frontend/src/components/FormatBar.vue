@@ -38,14 +38,19 @@ function pickBg(c) {
     <el-popover v-model:visible="textPop" placement="bottom-start" :width="290" trigger="click">
       <template #reference>
         <button class="fb-btn" type="button" title="文字颜色（支持 RGB 自定义）">
-          <span class="fb-a" :style="{ color: lastTextColor }">A</span>
-          <i class="fb-caret" :style="{ background: lastTextColor }" />
+          <!-- 图标保持中性色，当前色只由下方色条表达：
+               原来 A 本身也染成当前色，同一个颜色表达两遍 = 双份饱和色；
+               而且选白色时 A 会在浅色工具栏上直接消失 -->
+          <span class="fb-color">
+            <span class="fb-a">A</span>
+            <i class="fb-caret" :style="{ background: lastTextColor }" />
+          </span>
         </button>
       </template>
       <ColorPicker
         :palette="TEXT_COLORS"
         :initial="lastTextColor"
-        title="文字颜色 · 点色块即应用，或调 RGB 后点「应用」"
+        title="文字颜色"
         @pick="pickText"
       />
     </el-popover>
@@ -54,14 +59,16 @@ function pickBg(c) {
     <el-popover v-model:visible="bgPop" placement="bottom-start" :width="290" trigger="click">
       <template #reference>
         <button class="fb-btn" type="button" title="背景颜色（行内高亮）">
-          <svg class="fb-hl" viewBox="0 0 24 24"><path d="m9 11-4 4v3h3l4-4M13 5l6 6M9.5 15.5 15 4.8c.5-.8 1.5-1 2.2-.5l3.5 2.6c.8.5 1 1.5.5 2.2L15.5 14.5M4 20h16" /></svg>
-          <i class="fb-caret" :style="{ background: lastBgColor }" />
+          <span class="fb-color">
+            <svg class="fb-hl" viewBox="0 0 24 24"><path d="m9 11-4 4v3h3l4-4M13 5l6 6M9.5 15.5 15 4.8c.5-.8 1.5-1 2.2-.5l3.5 2.6c.8.5 1 1.5.5 2.2L15.5 14.5M4 20h16" /></svg>
+            <i class="fb-caret" :style="{ background: lastBgColor }" />
+          </span>
         </button>
       </template>
       <ColorPicker
         :palette="BG_COLORS"
         :initial="lastBgColor"
-        title="背景颜色 · 点色块即应用，或调 RGB 后点「应用」"
+        title="背景颜色"
         @pick="pickBg"
       />
     </el-popover>
@@ -172,9 +179,22 @@ function pickBg(c) {
   stroke: none;
 }
 
+/* 颜色按钮：图标 + 正下方一小段色条（当前色），整体作为一个单元居中。
+   原实现是「色条 absolute 铺满按钮宽度、贴在底部」—— 3px 高 × 整宽的饱和色块，
+   与 13.5px 的字形之间还空着几像素，看起来像两根脱节的横杠、也盖过了图标本身。
+   现在色条贴着字形下沿，宽度略窄于字形，颜色信号清晰但不抢戏。 */
+.fb-color {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+}
+
 .fb-a {
-  font-weight: 700;
-  font-size: 14px;
+  font-size: 13.5px; /* 与工具行里的字母按钮（B/I/S/U = 13.5px）同规格 */
+  font-weight: 600;
+  line-height: 1;
 }
 
 .fb-bg {
@@ -217,13 +237,13 @@ function pickBg(c) {
   opacity: 0.7;
 }
 
+/* 色条：贴着图标下沿的一小段（不再是通宽贴底的绝对定位块） */
 .fb-caret {
-  width: 100%;
+  width: 12px;
   height: 3px;
   border-radius: 2px;
-  position: absolute;
-  bottom: 1px;
-  left: 0;
+  /* 极浅色（#ffffff / #f2f2f2）在浅色工具栏上几乎没有边界，加一圈淡内描边兜底 */
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--app-text-1) 16%, transparent);
 }
 
 .fb-sep {

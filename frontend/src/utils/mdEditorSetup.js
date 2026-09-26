@@ -23,11 +23,15 @@ import { config } from 'md-editor-v3'
 import 'md-editor-v3/lib/style.css'
 import hljs from 'highlight.js'
 import mdCallout from './mdCallout'
+import mdAnchor from './mdAnchor'
 
 config({
   // 支持 :::名称 … ::: 彩色提示块（语雀等平台粘贴兼容）
   markdownItConfig(md) {
     md.use(mdCallout)
+    // md-editor 自身不给标题加 id（6.5.6 无锚点实现），这里补上，
+    // 使笔记里的手写目录 `[小节](#id)` 在预览与导出中行为一致
+    md.use(mdAnchor)
   },
   // ★ 注入高亮器：md-editor-v3 不自带 highlight.js，不传 instance 时
   //   代码块走 escapeHtml 分支，渲染出来是纯文本（2026-09-11 实测踩到）。

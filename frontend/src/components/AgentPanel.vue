@@ -1,8 +1,8 @@
 <script setup>
-import { defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { aiApi, categoryApi, noteApi } from '../api'
+import { aiApi, categoryApi, noteApi, modelApi, settingsApi } from '../api'
 import { fixHtmlQuotes } from '../utils/htmlQuotes'
 import { isDark } from '../composables/useTheme'
 
@@ -22,12 +22,239 @@ const MdPreview = defineAsyncComponent(() =>
 
 const router = useRouter()
 
+/**
+ * 嵌入模式：不在抽屉里、而作为**左侧导航的"智能体"页**整页显示。
+ * <p>为什么用 prop 而不是再写一个页面组件：对话逻辑（工具调用、待确认写操作、
+ * 保存为笔记、流式事件…）有一千行，复制一份必然发散 —— 两处行为会慢慢不一样，
+ * 而"智能体在哪都能用"恰恰要求行为完全一致。
+ */
+const props = defineProps({
+  embedded: { type: Boolean, default: false },
+  /**
+   * 是否显示面板自带的会话条与列表。
+   * <p>嵌入模式（智能体页）下会话有**自己的侧栏**，所以那边传 false，
+   * 让"会话管理"只有侧栏一个入口；抽屉模式仍用面板内的折叠列表。
+   */
+  showSessionBar: { type: Boolean, default: true },
+})
+
+/** 抽屉模式下的开合；嵌入模式恒为 true（页面本身就是打开状态） */
 const open = ref(false)
+/** 真实生效的可见性：嵌入模式永远可见 */
+const visible = computed(() => props.embedded || open.value)
+
+/**
+ * 嵌入模式（智能体页）下承载容器的形状：普通块级、铺满父容器。
+ * <p>为什么用内联样式而不是 CSS 类：抽屉那套是 {@code position: fixed + width: 480px}，
+ * 用 `:deep()` 覆盖时受样式表先后与优先级影响，实测没盖住（量出来仍是 fixed、高=视口高）。
+ * 内联样式优先级最高，这里是"必须生效"的两条布局属性，值得用最确定的方式。
+ */
+const EMBEDDED_DOCK_STYLE = {
+  position: 'static',
+  width: '100%',
+  height: '100%',
+  transform: 'none',
+  pointerEvents: 'auto',
+}
+
+/**
+ * 嵌入模式下**根容器**的形状：从"右下角悬浮"变成普通块级铺满。
+ * <p>根容器本身是 {@code position: fixed; right: 22px; bottom: 22px}（给悬浮球用的），
+ * 只改里面的 dock 是没用的 —— 父级还是浮在视口右下角，子元素的高度百分比按视口算，
+ * 量出来就是"高=视口高、宽=缩到内容宽"（实测 721×802，父容器却是 1162×680）。
+ */
+const EMBEDDED_ROOT_STYLE = {
+  position: 'static',
+  right: 'auto',
+  bottom: 'auto',
+  width: '100%',
+  height: '100%',
+  zIndex: 'auto',
+}
 const configured = ref(true)
 const busy = ref(false)
 const input = ref('')
 const listRef = ref(null)
 const messages = ref([])
+
+/**
+ * 会话 id：存 localStorage，刷新后接着聊。
+ * <p>上下文由**后端**从事件日志投影，前端不再自己拼 history ——
+ * 原来那段「filter + slice(0, -1)、曾误写成 slice(0, -2)」的历史组装逻辑因此整体删除：
+ * 少一处只有注释能解释清楚、而且真的写错过一次的地方。
+ */
+const SESSION_KEY = 'lh-agent-session'
+const sessionId = ref(localStorage.getItem(SESSION_KEY) || '')
+
+// ------------------------------------------------------------------
+// 会话版块 + 会话级模型
+// ------------------------------------------------------------------
+
+/** 会话列表（库里全部会话，按最后活动倒序） */
+const sessions = ref([])
+const showSessions = ref(false)
+/** 已配置的模型档案（可无限新增多个） */
+const modelProfiles = ref([])
+/** 本会话指定的档案 id；空 = 跟随任务分工表 */
+const chatProfile = ref('')
+
+const currentModelLabel = computed(() => {
+  const p = modelProfiles.value.find((x) => x.id === chatProfile.value)
+  if (p) {
+    return `代码答疑 · ${p.name}（${p.model}）`
+  }
+  return '代码答疑 · 默认（当前生效档案）'
+})
+
+async function loadSessions() {
+  try {
+    sessions.value = await modelApi.sessions(50)
+  } catch (e) {
+    sessions.value = []
+  }
+}
+
+async function loadModelProfiles() {
+  try {
+    const d = await modelApi.profiles()
+    modelProfiles.value = d.profiles || []
+  } catch (e) {
+    modelProfiles.value = []
+  }
+}
+
+/** 切换会话：把该会话的历史读进来，并带上它自己记的模型 */
+async function switchSession(id) {
+  if (id === sessionId.value) {
+    showSessions.value = false
+    return
+  }
+  sessionId.value = id
+  localStorage.setItem(SESSION_KEY, id)
+  messages.value = []
+  pending.value = []
+  showSessions.value = false
+  const s = sessions.value.find((x) => x.id === id)
+  chatProfile.value = s?.modelProfileId || ''
+  await loadSession()
+  notifyCurrentSession()
+}
+
+/** 会话换模型：**同时写库**，这样下次打开这个会话还是这个模型 */
+async function onProfileChange(v) {
+  if (!sessionId.value) {
+    return // 还没建会话，下一次提问时后端会按请求体里的档案建
+  }
+  try {
+    await modelApi.setSessionModel(sessionId.value, v || '')
+    ElMessage.success(v ? '本会话已固定使用该模型' : '本会话已改为默认（当前生效档案）')
+    await loadSessions()
+    notifyCurrentSession()
+  } catch (e) {
+    /* 拦截器已提示 */
+  }
+}
+
+async function removeSession(s) {
+  try {
+    await ElMessageBox.confirm(
+      `删除会话「${s.title || '新对话'}」及其全部消息？<br><br><span style="color:#6b7280">· 只删这次对话的记录，笔记/资料不受影响</span>`,
+      '删除会话',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消', dangerouslyUseHTMLString: true }
+    )
+  } catch {
+    return
+  }
+  try {
+    await modelApi.removeSession(s.id)
+    ElMessage.success('已删除')
+    if (s.id === sessionId.value) {
+      // 删的正是当前会话：清空面板，下一次提问自动开新会话
+      sessionId.value = ''
+      localStorage.removeItem(SESSION_KEY)
+      messages.value = []
+      pending.value = []
+      chatProfile.value = ''
+    }
+    await loadSessions()
+  } catch (e) {
+    /* 拦截器已提示 */
+  }
+}
+
+/**
+ * 刷新后恢复对话。
+ * 不做这一步会出现最别扭的状态：模型记得上一轮，面板却是空的。
+ */
+async function loadSession() {
+  if (!sessionId.value) return
+  try {
+    const s = await aiApi.session(sessionId.value)
+    if (!s?.messages?.length) return
+    messages.value = s.messages.map((m, i) => ({
+      id: Date.now() + i,
+      role: m.role,
+      content: m.content,
+      events: m.events || [],
+      toolUsed: !!m.toolUsed,
+    }))
+    pending.value = s.pendingActions || []
+    scrollBottom()
+  } catch (e) {
+    // 会话不存在（清过库 / 换了后端）：丢掉本地 id，下一次提问自动开新会话
+    sessionId.value = ''
+    localStorage.removeItem(SESSION_KEY)
+  }
+}
+
+/** 新对话：只丢本地引用；旧会话仍留在库里（可审计、可回看） */
+function newChat() {
+  sessionId.value = ''
+  localStorage.removeItem(SESSION_KEY)
+  messages.value = []
+  pending.value = []
+  input.value = ''
+}
+
+/**
+ * 待确认的写操作。
+ * 在用户点「确认执行」之前，后端**不会**动数据库 —— 这是防"AI 误改笔记"的关键一环。
+ * 刷新后由 loadSession() 重新取回（否则待确认项会变成无法点击的死状态）。
+ */
+const pending = ref([])
+
+async function resolveAction(a, approve) {
+  try {
+    let hint
+    if (approve) {
+      const r = await aiApi.approveAction(a.id)
+      hint = r?.hint || '已执行'
+      ElMessage.success(hint)
+    } else {
+      await aiApi.rejectAction(a.id)
+      hint = '已取消：' + (a.summary || '')
+      ElMessage.info('已取消，未做任何改动')
+    }
+    // 立刻把执行痕迹挂到最近一条回答的事件角标上：后端也会追加同样的事件，
+    // 刷新后由 loadSession 恢复 —— 两处表现保持一致，不必等刷新才看到结果。
+    const last = [...messages.value].reverse().find((m) => m.role === 'assistant')
+    if (last) {
+      last.events = [...(last.events || []), hint]
+      // 同时改正文：那条回答里通常写着"请在下方卡片上点确认"，而卡片点完就消失了 ——
+      // 只剩这句话会让人以为还没确认。补一行结果，读起来才自洽。
+      const tail = approve
+        ? `\n\n（已确认执行：${hint}）`
+        : `\n\n（已取消，未做任何改动：${a.summary || ''}）`
+      last.content = (last.content || '') + tail
+      scrollBottom()
+    }
+    pending.value = pending.value.filter((x) => x.id !== a.id)
+  } catch (e) {
+    // 失败（例如已被处理过）时也把它从列表里摘掉，避免反复点同一个死项；
+    // 错误提示已由请求拦截器统一弹出，这里不再重复打扰
+    pending.value = pending.value.filter((x) => x.id !== a.id)
+  }
+}
 
 const SUGGESTIONS = [
   'Java 的 == 和 equals 有什么区别？',
@@ -42,6 +269,33 @@ function scrollBottom() {
   })
 }
 
+/**
+ * 联网开关（放在输入框那一行）。
+ *
+ * 存的是设置里的 `ai.web_enabled`：**默认开**，关掉就只用工作台里的资料回答。
+ * 点一下立即 PUT、立即生效 —— 不需要"保存"，也不需要离开对话去设置面板改。
+ */
+const webEnabled = ref(true)
+
+async function loadWebSetting() {
+  try {
+    const s = await settingsApi.get()
+    webEnabled.value = s?.webEnabled !== false
+  } catch (e) {
+    webEnabled.value = true // 读不到就按默认开（与服务端默认一致）
+  }
+}
+
+async function toggleWeb() {
+  const next = !webEnabled.value
+  try {
+    await settingsApi.update({ webEnabled: next ? '1' : '0' })
+    webEnabled.value = next
+    ElMessage.success(next ? '已开启联网：需要时会搜索并读页面' : '已关闭联网：只用工作台里的资料回答')
+  } catch (e) {
+    /* 拦截器已提示 */
+  }
+}
 async function loadStatus() {
   try {
     const s = await aiApi.status()
@@ -51,7 +305,13 @@ async function loadStatus() {
   }
 }
 
-async function send(text) {
+/**
+ * 发一条消息。
+ * @param text 提问内容
+ * @param ctx  可选上下文（noteId / noteTitle / noteContext）—— 从知识图谱或 wiki 里
+ *             「问智能体」时带上，让模型知道这句话是在问哪一条记录，不必再检索一遍
+ */
+async function send(text, ctx) {
   const msg = (text ?? input.value).trim()
   if (!msg || busy.value) return
   input.value = ''
@@ -62,20 +322,33 @@ async function send(text) {
   messages.value.push(holder)
   scrollBottom()
   try {
-    // 历史 = 当前提问之前的所有消息。
-    // 注意：上面的 filter 已经把 loading 占位（assistant 且 content 为空）滤掉了，
-    // 所以要丢的只有「刚 push 的这条 user 消息」本身 → slice(0, -1)。
-    // 曾写成 slice(0, -2)：那是按「filter 还没滤掉 loading」想的，结果连上一条回答
-    // 一起删了，追问「上面第二点展开讲」时 AI 完全看不到自己上次说了什么。
-    const history = messages.value
-      .filter((m) => m.role === 'user' || (m.role === 'assistant' && m.content))
-      .slice(0, -1)
-      .map((m) => ({ role: m.role, content: m.content }))
-    const res = await aiApi.chat({ message: msg, history })
+    // 上下文交给后端会话维护：只带 sessionId（首次为空，响应里会把新 id 带回来）
+    const res = await aiApi.chat({
+      message: msg,
+      sessionId: sessionId.value,
+      // 会话级模型：带上它后端就用这个档案（空 = 跟随任务分工表）
+      modelProfileId: chatProfile.value || undefined,
+      noteId: ctx?.noteId,
+      noteTitle: ctx?.noteTitle,
+      noteContext: ctx?.noteContext,
+    })
+    if (res.sessionId && res.sessionId !== sessionId.value) {
+      sessionId.value = res.sessionId
+      localStorage.setItem(SESSION_KEY, res.sessionId)
+      await loadSessions()
+      // 面板第一次提问会自动建会话：通知会话侧栏把它列出来（否则侧栏看不到这次新会话）
+      window.dispatchEvent(new CustomEvent('lh-agent-sessions-changed'))
+      notifyCurrentSession()
+    }
     holder.loading = false
     holder.content = res.reply || ''
     holder.events = res.events || []
+    holder.retrieved = res.retrieved || []
     holder.toolUsed = res.toolUsed
+    // 本轮若发起了写操作，它们是"待确认"状态，攒到下面的确认卡片里
+    if (res.pendingActions?.length) {
+      pending.value.push(...res.pendingActions)
+    }
     holder.id = holder.id || Date.now()
     configured.value = true
   } catch (e) {
@@ -173,23 +446,90 @@ async function copyText(text) {
 
 onMounted(() => {
   loadStatus()
+  // 联网开关的当前状态（输入框那一行要显示"开/关"）
+  loadWebSetting()
+  loadSession()
+  // 会话列表 + 模型档案：右边栏的"新开/切换会话"与"本会话用哪个模型"都靠它们
+  loadSessions()
+  loadModelProfiles().then(() => {
+    // 恢复上次会话时，把该会话自己记的模型也带回来
+    const cur = sessions.value.find((x) => x.id === sessionId.value)
+    if (cur) {
+      chatProfile.value = cur.modelProfileId || ''
+    }
+  })
+  // 嵌入模式（左侧导航「智能体」页）默认展开会话列表：那一页的左栏就是会话清单
+  if (props.embedded) {
+    showSessions.value = true
+  }
   // 支持从笔记编辑器等页面唤起（window 事件，避免组件强耦合）
   window.addEventListener('lh-agent-open', openFromEvent)
+  // 知识图谱 / wiki 里的「问智能体」：不仅打开面板，还直接把问题发出去
+  window.addEventListener('lh-ask-agent', askFromEvent)
+  // 智能体页请求展开会话列表
+  window.addEventListener('lh-agent-sessions-open', openSessionsFromEvent)
+  // 智能体页的会话侧栏点了某条会话：切过去并载入它的历史
+  window.addEventListener('lh-agent-switch', switchFromEvent)
+  // 让侧栏知道"当前是哪条会话"（高亮、以及它用哪个模型）
+  notifyCurrentSession()
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('lh-agent-open', openFromEvent)
+  window.removeEventListener('lh-ask-agent', askFromEvent)
+  window.removeEventListener('lh-agent-sessions-open', openSessionsFromEvent)
+  window.removeEventListener('lh-agent-switch', switchFromEvent)
 })
+
+/** 外部（会话侧栏）要求切换会话 */
+async function switchFromEvent(e) {
+  const id = e?.detail?.id
+  if (!id || id === sessionId.value) {
+    return
+  }
+  await switchSession(id)
+}
+
+/** 把"当前会话 + 它的模型"广播给会话侧栏，让侧栏能高亮并显示模型 */
+function notifyCurrentSession() {
+  const cur = sessions.value.find((x) => x.id === sessionId.value)
+  window.dispatchEvent(new CustomEvent('lh-agent-current', {
+    detail: {
+      id: sessionId.value,
+      modelProfileId: cur ? cur.modelProfileId : chatProfile.value,
+      modelName: modelProfiles.value.find((p) => p.id === chatProfile.value)?.name || '',
+    },
+  }))
+}
+
+function openSessionsFromEvent() {
+  showSessions.value = true
+}
 
 function openFromEvent() {
   open.value = true
 }
+
+/**
+ * 从图谱节点 / wiki 页跳进来提问。
+ * 面板可能是首次打开（内容懒渲染），等一帧再发，避免消息推入时列表还没挂载。
+ */
+function askFromEvent(e) {
+  const d = e?.detail || {}
+  if (!d.message) return
+  open.value = true
+  nextTick(() => send(d.message, d))
+}
 </script>
 
 <template>
-  <div class="agent-root">
-    <!-- 悬浮入口 -->
-    <transition name="fab">
+  <div
+    class="agent-root"
+    :class="{ 'agent-embedded': embedded }"
+    :style="embedded ? EMBEDDED_ROOT_STYLE : null"
+  >
+    <!-- 悬浮入口（仅抽屉模式；嵌入模式下页面本身就是入口） -->
+    <transition v-if="!embedded" name="fab">
       <button v-if="!open" class="fab" type="button" @click="open = true">
         <span class="fab-dot"></span>
         <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
@@ -202,9 +542,68 @@ function openFromEvent() {
       </button>
     </transition>
 
-    <!-- 右侧抽屉 -->
-    <el-drawer v-model="open" direction="rtl" size="480px" :with-header="false" class="agent-drawer">
+    <!-- 抽屉模式的遮罩（嵌入模式没有遮罩：它就是页面本身） -->
+    <div v-if="!embedded && open" class="agent-backdrop" @click="open = false"></div>
+
+    <!--
+      两种承载方式共用同一套面板内容：
+        · 抽屉模式（默认）：桌面任意页面右下角悬浮球唤起，固定右侧 480px
+        · 嵌入模式：左侧导航「智能体」页整页显示（会话列表常驻左侧一栏）
+      用 CSS 承载而不是两个组件：面板里有上千行对话逻辑，复制一份必然发散，
+      而"智能体在哪都能用"恰恰要求行为完全一致。
+    -->
+    <!-- 嵌入模式用**内联样式**钉死形状：抽屉那套是 position:fixed + 480px，
+         靠 CSS 优先级去覆盖容易受先后顺序影响（实测就没盖住），内联最确定 -->
+    <div
+      class="agent-dock"
+      :class="{ open: open, embedded: embedded }"
+      :style="embedded ? EMBEDDED_DOCK_STYLE : null"
+    >
       <div class="panel">
+        <!-- 会话版块：新开/切换/删除。会话存在库里，刷新与重启都能接着聊；
+             每个会话还能记住自己用哪个模型档案（下面那排选择器）。
+             嵌入模式（智能体页）下这一块由**页面自己的侧栏**承担（见 AgentSessions.vue），
+             所以这里用 showSessionBar 关掉，避免同一件事有两个入口。 -->
+        <div v-if="showSessionBar" class="session-bar">
+          <button type="button" class="sess-toggle" @click="showSessions = !showSessions">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10" /></svg>
+            会话<template v-if="sessions.length">（{{ sessions.length }}）</template>
+          </button>
+          <el-select
+            v-model="chatProfile"
+            size="small"
+            class="sess-model"
+            placeholder="默认（当前生效档案）"
+            @change="onProfileChange"
+          >
+            <el-option label="默认（当前生效档案）" value="" />
+            <el-option
+              v-for="p in modelProfiles"
+              :key="p.id"
+              :label="p.name + '（' + p.model + '）'"
+              :value="p.id"
+            />
+          </el-select>
+          <button type="button" class="icon-btn" title="新对话" @click="newChat">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
+          </button>
+        </div>
+
+        <div v-if="showSessionBar && showSessions" class="session-list">
+          <div
+            v-for="s in sessions"
+            :key="s.id"
+            class="sess-row"
+            :class="{ on: s.id === sessionId }"
+            @click="switchSession(s.id)"
+          >
+            <span class="sess-title" :title="s.title">{{ s.title || '新对话' }}</span>
+            <span class="sess-meta">{{ s.events }} 条 · {{ s.updatedAt ? s.updatedAt.slice(5, 16) : '' }}</span>
+            <button type="button" class="sess-del" title="删除这个会话及其全部消息" @click.stop="removeSession(s)">✕</button>
+          </div>
+          <p v-if="!sessions.length" class="hint sess-empty">还没有会话 —— 问一句就会自动建一个</p>
+        </div>
+
         <header class="panel-head">
           <div class="head-left">
             <span class="head-avatar">A</span>
@@ -212,11 +611,14 @@ function openFromEvent() {
               <div class="head-title">智能体助手</div>
               <div class="head-sub">
                 <span class="dot" :class="configured ? 'on' : 'off'"></span>
-                {{ configured ? '代码答疑 · 可帮你沉淀笔记' : '未配置 API Key' }}
+                {{ configured ? currentModelLabel : '未配置模型' }}
               </div>
             </div>
           </div>
-          <button class="icon-btn" type="button" @click="open = false" title="收起">
+          <button v-if="messages.length" class="icon-btn" type="button" @click="newChat" title="新对话（旧对话仍保留在库里）">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
+          </button>
+          <button v-if="!embedded" class="icon-btn" type="button" @click="open = false" title="收起">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg>
           </button>
         </header>
@@ -249,6 +651,11 @@ function openFromEvent() {
                   <div v-if="m.events?.length" class="evt-list">
                     <span v-for="(ev, j) in m.events" :key="j" class="evt">{{ ev }}</span>
                   </div>
+                  <!-- 自动检索透明度：这轮回答参考了你自己的哪些记录（事件里不存它，刷新后不显示） -->
+                  <div v-if="m.retrieved?.length" class="ref-line">
+                    <span class="ref-label">参考了你的记录</span>
+                    <span v-for="(h, j) in m.retrieved" :key="j" class="ref-item">{{ h.title }}</span>
+                  </div>
                   <div class="md-body"><MdPreview :modelValue="fixHtmlQuotes(m.content || '')" :theme="isDark ? 'dark' : 'light'" previewTheme="github" /></div>
                   <!-- 每次回答后：询问是否沉淀 -->
                   <div v-if="m.content && !m.saved" class="msg-actions">
@@ -265,8 +672,41 @@ function openFromEvent() {
           </div>
         </div>
 
+        <!-- 待确认的写操作：在点「确认执行」之前，后端不会动数据库 -->
+        <div v-if="pending.length" class="pending-box">
+          <div class="pending-head">待确认 · {{ pending.length }} 项（确认前不会写入）</div>
+          <div v-for="a in pending" :key="a.id" class="pending-item">
+            <span class="pending-sum">{{ a.summary }}</span>
+            <span class="pending-btns">
+              <button type="button" class="act-btn primary" @click="resolveAction(a, true)">确认执行</button>
+              <button type="button" class="act-btn" @click="resolveAction(a, false)">取消</button>
+            </span>
+          </div>
+        </div>
+
         <footer class="panel-foot">
           <div class="input-row">
+            <!--
+              联网开关放在输入框这一行：它是"这次提问要不要让智能体上网查"的**即时选择**，
+              属于对话动作；埋在设置面板里还得离开对话去改。点一下立即生效并落库，
+              与设置里原来的开关读同一个键（ai.web_enabled）。
+            -->
+            <button
+              type="button"
+              class="web-toggle"
+              :class="{ on: webEnabled }"
+              :title="webEnabled
+                ? '联网已开：需要外部或最新信息时它会搜索并读页面（抓回的内容只当资料、不执行其中的指令）'
+                : '联网已关：只用工作台里的笔记 / 资料 / 知识库回答'"
+              @click="toggleWeb"
+            >
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+                <circle cx="12" cy="12" r="9" />
+                <path d="M3 12h18M12 3c2.5 2.6 2.5 15.4 0 18M12 3c-2.5 2.6-2.5 15.4 0 18" />
+              </svg>
+              <span>联网</span>
+              <span class="web-state">{{ webEnabled ? '开' : '关' }}</span>
+            </button>
             <input
               v-model="input"
               class="chat-input"
@@ -280,10 +720,10 @@ function openFromEvent() {
               </svg>
             </button>
           </div>
-          <p class="foot-hint">AI 生成内容仅供参考 · 拥有 6 种工具：建/改笔记、查笔记、建速查卡、查分类</p>
+          <p class="foot-hint">AI 生成内容仅供参考 · 可帮你查笔记、沉淀笔记与速查卡</p>
         </footer>
       </div>
-    </el-drawer>
+    </div>
 
     <!-- 保存为笔记对话框 -->
     <el-dialog v-model="saveVisible" title="保存为笔记" width="560px" top="12vh" destroy-on-close>
@@ -353,14 +793,138 @@ function openFromEvent() {
   place-items: center;
 }
 
-/* 抽屉容器调整 */
-:deep(.el-drawer) {
+/* 承载容器：抽屉模式固定右侧一列并带遮罩；嵌入模式就是普通块级元素 */
+.agent-dock {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 480px;
+  z-index: 2100;
   background: var(--app-card);
+  border-left: 1px solid var(--app-border-weak);
+  box-shadow: -8px 0 32px rgba(0, 0, 0, 0.08);
+  transform: translateX(100%);
+  transition: transform var(--dur) var(--ease);
+  pointer-events: none;
+}
+.agent-dock.open {
+  transform: none;
+  pointer-events: auto;
+}
+.agent-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2050;
+  background: rgba(0, 0, 0, 0.18);
+}
+/* 嵌入模式（左侧导航「智能体」页）：占满页面、无遮罩、无位移 */
+.agent-dock.embedded {
+  position: static;
+  width: 100%;
+  height: 100%;
+  transform: none;
+  pointer-events: auto;
+  border-left: 0;
+  box-shadow: none;
+}
+.agent-embedded {
+  height: 100%;
 }
 .panel {
   display: flex;
   flex-direction: column;
   height: 100%;
+}
+/* 会话版块：新开/切换/删除 + 本会话的模型选择 */
+.session-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--app-border-weak);
+  background: var(--app-bg);
+}
+.sess-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  background: transparent;
+  color: var(--app-text-2);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+.sess-toggle:hover {
+  background: var(--app-card);
+  color: var(--app-text-1);
+}
+.sess-model {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.session-list {
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--app-border-weak);
+  background: var(--app-card);
+}
+.sess-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 20px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--app-text-2);
+}
+.sess-row:hover {
+  background: var(--app-bg);
+  color: var(--app-text-1);
+}
+.sess-row.on {
+  background: var(--app-brand-soft);
+  color: var(--app-brand-deep);
+  font-weight: 600;
+}
+.sess-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sess-meta {
+  font-size: 11px;
+  color: var(--app-text-3);
+  white-space: nowrap;
+}
+.sess-del {
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--app-text-3);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  visibility: hidden;
+}
+.sess-row:hover .sess-del,
+.sess-row.on .sess-del {
+  visibility: visible;
+}
+.sess-del:hover {
+  background: color-mix(in srgb, #dc2626 14%, transparent);
+  color: #dc2626;
+}
+.sess-empty {
+  padding: 4px 6px;
 }
 .panel-head {
   display: flex;
@@ -530,9 +1094,113 @@ html.dark .cfg-tip {
   color: #fff;
   border-bottom-right-radius: 4px;
 }
-.bubble.assistant .md-body :deep(.md-editor-preview) {
+/* 用户提问保留气泡（一眼能分清谁说的）；AI 回答不套框，直接铺满面板，
+   像一篇文档那样读——短栏里再套一层 82% 的气泡，等于把正文挤成 330px。 */
+.bubble.assistant {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  max-width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
+  /* 不用 break-word：它会把 AutoConfiguration.imports 这类标识符从中间劈开 */
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+.bubble.assistant .md-body {
+  min-width: 0;
+}
+
+/* ---- AI 回答的排版：按"对话内阅读"收档 ----
+   全局那套是给笔记页的宽栏调的（正文 15px/1.8、h1 1.65em≈25px），
+   拿到 ~450px 的面板里就又大又散：标题像横幅、段间距过大、表格被挤到逐字换行。
+   这里整体降一档并收紧节奏，选择器双写 + scoped deep，确保压过预览主题。 */
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview) {
+  font-size: 13.5px;
+  line-height: 1.72;
+  padding: 0;
   background: transparent;
 }
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview p) {
+  margin: 0.55em 0;
+}
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview h1),
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview h2),
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview h3),
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview h4),
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview h5),
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview h6) {
+  /* 预览主题给标题设了 word-break:break-all，会把英文标识符拦腰截断 */
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview h1) {
+  font-size: 1.3em;
+  margin: 1.05em 0 0.4em;
+}
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview h2) {
+  font-size: 1.18em;
+  margin: 1.05em 0 0.4em;
+  padding-bottom: 0;
+  border-bottom: 0; /* 窄栏里这条 GitHub 点线太抢眼，去掉 */
+}
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview h3) {
+  font-size: 1.06em;
+  margin: 0.95em 0 0.35em;
+}
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview h4),
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview h5),
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview h6) {
+  font-size: 1em;
+  margin: 0.85em 0 0.3em;
+}
+/* 首尾不留白：回答的开头贴着事件角标，结尾贴着操作按钮 */
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview > :first-child) {
+  margin-top: 0;
+}
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview > :last-child) {
+  margin-bottom: 0;
+}
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview ul),
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview ol) {
+  margin: 0.5em 0;
+  padding-left: 1.35em;
+}
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview li) {
+  margin: 0.18em 0;
+}
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview blockquote) {
+  margin: 0.7em 0;
+  padding: 0.1em 0.85em;
+}
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview hr) {
+  margin: 1.1em 0;
+}
+/* 表格：width:auto 会被压到列宽内逐字换行；改成按内容撑开 + 超出横向滚动 */
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview table) {
+  width: max-content;
+  min-width: 100%;
+  margin: 0.7em 0;
+}
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview th) {
+  white-space: nowrap;
+}
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview th),
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview td) {
+  padding: 0.4em 0.75em;
+}
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview td) {
+  min-width: 4.5em;
+}
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview pre) {
+  margin: 0.6em 0;
+}
+/* 正文降到 13.5px 后，全局 0.875em 的行内代码只有 11.8px，比正文小太多 */
+.bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview code) {
+  font-size: 0.92em;
+}
+
 
 .evt-list {
   display: flex;
@@ -545,6 +1213,28 @@ html.dark .cfg-tip {
   color: var(--app-brand-deep);
   background: var(--app-brand-soft);
   padding: 3px 8px;
+  border-radius: 999px;
+}
+
+/* 自动检索的透明度提示：刻意比工具角标更轻（工具是"做了事"，这个是"看了什么"）。
+   11px 小字按项目规则用 text-2，不用更弱的 text-3。 */
+.ref-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  font-size: 11px;
+  color: var(--app-text-2);
+}
+
+.ref-item {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 7px;
+  border: 1px solid var(--app-border);
   border-radius: 999px;
 }
 
@@ -614,6 +1304,49 @@ html.dark .cfg-tip {
   color: #16a34a;
 }
 
+/* 待确认的写操作卡片：做得像"一张待办"，并在标题里明说"确认前不会写入" ——
+   这句话本身就是这个功能的价值所在（用户因此敢让 AI 自由发挥）。 */
+.pending-box {
+  margin: 0 12px 8px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--app-brand) 35%, var(--app-border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--app-brand) 6%, transparent);
+}
+
+.pending-head {
+  margin-bottom: 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--app-brand-deep);
+}
+
+.pending-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 0;
+}
+
+.pending-item + .pending-item {
+  border-top: 1px dashed var(--app-border);
+}
+
+.pending-sum {
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--app-text-1);
+  word-break: break-all;
+}
+
+.pending-btns {
+  display: inline-flex;
+  gap: 6px;
+  flex: none;
+}
+
 .panel-foot {
   border-top: 1px solid var(--app-border);
   padding: 12px 14px 14px;
@@ -621,6 +1354,36 @@ html.dark .cfg-tip {
 .input-row {
   display: flex;
   gap: 8px;
+  align-items: center;
+}
+/* 联网开关：小、贴着输入框，一眼看出开/关 */
+.web-toggle {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-card);
+  color: var(--app-text-3);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all var(--dur-fast) ease;
+  white-space: nowrap;
+}
+.web-toggle:hover {
+  color: var(--app-text-1);
+  border-color: var(--app-border-weak);
+}
+.web-toggle.on {
+  color: var(--app-brand-deep);
+  border-color: color-mix(in srgb, var(--app-brand) 45%, transparent);
+  background: var(--app-brand-soft);
+}
+.web-state {
+  font-weight: 600;
 }
 .chat-input {
   flex: 1;
@@ -637,6 +1400,11 @@ html.dark .cfg-tip {
 }
 .chat-input:focus {
   border-color: var(--app-brand);
+}
+/* P4：基础规则里的 outline:none 会抹掉键盘焦点环，这里为键盘导航补回 */
+.chat-input:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--app-brand) 55%, transparent);
+  outline-offset: 2px;
 }
 .chat-input::placeholder {
   color: var(--app-text-3);

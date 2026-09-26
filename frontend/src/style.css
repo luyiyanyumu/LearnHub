@@ -20,9 +20,10 @@
 
   /* EP 默认 4px 圆角偏"工具感"，统一提到 8px（输入框/下拉/小按钮） */
   --el-border-radius-base: 8px;
-  --el-border-radius-small: 6px;
-  /* 控件统一 36px 高（EP 默认 32px）—— 按钮/输入框/选择器一次到位 */
-  --el-component-size: 36px;
+  /* 小圆角档已下线，与 base 合并为 8px（P0 收敛：圆角只保留 8 / 12 / 16） */
+  --el-border-radius-small: 8px;
+  /* 控件统一 40px 高（P0：原 36px 偏矮，40px 达可点区标准；行内操作另用 32px） */
+  --el-component-size: 40px;
 
   /* --- 应用语义 token ---
      2026-09-11 编辑页 UI 重构对齐 Notion/Linear 系：
@@ -34,12 +35,38 @@
   --app-border-weak: #eef0f2; /* 更弱的一档：卡片内部分隔线用 */
   --app-text-1: #1f2d2a;      /* 主文本：带青的近黑，比纯黑柔和 */
   --app-text-2: #5a6b67;      /* 次级文本 */
-  --app-text-3: #8a9995;      /* 弱化文本 */
+  /* P5：原 #8a9995 对页面底色仅 2.8:1，远低于 AA 正文 4.5:1，现约 4.6:1 */
+  --app-text-3: #66746f;      /* 弱化文本（12px 以下文本请改用 --app-text-2） */
   --app-brand: #0e9f8e;
   --app-brand-deep: #0b7f72;
   --app-brand-soft: #e2f5f1;
   --app-brand-glow: rgba(14, 159, 142, 0.12);
   --app-code-bg: #f2f4f5;
+
+  /* --- 设计令牌：字号阶梯（P0）---
+     全站字号只取这 6 档，行高按字号反比放大 */
+  --font-display: 48px;  --lh-display: 1.15;   /* 首页主标题，每屏一次 */
+  --font-title:   28px;  --lh-title:   1.3;    /* 模块标题 */
+  --font-heading: 20px;  --lh-heading: 1.4;    /* 卡片标题 */
+  --font-body:    14px;  --lh-body:    1.75;   /* 正文 */
+  --font-code:    13px;  --lh-code:    1.7;    /* 代码块与行内命令 */
+  --font-caption: 12px;  --lh-caption: 1.6;    /* 元信息 / 标签 / 时间戳 */
+
+  /* --- 设计令牌：间距阶梯（P0）---
+     纵向节奏一律取 8 的倍数，避免 5px / 10px 这类破坏秩序的数值 */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-2xl: 48px;
+
+  /* --- 控件高度（P0）：表单 40px，行内操作 32px --- */
+  --control-h: 40px;
+  --control-h-inline: 32px;
+
+  /* 原生控件（滚动条 / 日期面板 / 自动填充）跟随主题 */
+  color-scheme: light;
 
   /* 分层阴影：两层小阴影叠出"浮起但不夸张"的质感（单层大阴影容易显得廉价） */
   --shadow-sm: 0 1px 2px rgba(16, 63, 57, 0.04), 0 2px 6px rgba(16, 63, 57, 0.03);
@@ -47,17 +74,22 @@
   --shadow-lg: 0 4px 12px rgba(16, 63, 57, 0.06), 0 24px 56px -12px rgba(16, 63, 57, 0.2);
 
   --radius: 8px;
-  --radius-sm: 6px;
+  --radius-sm: 8px;   /* 原 6px，与 --radius 合并（P0 收敛） */
   --radius-lg: 12px;
+  --radius-xl: 16px;  /* 大容器：卡片外壳 / 浮层 */
 
   /* 统一缓动：ease-out-quint，减速自然、无回弹（回弹显得廉价） */
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-instant: 0.12s;  /* 微交互：指示条位移、节点变色、勾选态 */
   --dur-fast: 0.15s;
   --dur: 0.25s;
   --dur-slow: 0.35s;
 }
 
 html.dark {
+  /* 注意：本区块的 --el-color-primary-light-N 语义是「向背景色方向混合」，
+     与浅色主题方向相反（数值越大越暗）。仅供描边与悬停叠加使用，
+     禁止作为浅底色引用 —— light-9 在本区块是极深色 #0d4b47。 */
   --el-color-primary: #2dd4bf;
   --el-color-primary-rgb: 45, 212, 191;
   --el-color-primary-light-3: #25b3a2;
@@ -74,16 +106,22 @@ html.dark {
   --app-border-weak: #1f2a28;
   --app-text-1: #e7eeec;
   --app-text-2: #a2b3af;
-  --app-text-3: #667974;
+  /* P5：原 #667974 对页面底色仅 4.1:1，现约 5.5:1 */
+  --app-text-3: #7c8f8a;
   --app-brand: #2dd4bf;
+  /* 注意：深色下 brand-deep 是"更亮"（#5eead4），与浅色的"更深"语义相反 */
   --app-brand-deep: #5eead4;
   --app-brand-soft: #12332e;
   --app-brand-glow: rgba(45, 212, 191, 0.14);
-  --app-code-bg: #0c1110;
-  /* 深色模式的层级感靠表面色差而不是阴影（阴影在暗底上几乎不可见） */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.5);
+  /* P5：原 #0c1110 比页面底色 #0e1514 更深，会形成"洞"效应；
+     现落在页面与卡片之间，构成 页面 < 代码块 < 卡片 的正常层级 */
+  --app-code-bg: #101817;
+  /* 深色模式的层级感靠表面描边而不是阴影（阴影在暗底上几乎不可见，过重会像“浮出黑洞”） */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.22);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.28);
+  --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.38);
+  /* 原生控件（滚动条 / 日期面板 / 自动填充）跟随主题 */
+  color-scheme: dark;
 }
 
 /* --- 基础 --- */
@@ -143,7 +181,14 @@ body {
 .page {
   /* 留白节奏：从 18/20 提到 24/28，内容与画布之间有呼吸感 */
   padding: 24px 28px;
-  animation: pageIn var(--dur-slow) var(--ease) both;
+  /* ⚠️ fill-mode 必须是 backwards，不能用 both / forwards：
+     两者都会让动画结束后**继续应用 transform 的计算值**（即使终值是 none，浏览器也按单位矩阵算），
+     而任何非 none 的 transform 都会让元素成为 fixed 后代的**包含块**。
+     后果（2026-09 实测）：
+       1) .page 内的 el-dialog 遮罩被限制在 .page 盒子里 —— 盖不住侧栏与下方空白（只暗上半屏）；
+       2) .tb-menu 这类按视口坐标定位的 fixed 菜单整体右移一个侧栏宽度（200px）。
+     改成 backwards：入场动画照常播，播完就释放 transform，上面两处恢复按视口定位。 */
+  animation: pageIn var(--dur-slow) var(--ease) backwards;
 }
 
 @keyframes pageIn {
@@ -175,6 +220,14 @@ body {
 
 .toolbar .spacer {
   flex: 1;
+}
+
+/* 工具栏里的搜索框要和两侧控件同高。
+   EP 给 .el-input 的高度取 --el-component-size，而按需引入后 EP 的组件 CSS 在 style.css
+   之后注入、会把它重设回自己的默认值：结果 el-select / el-button 是 32px，
+   唯独 el-input 是 40px，在一排控件里单独高出一截（实测 40 vs 32）。 */
+.toolbar .el-input {
+  --el-component-size: var(--control-h-inline);
 }
 
 .tip {
@@ -467,18 +520,13 @@ html.dark .md-editor-preview.md-editor-preview code:not(.md-editor-code-block) {
 .md-editor-preview.md-editor-preview .md-editor-code-lang {
   font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
   font-size: 11px;
+  line-height: 1;
   letter-spacing: 0.05em;
-  color: var(--app-text-3);
+  color: var(--app-text-2); /* 11px 小字：按项目规则不低于 text-2（原来用 text-3） */
 }
 
-.md-editor-preview.md-editor-preview .md-editor-copy-button {
-  color: var(--app-text-3);
-  transition: color var(--dur-fast) ease;
-}
-
-.md-editor-preview.md-editor-preview .md-editor-copy-button:hover {
-  color: var(--app-brand-deep);
-}
+/* 复制按钮的样式统一在下面的「代码块头部精修」段里（选择器要写到 5 层才压得住预览主题包，
+   那两条 3 层的老规则会被它完全覆盖，已删除以免同一元素出现两套 color 造成误读） */
 
 .md-editor-preview.md-editor-preview pre {
   margin: 0;
@@ -487,6 +535,67 @@ html.dark .md-editor-preview.md-editor-preview code:not(.md-editor-code-block) {
 .md-editor-preview.md-editor-preview .md-editor-code pre code {
   font-size: 13.5px;
   line-height: 1.7;
+}
+
+/* --- 代码块头部精修（覆盖预览主题包 @vavt/markdown-theme/css/github.css）---
+   主题在头部做三件事：左边画 macOS 红黄绿三个圆点、头部用 grid-template:"1fr 1fr"、
+   复制按钮 line-height 写死 32px。这里整体改掉：
+   · 去掉三个圆点 —— 它们是全站唯一的红/黄/绿饱和色，与「安静的高级感」直接冲突
+   · 头部改 flex：语言名在左、复制与折叠在右（原来是圆点占左格，其余全挤在右格）
+   · 复制按钮做成安静的圆角按钮：默认低对比，hover 才浮出来
+   注意选择器层级：主题 CSS 随 md-editor 懒加载注入，且复制按钮那条深到 4 层
+   （.md-editor-preview .md-editor-code .md-editor-code-head .md-editor-copy-button:not(…) = 0,4,1），
+   所以这里必须写足层级才压得住 —— 沿用本文件既有的「双写类名」手法。 */
+.md-editor-preview.md-editor-preview .md-editor-code-flag {
+  display: none;
+}
+
+.md-editor-preview.md-editor-preview .md-editor-code-head {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  /* 圆点去掉后由 padding 提供左右对称的内边距（原来是 flag/collapse 各自的 margin） */
+  padding: 0 12px;
+}
+
+.md-editor-preview.md-editor-preview .md-editor-code-head .md-editor-code-flag,
+.md-editor-preview.md-editor-preview .md-editor-code-head .md-editor-collapse-tips {
+  margin-inline: 0;
+}
+
+/* 复制按钮（连同其后的折叠图标）推到右侧 */
+.md-editor-preview.md-editor-preview .md-editor-code .md-editor-code-head .md-editor-copy-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-inline-start: auto;
+  height: 22px;
+  padding: 0 8px;
+  line-height: 1; /* 主题写死 32px，在 32px 高的头部里会把文字顶偏 */
+  border-radius: 6px;
+  color: var(--app-text-2);
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease;
+}
+
+.md-editor-preview.md-editor-preview .md-editor-code .md-editor-code-head .md-editor-copy-button:hover {
+  background: color-mix(in srgb, var(--app-text-1) 8%, transparent);
+  color: var(--app-text-1);
+}
+
+.md-editor-preview.md-editor-preview
+  .md-editor-code
+  .md-editor-code-head
+  .md-editor-copy-button
+  .md-editor-icon {
+  width: 14px;
+  height: 14px;
+}
+
+/* 行号：主题把颜色写死成 #999（不随深浅主题变化），改用项目令牌 */
+.md-editor-preview.md-editor-preview .md-editor-scrn span[rn-wrapper] > span::before {
+  color: var(--app-text-3);
+  padding-inline-end: 0.6em;
 }
 
 /* --- 低饱和代码高亮（与品牌同源派生，light/dark 各一份）--- */
@@ -597,38 +706,36 @@ html.dark .md-editor-preview.md-editor-preview .hljs-deletion {
 }
 
 /* :::名称 … ::: 彩色提示块（语雀等平台粘贴兼容，插件见 utils/mdCallout.js）。
-   半透明底色 + 左侧色条，浅色/深色主题下都可读 */
+   只用**半透明底色**区分类型：原来的 4px 左侧色条已去掉 ——
+   一是视觉太重，二是它和「引用块」的左侧细色条撞形，而这两者语义不同
+   （引用是"别人的话"、提示块是"我的提醒"），本就不该长得一样。
+   去掉色条后 padding 左右都是 14px，反而比原来（左 18 / 右 14）更对称。
+   ⚠️ 导出 HTML 用的是同一套样式的副本，在 utils/mdToHtml.js 的 BODY_CSS 里，改这里必须同步改那边。 */
 .md-callout {
   margin: 12px 0;
   padding: 10px 14px;
   border-radius: 8px;
-  border-left: 4px solid #909399;
   background: rgba(144, 147, 153, 0.08);
 }
 .md-callout p {
   margin: 4px 0;
 }
 .md-callout-success {
-  border-left-color: #52c41a;
   background: rgba(82, 196, 26, 0.08);
 }
 .md-callout-info,
 .md-callout-note {
-  border-left-color: #409eff;
   background: rgba(64, 158, 255, 0.08);
 }
 .md-callout-warning,
 .md-callout-attention {
-  border-left-color: #e6a23c;
   background: rgba(230, 162, 60, 0.1);
 }
 .md-callout-danger,
 .md-callout-error {
-  border-left-color: #f56c6c;
   background: rgba(245, 108, 108, 0.08);
 }
 .md-callout-tip {
-  border-left-color: #13c2c2;
   background: rgba(19, 194, 194, 0.08);
 }
 
@@ -689,4 +796,66 @@ html.dark .md-editor-preview.md-editor-preview .hljs-deletion {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+
+  /* P4 补强：编辑页的滚动同步会程序化设置 scrollTop 并按比例联动另一侧，
+     浏览器若对滚动做平滑动画，同步计算会读到动画中间值而出现漂移。
+     所以压掉过渡还不够，必须同时压掉滚动行为。 */
+  html,
+  .el-drawer__body,
+  .el-dialog {
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ============================================================
+   P4 / P5 补强：深色专属覆盖 + 键盘可见性
+   均为覆盖规则，不改令牌定义、不新增色值
+   ============================================================ */
+
+/* --- P5：深底会放大字重的视觉膨胀，同字重看起来更粗，标题降一档（字号不动）--- */
+html.dark .page-h2 {
+  font-weight: 500;
+}
+
+/* --- P5：深色下 1.7px 细描边会被底色"吃掉"，空状态插画加粗一档 --- */
+html.dark .pv-empty svg {
+  stroke-width: 2;
+}
+
+/* --- P5：注释是读代码时的高频信息，原 #5f7370 在深色下仅约 3.7:1。
+     这里取 #73857f（约 4.8:1，达 AA）而不是直接对齐次级文本色 ——
+     保持"注释比代码安静"的层次，也不新增令牌。其余七组语法色不动。 --- */
+html.dark .md-editor-preview.md-editor-preview .hljs-comment,
+html.dark .md-editor-preview.md-editor-preview .hljs-quote,
+html.dark .md-editor-preview.md-editor-preview .hljs-meta {
+  color: #73857f;
+}
+
+/* --- P5：深色滚动条在暗底上几乎不可见，提高不透明度 --- */
+html.dark ::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--app-text-3) 52%, transparent);
+}
+
+html.dark ::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--app-text-3) 72%, transparent);
+}
+
+/* --- P5：切换主题时先禁过渡，避免多处元素各自过渡出现"半浅半深"的中间帧。
+     由 composables/useTheme.js 在切换瞬间加类，下一帧移除。 --- */
+html.theme-switching,
+html.theme-switching *,
+html.theme-switching *::before,
+html.theme-switching *::after {
+  transition: none !important;
+}
+
+/* ============ pdf.js 文字层（必须全局：span 是 pdf.js 运行时注入的）============
+   原理：canvas 画像素，这一层叠同样位置的**透明文字**，于是可以选中/复制/搜索。
+   关键点：容器要有 --scale-factor（pdf.js 用它算字号与位置，设错就完全选不中），
+   span 用 transform 定位、颜色透明、只能看见选区背景。 */
+.pdf-textlayer { z-index: 2; }
+.pdf-textlayer > span { pointer-events: auto; }
+/* 连续模式：让页与页之间留白，滚动时能分清边界 */
+.pdf-pages.mode-continuous .pdf-page-box + .pdf-page-box {
+  margin-top: 12px;
 }

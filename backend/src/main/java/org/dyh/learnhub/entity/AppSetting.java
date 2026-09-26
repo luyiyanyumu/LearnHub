@@ -11,7 +11,7 @@ import java.time.LocalDateTime;
 @TableName("app_setting")
 public class AppSetting {
 
-    /** 设置键，如 ai.model / ai.polish_prompt / ai.format_prompt */
+    /** 设置键，如 ai.model / ai.temperature / ai.chat_prompt（润色、格式的提示词已改为技能文件，不在这里） */
     @TableId(type = IdType.INPUT)
     private String settingKey;
 

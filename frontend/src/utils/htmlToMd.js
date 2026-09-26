@@ -14,6 +14,7 @@
  */
 import TurndownService from 'turndown'
 import { gfm } from 'turndown-plugin-gfm'
+import { hasExplicitSize } from './tableResize'
 
 /** 预览区里的“装饰性”节点：不属于用户内容，反推前必须剔除 */
 const DROP_SELECTOR = [
@@ -54,6 +55,13 @@ function getService() {
 
   t.use(gfm)
   t.keep(KEEP_TAGS)
+
+  // 带显式列宽/行高的表格：保留为内联 HTML <table>（Markdown 管道表无法表达尺寸）。
+  // addRule 内部是 unshift，此规则会排在 gfm 的 table 规则之前，先命中。
+  t.addRule('sizedTable', {
+    filter: (node) => node.nodeName === 'TABLE' && hasExplicitSize(node),
+    replacement: (content, node) => `\n\n${node.outerHTML}\n\n`,
+  })
 
   // gfm 插件把 <s> 转成单波浪线 ~x~，但 markdown-it 只认 ~~x~~，这里覆盖成正确的双波浪线
   t.addRule('strikethroughGfm', {

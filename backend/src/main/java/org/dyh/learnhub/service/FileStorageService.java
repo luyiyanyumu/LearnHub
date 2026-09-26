@@ -54,6 +54,7 @@ public class FileStorageService {
     private final FileInfoMapper fileInfoMapper;
     private final CategoryMapper categoryMapper;
     private final DocumentTextService documentTextService;
+    private final PdfLayoutExtractor pdfLayoutExtractor;
     private final ApplicationEventPublisher events;
 
     /** 文件存放目录：后端工作目录下的 uploads/ */
@@ -234,6 +235,46 @@ public class FileStorageService {
         m.put("chars", info.getTextContent() == null ? 0 : info.getTextContent().length());
         m.put("textStatus", info.getTextStatus());
         m.put("textError", info.getTextError());
+        return m;
+    }
+
+    /**
+     * 排版还原后的正文（阅读器「抽取正文」用）。
+     *
+     * <p>与 {@link #textOf} 的分工：textOf 给的是**检索层实际用的那份纯文本**（一行一段、两栏交错），
+     * 这里给的是**按坐标重建过版面的结构化正文**（标题/作者/章节/段落/列表/脚注，按页返回），
+     * 界面照原文档排版，"抽取正文"才能当原文读。非 PDF 一律返回 unsupported，前端继续用分段正文。
+     */
+    public Map<String, Object> layoutOf(Long id) {
+        FileInfo info = require(id);
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", info.getId());
+        m.put("ext", info.getExt() == null ? "" : info.getExt());
+        m.put("textStatus", info.getTextStatus() == null ? "" : info.getTextStatus());
+        String ext = info.getExt() == null ? "" : info.getExt().toLowerCase(Locale.ROOT);
+        if (!"pdf".equals(ext)) {
+            m.put("status", "unsupported");
+            m.put("error", "排版还原只针对 PDF，其它格式请用分段正文");
+            m.put("pages", List.of());
+            m.put("chars", 0);
+            m.put("pageCount", 0);
+            return m;
+        }
+        Path path = storageDir().resolve(info.getStoreName());
+        if (!Files.exists(path)) {
+            m.put("status", "missing");
+            m.put("error", "文件已丢失: " + info.getStoreName());
+            m.put("pages", List.of());
+            m.put("chars", 0);
+            m.put("pageCount", 0);
+            return m;
+        }
+        PdfLayoutExtractor.Layout layout = pdfLayoutExtractor.extract(path);
+        m.put("status", layout.status());
+        m.put("error", layout.error());
+        m.put("pages", layout.pages());
+        m.put("chars", layout.chars());
+        m.put("pageCount", layout.pageCount());
         return m;
     }
 

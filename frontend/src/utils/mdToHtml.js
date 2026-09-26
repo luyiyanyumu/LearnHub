@@ -14,6 +14,7 @@ import githubCss from 'highlight.js/styles/github.css?raw'
 import githubDarkCss from 'highlight.js/styles/github-dark.css?raw'
 import { fixHtmlQuotes } from './htmlQuotes'
 import mdCallout from './mdCallout'
+import mdAnchor from './mdAnchor'
 
 const md = new MarkdownIt({
   html: true, // 笔记中允许少量原始 HTML（图片/表格微调等），与编辑器预览一致
@@ -33,6 +34,7 @@ const md = new MarkdownIt({
   },
 })
 md.use(mdCallout) // :::名称 … ::: 彩色提示块，与编辑器预览保持一致
+md.use(mdAnchor) // 给标题加 id：手写目录 [小节](#id) 在导出文件里也能跳（与预览同一套规则）
 
 /**
  * 任务列表支持：`- [ ] 待办` / `- [x] 已完成` → 带勾选框的列表项
@@ -140,17 +142,17 @@ body {
 .markdown-body th { background: #f6f8fa; font-weight: 600; }
 .markdown-body hr { border: 0; border-top: 2px solid #d8dee4; margin: 2em 0; }
 .markdown-body del { color: #6e7781; }
-/* :::名称 … ::: 彩色提示块（半透明底色，深色下也可读） */
+/* :::名称 … ::: 彩色提示块（只用半透明底色，无左侧色条；与应用内预览保持一致） */
 .markdown-body .md-callout {
   margin: 1em 0; padding: 10px 14px; border-radius: 8px;
-  border-left: 4px solid #909399; background: rgba(144,147,153,.08);
+  background: rgba(144,147,153,.08);
 }
 .markdown-body .md-callout p { margin: .3em 0; }
-.markdown-body .md-callout-success { border-left-color: #52c41a; background: rgba(82,196,26,.08); }
-.markdown-body .md-callout-info, .markdown-body .md-callout-note { border-left-color: #409eff; background: rgba(64,158,255,.08); }
-.markdown-body .md-callout-warning, .markdown-body .md-callout-attention { border-left-color: #e6a23c; background: rgba(230,162,60,.1); }
-.markdown-body .md-callout-danger, .markdown-body .md-callout-error { border-left-color: #f56c6c; background: rgba(245,108,108,.08); }
-.markdown-body .md-callout-tip { border-left-color: #13c2c2; background: rgba(19,194,194,.08); }
+.markdown-body .md-callout-success { background: rgba(82,196,26,.08); }
+.markdown-body .md-callout-info, .markdown-body .md-callout-note { background: rgba(64,158,255,.08); }
+.markdown-body .md-callout-warning, .markdown-body .md-callout-attention { background: rgba(230,162,60,.1); }
+.markdown-body .md-callout-danger, .markdown-body .md-callout-error { background: rgba(245,108,108,.08); }
+.markdown-body .md-callout-tip { background: rgba(19,194,194,.08); }
 .doc-foot {
   margin-top: 48px; padding-top: 16px; border-top: 1px solid #d0d7de;
   color: #8c959f; font-size: 12px; text-align: center;

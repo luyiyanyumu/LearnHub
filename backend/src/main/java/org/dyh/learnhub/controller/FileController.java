@@ -116,6 +116,19 @@ public class FileController {
     public Result<Map<String, Object>> text(@PathVariable Long id) {
         return Result.ok(fileStorageService.textOf(id));
     }
+
+    /**
+     * 取**排版还原后的正文**（阅读器的"抽取正文"页用）。
+     *
+     * <p>与 {@code /text} 的区别：那个是检索层用的纯文本（PDF 两栏会逐行交错，只能检索不能读），
+     * 这个按键面坐标把两栏、段落、章节标题重建出来，前端照原文档排版。
+     * <p>单独一个接口而不是塞进 {@code /text}：PDF 解析要几百毫秒到一两秒，
+     * 而阅读器默认打开的是"原文"页 —— 让它在切到"抽取正文"时才付这个成本。
+     */
+    @GetMapping("/{id}/text-layout")
+    public Result<Map<String, Object>> textLayout(@PathVariable Long id) {
+        return Result.ok(fileStorageService.layoutOf(id));
+    }
 /** 翻译能力（界面用它显示"用哪个档案翻、单段上限多少"） */
     @GetMapping("/translate/capabilities")
     public Result<Map<String, Object>> translateCaps() {

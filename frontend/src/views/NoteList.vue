@@ -119,7 +119,7 @@ async function reloadMeta() {
       <div class="spacer"></div>
       <el-input
         v-model="query.kw"
-        placeholder="搜索标题 / 内容关键词"
+        placeholder="搜索标题 / 内容"
         clearable
         style="width: 220px"
         @keyup.enter="search"

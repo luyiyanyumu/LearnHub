@@ -1,8 +1,8 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { categoryApi, tagApi, settingsApi, aiApi } from '../api'
-import { setThemeMode, themeMode } from '../composables/useTheme'
+import { categoryApi, tagApi, settingsApi, aiApi, wikiApi, modelApi } from '../api'
+import { extractPromptFromMd } from '../utils/promptFromMd'
 
 const visible = defineModel({ type: Boolean, default: false })
 
@@ -14,15 +14,282 @@ const configuredModel = ref('')
 const presetLabel = ref('')
 
 // ---------- AI / 外观设置 ----------
-/** AI 相关字段（顺序即 diff / 重置顺序） */
+/** AI 相关字段（顺序即 diff / 重置顺序）。润色/格式提示词已移出：它们是技能文件，不再走设置接口 */
 const AI_FIELDS = [
   'baseUrl', 'apiKey', 'model', 'maxTokens', 'temperature',
-  'thinking', 'reasoningEffort', 'polishPrompt', 'formatPrompt',
+  'thinking', 'reasoningEffort', 'chatPrompt', 'webEnabled',
 ]
 const emptyForm = () => ({
   baseUrl: '', apiKey: '', model: '', maxTokens: '', temperature: '',
-  thinking: '', reasoningEffort: '', polishPrompt: '', formatPrompt: '',
+  thinking: '', reasoningEffort: '', chatPrompt: '', webEnabled: '1',
 })
+
+/**
+ * 设置分组。原来是一个「外观与 AI」标签页里塞了 8 个 section
+ * （其中一个"旧配置"就 182 行），滚起来又长又找不到东西；
+ * 现在拆成左侧分组菜单 + 右侧只显示当前分组，一屏就能看完一组。
+ */
+const pane = ref('model')
+const PANES = [
+  { id: 'model', name: '模型档案与分工' },
+  { id: 'legacy', name: '模型参数' },
+  { id: 'prompt', name: '对话提示词' },
+  { id: 'skill', name: '技能' },
+  { id: 'category', name: '分类' },
+  { id: 'tag', name: '标签' },
+]
+/** 模型分工表：每个任务指向哪个**模型档案**（含"为什么是这个默认"） */
+const routing = ref({ table: [], targets: [] })
+const routingBusy = ref(false)
+
+/** 模型档案列表（接口**不返回明文密钥**，只有 hasKey / keyHint） */
+const profiles = ref([])
+const presets = ref([])
+const probingId = ref('')
+const savingProfile = ref(false)
+const editor = ref({ open: false, id: '', name: '', provider: 'custom', baseUrl: '', apiKey: '', model: '', note: '', hasKey: false, keyHint: '' })
+
+async function loadRouting() {
+  try {
+    const d = await modelApi.profiles()
+    profiles.value = d.profiles || []
+    presets.value = d.presets || []
+    // 分工表的目标就是档案列表，一起刷新，避免"档案改了、下拉还是旧的"
+    routing.value = { table: d.routing || [], targets: (d.profiles || []).map((p) => ({ id: p.id, label: p.name, model: p.model })) }
+    // 参数页默认落在当前激活档案上；该档案被删了就回退第一个
+    if (!paramProfile.value || !profiles.value.some((pp) => pp.id === paramProfile.value)) {
+      paramProfile.value = d.activeId || profiles.value[0]?.id || ''
+    }
+    loadParamOf(paramProfile.value)
+  } catch (e) {
+    routing.value = { table: [], targets: [] }
+  }
+}
+
+const PROVIDER_LABEL = {
+  deepseek: 'DeepSeek', kimi: 'Kimi', ark: '火山方舟', openai: 'OpenAI',
+  ollama: '本地 Ollama', lmstudio: '本地 LM Studio', vllm: '本地 vLLM', custom: '自定义',
+}
+
+function providerLabel(p) {
+  return PROVIDER_LABEL[p] || p || '自定义'
+}
+
+/**
+ * 打开档案编辑器。
+ * @param p    要编辑的档案（null = 新增）
+ * @param pre  预设（新增时预填地址与模型名）
+ */
+function openProfileEditor(p, pre) {
+  if (p) {
+    editor.value = {
+      open: true, id: p.id, name: p.name, provider: p.provider, baseUrl: p.baseUrl,
+      apiKey: '', // **不回填密钥**：接口本来就只给掩码，回填会让用户以为可以改
+      model: p.model, note: p.note || '', hasKey: p.hasKey, keyHint: p.keyHint,
+    }
+  } else {
+    editor.value = {
+      open: true, id: '', name: pre ? pre.name : '新档案', provider: pre ? pre.provider : 'custom',
+      baseUrl: pre ? pre.baseUrl : '', apiKey: '', model: pre ? pre.model : '',
+      note: pre ? pre.note : '', hasKey: false, keyHint: '',
+    }
+  }
+}
+
+async function saveProfile() {
+  const e = editor.value
+  if (!e.name.trim() || !e.baseUrl.trim() || !e.model.trim()) {
+    ElMessage.warning('名称、Base URL、模型名都要填')
+    return
+  }
+  savingProfile.value = true
+  try {
+    const body = {
+      name: e.name.trim(), provider: e.provider, baseUrl: e.baseUrl.trim(),
+      model: e.model.trim(), note: e.note ? e.note.trim() : '',
+      // 编辑时留空 = 不改密钥；新增时留空 = 不设置
+      apiKey: e.id ? (e.apiKey.trim() ? e.apiKey.trim() : '__KEEP__') : e.apiKey.trim(),
+    }
+    if (e.id) {
+      await modelApi.updateProfile(e.id, body)
+    } else {
+      await modelApi.createProfile(body)
+    }
+    editor.value.open = false
+    ElMessage.success('已保存')
+    await loadRouting()
+  } catch (err) {
+    /* 拦截器已提示 */
+  } finally {
+    savingProfile.value = false
+  }
+}
+
+/** 连通性探测：真实发一次请求，把失败原因与提示直接告诉用户 */
+async function probeProfile(p) {
+  probingId.value = p.id
+  try {
+    const r = await modelApi.testProfile(p.id)
+    if (r.ok) {
+      ElMessage.success(`${p.name}：${r.message}（${r.ms}ms）`)
+    } else {
+      ElMessage.error(`${p.name} 连不上：${r.message}${r.hint ? '　→ ' + r.hint : ''}`)
+    }
+  } catch (e) {
+    /* 拦截器已提示 */
+  } finally {
+    probingId.value = ''
+  }
+}
+
+async function activateProfile(p) {
+  try {
+    await modelApi.activateProfile(p.id)
+    ElMessage.success(`已把「${p.name}」设为对话默认`)
+    await loadRouting()
+  } catch (e) {
+    /* 拦截器已提示 */
+  }
+}
+
+async function removeProfile(p) {
+  try {
+    await ElMessageBox.confirm(
+      `删除档案「${p.name}」？<br><br><span style="color:#6b7280">· 指向它的任务会自动回退到默认档案，不会让任务卡死<br>· 密钥一并删除，且**不可恢复**</span>`,
+      '删除模型档案',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消', dangerouslyUseHTMLString: true }
+    )
+  } catch {
+    return
+  }
+  try {
+    await modelApi.removeProfile(p.id)
+    ElMessage.success('已删除')
+    await loadRouting()
+  } catch (e) {
+    /* 拦截器已提示 */
+  }
+}
+
+async function migrateProfiles() {
+  try {
+    const r = await modelApi.migrate()
+    if (r.created > 0) {
+      ElMessage.success(`已把原有配置迁移为 ${r.created} 个档案`)
+    } else {
+      ElMessage.info('没有可迁移的旧配置（或已经有档案了）')
+    }
+    await loadRouting()
+  } catch (e) {
+    /* 拦截器已提示 */
+  }
+}
+
+/**
+ * 「模型参数」页：选一个档案 + 改它这一套生成参数。
+ *
+ * 为什么不是全局一组参数、也不是重复填地址密钥：参数的最优值**跟着模型走** ——
+ * 本地小模型要更小的输出上限，思考型模型下发温度会被忽略，机械任务要关掉思考才快。
+ * 所以这里只做两件事：选档案、改参数；地址/密钥/模型名统一留给「模型档案与分工」。
+ * 参数改完**立即写库**（不像其它页要按保存），因为它是这个档案的属性、不是弹窗的表单草稿。
+ */
+const paramProfile = ref('')
+const param = ref({ maxTokens: null, temperature: null, thinking: '', reasoningEffort: '' })
+const paramTesting = ref(false)
+
+const paramProfileActive = computed(
+  () => !!paramProfile.value && paramProfile.value === profiles.value.find((p) => p.active)?.id,
+)
+const paramProfileHint = computed(() => {
+  const p = profiles.value.find((x) => x.id === paramProfile.value)
+  if (!p) {
+    return '还没有档案 —— 先去「模型档案与分工」加一个'
+  }
+  return `${providerLabel(p.provider)} · ${p.baseUrl} · ${p.model}` + (p.hasKey ? ` · 密钥 ${p.keyHint}` : ' · 未配置密钥')
+})
+/** 思考是否开着（决定强度可选、温度是否生效） */
+const paramThinkingOn = computed(() => param.thinking === 'enabled')
+const paramTempAllowed = computed(() => param.thinking !== 'enabled')
+
+/** 把某个档案的参数读进编辑区 */
+function loadParamOf(id) {
+  const p = profiles.value.find((x) => x.id === id)
+  param.value = {
+    maxTokens: p?.maxTokens ?? null,
+    temperature: p?.temperature ?? null,
+    thinking: p?.thinking || '',
+    reasoningEffort: p?.reasoningEffort || '',
+  }
+}
+
+/** 保存单个参数到所选档案（空值 = 清除 = 跟随全局默认） */
+async function saveParam(key, value) {
+  if (!paramProfile.value) {
+    ElMessage.warning('先选一个模型档案')
+    return
+  }
+  try {
+    await modelApi.updateProfile(paramProfile.value, { [key]: value === null || value === undefined ? '' : value })
+    await loadRouting()
+    loadParamOf(paramProfile.value)
+    ElMessage.success('已保存到该档案')
+  } catch (e) {
+    /* 拦截器已提示 */
+  }
+}
+
+async function activateParamProfile() {
+  try {
+    await modelApi.activateProfile(paramProfile.value)
+    await loadRouting()
+    ElMessage.success('已设为对话默认档案')
+  } catch (e) {
+    /* 拦截器已提示 */
+  }
+}
+
+/** 用该档案真实发一次最小请求，确认地址/密钥/模型名都对 */
+async function testParamProfile() {
+  if (!paramProfile.value) {
+    return
+  }
+  paramTesting.value = true
+  try {
+    const r = await modelApi.testProfile(paramProfile.value)
+    if (r.ok) {
+      ElMessage.success(`${r.name}：${r.message}（${r.ms}ms）`)
+    } else {
+      ElMessage.error(`连不上：${r.message}${r.hint ? '　→ ' + r.hint : ''}`)
+    }
+  } catch (e) {
+    /* 拦截器已提示 */
+  } finally {
+    paramTesting.value = false
+  }
+}
+
+/** 任务 → 设置字段名（与后端 SettingsController 的映射一一对应） */
+function fieldOfTask(task) {
+  return 'modelFor' + task.charAt(0).toUpperCase() + task.slice(1)
+}
+
+async function setTaskTarget(task, target) {
+  routingBusy.value = true
+  try {
+    const payload = {}
+    payload[fieldOfTask(task)] = target
+    // 必须用 update：settingsApi 只有 get/update，写 save() 会抛 TypeError。
+    // 当时那个空 catch 把它吞了 → 界面看起来"点了没反应"（实测踩到：任务分工改不动）。
+    await settingsApi.update(payload)
+    await loadRouting()
+    ElMessage.success('已切换（下一次该任务生效）')
+  } catch (e) {
+    // 失败必须说出来：静默失败最难查（这次就是被静默吞掉才没人发现）
+    ElMessage.error('切换失败：' + (e?.message || e))
+  } finally {
+    routingBusy.value = false
+  }
+}
 
 const form = ref(emptyForm())
 let baseline = emptyForm()
@@ -38,6 +305,75 @@ const defaults = ref({})
  */
 const hasApiKey = ref(false)
 const clearApiKey = ref(false)
+
+// ---------- 提示词：从 .md 文件识别导入 ----------
+/**
+ * 对话提示词支持上传 .md 识别导入：
+ * 把写好的提示词文档直接选进来，由 utils/promptFromMd
+ * 剥掉说明性文字、只取要喂给模型的那一段。
+ * 识别方式可随时切换（复用同一份文件内容，不必重新选文件），也能「撤销导入」还原导入前的值。
+ * <p>
+ * 润色 / 整合格式的提示词**不再走这条路**：它们已是 skills/&lt;id&gt;/SKILL.md 文件，
+ * 由后端实时读取，界面上只做只读展示（见下方「技能」区块）。
+ */
+const fileInputRef = ref(null)
+let importTarget = ''
+/** field → { name, raw, mode, label, chars, prev } */
+const promptImport = ref({ chatPrompt: null })
+
+function pickPromptFile(field) {
+  importTarget = field
+  const el = fileInputRef.value
+  if (!el) return
+  el.value = '' // 清掉上次选择，否则连选同一个文件不触发 change
+  el.click()
+}
+
+async function onPromptFile(e) {
+  const file = e.target.files?.[0]
+  e.target.value = ''
+  const field = importTarget
+  if (!file || !field) return
+  let raw = ''
+  try {
+    raw = await file.text()
+  } catch (err) {
+    ElMessage.error('读取文件失败：' + (err?.message || '未知错误'))
+    return
+  }
+  const picked = extractPromptFromMd(raw, 'auto')
+  promptImport.value[field] = {
+    name: file.name,
+    raw,
+    mode: 'auto',
+    prev: form.value[field] || '', // 支持撤销导入
+    ...picked,
+  }
+  form.value[field] = picked.text
+  if (!picked.text || picked.text.trim().length < 30) {
+    ElMessage.warning(`从 ${file.name} 里只识别出 ${picked.chars} 字，可能取错了部分 —— 可切换识别方式，或改用粘贴`)
+  } else {
+    ElMessage.success(`已从 ${file.name} 导入（${picked.label} · ${picked.chars} 字），保存后生效`)
+  }
+}
+
+/** 切换识别方式：用同一份文件内容重新抽取 */
+function rePromptMode(field, mode) {
+  const cur = promptImport.value[field]
+  if (!cur) return
+  const picked = extractPromptFromMd(cur.raw, mode)
+  promptImport.value[field] = { ...cur, mode, ...picked }
+  form.value[field] = picked.text
+}
+
+/** 撤销导入：还原成导入前的内容 */
+function undoPromptImport(field) {
+  const cur = promptImport.value[field]
+  if (!cur) return
+  form.value[field] = cur.prev
+  promptImport.value[field] = null
+  ElMessage.info('已还原为导入前的内容')
+}
 
 /** 常见 OpenAI 兼容服务：一键填充地址 + 模型名（模型名以 2026-09 各家官方文档为准） */
 const PRESETS = [
@@ -250,6 +586,8 @@ function fixLegacyModel() {
 function applySnapshot(s) {
   const next = emptyForm()
   for (const k of AI_FIELDS) next[k] = s[k] == null ? '' : String(s[k])
+  // 后端返回的是布尔，面板里用 '1'/'0' 与其它字段保持同一种形状（都是字符串）
+  next.webEnabled = s.webEnabled ? '1' : '0'
   form.value = next
   baseline = { ...next }
   overridden.value = {
@@ -260,8 +598,7 @@ function applySnapshot(s) {
     temperature: !!s.temperatureOverridden,
     thinking: !!s.thinkingOverridden,
     reasoningEffort: !!s.reasoningEffortOverridden,
-    polishPrompt: !!s.polishOverridden,
-    formatPrompt: !!s.formatOverridden,
+    chatPrompt: !!s.chatOverridden,
   }
   if (s.defaults) defaults.value = s.defaults
   hasApiKey.value = !!s.hasApiKey
@@ -274,6 +611,111 @@ const tags = ref([])
 const catLoading = ref(false)
 const tagLoading = ref(false)
 
+// ---------- 技能（润色 / 整理格式的提示词） ----------
+const skills = ref([])
+const skillsLoading = ref(false)
+
+/** 技能服务于哪个按钮（后端固定映射：润色 → markdown-polish，整理格式 → markdown-beautify） */
+const SKILL_USAGE = {
+  polish: 'AI 润色',
+  format: '整理格式',
+}
+function skillUsage(appliesTo) {
+  return SKILL_USAGE[appliesTo] || appliesTo || '未指定'
+}
+
+async function loadSkills() {
+  skillsLoading.value = true
+  try {
+    const r = await aiApi.skills()
+    skills.value = r?.skills || []
+  } catch (e) {
+    skills.value = []
+  } finally {
+    skillsLoading.value = false
+  }
+}
+
+/**
+ * 上传技能：选一个 .md/.txt 覆盖 skills/<id>/SKILL.md。
+ * - 「替换」按钮 → 带上该技能 id；「上传技能」按钮 → id 为空，需填新技能名（即新建）
+ * - 识别方式默认「整体导入」：技能文件本身就含 frontmatter，不能像导入提示词那样默认去抽取，
+ *   否则会把 frontmatter 一起剥掉、元数据（applies_to / min_ratio）就丢了
+ */
+const skillFileRef = ref(null)
+const skillImport = ref(null)
+const skillSaving = ref(false)
+
+function pickSkillFile(skillId) {
+  skillImport.value = { id: skillId || '', name: '', raw: '', mode: 'whole', chars: 0, newId: '' }
+  const el = skillFileRef.value
+  if (!el) return
+  el.value = '' // 清掉上次选择，否则连选同一个文件不触发 change
+  el.click()
+}
+
+async function onSkillFile(e) {
+  const file = e.target.files?.[0]
+  e.target.value = ''
+  if (!file) {
+    skillImport.value = null
+    return
+  }
+  let raw = ''
+  try {
+    raw = await file.text()
+  } catch (err) {
+    ElMessage.error('读取文件失败：' + (err?.message || '未知错误'))
+    return
+  }
+  const cur = skillImport.value || { id: '', newId: '' }
+  skillImport.value = { ...cur, name: file.name, raw, mode: 'whole', chars: raw.length }
+}
+
+/** 按当前识别方式算出真正要写入的正文（供预览字数） */
+function skillText(it) {
+  if (!it) return ''
+  if (it.mode === 'whole') return it.raw
+  return extractPromptFromMd(it.raw, it.mode).text
+}
+
+function reSkillMode(mode) {
+  const it = skillImport.value
+  if (!it) return
+  it.mode = mode
+  it.chars = skillText({ ...it, mode }).length
+}
+
+async function confirmSkillUpload() {
+  const it = skillImport.value
+  if (!it) return
+  const id = (it.id || it.newId || '').trim().toLowerCase()
+  if (!id) {
+    ElMessage.warning('请先填技能名')
+    return
+  }
+  if (!/^[a-z0-9][a-z0-9._-]*$/.test(id)) {
+    ElMessage.warning('技能名只能用小写字母、数字、点、下划线、连字符')
+    return
+  }
+  const content = skillText(it)
+  if (!content.trim()) {
+    ElMessage.warning('文件内容为空')
+    return
+  }
+  skillSaving.value = true
+  try {
+    await aiApi.saveSkill(id, { content })
+    ElMessage.success(`已写入 skills/${id}/SKILL.md，立即生效`)
+    skillImport.value = null
+    await loadSkills()
+  } catch (e) {
+    // 失败原因（技能名非法 / 内容为空等）由请求拦截器统一弹出
+  } finally {
+    skillSaving.value = false
+  }
+}
+
 // immediate 必须开：本组件是被 AppLayout 懒加载的（defineAsyncComponent + v-if），
 // 「首次点设置」时挂载与 visible=true 发生在同一拍 —— 组件挂载好的瞬间 visible 就已经是
 // true，不存在 false→true 的变化。没有 immediate 的话这条 watch 永远不触发，
@@ -285,11 +727,16 @@ watch(visible, (v) => {
     load()
     loadCategories()
     loadTags()
+    loadSkills()
+  loadRouting()
   }
 }, { immediate: true })
 
 async function load() {
   loading.value = true
+  // 每次打开设置都清掉上一次的导入提示（重新加载后内容已经变了）
+  promptImport.value = { chatPrompt: null }
+  skillImport.value = null
   try {
     const s = await settingsApi.get()
     applySnapshot(s)
@@ -382,6 +829,8 @@ async function resetAll() {
 /** 单项恢复默认：留空保存后后端即回落默认值 */
 function resetField(key) {
   form.value[key] = defaults.value[key] || ''
+  // 恢复默认时把「已从 xxx.md 导入」的提示一并清掉，避免状态与实际内容不符
+  if (promptImport.value[key]) promptImport.value[key] = null
 }
 
 // ---------- 分类管理 ----------
@@ -498,234 +947,323 @@ function notifyMetaChanged() {
   window.dispatchEvent(new CustomEvent('lh-meta-changed'))
 }
 </script>
-
 <template>
-  <el-dialog v-model="visible" title="⚙ 设置" width="680px" top="6vh" destroy-on-close>
-    <el-tabs v-model="activeTab">
-      <!-- 外观与 AI -->
-      <el-tab-pane label="外观与 AI" name="ai">
-        <div v-loading="loading" class="settings">
+  <el-dialog v-model="visible" title="⚙ 设置" width="880px" top="8vh" destroy-on-close>
+    <div class="settings-body">
+      <nav class="settings-nav">
+        <button
+          v-for="g in PANES"
+          :key="g.id"
+          type="button"
+          class="nav-item"
+          :class="{ on: pane === g.id }"
+          @click="pane = g.id"
+        >{{ g.name }}</button>
+      </nav>
+
+      <div class="settings-pane">
+        <div v-show="pane === 'legacy'">
           <section class="sec">
-            <h4 class="sec-title">界面风格</h4>
-            <el-radio-group v-model="themeMode" @change="(m) => setThemeMode(m)">
-              <el-radio-button value="light">浅色</el-radio-button>
-              <el-radio-button value="dark">深色</el-radio-button>
-              <el-radio-button value="auto">跟随系统</el-radio-button>
-            </el-radio-group>
-            <p class="hint">切换即时预览；侧栏的太阳/月亮按钮也随时可切</p>
+            <h4 class="sec-title">选择模型档案</h4>
+            <p class="hint net-hint">
+              这一节只管<b>生成参数</b>——模型本身的地址、密钥、模型名在「模型档案与分工」里配，
+              不再两处都能改。选一个档案，下面改的就是<b>它</b>的参数：不同模型想要的并不一样
+              （本地小模型要更小的输出上限、思考型模型下发温度会被忽略），所以参数跟着档案走。
+            </p>
+            <div class="field">
+              <label class="lbl">模型档案</label>
+              <div class="inline">
+                <el-select v-model="paramProfile" style="width: 280px" @change="loadParamOf">
+                  <el-option v-for="p in profiles" :key="p.id" :label="p.name + '（' + p.model + '）'" :value="p.id" />
+                </el-select>
+                <el-button size="small" :loading="paramTesting" @click="testParamProfile">测试连接</el-button>
+                <el-tag v-if="paramProfileActive" size="small" type="success" effect="plain">当前生效</el-tag>
+                <el-button v-else size="small" :disabled="!paramProfile" @click="activateParamProfile">设为生效</el-button>
+              </div>
+              <p class="hint">{{ paramProfileHint }}</p>
+            </div>
           </section>
 
           <section class="sec">
-            <h4 class="sec-title">
-              API 接入
-              <el-tag v-if="overridden.baseUrl || overridden.apiKey || overridden.model" size="small" type="warning" effect="plain">已自定义</el-tag>
-              <el-select
-                v-model="presetLabel"
-                class="preset-select"
-                placeholder="快速填充服务商"
-                size="small"
-                @change="applyPreset"
-              >
-                <el-option v-for="p in PRESETS" :key="p.label" :label="p.label" :value="p.label" />
-              </el-select>
-            </h4>
-            <div class="ai-form">
-              <div class="field">
-                <label class="lbl">
-                  接口地址
-                  <el-link v-if="overridden.baseUrl" type="primary" :underline="false" class="reset-link" @click="resetField('baseUrl')">恢复默认</el-link>
-                </label>
-                <el-input v-model="form.baseUrl" placeholder="https://api.deepseek.com" />
-              </div>
-              <div class="field">
-                <label class="lbl">
-                  API Key
-                  <el-tag v-if="clearApiKey" size="small" type="warning" effect="plain">保存后将清除</el-tag>
-                  <el-tag v-else-if="hasApiKey" size="small" type="success" effect="plain">已保存</el-tag>
-                  <el-link
-                    v-if="hasApiKey && !clearApiKey"
-                    type="primary"
-                    :underline="false"
-                    class="reset-link"
-                    @click="clearSavedKey"
-                  >清除已保存的密钥</el-link>
-                </label>
-                <el-input
-                  v-model="form.apiKey"
-                  type="password"
-                  show-password
-                  :placeholder="hasApiKey && !clearApiKey
-                    ? '已保存密钥（出于安全不回显）：留空 = 不修改，要换直接粘贴新的'
-                    : '留空 = 使用后端 .env 中的密钥'"
-                />
-                <p class="hint">密钥只存在本机数据库或 backend/.env，接口不会再把它回传到页面。</p>
-              </div>
-              <div class="field">
-                <label class="lbl">
-                  模型名称
-                  <el-link v-if="overridden.model" type="primary" :underline="false" class="reset-link" @click="resetField('model')">恢复默认</el-link>
-                </label>
+            <h4 class="sec-title">生成参数</h4>
+            <p class="hint net-hint">
+              留空 = <b>跟随全局默认</b>；改完立即保存到该档案，不需要点下面的「保存」。
+            </p>
+            <div class="field">
+              <label class="lbl">思考模式</label>
+              <div class="inline">
+                <el-radio-group :model-value="param.thinking" size="small" @change="(v) => saveParam('thinking', v)">
+                  <el-radio-button value="">跟随默认</el-radio-button>
+                  <el-radio-button value="enabled">开启</el-radio-button>
+                  <el-radio-button value="disabled">关闭</el-radio-button>
+                </el-radio-group>
                 <el-select
-                  v-model="form.model"
-                  filterable
-                  allow-create
-                  default-first-option
-                  placeholder="按服务商分组选择，或直接输入未列出的模型名"
-                  style="width: 100%"
+                  :model-value="param.reasoningEffort"
+                  size="small"
+                  class="effort-select"
+                  :disabled="!paramThinkingOn"
+                  placeholder="思考强度"
+                  @change="(v) => saveParam('reasoningEffort', v)"
                 >
-                  <el-option-group v-for="g in MODEL_GROUPS" :key="g.label" :label="g.label">
-                    <el-option
-                      v-for="o in g.options"
-                      :key="o.value"
-                      :label="o.label"
-                      :value="o.value"
-                      :disabled="o.disabled"
-                    />
-                  </el-option-group>
+                  <el-option label="强度：服务端默认" value="" />
+                  <el-option label="none · 几乎不思考，最省" value="none" />
+                  <el-option label="minimal · 极简思考" value="minimal" />
+                  <el-option label="low · 简单任务" value="low" />
+                  <el-option label="medium · 中等" value="medium" />
+                  <el-option label="high · 日常（推荐）" value="high" />
+                  <el-option label="xhigh · 较高" value="xhigh" />
+                  <el-option label="max · 复杂推理，最贵" value="max" />
                 </el-select>
-                <div v-if="modelIsDead || legacyReplacement" class="warn-line">
-                  <el-alert
-                    :type="modelIsDead ? 'error' : 'warning'"
-                    :closable="false"
-                    show-icon
-                  >
-                    <template #title>
-                      <span class="warn-text">
-                        <template v-if="modelIsDead">
-                          「{{ form.model }}」已被官方拒收，调用会直接返回 400。
-                        </template>
-                        <template v-else>
-                          「{{ form.model }}」是旧名——目前仍可用，但已不是官方文档里的主名。
-                        </template>
-                      </span>
-                      <el-link
-                        v-if="legacyReplacement"
-                        type="primary"
-                        :underline="false"
-                        class="warn-fix"
-                        @click="fixLegacyModel"
-                      >
-                        一键换成 {{ legacyReplacement }}
-                      </el-link>
-                    </template>
-                  </el-alert>
+              </div>
+              <p class="hint">
+                「跟随默认」= 由模型决定：DeepSeek 的 flash / reasoner 与 V4 系列默认开启思考，deepseek-chat 默认不开。
+                思考强度仅对 DeepSeek 官方端点（api.deepseek.com）生效。
+                <b>润色 / 整理格式默认走快速通道（不思考）</b>，只有把思考模式显式设为「开启」才会让它们也思考。
+              </p>
+            </div>
+            <div class="field-row">
+              <div class="field grow">
+                <label class="lbl">最大输出</label>
+                <div class="inline">
+                  <el-input
+                    :model-value="param.maxTokens"
+                    placeholder="跟随默认（8192）"
+                    style="width: 170px"
+                    @change="(v) => saveParam('maxTokens', v)"
+                  />
+                  <span class="unit">tokens</span>
                 </div>
               </div>
-
-              <div class="field">
+              <div class="field grow">
                 <label class="lbl">
-                  思考模式
-                  <el-link v-if="overridden.thinking" type="primary" :underline="false" class="reset-link" @click="resetField('thinking')">恢复默认</el-link>
+                  温度
+                  <el-tag v-if="!paramTempAllowed" size="small" type="info" effect="plain">当前不生效</el-tag>
                 </label>
                 <div class="inline">
-                  <el-radio-group v-model="form.thinking" size="small">
-                    <el-radio-button value="">自动</el-radio-button>
-                    <el-radio-button value="enabled">开启</el-radio-button>
-                    <el-radio-button value="disabled">关闭</el-radio-button>
-                  </el-radio-group>
-                  <el-select
-                    v-model="form.reasoningEffort"
-                    size="small"
-                    class="effort-select"
-                    :disabled="!thinkingOn"
-                    placeholder="思考强度"
-                  >
-                    <el-option label="强度：服务端默认" value="" />
-                    <el-option label="none · 几乎不思考，最省" value="none" />
-                    <el-option label="minimal · 极简思考" value="minimal" />
-                    <el-option label="low · 简单任务" value="low" />
-                    <el-option label="medium · 中等" value="medium" />
-                    <el-option label="high · 日常（推荐）" value="high" />
-                    <el-option label="xhigh · 较高" value="xhigh" />
-                    <el-option label="max · 复杂推理，最贵" value="max" />
-                  </el-select>
+                  <el-slider
+                    :model-value="param.temperature === null ? 0.3 : Number(param.temperature)"
+                    :min="0"
+                    :max="2"
+                    :step="0.1"
+                    :disabled="!paramTempAllowed"
+                    class="temp-slider"
+                    @change="(v) => saveParam('temperature', v)"
+                  />
+                  <span class="unit">{{ param.temperature === null ? '跟随默认' : Number(param.temperature).toFixed(1) }}</span>
                 </div>
-                <p class="hint">
-                  「自动」= 由模型决定：DeepSeek 的 flash / reasoner 与 V4 系列默认开启思考，deepseek-chat 默认不开。
-                  思考强度仅对 DeepSeek 官方端点（api.deepseek.com）生效。
-                  <b>润色 / 整理格式默认走快速通道（不思考）</b>——这类机械转换思考收益小、却要慢 3-4 倍；
-                  只有把思考模式显式设为「开启」才会让它们也思考。
+                <p v-if="!paramTempAllowed" class="hint">
+                  思考模式已开启：DeepSeek V4 等模型在思考时会忽略温度，请求里已不带该参数。
                 </p>
               </div>
-              <div class="field-row">
-                <div class="field grow">
-                  <label class="lbl">
-                    最大输出
-                    <el-link v-if="overridden.maxTokens" type="primary" :underline="false" class="reset-link" @click="resetField('maxTokens')">恢复默认</el-link>
-                  </label>
-                  <div class="inline">
-                    <el-input v-model="form.maxTokens" placeholder="8192" style="width: 130px" />
-                    <span class="unit">tokens</span>
-                  </div>
-                </div>
-                <div class="field grow">
-                  <label class="lbl">
-                    温度
-                    <el-tag v-if="!tempAllowed" size="small" type="info" effect="plain">当前不生效</el-tag>
-                    <el-link v-if="overridden.temperature" type="primary" :underline="false" class="reset-link" @click="resetField('temperature')">恢复默认</el-link>
-                  </label>
-                  <div class="inline">
-                    <el-slider
-                      v-model="tempNum"
-                      :min="0"
-                      :max="2"
-                      :step="0.1"
-                      :disabled="!tempAllowed"
-                      class="temp-slider"
-                    />
-                    <span class="unit">{{ tempNum.toFixed(1) }}</span>
-                  </div>
-                  <p v-if="!tempAllowed" class="hint">
-                    {{
-                      thinkingOn
-                        ? '思考模式已开启：DeepSeek V4 等模型在思考时会忽略温度，请求里已不带该参数。'
-                        : '该模型属于思考型且无法关闭思考，其接口要求不要下发温度参数。'
-                    }}
-                  </p>
-                </div>
-              </div>
             </div>
-            <div class="ai-actions">
-              <el-button size="small" :loading="testing" @click="testConn">⚡ 测试连接</el-button>
-              <span class="hint">
-                按上面填的地址/密钥/模型直接试一次，不必先保存
-                <template v-if="configuredModel"> · 当前生效：{{ configuredModel }}</template>
-              </span>
-            </div>
-          </section>
-
-          <section class="sec">
-            <h4 class="sec-title">
-              润色提示词
-              <el-tag v-if="overridden.polishPrompt" size="small" type="warning" effect="plain">已自定义</el-tag>
-              <el-link v-if="overridden.polishPrompt" type="primary" :underline="false" class="reset-link" @click="resetField('polishPrompt')">恢复默认</el-link>
-            </h4>
-            <el-input
-              v-model="form.polishPrompt"
-              type="textarea"
-              :rows="6"
-              placeholder="留空 = 使用内置默认。可自定义润色规则，如：统一术语、口语转书面、修正标点…"
-            />
-          </section>
-
-          <section class="sec">
-            <h4 class="sec-title">
-              格式提示词
-              <el-tag v-if="overridden.formatPrompt" size="small" type="warning" effect="plain">已自定义</el-tag>
-              <el-link v-if="overridden.formatPrompt" type="primary" :underline="false" class="reset-link" @click="resetField('formatPrompt')">恢复默认</el-link>
-            </h4>
-            <el-input
-              v-model="form.formatPrompt"
-              type="textarea"
-              :rows="6"
-              placeholder="留空 = 使用内置默认。可自定义排版规则，如：标题层级、列表、代码块标注语言…"
-            />
           </section>
         </div>
-      </el-tab-pane>
 
+        <div v-show="pane === 'model'">
+          <section class="sec">
+            <h4 class="sec-title">模型配置档案</h4>
+            <p class="hint net-hint">
+              每个档案是一套「服务商 + 地址 + 密钥 + 模型」组合，<b>可以加很多个</b>：
+              云端强模型做判断类任务、本地模型做批量摘要，互不影响。
+              点「启用」即把该档案设为对话默认；各任务具体用哪个，在下面的「模型分工」里逐项选。
+            </p>
+
+            <div v-for="p in profiles" :key="p.id" class="profile-row" :class="{ 'profile-active': p.active }">
+              <div class="profile-main">
+                <b class="profile-name">{{ p.name }}</b>
+                <span v-if="p.active" class="badge badge-ok">当前生效</span>
+                <span class="hint profile-meta">
+                  {{ providerLabel(p.provider) }} · {{ p.model }}
+                  <template v-if="p.hasKey"> · 密钥 {{ p.keyHint }}</template>
+                  <template v-else> · 未配置密钥</template>
+                </span>
+              </div>
+              <div class="profile-acts">
+                <el-button size="small" @click="openProfileEditor(p)">编辑</el-button>
+                <el-button size="small" :loading="probingId === p.id" @click="probeProfile(p)">测试</el-button>
+                <el-button size="small" :disabled="p.active" @click="activateProfile(p)">启用</el-button>
+                <el-button size="small" :disabled="profiles.length <= 1" @click="removeProfile(p)">删除</el-button>
+              </div>
+            </div>
+            <p v-if="!profiles.length" class="hint">
+              还没有档案 —— 从下面的预设加一个（也可以用 <b>迁移旧配置</b> 把原来填过的地址/密钥搬过来）
+            </p>
+
+            <div class="preset-chips">
+              <button v-for="pre in presets" :key="pre.provider + pre.name" type="button" class="preset-chip"
+                      @click="openProfileEditor(null, pre)">
+                ＋{{ pre.name }}
+              </button>
+              <button type="button" class="preset-chip preset-migrate" @click="migrateProfiles">
+                迁移旧配置
+              </button>
+            </div>
+          </section>
+
+          <!-- 档案编辑器：新增/编辑共用 -->
+          <section v-if="editor.open" class="sec">
+            <h4 class="sec-title">{{ editor.id ? '编辑档案' : '新增档案' }}</h4>
+            <div class="form-grid">
+              <label class="fl">名称</label>
+              <el-input v-model="editor.name" placeholder="如：DeepSeek 云端 / 本地 Ollama" />
+              <label class="fl">服务商</label>
+              <el-select v-model="editor.provider" style="width: 100%">
+                <el-option v-for="pre in presets" :key="pre.provider" :label="pre.name" :value="pre.provider" />
+              </el-select>
+              <label class="fl">Base URL</label>
+              <el-input v-model="editor.baseUrl" placeholder="OpenAI 兼容基址，本地 Ollama 是 http://localhost:11434/v1" />
+              <label class="fl">API Key</label>
+              <el-input v-model="editor.apiKey" :placeholder="editor.hasKey ? '已配置（' + editor.keyHint + '），留空保持不变' : '本地服务随便填一个非空值即可'" />
+              <label class="fl">模型名</label>
+              <el-input v-model="editor.model" placeholder="如 deepseek-flash / qwen3:8b" />
+              <label class="fl">备注</label>
+              <el-input v-model="editor.note" placeholder="这档准备用来干什么（可空）" />
+            </div>
+            <div class="ai-actions">
+              <el-button size="small" type="primary" :loading="savingProfile" @click="saveProfile">保存</el-button>
+              <el-button size="small" @click="editor.open = false">取消</el-button>
+              <span class="hint">保存后可点列表里的「测试」真实发一次请求，确认地址与模型名都对</span>
+            </div>
+          </section>
+
+          <section class="sec">
+            <h4 class="sec-title">模型分工（每个后台任务用哪个档案）</h4>
+            <p class="hint net-hint">
+              每个**后台任务**可以单独指定一个档案。<b>默认值是按实测定的</b>：判断类任务（实体页编译、影响分析、
+              语义自检、图谱关联、三元组抽取、答案核对）用当前生效档案——小模型实测守不住跨页规则、标签也不稳定；
+              批量摘要类任务（主题 wiki、检索重排、检索词扩展）优先本地档案——免费且够用。
+              嵌入向量固定用本地（换模型必须重建索引，所以不走这里）。
+              <b>对话的模型不在这里选</b>：在智能体界面按会话选 —— 每个会话可固定一个档案，或选「默认」用当前生效档案。
+            </p>
+            <div v-for="row in routing.table" :key="row.task" class="route-row">
+              <div class="route-main">
+                <b class="route-label">{{ row.label }}</b>
+                <span class="hint">{{ row.why }}</span>
+              </div>
+              <el-select
+                :model-value="row.target"
+                size="small"
+                :disabled="routingBusy"
+                @change="(v) => setTaskTarget(row.task, v)"
+              >
+                <el-option
+                  v-for="t in routing.targets"
+                  :key="t.id"
+                  :label="t.label + '（' + t.model + '）'"
+                  :value="t.id"
+                />
+              </el-select>
+            </div>
+          </section>
+
+        </div>
+
+        <div v-show="pane === 'prompt'">
+          <section class="sec">
+            <h4 class="sec-title">
+              对话提示词
+              <el-tag v-if="overridden.chatPrompt" size="small" type="warning" effect="plain">已自定义</el-tag>
+              <el-link v-if="overridden.chatPrompt" type="primary" :underline="false" class="reset-link" @click="resetField('chatPrompt')">恢复默认</el-link>
+            </h4>
+            <el-input
+              v-model="form.chatPrompt"
+              type="textarea"
+              :rows="6"
+              placeholder="留空 = 使用内置默认。这是悬浮智能体的系统提示词：讲解方式、用户背景、工具使用纪律都写在这里"
+            />
+            <div class="import-bar">
+              <el-button size="small" @click="pickPromptFile('chatPrompt')">📄 导入 .md</el-button>
+              <template v-if="promptImport.chatPrompt">
+                <span class="import-file" :title="promptImport.chatPrompt.name">{{ promptImport.chatPrompt.name }}</span>
+                <span class="hint">{{ promptImport.chatPrompt.label }} · {{ promptImport.chatPrompt.chars }} 字</span>
+                <el-select
+                  :model-value="promptImport.chatPrompt.mode"
+                  size="small"
+                  class="import-mode"
+                  @change="(m) => rePromptMode('chatPrompt', m)"
+                >
+                  <el-option label="自动识别" value="auto" />
+                  <el-option label="仅取代码块" value="fence" />
+                  <el-option label="整体导入" value="whole" />
+                </el-select>
+                <el-link type="primary" :underline="false" class="reset-link" @click="undoPromptImport('chatPrompt')">撤销导入</el-link>
+              </template>
+              <span v-else class="hint">改完即时生效，不用重启后端；对话里说的「口径」都在这里定义</span>
+            </div>
+          </section>
+        </div>
+
+        <div v-show="pane === 'skill'">
+          <section class="sec">
+            <h4 class="sec-title">
+              技能
+              <span class="sec-actions">
+                <el-button size="small" @click="pickSkillFile('')">上传技能</el-button>
+                <el-link type="primary" :underline="false" class="skill-reload" :disabled="skillsLoading" @click="loadSkills">
+                  重新读取
+                </el-link>
+              </span>
+            </h4>
+            <div v-if="skillsLoading" class="hint">读取中…</div>
+            <div v-else-if="!skills.length" class="skill-empty">
+              <p class="hint">没找到技能文件，可点「上传技能」新建（目录：<code>skills/&lt;技能名&gt;/SKILL.md</code>）</p>
+            </div>
+            <div v-else class="skill-list">
+              <div v-for="s in skills" :key="s.id" class="skill-item">
+                <div class="skill-row">
+                  <span class="skill-name">{{ s.name }}</span>
+                  <el-tag size="small" effect="plain">{{ skillUsage(s.appliesTo) }}</el-tag>
+                  <span class="hint skill-meta">{{ s.chars }} 字</span>
+                  <el-button size="small" text type="primary" @click="pickSkillFile(s.id)">替换</el-button>
+                </div>
+                <div class="skill-path" :title="s.description ? s.description + '\n' + s.path : s.path">{{ s.path }}</div>
+              </div>
+            </div>
+
+            <!-- 上传（新建 / 替换）确认区：先选文件，再确认写入 -->
+            <div v-if="skillImport" class="skill-import">
+              <div class="skill-import-row">
+                <span class="skill-import-file" :title="skillImport.name">{{ skillImport.name || '未选择文件' }}</span>
+                <template v-if="skillImport.raw">
+                  <span class="hint">{{ skillText(skillImport).length }} 字</span>
+                  <el-select
+                    :model-value="skillImport.mode"
+                    size="small"
+                    class="import-mode"
+                    @change="reSkillMode"
+                  >
+                    <el-option label="整体导入" value="whole" />
+                    <el-option label="自动识别" value="auto" />
+                    <el-option label="仅取代码块" value="fence" />
+                  </el-select>
+                </template>
+              </div>
+              <div class="skill-import-row">
+                <el-input
+                  v-if="!skillImport.id"
+                  v-model="skillImport.newId"
+                  size="small"
+                  class="skill-newid"
+                  placeholder="技能名（小写字母开头）"
+                />
+                <span v-else class="hint">将替换 <b>{{ skillImport.id }}</b></span>
+                <el-button
+                  size="small"
+                  type="primary"
+                  :loading="skillSaving"
+                  :disabled="!skillImport.raw"
+                  @click="confirmSkillUpload"
+                >
+                  确认写入
+                </el-button>
+                <el-link type="info" :underline="false" class="skill-reload" @click="skillImport = null">取消</el-link>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <div v-show="pane === 'category'">
       <!-- 分类管理 -->
-      <el-tab-pane label="分类" name="category">
         <div class="mgmt-head">
           <span class="hint">分类用于组织笔记 / 速查卡 / 资料，支持多级</span>
           <el-button type="primary" plain size="small" @click="addCategory(0)">＋ 新建顶级分类</el-button>
@@ -748,10 +1286,10 @@ function notifyMetaChanged() {
             </template>
           </el-table-column>
         </el-table>
-      </el-tab-pane>
+        </div>
 
+        <div v-show="pane === 'tag'">
       <!-- 标签管理 -->
-      <el-tab-pane label="标签" name="tag">
         <div class="mgmt-head">
           <span class="hint">标签可跨分类给笔记打标，一篇笔记可挂多个标签</span>
           <el-button type="primary" plain size="small" @click="addTag">＋ 新建标签</el-button>
@@ -772,16 +1310,34 @@ function notifyMetaChanged() {
             </template>
           </el-table-column>
         </el-table>
-      </el-tab-pane>
-    </el-tabs>
+        </div>
+
+
+        <!-- 隐藏的文件选择器：提示词导入 / 技能上传（必须留在模板里，按钮通过 ref 触发）-->
+          <!-- 隐藏的文件选择器：现在只服务「对话提示词」的导入（导入目标由 pickPromptFile 记录） -->
+          <input
+            ref="fileInputRef"
+            type="file"
+            accept=".md,.markdown,.txt,text/markdown,text/plain"
+            class="import-hidden"
+            @change="onPromptFile"
+          />
+
+          <!-- 隐藏的文件选择器：技能上传（新建 / 替换 SKILL.md，目标由 skillImport.id 决定） -->
+          <input
+            ref="skillFileRef"
+            type="file"
+            accept=".md,.markdown,.txt,text/markdown,text/plain"
+            class="import-hidden"
+            @change="onSkillFile"
+          />
+      </div>
+    </div>
 
     <template #footer>
-      <template v-if="activeTab === 'ai'">
-        <el-button @click="resetAll" :disabled="saving">全部恢复默认</el-button>
-        <el-button @click="visible = false">关闭</el-button>
-        <el-button type="primary" :loading="saving" @click="save">保存</el-button>
-      </template>
-      <el-button v-else @click="visible = false">关闭</el-button>
+      <el-button @click="resetAll" :disabled="saving">全部恢复默认</el-button>
+      <el-button @click="visible = false">关闭</el-button>
+      <el-button type="primary" :loading="saving" @click="save">保存</el-button>
     </template>
   </el-dialog>
 </template>
@@ -807,6 +1363,296 @@ function notifyMetaChanged() {
 .reset-link {
   font-size: 12px;
   margin-left: auto;
+}
+
+/* ---- 提示词导入工具栏 ---- */
+.import-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+/* 文件名可能很长：限宽 + 省略号，完整名走 title 悬浮查看 */
+.import-file {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--app-text-1);
+  font-weight: 600;
+}
+
+.import-mode {
+  width: 118px;
+}
+
+.import-hidden {
+  display: none;
+}
+
+/* ---- 技能：列表 + 上传（新建 / 替换 SKILL.md） ---- */
+.sec-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+/* 联网开关的说明：一段话讲清"能干什么 + 花什么 + 安全边界" */
+/* ---- 设置面板排版：左侧分组菜单 + 右侧单组内容 ---- */
+.settings-body {
+  display: grid;
+  grid-template-columns: 148px minmax(0, 1fr);
+  gap: 16px;
+  /* 固定高度 + 内容区自己滚动：设置项再多也不会把弹窗撑到整屏 */
+  height: 62vh;
+}
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-right: 1px solid var(--app-border-weak);
+  padding-right: 10px;
+  overflow-y: auto;
+}
+.nav-item {
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font-size: 13px;
+  color: var(--app-text-2);
+  padding: 7px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: all var(--dur-fast) ease;
+}
+.nav-item:hover {
+  background: var(--app-bg);
+  color: var(--app-text-1);
+}
+.nav-item.on {
+  background: var(--app-brand-soft);
+  color: var(--app-brand-deep);
+  font-weight: 600;
+}
+.settings-pane {
+  overflow-y: auto;
+  padding-right: 4px;
+}
+/* 分组内的 section 不再各占一大块：收紧间距与留白 */
+.settings-pane .sec + .sec {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px dashed var(--app-border-weak);
+}
+/* 模型档案列表 */
+.profile-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--app-border-weak);
+  border-radius: 8px;
+  margin-bottom: 8px;
+}
+.profile-row.profile-active {
+  border-color: color-mix(in srgb, var(--app-brand) 45%, transparent);
+  background: var(--app-brand-soft);
+}
+.profile-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.profile-name {
+  font-size: 13px;
+  color: var(--app-text-1);
+}
+.profile-meta {
+  font-size: 11.5px;
+}
+.profile-acts {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+/* 预设「＋服务商」按钮 */
+.preset-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+.preset-chip {
+  border: 1px dashed var(--app-border);
+  background: transparent;
+  color: var(--app-text-2);
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all var(--dur-fast) ease;
+}
+.preset-chip:hover {
+  color: var(--app-brand-deep);
+  border-color: color-mix(in srgb, var(--app-brand) 45%, transparent);
+  background: var(--app-brand-soft);
+}
+.preset-migrate {
+  border-style: solid;
+}
+/* 档案编辑表单 */
+.form-grid {
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  align-items: center;
+  gap: 10px 12px;
+}
+.form-grid .fl {
+  font-size: 12.5px;
+  color: var(--app-text-2);
+  text-align: right;
+}
+/* 模型分工表 */
+.route-row {
+  /* 用 grid 而不是 flex：右侧下拉的宽度必须由**容器**决定，不能被左侧文字长度牵着走。
+     原来 flex + 下拉 224px 时，指示文字最长的那行（实体/概念页编译，460px）
+     会把下拉**挤窄**成 200px —— 右边界还贴齐，所以看起来像"往右缩进了一下"（实测数据：
+     多数行 selLeft=897/宽224，那一行 selLeft=921/宽200）。grid 之后列宽恒定。 */
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 240px;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--app-border-weak);
+}
+/* 下拉填满它那一列（宽度由上面的列宽统一决定） */
+.route-row :deep(.el-select) {
+  width: 100%;
+}
+.route-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.route-label {
+  font-size: 13px;
+  color: var(--app-text-1);
+}
+.net-hint {
+  margin: 8px 0 0;
+  line-height: var(--lh-body);
+}
+.net-hint b {
+  color: var(--app-text-1);
+}
+
+.skill-reload {
+  font-size: 12px;
+}
+
+.skill-empty {
+  padding: 10px 12px;
+  border: 1px dashed var(--app-border);
+  border-radius: var(--radius-sm);
+  background: var(--app-bg);
+}
+
+.skill-empty .hint {
+  margin: 0;
+}
+
+.skill-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.skill-item {
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-sm);
+  background: var(--app-bg);
+}
+
+.skill-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+.skill-name {
+  font-size: 13px;
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  color: var(--app-text-1);
+}
+
+.skill-meta {
+  margin-left: auto;
+}
+
+/* 路径可能很长（Windows 盘符 + 多级目录）：限宽省略，完整路径走 title */
+.skill-path {
+  margin-top: 6px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--app-text-3);
+}
+
+.skill-import {
+  margin-top: var(--space-sm);
+  padding: 10px 12px;
+  border: 1px solid var(--app-brand);
+  border-radius: var(--radius-sm);
+}
+
+.skill-import-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+.skill-import-row + .skill-import-row {
+  margin-top: var(--space-sm);
+}
+
+/* 文件名可能很长：限宽 + 省略号，完整名走 title */
+.skill-import-file {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--app-text-1);
+}
+
+.skill-newid {
+  width: 200px;
+}
+
+.skill-empty code,
+.hint code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--app-code-bg);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--app-text-1);
 }
 
 .preset-select {

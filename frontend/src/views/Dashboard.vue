@@ -4,7 +4,8 @@ import { useRouter } from 'vue-router'
 import { statsApi } from '../api'
 
 const router = useRouter()
-const loading = ref(false)
+// 初始即置为 loading，避免首帧先闪一下「空状态」再被数据顶掉
+const loading = ref(true)
 const stats = ref({
   noteTotal: 0,
   refTotal: 0,
@@ -46,6 +47,12 @@ async function load() {
   }
 }
 
+/** 统计卡跳转目标：笔记/分类/标签都落到笔记列表页（可在那里继续筛选），速查卡去速查卡页 */
+const STAT_TARGET = { noteTotal: '/notes', refTotal: '/refs', categoryTotal: '/notes', tagTotal: '/notes' }
+function openStat(key) {
+  router.push(STAT_TARGET[key])
+}
+
 /** 问候语带日期：比一句固定的口号更像「为你而做」的工具 */
 const greeting = computed(() => {
   const now = new Date()
@@ -68,7 +75,18 @@ onMounted(load)
     </div>
 
     <div class="stat-grid">
-      <el-card v-for="c in cards" :key="c.key" shadow="never" class="stat-card" @click="router.push(c.key === 'noteTotal' ? '/notes' : c.key === 'refTotal' ? '/refs' : c.key === 'categoryTotal' ? '/notes' : '/notes')">
+      <el-card
+        v-for="c in cards"
+        :key="c.key"
+        shadow="never"
+        class="stat-card"
+        role="button"
+        tabindex="0"
+        :aria-label="`查看${c.label}`"
+        @click="openStat(c.key)"
+        @keydown.enter.prevent="openStat(c.key)"
+        @keydown.space.prevent="openStat(c.key)"
+      >
         <div class="stat-icon">
           <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
             <path :d="c.icon" />
@@ -152,6 +170,12 @@ onMounted(load)
   overflow: hidden;
 }
 
+/* 键盘焦点环走内描边，避免被 overflow:hidden 裁掉 */
+.stat-card:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--app-brand) 55%, transparent);
+  outline-offset: -2px;
+}
+
 .stat-card:hover {
   transform: translateY(-2px);
   box-shadow: var(--shadow-md) !important;
@@ -165,6 +189,11 @@ onMounted(load)
   padding: 20px;
   position: relative;
   z-index: 1;
+  /* Element Plus 给卡片 body 默认设了 overflow: auto，而 .stat-glow 是刻意伸出右边缘
+     34px 的装饰圆 —— 两者相撞，每张统计卡底部就会多出一条横向滚动条（实测 scrollWidth
+     比 clientWidth 正好多 34px）。卡片根节点本来就有 overflow: hidden，这里把 body 也
+     压成 hidden：只是去掉滚动条，圆仍按卡片边界裁切，视觉完全一致。 */
+  overflow: hidden;
 }
 
 .stat-icon {
