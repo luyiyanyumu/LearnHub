@@ -1,12 +1,21 @@
 package org.dyh.learnhub.service;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pdfbox.Loader;
+import org.apache.pdfbox.contentstream.PDFStreamEngine;
+import org.apache.pdfbox.contentstream.operator.Operator;
+import org.apache.pdfbox.cos.COSBase;
+import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.common.PDRectangle;
+import org.apache.pdfbox.pdmodel.graphics.PDXObject;
+import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.apache.pdfbox.text.TextPosition;
+import org.apache.pdfbox.util.Matrix;
+import org.apache.pdfbox.util.Vector;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
@@ -118,14 +127,27 @@ public class PdfLayoutExtractor {
     // 对外结构（前端按 type 排版）
     // ------------------------------------------------------------------
 
-    /** type: title / authors / heading / para / bullet / meta / code / table；heading 用 level 表示层级（1 最高） */
-    public record Block(String type, String text, int level) {
+    /**
+     * type: title / authors / heading / para / bullet / meta / note / code / table / figure；heading 用 level 表示层级（1 最高）。
+     * <p>{@code src} 只有 {@code figure} 用得上：值形如 {@code "12-0"}（第 12 页的第 0 张图），
+     * 前端据此拼出取图地址 —— 抽取这一层拿不到 file_id（它只认识文件路径）。
+     * <p>{@code meta} 是居中元信息（作者单位、邮箱），{@code note} 是页面底部的脚注小字（左对齐）。
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record Block(String type, String text, int level, String src) {
+        public Block(String type, String text, int level) {
+            this(type, text, level, null);
+        }
     }
 
     public record PageLayout(int page, int columns, List<Block> blocks) {
     }
 
     public record Layout(String status, String error, List<PageLayout> pages, int chars, int pageCount) {
+    }
+
+    /** 页面上的一块图片：{@code idx} 是页内序号，几何是设备坐标（左上角原点、y 向下，和行坐标同一套） */
+    public record Figure(int idx, double x0, double y0, double x1, double y1) {
     }
 
     /** 一个词（PDFBox 的一次调用）：左上角 + 右边界 + 字号 + "前面有没有空格" + 是不是等宽字体 */
@@ -200,8 +222,14 @@ public class PdfLayoutExtractor {
         collector.getText(doc);                      // 只为触发回调，返回值不用
 
         List<List<Word>> rows = collector.rows;
+        List<Figure> figures = scanFigures(page, pageNo, width, height, rotation);
         if (rows.isEmpty()) {
-            return new PageLayout(pageNo, 1, List.of());
+            // 整页没字但有图（扫描件、纯图页）：**不硬"识别"**，把这一页当一张图交给界面
+            List<Block> only = new ArrayList<>();
+            for (Figure f : figures) {
+                only.add(figureBlock(pageNo, f));
+            }
+            return new PageLayout(pageNo, 1, only);
         }
         double bodySize = bodySize(rows);
         // 旋转页（横排大表）坐标系被换过，硬做分栏只会更乱 —— 退化成"一段一段往下排"
@@ -250,14 +278,18 @@ public class PdfLayoutExtractor {
                 body.addAll(lines);
             }
             List<Block> blocks = new ArrayList<>(headBlocks(head, bodySize, pageNo, width));
-            blocks.addAll(plain(columnPlaced(columnOf(body), bodySize, pageNo, height)));
+            blocks.addAll(plain(columnPlaced(columnOf(body), bodySize, pageNo, height, figures)));
             return new PageLayout(pageNo, 1, blocks);
         }
 
+        List<Figure> leftFigures = pickFigures(figures, f -> centerX(f) < gutter && !spansGutter(f, gutter));
+        List<Figure> rightFigures = pickFigures(figures, f -> centerX(f) >= gutter && !spansGutter(f, gutter));
+        List<Figure> wideFigures = pickFigures(figures, f -> spansGutter(f, gutter));
+
         List<Line> leftLines = toLines(left);
         List<Line> rightLines = toLines(right);
-        List<Placed> leftBlocks = columnPlaced(columnOf(leftLines), bodySize, pageNo, height);
-        List<Placed> rightBlocks = columnPlaced(columnOf(rightLines), bodySize, pageNo, height);
+        List<Placed> leftBlocks = columnPlaced(columnOf(leftLines), bodySize, pageNo, height, leftFigures);
+        List<Placed> rightBlocks = columnPlaced(columnOf(rightLines), bodySize, pageNo, height, rightFigures);
         mergeColumnSeam(leftBlocks, rightBlocks);
 
         // 通栏块：**首页**栏目之上的（标题区）走标题处理；其余（含后续页面的页首通栏行）
@@ -273,7 +305,7 @@ public class PdfLayoutExtractor {
                 spanningLines.add(ln);
             }
         }
-        List<Placed> spanning = columnPlaced(columnOf(spanningLines), bodySize, pageNo, height);
+        List<Placed> spanning = columnPlaced(columnOf(spanningLines), bodySize, pageNo, height, wideFigures);
         List<Block> blocks = new ArrayList<>(headBlocks(head, bodySize, pageNo, width));
         blocks.addAll(plain(interleave(leftBlocks, spanning)));
         blocks.addAll(plain(rightBlocks));
@@ -623,8 +655,13 @@ public class PdfLayoutExtractor {
         }
     }
 
-    /** 一栏 → 块（带 y，便于通栏块插回阅读顺序） */
-    private List<Placed> columnPlaced(Column column, double bodySize, int pageNo, double pageHeight) {
+    /**
+     * 一栏 → 块（带 y，便于通栏块插回阅读顺序）。
+     * <p>{@code figures} 是这一栏范围内的图片：它们按 y 插进正文流里（对应"截图到相应位置"）——
+     * 图不能一律堆到页尾，否则读者要自己找它对应哪段话。
+     */
+    private List<Placed> columnPlaced(Column column, double bodySize, int pageNo, double pageHeight,
+                                      List<Figure> figures) {
         List<Placed> out = new ArrayList<>();
         if (column == null) {
             return out;
@@ -642,11 +679,23 @@ public class PdfLayoutExtractor {
         int rowLines = 0;
         double rowY = 0;
         Line prev = null;
+        int figureAt = 0;
 
         for (Line ln : column.lines()) {
             String text = ln.text();
             if (text.isEmpty()) {
                 continue;
+            }
+            // 这一行之前的图：先落地（图也要按 y 排进阅读顺序）
+            while (figureAt < figures.size() && figures.get(figureAt).y0() < ln.y()) {
+                Figure f = figures.get(figureAt++);
+                flushPlaced(out, para, bullet, paraY);
+                bullet = false;
+                flushCode(out, code, codeLines, codeY);
+                codeLines = 0;
+                flushRows(out, rows, rowLines, rowY);
+                rowLines = 0;
+                out.add(new Placed(figureBlock(pageNo, f), f.y0()));
             }
             boolean rowishLine = rowish(text, ln, column);
             // 表格行结束：只要遇到一行"不像表格"的，就先把攒着的表格落地（这样下面所有分支都不用管它）
@@ -721,10 +770,15 @@ public class PdfLayoutExtractor {
                 prev = ln;
                 continue;
             }
-            // 页脚/侧边注释：字号小一档 + 挨着页面底部 + 不是正在拼的段落
-            if (para.length() == 0 && ln.size() < bodySize * 0.9 && text.length() < 160
-                    && ln.y() > pageHeight * 0.88) {
-                out.add(new Placed(new Block("meta", text, 0), ln.y()));
+            // 页脚/脚注：字号**明显**小一档（<0.88 倍正文）+ 挨着页面底部。**不管段落是否正在拼**都要切一刀 ——
+            // 论文底部的脚注常被当成上一段正文的续行，两三条脚注黏成一段（实测某篇论文首页：
+            // "∗Equal contribution 1The code and trained models have been released at …"）。
+            // 字号这一刀要够狠：正文最后几行也在页面底部，0.92 那种松阈值会把它们误判成脚注（实测踩过）。
+            // 类型单独给 `note`（而不是 meta）：脚注**左对齐**、作者单位**居中**，两者排版不是一回事。
+            if (ln.size() < bodySize * 0.88 && text.length() < 300 && ln.y() > pageHeight * 0.84) {
+                flushPlaced(out, para, bullet, paraY);
+                bullet = false;
+                out.add(new Placed(new Block("note", text, 0), ln.y()));
                 prev = ln;
                 continue;
             }
@@ -743,9 +797,117 @@ public class PdfLayoutExtractor {
         flushPlaced(out, para, bullet, paraY);
         flushCode(out, code, codeLines, codeY);
         flushRows(out, rows, rowLines, rowY);
+        // 栏目末尾剩下的图（正文比图短时会出现）
+        while (figureAt < figures.size()) {
+            Figure f = figures.get(figureAt++);
+            out.add(new Placed(figureBlock(pageNo, f), f.y0()));
+        }
         // 表格/图表里的短块（单元格、坐标轴刻度、图例）合成一个块：
         // 不合并的话它们会以"正文段落"的样子出现，一页结果表能刷出几十个一句一行的段落
         return mergeTableCellRuns(out);
+    }
+
+    /**
+     * 扫描一页里的图片位置。
+     *
+     * <p>为什么要"扫位置"而不是整页截图：论文的图是位图/矢量混排的，整页截图会把两栏正文一起塞进图里。
+     * 这里拿到的是**一张图被画在哪**（单位正方形经 CTM 变换后的包围盒），于是可以只裁那一块，
+     * 而且因为 y 与正文行同一套坐标，能按 y 插回阅读顺序。
+     */
+    private List<Figure> scanFigures(PDPage page, int pageNo, double width, double height, int rotation) {
+        if (rotation != 0) {
+            return List.of();                     // 旋转页坐标系被换过，裁出来的位置对不上，宁可不贴图
+        }
+        List<double[]> raw = new PdfFigureScanner(page).scan();
+        double pageArea = width * height;
+        List<double[]> kept = new ArrayList<>();
+        for (double[] r : raw) {
+            double x0 = Math.max(0, r[0]);
+            double y0 = Math.max(0, r[1]);
+            double x1 = Math.min(width, r[2]);
+            double y1 = Math.min(height, r[3]);
+            if (x1 - x0 < 24 || y1 - y0 < 24 || (x1 - x0) * (y1 - y0) < pageArea * 0.01) {
+                continue;                          // 分隔线、图标、项目符号、页边 logo 都不是"图"
+            }
+            kept.add(new double[]{x0, y0, x1, y1});
+        }
+        // 同一张图常被重复画（掩膜、拼贴、多次 Do）：去掉被更大的框大部分盖住的那个
+        kept.sort(Comparator.comparingDouble((double[] r) -> -(r[2] - r[0]) * (r[3] - r[1])));
+        List<double[]> uniq = new ArrayList<>();
+        for (double[] r : kept) {
+            boolean covered = uniq.stream().anyMatch(k -> overlapRatio(k, r) > 0.8);
+            if (!covered) {
+                uniq.add(r);
+            }
+        }
+        uniq.sort(Comparator.comparingDouble(r -> r[1]));
+        List<Figure> out = new ArrayList<>();
+        for (int i = 0; i < uniq.size(); i++) {
+            double[] r = uniq.get(i);
+            out.add(new Figure(i, r[0], r[1], r[2], r[3]));
+        }
+        return out;
+    }
+
+    private static Block figureBlock(int pageNo, Figure f) {
+        return new Block("figure", "", 0, pageNo + "-" + f.idx());
+    }
+
+    private static List<Figure> pickFigures(List<Figure> all, java.util.function.Predicate<Figure> p) {
+        List<Figure> out = new ArrayList<>();
+        for (Figure f : all) {
+            if (p.test(f)) {
+                out.add(f);
+            }
+        }
+        return out;
+    }
+
+    private static double centerX(Figure f) {
+        return (f.x0() + f.x1()) / 2;
+    }
+
+    private static boolean spansGutter(Figure f, double gutter) {
+        return f.x0() < gutter && f.x1() > gutter;
+    }
+
+    /** b 有多大比例落在 a 里 */
+    private static double overlapRatio(double[] a, double[] b) {
+        double w = Math.min(a[2], b[2]) - Math.max(a[0], b[0]);
+        double h = Math.min(a[3], b[3]) - Math.max(a[1], b[1]);
+        if (w <= 0 || h <= 0) {
+            return 0;
+        }
+        return (w * h) / ((b[2] - b[0]) * (b[3] - b[1]));
+    }
+
+    /**
+     * 某页第 {@code idx} 张图的裁剪框（px，左上角原点）——给"按需渲染图片"用。
+     * <p>{@code dpi/72} 是渲染缩放：PDF 的坐标是 pt（1/72 英寸），渲染出来是像素。
+     */
+    public int[] figureRect(Path path, int pageNo, int idx, double dpi) {
+        try (PDDocument doc = Loader.loadPDF(path.toFile())) {
+            if (pageNo < 1 || pageNo > doc.getNumberOfPages()) {
+                return null;
+            }
+            PDPage page = doc.getPage(pageNo - 1);
+            PDRectangle box = page.getCropBox() != null ? page.getCropBox() : page.getMediaBox();
+            int rotation = ((page.getRotation() % 360) + 360) % 360;
+            for (Figure f : scanFigures(page, pageNo, box.getWidth(), box.getHeight(), rotation)) {
+                if (f.idx() == idx) {
+                    double s = dpi / 72.0;
+                    int x = (int) Math.round(f.x0() * s);
+                    int y = (int) Math.round(f.y0() * s);
+                    int w = (int) Math.round((f.x1() - f.x0()) * s);
+                    int h = (int) Math.round((f.y1() - f.y0()) * s);
+                    return new int[]{x, y, Math.max(1, w), Math.max(1, h)};
+                }
+            }
+            return null;
+        } catch (Throwable t) {
+            log.warn("取图片区域失败: {} p{} #{} - {}", path.getFileName(), pageNo, idx, t.toString());
+            return null;
+        }
     }
 
     /**

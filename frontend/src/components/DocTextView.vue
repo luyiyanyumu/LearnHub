@@ -47,6 +47,10 @@ const busy = ref(false)
 const blockCount = computed(() =>
   props.pages.reduce((n, p) => n + (p.blocks?.length || 0), 0))
 
+/** 插图数（工具条上提示"图是按原位贴出来的"，顺带告诉读者这页有几张图） */
+const figureCount = computed(() =>
+  props.pages.reduce((n, p) => n + (p.blocks || []).filter((b) => b.type === 'figure').length, 0))
+
 /** 可翻译的块：标题/作者这类短标签没必要翻 */
 function translatable(block) {
   return block.type === 'para' || block.type === 'bullet'
@@ -58,6 +62,15 @@ function keyOf(page, index) {
 
 function tooLong(block) {
   return (block.text || '').length > props.maxChars
+}
+
+/**
+ * 插图地址：抽取层只给得出"第几页的第几张图"（它按文件路径工作，拿不到资料 id），
+ * 这里补上 fileId 拼成真实地址。图在服务端按需裁剪并缓存，重复滚动不会重复渲染。
+ */
+function figureUrl(block) {
+  const [page, idx] = String(block.src || '').split('-')
+  return `/api/files/${props.fileId}/page-image?page=${page}&idx=${idx}`
 }
 
 /** 前 n 个可翻译段（"翻译前 5 段"用） */
@@ -111,7 +124,7 @@ async function translateFirst(n) {
 
 async function copyAll() {
   const text = props.pages
-    .map((p) => (p.blocks || []).map((b) => b.text).join('\n'))
+    .map((p) => (p.blocks || []).map((b) => b.text).filter(Boolean).join('\n'))
     .join('\n\n')
   try {
     await navigator.clipboard.writeText(text)
@@ -131,7 +144,9 @@ watch(() => props.targetLang, () => {
   <div class="doc-view">
     <div class="reader-toolbar doc-tools">
       <span class="reader-hint">
-        按原文档排版还原 · {{ pages.length }} / {{ pageCount || pages.length }} 页 · {{ chars || blockCount }} 字
+        按原文档排版还原 · {{ pages.length }} / {{ pageCount || pages.length }} 页 · {{ chars || blockCount }} 字<template
+          v-if="figureCount"
+        > · 含 {{ figureCount }} 张插图</template>
       </span>
       <span class="reader-sep" />
       <span class="reader-hint">段落 hover 出「译」，逐段翻译</span>
@@ -157,12 +172,19 @@ watch(() => props.targetLang, () => {
           <h2 v-if="b.type === 'title'" class="doc-title">{{ b.text }}</h2>
           <p v-else-if="b.type === 'authors'" class="doc-authors">{{ b.text }}</p>
           <p v-else-if="b.type === 'meta'" class="doc-meta">{{ b.text }}</p>
+          <!-- 脚注：小字、左对齐。**不并进正文段落**，也不给「译」按钮（一条脚注半句话，翻了没意义） -->
+          <p v-else-if="b.type === 'note'" class="doc-note">{{ b.text }}</p>
           <h3 v-else-if="b.type === 'heading'" class="doc-heading" :class="'doc-lv' + (b.level || 1)">
             {{ b.text }}
           </h3>
           <!-- 代码 / 表格：按"一行一行"原样渲染，不参与翻译（翻代码没有意义，还会把缩进搅乱） -->
           <pre v-else-if="b.type === 'code'" class="doc-code">{{ b.text }}</pre>
           <pre v-else-if="b.type === 'table'" class="doc-table">{{ b.text }}</pre>
+          <!-- 插图：直接把原 PDF 的那块图裁出来贴在这里。**不识别**图里的文字 ——
+               图表里的刻度/流程框抽成文字只会变成一堆散落的碎片，看图反而准 -->
+          <figure v-else-if="b.type === 'figure' && b.src" class="doc-figure">
+            <img :src="figureUrl(b)" alt="" loading="lazy" decoding="async" />
+          </figure>
           <div v-else class="doc-block">
             <button
               type="button"
@@ -264,12 +286,22 @@ watch(() => props.targetLang, () => {
   color: var(--app-text-2);
 }
 
-/* 机构 / 邮箱 / 脚注：小一号居中，和正文区分开 */
+/* 机构 / 邮箱：小一号居中，和正文区分开 */
 .doc-meta {
   margin: 0 0 2px;
   text-align: center;
   font-size: 12.5px;
   line-height: 1.8;
+  color: var(--app-text-3);
+}
+
+/* 脚注：小字 + 左对齐 + 上边一条细线，像原文档那样落在正文之下 */
+.doc-note {
+  margin: 4px 0 2px;
+  padding-top: 6px;
+  border-top: 1px solid var(--app-border-weak);
+  font-size: 12px;
+  line-height: 1.75;
   color: var(--app-text-3);
 }
 
@@ -364,6 +396,20 @@ watch(() => props.targetLang, () => {
 .doc-table {
   font-size: 13px;
   letter-spacing: 0.02em;
+}
+
+/* 插图：居中、限宽，点开原尺寸（读者想看清细节时不会因为缩略而看不清） */
+.doc-figure {
+  margin: 14px 0;
+  text-align: center;
+}
+
+.doc-figure img {
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: #fff;
 }
 
 .doc-trans-tag {

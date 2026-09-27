@@ -4,6 +4,10 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.pdfbox.Loader;
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.rendering.ImageType;
+import org.apache.pdfbox.rendering.PDFRenderer;
 import org.dyh.learnhub.common.KnowledgeChangedEvent;
 import org.dyh.learnhub.entity.FileInfo;
 import org.dyh.learnhub.mapper.CategoryMapper;
@@ -17,6 +21,9 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
 
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -300,9 +307,63 @@ public class FileStorageService {
         return m;
     }
 
+    /** 渲染插图的分辨率：150 够看清图里的字，单页位图也就 8MB 左右，不至于把内存吃掉 */
+    private static final float FIGURE_DPI = 150f;
+
+    /**
+     * 「抽取正文」里的插图：把 PDF 那一页渲染出来，**只裁那块图**，返回 PNG 字节。
+     *
+     * <p>为什么裁而不是整页截：论文的图与正文是排在一起的，整页截图会把两栏正文也塞进图里。
+     * 位置来自 {@link PdfLayoutExtractor#figureRect}（单位正方形经 CTM 变换后的包围盒），
+     * 所以这里只要按 {@code dpi/72} 缩放裁一刀。
+     *
+     * <p>裁出来的图缓存到 {@code uploads/.derived/<fileId>/p<页>-<序号>.png}：
+     * 翻页来回滚动时不会再渲染一遍（渲染一页 150dpi 要几十毫秒，滚动时很显眼）。
+     */
+    public byte[] pageImage(Long id, int pageNo, int idx) {
+        FileInfo info = require(id);
+        String ext = info.getExt() == null ? "" : info.getExt().toLowerCase(Locale.ROOT);
+        if (!"pdf".equals(ext)) {
+            throw new IllegalArgumentException("只有 PDF 才有可裁剪的插图");
+        }
+        Path src = storageDir().resolve(info.getStoreName());
+        if (!Files.exists(src)) {
+            throw new IllegalStateException("文件已丢失: " + info.getStoreName());
+        }
+        Path cache = storageDir().resolve(".derived").resolve(String.valueOf(id))
+                .resolve("p" + pageNo + "-" + idx + ".png");
+        try {
+            if (Files.exists(cache)) {
+                return Files.readAllBytes(cache);
+            }
+            int[] rect = pdfLayoutExtractor.figureRect(src, pageNo, idx, FIGURE_DPI);
+            if (rect == null) {
+                throw new IllegalArgumentException("第 " + pageNo + " 页没有第 " + idx + " 张插图");
+            }
+            byte[] png;
+            try (PDDocument doc = Loader.loadPDF(src.toFile())) {
+                BufferedImage full = new PDFRenderer(doc)
+                        .renderImageWithDPI(pageNo - 1, FIGURE_DPI, ImageType.RGB);
+                int x = Math.max(0, Math.min(rect[0], full.getWidth() - 1));
+                int y = Math.max(0, Math.min(rect[1], full.getHeight() - 1));
+                int w = Math.max(1, Math.min(rect[2], full.getWidth() - x));
+                int h = Math.max(1, Math.min(rect[3], full.getHeight() - y));
+                ByteArrayOutputStream out = new ByteArrayOutputStream();
+                ImageIO.write(full.getSubimage(x, y, w, h), "png", out);
+                png = out.toByteArray();
+            }
+            Files.createDirectories(cache.getParent());
+            Files.write(cache, png, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+            return png;
+        } catch (IllegalArgumentException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalStateException("插图渲染失败: " + e.getMessage(), e);
+        }
+    }
+
     /** 统一检索用的轻量列表（正文为截断片段） */
-    public List<Map<String, Object>> searchFiles(String kw, int limit) {
-        return fileInfoMapper.searchFiles(kw == null ? "" : kw.trim(), limit);
+    public List<Map<String, Object>> searchFiles(String kw, int limit) {        return fileInfoMapper.searchFiles(kw == null ? "" : kw.trim(), limit);
     }
 
     /** 自动召回候选（最近 N 条，正文截断） */

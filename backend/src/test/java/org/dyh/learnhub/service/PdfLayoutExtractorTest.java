@@ -67,6 +67,9 @@ class PdfLayoutExtractorTest {
                     .flatMap(p -> p.blocks().stream()).toList();
             assertTrue(blocks.size() >= 20, name + " 块太少（可能整页被当成一块）: " + blocks.size());
             for (PdfLayoutExtractor.Block b : blocks) {
+                if ("figure".equals(b.type())) {
+                    continue;                    // 图块本来就没有文字：它靠 src 去原 PDF 上按位置裁图
+                }
                 assertFalse(b.text() == null || b.text().isBlank(), name + " 有空块（type=" + b.type() + "）");
                 assertFalse(b.text().contains("â"), name + " 有没修掉的乱码: " + b.text());
             }
@@ -96,6 +99,22 @@ class PdfLayoutExtractorTest {
             blocks.stream().filter(b -> "table".equals(b.type()))
                     .forEach(b -> assertTrue(b.text().contains("\n"),
                             name + " 表格块只有一行: " + b.text()));
+
+            // 图块：src 必须是"页-序号"（前端拿它在原 PDF 上按位置裁图），而且裁剪框要落在页面内。
+            // 这条同样与版面无关于：样本里有位图就必须满足，样本里没有位图也不会误报。
+            for (PdfLayoutExtractor.Block b : blocks) {
+                if (!"figure".equals(b.type())) {
+                    continue;
+                }
+                assertTrue(b.text().isEmpty() && b.src() != null && b.src().matches("\\d+-\\d+"),
+                        name + " 图块格式不对: text=" + b.text() + " src=" + b.src());
+                int page = Integer.parseInt(b.src().split("-")[0]);
+                int idx = Integer.parseInt(b.src().split("-")[1]);
+                int[] rect = extractor.figureRect(pdf, page, idx, 72);
+                assertTrue(rect != null, name + " 图块取不到裁剪框: " + b.src());
+                assertTrue(rect[0] >= 0 && rect[1] >= 0 && rect[2] >= 24 && rect[3] >= 24,
+                        name + " 裁剪框不合理: " + java.util.Arrays.toString(rect));
+            }
 
             if (!printed) {
                 printSample(layout.pages().get(0), 8);

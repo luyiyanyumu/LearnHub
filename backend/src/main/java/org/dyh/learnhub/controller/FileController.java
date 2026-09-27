@@ -129,6 +129,28 @@ public class FileController {
     public Result<Map<String, Object>> textLayout(@PathVariable Long id) {
         return Result.ok(fileStorageService.layoutOf(id));
     }
+
+    /**
+     * 「抽取正文」里的插图：把 PDF 里那张图按位置裁出来（PNG）。
+     *
+     * <p>为什么不"识别"图里的字：图表、流程图、公式截图里的文字靠抽字只会得到一堆散落的
+     * 坐标碎片（实测柱状图的刻度会变成一个个"段落"）。这里直接把原图裁出来贴在正文对应的位置，
+     * 读者看到的是原样，不会被"识别"歪掉。
+     *
+     * <p>{@code page} 是 1 起的页码，{@code idx} 是该页第几张图（与正文块里 figure 的 src 对应）。
+     */
+    @GetMapping("/{id}/page-image")
+    public ResponseEntity<byte[]> pageImage(@PathVariable Long id,
+                                            @RequestParam int page,
+                                            @RequestParam int idx) {
+        byte[] png = fileStorageService.pageImage(id, page, idx);
+        return ResponseEntity.ok()
+                .contentType(MediaType.IMAGE_PNG)
+                .header(HttpHeaders.CACHE_CONTROL, "public, max-age=86400")
+                .header("X-Content-Type-Options", "nosniff")
+                .body(png);
+    }
+
 /** 翻译能力（界面用它显示"用哪个档案翻、单段上限多少"） */
     @GetMapping("/translate/capabilities")
     public Result<Map<String, Object>> translateCaps() {
