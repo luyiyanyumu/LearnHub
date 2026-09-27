@@ -4,7 +4,6 @@
 
 ![License](https://img.shields.io/badge/license-PolyForm_NC_1.0.0-orange)
 
-<img width="2559" height="1362" alt="image" src="https://github.com/user-attachments/assets/a571f4a9-2263-488c-a93c-1443197d24d1" />
 
 
 
