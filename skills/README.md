@@ -22,10 +22,32 @@ skills/
   markdown-beautify/
     SKILL.md
     REFERENCE.md
+  note-merge/
+    SKILL.md       ← 把回答按结构融入当前笔记（并进对应小节 / 新增合适小节）
+    REFERENCE.md   ← 设计取舍：为什么不是"追加到文末"、长度闸门、验收要点
+  paper-finder/
+    SKILL.md       ← 文献检索：找论文、给网址与下载入口，禁止编造参考文献
+    REFERENCE.md   ← 数据源清单（Crossref/arXiv/DBLP/OpenAlex/Unpaywall…）、标识符校验、常见错误
+  wiki-schema/
+    SKILL.md
 ```
 
 **SKILL.md 的正文就是提示词本身**，不要在里面写"给人看"的说明——那会被一起发给模型。
 人看的材料放 `REFERENCE.md`（同目录，任意文件名，只要不是 `SKILL.md`）。
+
+## 现有技能一览
+
+| 技能 | 用途 | 绑定的按钮 |
+| --- | --- | --- |
+| `markdown-polish` | 笔记润色：修错别字语病、统一术语标点，事实与结构不变 | AI 润色 |
+| `markdown-beautify` | 整理格式：按渲染能力白名单重排 Markdown | 整理格式 |
+| `wiki-schema` | LLM wiki 页面的结构规范 | 无（由 wiki 生成流程使用） |
+| `note-merge` | 把智能体的回答**按结构融入**当前笔记（并进对应小节 / 新增合适小节），产出完整新正文 | 无（由笔记页的「融入当前笔记」使用） |
+| `paper-finder` | 文献检索：按主题/标题/作者找论文，给出可核对的官方页与下载入口；**任何参考文献都必须来自本次实际抓取到的页面，禁止凭记忆编造**；用户要留档时可经 MCP 工具把全文直链直接存进资料库 | 无（由支持技能加载的智能体按需取用） |
+
+`paper-finder` 的硬约束写在 `SKILL.md` 第零节：每条结果的标题/作者/年份/发表处/DOI/arXiv/链接
+都要能指认到本次抓取过的页面，并附「证据」；查不到就写「未找到」。相关的真实数据源与调用模板、
+以及「找到论文 → 一键入库 → 验证能检索」的工具用法在 `paper-finder/REFERENCE.md`。
 
 ## frontmatter 字段
 

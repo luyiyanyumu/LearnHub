@@ -24,6 +24,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -89,22 +90,43 @@ public class FileStorageService {
         }
         String originName = StringUtils.cleanPath(
                 file.getOriginalFilename() == null ? "unnamed" : file.getOriginalFilename());
-        String ext = extOf(originName);
+        byte[] bytes;
+        try {
+            bytes = file.getBytes();
+        } catch (IOException e) {
+            throw new IllegalStateException("读取上传内容失败: " + e.getMessage(), e);
+        }
+        return uploadBytes(originName, bytes, categoryId);
+    }
+
+    /**
+     * 用**字节数组**入库（智能体的「把论文存进资料库」与 MCP 桥接走这条路）。
+     *
+     * <p>为什么不复用 MultipartFile：那份接口要求调用方造一个假的上传对象
+     * （Spring 的 MockMultipartFile 在 test 作用域里，生产代码拿不到）。
+     * 抽成字节数组后，网页上传、智能体下载入库、将来任何"内容已经在内存里"的场景共用同一条落盘/抽文/通知链路，
+     * 也就不会出现"某条路径忘了抽正文"这种半截实现。
+     */
+    @Transactional
+    public FileInfo uploadBytes(String originName, byte[] bytes, Long categoryId) {
+        if (bytes == null || bytes.length == 0) {
+            throw new IllegalArgumentException("文件内容为空");
+        }
+        String name = StringUtils.cleanPath(StringUtils.hasText(originName) ? originName.trim() : "unnamed");
+        String ext = extOf(name);
         String storeName = UUID.randomUUID().toString().replace("-", "") + (ext.isEmpty() ? "" : "." + ext);
 
         Path target = storageDir().resolve(storeName);
         try {
-            try (var in = file.getInputStream()) {
-                Files.copy(in, target, StandardCopyOption.REPLACE_EXISTING);
-            }
+            Files.write(target, bytes, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
         } catch (IOException e) {
             throw new IllegalStateException("文件保存失败: " + e.getMessage(), e);
         }
 
         FileInfo info = new FileInfo();
-        info.setOriginName(originName);
+        info.setOriginName(name);
         info.setStoreName(storeName);
-        info.setSize(file.getSize());
+        info.setSize((long) bytes.length);
         info.setExt(ext);
         info.setCategoryId(categoryId);
         info.setTextStatus("pending");
@@ -112,7 +134,7 @@ public class FileStorageService {
         // 抽取放在入库之后：即使抽取失败/超时，资料本身也已经存在（可重试），不会出现"文件丢了但记录在"
         extractInto(info, target);
         publishChanged(categoryId);
-        log.info("文件上传成功: {} ({} bytes) -> {}，正文 {}", originName, file.getSize(), storeName, info.getTextStatus());
+        log.info("文件入库成功: {} ({} bytes) -> {}，正文 {}", name, bytes.length, storeName, info.getTextStatus());
         return info;
     }
 

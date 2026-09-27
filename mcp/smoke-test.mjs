@@ -14,6 +14,8 @@
  */
 
 import { spawn } from 'node:child_process'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -141,6 +143,23 @@ try {
   const refs = await call('list_quick_refs')
   check('list_quick_refs', !refs.isError && refs.data?.count >= 0, `${refs.data?.count} 张`)
 
+  console.log('\n--- 资料库（只读）---')
+  const files = await call('list_files')
+  check('list_files', !files.isError && Array.isArray(files.data?.files), `${files.data?.count} 份`)
+  check('资料列表不含正文（不塞爆上下文）', !('text' in (files.data?.files?.[0] || {})))
+  const firstPdf = (files.data?.files || []).find((f) => f.ext === 'pdf') || files.data?.files?.[0]
+  if (firstPdf) {
+    const txt = await call('get_file_text', { id: firstPdf.id, maxChars: 500 })
+    check('get_file_text 分页取正文', !txt.isError && typeof txt.data?.chars === 'number',
+      `「${txt.data?.originName}」${txt.data?.chars} 字，本次 ${txt.data?.returned} 字，hasMore=${txt.data?.hasMore}`)
+    check('get_file_text 不超过 maxChars', (txt.data?.returned ?? 0) <= 500)
+    if (firstPdf.textStatus === 'ok') {
+      check('★ 正文确实抽出来了（入库即可检索）', (txt.data?.text || '').length > 0)
+    }
+  } else {
+    check('get_file_text 分页取正文', true, '资料库为空，跳过')
+  }
+
   console.log('\n--- 错误路径 ---')
   const bad = await call('get_note', { id: 99999999 })
   check('不存在的 id → isError + 可读原因', bad.isError && bad.text.length > 0, '→ ' + bad.text.slice(0, 50))
@@ -167,8 +186,42 @@ try {
       const r = await fetch(`${BASE}/api/tags/${t.id}`, { method: 'DELETE' })
       check('清理自测标签', r.ok, `#${t.id}`)
     }
+
+    console.log('\n--- 资料库写入闭环（自建自删）---')
+    // 用临时目录里的一个小 Markdown：不联网、不进版本库、跑完就删
+    const dir = await mkdtemp(path.join(tmpdir(), 'learnhub-smoke-'))
+    const sample = path.join(dir, 'mcp-smoke.md')
+    const marker = 'MCP冒烟标记：入库后应当能被抽出来'
+    await writeFile(sample, `# MCP 冒烟文档\n\n${marker}\n`, 'utf8')
+    let uploadedId = null
+    try {
+      const up = await call('upload_file', { path: sample })
+      uploadedId = up.data?.uploaded?.id || null
+      check('upload_file 入库', !up.isError && uploadedId > 0, `id=${uploadedId}`)
+      check('★ 入库即抽正文（textStatus=ok）', up.data?.uploaded?.textStatus === 'ok',
+        `status=${up.data?.uploaded?.textStatus} ${up.data?.uploaded?.textChars} 字`)
+      check('抽不出正文时会给提示（这里应为 null）', up.data?.notice === null, `notice=${up.data?.notice}`)
+
+      if (uploadedId) {
+        const got = await call('get_file_text', { id: uploadedId, maxChars: 1000 })
+        check('★ 抽出来的正文里能找到标记', (got.data?.text || '').includes('MCP冒烟标记'))
+        const hit = await call('search_all', { kw: marker })
+        check('★ 统一检索能命中这份新资料',
+          (hit.data?.items || []).some((i) => i.type === 'file' && i.id === uploadedId))
+      }
+
+      const missing = await call('upload_file', { path: path.join(dir, '不存在.pdf') })
+      check('不存在的路径 → isError + 可读原因', missing.isError, '→ ' + missing.text.slice(0, 40))
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+      if (uploadedId) {
+        // MCP 侧没有删除工具（知识库不做回收站），自测用 REST 收拾干净
+        const r = await fetch(`${BASE}/api/files/${uploadedId}`, { method: 'DELETE' })
+        check('清理自测资料', r.ok, `#${uploadedId}`)
+      }
+    }
   } else {
-    console.log('\n（省略写入闭环；加 --write 可完整验证建/改/删）')
+    console.log('\n（省略写入闭环；加 --write 可完整验证建/改/删 + 资料入库）')
   }
 } catch (e) {
   fail++

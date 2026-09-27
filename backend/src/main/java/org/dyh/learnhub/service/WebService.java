@@ -94,6 +94,14 @@ public class WebService {
     private static final Duration FETCH_TIMEOUT = Duration.ofSeconds(30);
 
     /**
+     * 二进制下载（入库用）的上限：与后端 multipart 上限对齐（50MB）。
+     * 独立于 {@link #MAX_RESPONSE_BYTES}（5MB）—— 那个是"别把网页正文吃爆"，
+     * 而论文 PDF 动辄 2~20MB，用同一个上限会导致正常论文全被拒。
+     */
+    private static final long MAX_DOWNLOAD_BYTES = 50_000_000L;
+    private static final Duration DOWNLOAD_TIMEOUT = Duration.ofSeconds(90);
+
+    /**
      * 交给模型的正文上限。
      * 与 {@link #MAX_BODY_CHARS}（安全上限）分开：抓取层防的是"把内存吃爆"，
      * 这里是"别把上下文撑爆" —— 10 万字塞进对话足够让整轮报废。
@@ -280,6 +288,64 @@ public class WebService {
     // ==================================================================
     // 二、抓取（照 dsh-web-fetch-http 的边界）
     // ==================================================================
+
+    public record DownloadResult(String url, String contentType, byte[] body, long bytes) {
+    }
+
+    /**
+     * 下载一个**公开的二进制文件**（PDF 等），用于"把论文存进资料库"。
+     *
+     * <p>与 {@link #fetch} 共用同一套防护：URL 只允许 http/https、无内嵌凭据、
+     * 每一跳都解析并**拒绝非公网地址**（防 SSRF）、连接钉在已校验的 IP 上、字节与时间有上限。
+     *
+     * <p><b>与 fetch 唯一的差别：允许跨源重定向。</b> fetch 是"读某个页面"，跨源跳转会破坏
+     * "我要的就是这一个页面"的前提，所以那里直接失败；而这里要的是**文件本体**，
+     * 论文地址天然就带一层跳转（{@code doi.org → 出版商}、{@code arxiv.org/pdf/x → /pdf/xv7}），
+     * 拒绝跨源等于把最常见的用法挡在门外。安全性不靠同源，而靠**每一跳都重新校验公网地址**，
+     * 且返回体里带上最终落地的 URL，来源可见。
+     */
+    public DownloadResult download(String url) {
+        if (!StringUtils.hasText(url)) {
+            throw new IllegalStateException("URL 为空");
+        }
+        URI current = parseAndValidate(url.trim());
+        int redirects = 0;
+        for (;;) {
+            InetAddress pinned = resolvePublic(current);
+            PinnedHttpClient.Response response = PinnedHttpClient.get(
+                    pinned, current, USER_AGENT, MAX_DOWNLOAD_BYTES, 15_000, (int) DOWNLOAD_TIMEOUT.toMillis());
+            int code = response.status();
+            if (code >= 300 && code < 400) {
+                String location = response.header("location");
+                if (!StringUtils.hasText(location)) {
+                    throw new IllegalStateException("HTTP " + code + " 但没有 Location 头");
+                }
+                if (++redirects > MAX_REDIRECTS) {
+                    throw new IllegalStateException("重定向超过 " + MAX_REDIRECTS + " 跳，已停止");
+                }
+                URI next = current.resolve(location);
+                String scheme = next.getScheme() == null ? "" : next.getScheme().toLowerCase(Locale.ROOT);
+                if (!"http".equals(scheme) && !"https".equals(scheme)) {
+                    throw new IllegalStateException("重定向到了非 http(s) 协议：" + scheme);
+                }
+                if (next.toString().length() > MAX_URL_LEN) {
+                    throw new IllegalStateException("重定向后的 URL 过长");
+                }
+                current = next;
+                continue;
+            }
+            if (code != 200) {
+                throw new IllegalStateException("下载失败：HTTP " + code + "（" + current + "）");
+            }
+            byte[] body = response.body();
+            if (body == null) {
+                throw new IllegalStateException("响应超过 " + (MAX_DOWNLOAD_BYTES / 1_000_000) + "MB 上限，已停止");
+            }
+            String contentType = response.header("content-type");
+            return new DownloadResult(current.toString(),
+                    contentType == null ? "" : contentType.toLowerCase(Locale.ROOT), body, body.length);
+        }
+    }
 
     /**
      * 抓取一个公开 HTTP(S) 页面，返回**已转成 Markdown** 的正文。

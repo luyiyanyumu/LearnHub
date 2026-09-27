@@ -8,6 +8,11 @@ import { MdEditor, MdPreview } from 'md-editor-v3'
 import '../utils/mdEditorSetup'
 import { aiApi, categoryApi, tagApi, noteApi, saveBlob } from '../api'
 import { fixHtmlQuotes } from '../utils/htmlQuotes'
+import {
+  AGENT_NOTE_CONTEXT_EVENT,
+  AGENT_NOTE_MERGE_EVENT,
+  AGENT_NOTE_MERGE_RESULT_EVENT,
+} from '../utils/agentNoteMerge'
 import { isDark } from '../composables/useTheme'
 import { focusMode } from '../composables/useViewMode'
 import { FORMAT_PRESETS, stripInline } from '../utils/richFormat'
@@ -337,6 +342,8 @@ const aiBusy = ref(false)
 const aiDialog = ref(false)
 const aiLabel = ref('')
 const aiResult = ref('')
+/** 弹窗里的说明文字：润色/融入的等待方式不同（分段 vs 整篇），各说各的 */
+const aiHint = ref('')
 
 /**
  * 处理进度：**真实进度**，不是假走条。
@@ -409,6 +416,8 @@ async function aiProcess(mode) {
   }
   aiBusy.value = true
   aiLabel.value = mode === 'format' ? 'AI 整理格式' : 'AI 润色'
+  aiHint.value = '长文按 4000 字分段逐段处理，思考型模型单段可能耗时 1–3 分钟；'
+    + '进度按「已完成段数」推进，段内不动属正常。可继续等待，或点「取消处理」中止。'
   aiResult.value = ''
   // 先开弹窗：进度就显示在弹窗里，而不是让用户对着一个不动的按钮等三分钟
   aiDialog.value = true
@@ -446,6 +455,99 @@ function aiApply() {
 // 注：打开 AI 对话的唯一入口是右下角常驻的智能体悬浮按钮（顶栏原来的「打开 AI 对话」菜单项
 // 与之重复，已移除）。若将来需要在页面内程序化唤起它，派发下面这个 window 事件即可：
 //   window.dispatchEvent(new CustomEvent('lh-agent-open'))   // AgentPanel 监听此事件
+
+/**
+ * 告诉悬浮面板「当前开着哪篇笔记」。
+ *
+ * 有了它，面板里回答后的主操作会从「保存为笔记」换成「融入当前笔记」，
+ * 并把这篇笔记当提问背景一起发给模型（见 utils/agentNoteMerge.js 里的取舍说明）。
+ *
+ * 触发点挂在 `id` 与**标题**上：加载完成、保存成功、用户改标题都会打到；
+ * 刻意不监听正文 —— 正文可能几十万字，每敲一键广播一遍没意义。
+ * 广播里的 context 只是"提问背景"，后端还会再截到 1500 字注入。
+ */
+function publishAgentNote() {
+  window.dispatchEvent(new CustomEvent(AGENT_NOTE_CONTEXT_EVENT, {
+    detail: {
+      noteId: id.value ? Number(id.value) : null,
+      title: form.value.title || '',
+      isNew: isNew.value,
+      context: (form.value.content || '').slice(0, 4000),
+    },
+  }))
+}
+watch([id, () => form.value.title], publishAgentNote)
+
+/**
+ * 面板要把智能体的回答融入这篇笔记。
+ *
+ * 这里**不是**往文末追加一段，而是让模型读完**整篇**（`form.content` 是唯一权威的那一份，
+ * 可能包含未保存的改动）再产出"把新知识放到合适位置"的新正文，然后在弹窗里给用户预览，
+ * 点「替换正文」才写进编辑器 —— 落库仍由用户点「保存」决定。
+ *
+ * 无论成功失败都要回报面板（见 agentNoteMerge.js 的职责划分）：失败时面板把按钮恢复成可重试，
+ * 而不是永远显示"已融入"。失败时**正文保持原样**，不做降级追加。
+ */
+async function onAgentMerge(e) {
+  const d = e?.detail || {}
+  const noteId = d.noteId || null
+  const answer = (d.answer || '').trim()
+  const reply = (ok, message) => window.dispatchEvent(new CustomEvent(AGENT_NOTE_MERGE_RESULT_EVENT, {
+    detail: { noteId, ok, message },
+  }))
+  if (!answer) {
+    reply(false, '这条回答是空的，没有可融入的内容')
+    return
+  }
+  // 融入结果回来时如果用户已经切走笔记，就别把 A 的内容应用到 B 上（本文件开头那类事故）
+  const expectId = id.value
+  aiBusy.value = true
+  aiLabel.value = '融入当前笔记'
+  aiHint.value = '整篇一次重写：模型会把回答按结构并进对应小节（或新增合适的小节），产出完整新正文；'
+    + '确认无误后再点「替换正文」，然后点「保存」才会落库。'
+  aiResult.value = ''
+  aiDialog.value = true
+  startAiProgress()
+  aiAbort = new AbortController()
+  try {
+    const out = await aiApi.mergeNoteStream(
+      {
+        noteId: noteId ? Number(noteId) : undefined,
+        title: form.value.title || '',
+        note: form.value.content || '',
+        question: d.question || '',
+        answer,
+      },
+      onAiProgress,
+      aiAbort.signal,
+    )
+    aiProgress.value.percent = 100
+    if (String(expectId) !== String(id.value)) {
+      aiDialog.value = false
+      reply(false, '期间切换了笔记，已放弃本次融入（正文未改动）')
+      return
+    }
+    if ((out || '').trim() === (form.value.content || '').trim()) {
+      aiDialog.value = false
+      ElMessage.info('模型认为这条内容已经在笔记里了，未做改动')
+      reply(false, '模型认为这条内容已经在笔记里，未做改动')
+      return
+    }
+    aiResult.value = out
+    // 只回报"预览已生成"：真正替换要等用户点弹窗里的「替换正文」
+    reply(true, '已在笔记页打开融入预览，确认后点「替换正文」')
+  } catch (err) {
+    aiDialog.value = false
+    const msg = err?.message || 'AI 处理失败'
+    if (msg !== '已取消处理') ElMessage.error(msg + '（正文保持原样）')
+    reply(false, msg)
+  } finally {
+    aiAbort = null
+    stopAiProgress()
+    aiBusy.value = false
+  }
+}
+
 
 async function loadMeta() {
   categories.value = flatten(await categoryApi.tree())
@@ -2044,6 +2146,8 @@ onMounted(async () => {
   window.addEventListener('lh-meta-changed', loadMeta)
   window.addEventListener('keydown', onGlobalKeydown)
   window.addEventListener('resize', measureLayout)
+  // 悬浮面板的「融入当前笔记」把 Markdown 追加进正文（见 onAgentMerge）
+  window.addEventListener(AGENT_NOTE_MERGE_EVENT, onAgentMerge)
   document.addEventListener('mousedown', onDocDownToolMenus)
   await loadMeta()
   loadNote()
@@ -2070,6 +2174,9 @@ onBeforeUnmount(() => {
   window.removeEventListener('lh-meta-changed', loadMeta)
   window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('resize', measureLayout)
+  window.removeEventListener(AGENT_NOTE_MERGE_EVENT, onAgentMerge)
+  // 离开笔记页：广播"现在没开笔记"，面板的主操作随之回退成「保存为笔记」
+  window.dispatchEvent(new CustomEvent(AGENT_NOTE_CONTEXT_EVENT, { detail: null }))
   document.removeEventListener('mousedown', onDocDownToolMenus)
   document.removeEventListener('keydown', onPreviewKeydown)
   const ed = editorScrollEl()
@@ -2519,10 +2626,7 @@ onBeforeUnmount(() => {
           <span class="ai-progress-phase">{{ aiProgress.phase }}</span>
           <span class="ai-progress-time">已用 {{ aiProgress.elapsed }}s</span>
         </div>
-        <p class="ai-progress-tip">
-          长文按 4000 字分段逐段处理，思考型模型单段可能耗时 1–3 分钟；进度按「已完成段数」推进，段内不动属正常。
-          可继续等待，或点「取消处理」中止。
-        </p>
+        <p class="ai-progress-tip">{{ aiHint }}</p>
       </div>
       <div v-else class="ai-preview">
         <MdPreview :modelValue="fixHtmlQuotes(aiResult) || '*空内容*'" :theme="isDark ? 'dark' : 'light'" previewTheme="github" />

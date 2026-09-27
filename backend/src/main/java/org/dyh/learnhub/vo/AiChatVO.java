@@ -18,6 +18,15 @@ public class AiChatVO {
     /** 助手最终文本回复（Markdown） */
     private String reply;
 
+    /**
+     * 本轮的**思考过程**（thinking 模型返回的 reasoning_content；模型不支持思考或思考关闭时为空）。
+     * <p>
+     * 为什么单独给一个字段而不是拼进 reply：思考是"过程"，回答是"结论"，
+     * 混在一起既会污染可保存为笔记的正文，也会让人分不清哪句是承诺。
+     * 界面把它渲染成可折叠的「思考过程」，与回答分层展示。
+     */
+    private String reasoning;
+
     /** 本轮对话中发生的工具操作记录（如“已创建笔记 xx”），前端可作气泡/角标提示 */
     private List<String> events = new ArrayList<>();
 

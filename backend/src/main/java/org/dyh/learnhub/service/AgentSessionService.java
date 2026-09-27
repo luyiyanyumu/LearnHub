@@ -56,6 +56,17 @@ public class AgentSessionService {
     public static final String ROLE_ASSISTANT = "assistant";
     public static final String ROLE_TOOL = "tool";
     public static final String ROLE_SUMMARY = "summary";
+    /**
+     * 思考过程（thinking 模型返回的 reasoning_content）。
+     * <p>
+     * <b>刻意独立成一种角色</b>，而不是拼进 assistant 正文：
+     * <ul>
+     *   <li>模型投影只取 user/assistant（见 {@link #turns}），所以历史思考**不会被再喂回模型** ——
+     *       思考文本很长，回灌只会把请求体撑大（实测：长会话 + 思考回传很容易撞上服务端 413）；</li>
+     *   <li>界面按角色分开渲染，思考可以折叠、可以整体隐藏，正文不受影响。</li>
+     * </ul>
+     */
+    public static final String ROLE_REASONING = "reasoning";
 
     /**
      * 取会话；不存在则创建。
@@ -277,36 +288,49 @@ public class AgentSessionService {
     public List<Map<String, Object>> messagesForDisplay(String sessionId) {
         List<Map<String, Object>> out = new ArrayList<>();
         List<String> pendingTools = new ArrayList<>();
+        String pendingReasoning = "";
         for (AgentEvent e : allEvents(sessionId)) {
             switch (e.getRole()) {
                 case ROLE_USER -> {
                     pendingTools.clear();
-                    out.add(bubble(ROLE_USER, e.getContent(), List.of()));
+                    pendingReasoning = "";
+                    out.add(bubble(ROLE_USER, e.getContent(), List.of(), ""));
                 }
                 case ROLE_TOOL -> {
                     if (StringUtils.hasText(e.getContent())) {
                         pendingTools.add(e.getContent());
                     }
                 }
+                case ROLE_REASONING -> pendingReasoning = nullTo(e.getContent());
                 case ROLE_ASSISTANT -> {
-                    out.add(bubble(ROLE_ASSISTANT, e.getContent(), new ArrayList<>(pendingTools)));
+                    out.add(bubble(ROLE_ASSISTANT, e.getContent(), new ArrayList<>(pendingTools), pendingReasoning));
                     pendingTools.clear();
+                    pendingReasoning = "";
                 }
                 default -> {
                     // summary 是给模型用的内部事件，不在界面出现
                 }
             }
         }
+        // 思考落库了但这一轮没等到回答（超时/报错）：别把思考吞掉，单独挂一条气泡
+        if (StringUtils.hasText(pendingReasoning)) {
+            out.add(bubble(ROLE_ASSISTANT, "", List.of(), pendingReasoning));
+        }
         return out;
     }
 
-    private static Map<String, Object> bubble(String role, String content, List<String> events) {
+    private static Map<String, Object> bubble(String role, String content, List<String> events, String reasoning) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("role", role);
         m.put("content", content == null ? "" : content);
         m.put("events", events);
+        m.put("reasoning", reasoning == null ? "" : reasoning);
         m.put("toolUsed", !events.isEmpty());
         return m;
+    }
+
+    private static String nullTo(String s) {
+        return s == null ? "" : s;
     }
 
     /** 会话元信息（不存在返回 null） */

@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
  * learn-hub MCP server —— 把 learn-hub 的 REST 接口暴露成 MCP 工具，
- * 让 DeepSeek Harness（或任何 MCP 客户端）能直接读写笔记库。
+ * 让 DeepSeek Harness（或任何 MCP 客户端）能直接读写笔记库**与资料库**。
  *
  * 设计取舍：
- * 1. **零依赖、手写协议**。MCP 的 stdio 传输就是「换行分隔的 JSON-RPC 2.0」，
+ * 1. **零 npm 依赖、手写协议**。MCP 的 stdio 传输就是「换行分隔的 JSON-RPC 2.0」，
  *    只需要 initialize / tools/list / tools/call 三个方法，不值得为此引入官方 SDK 包
  *    （与本项目后端手写 DeepSeek 客户端、无 SDK 依赖的做法一致）。
- *    Node 18+ 自带 fetch，所以整个文件不 import 任何东西。
+ *    Node 18+ 自带 fetch / FormData / Blob，所以除了 node: 内置模块外不 import 任何包。
  * 2. **stdout 只走协议帧，日志一律 stderr**。这是 MCP stdio 的硬要求：
  *    往 stdout 打一行日志就会破坏帧解析（DSH 自己的 SDK 服务端也有同样约束）。
  * 3. **不改后端**。全部通过已有的 REST 接口访问，所以后端不需要重启、不需要新依赖。
@@ -15,14 +15,23 @@
  *
  * 环境变量：
  *   LEARNHUB_BASE_URL   后端地址，默认 http://localhost:18080
- *   LEARNHUB_TIMEOUT_MS 单次 HTTP 超时，默认 15000
+ *   LEARNHUB_TIMEOUT_MS 单次 HTTP 超时，默认 15000（上传/下载另有更长的超时）
  *
  * 本地自测（不依赖任何客户端）：
  *   echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | node learn-hub-mcp.mjs
  */
 
+import { readFile, stat } from 'node:fs/promises'
+import { basename, extname } from 'node:path'
+
 const BASE = (process.env.LEARNHUB_BASE_URL || 'http://localhost:18080').replace(/\/+$/, '')
 const TIMEOUT_MS = Number(process.env.LEARNHUB_TIMEOUT_MS || 15000)
+/** 上传：后端 50MB 上限 + 抽取正文要时间，给的余量更宽 */
+const UPLOAD_TIMEOUT_MS = Number(process.env.LEARNHUB_UPLOAD_TIMEOUT_MS || 180000)
+/** 下载远端论文 PDF：只用来入库，所以跟上传同一档超时 */
+const DOWNLOAD_TIMEOUT_MS = Number(process.env.LEARNHUB_DOWNLOAD_TIMEOUT_MS || 180000)
+/** 与后端 spring.servlet.multipart.max-file-size 对齐，超了直接在产品侧拦下 */
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 
 /**
  * 我们声明支持的协议版本。客户端（DSH 用的官方 SDK）会先发它自己的版本，
@@ -76,7 +85,117 @@ async function api(method, path, { body, query } = {}) {
   return payload.data
 }
 
-// ---------------------------------------------------------------- 工具实现
+// ---------------------------------------------------------------- 资料库（文件）辅助
+
+/** 精简资料项：**不含正文**（正文动辄十几万字，列表里带上就等于把上下文塞爆） */
+function briefFile(f) {
+  return {
+    id: f.id,
+    originName: f.originName,
+    ext: f.ext || '',
+    size: f.size,
+    textStatus: f.textStatus || '',
+    textChars: f.textChars ?? 0,
+    categoryId: f.categoryId ?? null,
+    categoryName: f.categoryName || null,
+    summary: f.summary || '',
+    createdAt: f.createdAt || '',
+  }
+}
+
+/** 上传字节流到资料库：走后端 multipart 接口，落盘后后端会立刻抽正文 */
+async function uploadBytes(bytes, filename, categoryId) {
+  const fd = new FormData()
+  // Buffer 是合法 BlobPart；带上文件名后端才认得出扩展名（决定怎么抽正文）
+  fd.append('file', new Blob([bytes]), filename)
+  const url = new URL(BASE + '/api/files/upload')
+  if (categoryId) url.searchParams.set('categoryId', String(categoryId))
+  let resp
+  try {
+    resp = await fetch(url, { method: 'POST', body: fd, signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS) })
+  } catch (e) {
+    throw new Error(`上传失败（${BASE}）：${e?.message || e}`)
+  }
+  let payload = null
+  try {
+    payload = await resp.json()
+  } catch {
+    throw new Error(`上传返回了非 JSON 内容（HTTP ${resp.status}）`)
+  }
+  if (!resp.ok || payload.code !== 200) {
+    throw new Error(payload?.msg || `上传失败（HTTP ${resp.status}）`)
+  }
+  return payload.data
+}
+
+/**
+ * 后端**抽得出正文**的扩展名（镜像 `DocumentTextService` 的 PDF/Office/文本三组白名单）。
+ * 为什么在这里也要维护一份：往资料库塞一份抽不出正文的文件，界面上有记录、检索里却没有它 ——
+ * 是"看起来成功、实际查不到"的隐形脏数据，宁可在入口处就拦下来（实测踩过：arxiv.org/pdf/1706.03762
+ * 没有 .pdf 后缀，按 URL 猜出来的是 "03762"，后端直接判 unsupported，整份论文白传）。
+ */
+const EXTRACTABLE_EXTS = new Set([
+  'pdf',
+  'doc', 'docx', 'docm', 'xls', 'xlsx', 'xlsm', 'ppt', 'pptx', 'pptm',
+  'md', 'markdown', 'txt', 'text', 'log', 'csv', 'tsv', 'json', 'jsonc', 'yml', 'yaml',
+  'xml', 'html', 'htm', 'css', 'scss', 'less', 'sql', 'properties', 'ini', 'conf', 'env',
+  'toml', 'java', 'js', 'mjs', 'cjs', 'ts', 'vue', 'jsx', 'tsx', 'py', 'go', 'rs', 'rb',
+  'php', 'c', 'h', 'cpp', 'hpp', 'cs', 'kt', 'swift', 'sh', 'bash', 'zsh', 'ps1', 'bat',
+  'cmd', 'gradle', 'groovy', 'lua', 'r', 'm', 'pl', 'scala', 'dart', 'tex',
+])
+
+/** Content-Type → 扩展名（只在 URL 后缀不可信时用） */
+function extFromContentType(contentType) {
+  const t = (contentType || '').toLowerCase()
+  if (t.includes('pdf')) return '.pdf'
+  if (t.includes('wordprocessingml')) return '.docx'
+  if (t.includes('spreadsheetml')) return '.xlsx'
+  if (t.includes('presentationml')) return '.pptx'
+  if (t.includes('msword')) return '.doc'
+  if (t.includes('text/markdown')) return '.md'
+  if (t.includes('text/plain')) return '.txt'
+  if (t.includes('text/csv')) return '.csv'
+  if (t.includes('json')) return '.json'
+  return ''
+}
+
+/**
+ * 由 URL / Content-Type 猜一个**带可抽取扩展名**的文件名（后端用它决定怎么抽正文）。
+ * 判不出可抽取类型时**直接抛错**，而不是入库一份查不到的资料。
+ */
+function filenameFrom(url, contentType, given) {
+  const fromUrl = decodeURIComponent(new URL(url).pathname.split('/').filter(Boolean).pop() || '')
+  const raw = (given || '').trim() || fromUrl
+  const name = basename(raw).replace(/[\\/:*?"<>|]/g, '_').slice(0, 120)
+  const ext = extname(name).slice(1).toLowerCase()
+  if (EXTRACTABLE_EXTS.has(ext)) return name
+  const fromType = extFromContentType(contentType)
+  if (fromType) {
+    // 后缀不可信（如 arxiv.org/pdf/1706.03762 的 ".03762"）：整名保留，再补一个真后缀
+    return (name || 'download') + fromType
+  }
+  throw new Error(
+    `这份文件的类型后端抽不出正文（文件名 "${name}"，Content-Type "${contentType || '未知'}"），` +
+      `入库后会是一条检索不到的空壳，所以拒收。` +
+      `如果它确实是论文全文，请传一个带扩展名的 filename（如 "paper.pdf"）；` +
+      `如果只是网页/压缩包，先换成全文文件，或用 upload_file 从本机路径自行入库（那时会明确标 unsupported）。`,
+  )
+}
+
+/** 抽不出正文时给模型一句明确提示（别让"入库成功"被误读成"能检索了"） */
+function extractionNotice(uploaded) {
+  const status = uploaded?.textStatus
+  if (status === 'ok') return null
+  const why = {
+    empty: '文件里没有可提取的文字（扫描版 PDF / 纯图片）',
+    unsupported: '这个格式不支持抽正文（图片、压缩包等）',
+    skipped: '文件太大，后端跳过了抽取',
+    failed: '后端抽取失败',
+    pending: '后端还在抽取',
+  }[status] || `抽取状态：${status || '未知'}`
+  return `${why} —— 这份资料只能按文件名与手写「说明」参与检索`
+}
+
 
 /** 精简笔记列表项，避免把整篇正文塞进列表结果（正文用 get_note 单独取） */
 function briefNote(n) {
@@ -113,7 +232,7 @@ async function resolveTagIds(names) {
 }
 
 const tools = {
-  // ---------- 读 ----------
+  // ---------- 读：笔记 ----------
   async stats() {
     const s = await api('GET', '/api/stats')
     return {
@@ -180,6 +299,123 @@ const tools = {
   async search_all({ kw }) {
     const r = await api('GET', '/api/knowledge/search', { query: { kw } })
     return r
+  },
+
+  // ---------- 读：资料库（上传的 PDF/Office/文本，正文由后端抽好） ----------
+
+  async list_files({ kw, categoryId } = {}) {
+    const list = await api('GET', '/api/files', { query: { kw, categoryId } })
+    return { count: list.length, files: list.map(briefFile) }
+  },
+
+  /**
+   * 取资料正文的**一段**。
+   *
+   * 为什么必须分页：抽出来的正文常见十几万字，一次全给等于把上下文烧光。
+   * 默认给 2000 字 + 总长度 + hasMore，模型按需翻页（offset）。
+   * `textStatus` 一并返回：empty/unsupported/failed 时要能解释"为什么没正文"。
+   */
+  async get_file_text({ id, offset = 0, maxChars = 2000 }) {
+    const d = await api('GET', `/api/files/${id}/text`)
+    const text = d.text || ''
+    const start = Math.max(0, Number(offset) || 0)
+    const size = Math.max(200, Math.min(20000, Number(maxChars) || 2000))
+    const slice = text.slice(start, start + size)
+    return {
+      id: d.id,
+      originName: d.originName,
+      ext: d.ext || '',
+      chars: d.chars ?? text.length,
+      textStatus: d.textStatus || '',
+      textError: d.textError || '',
+      offset: start,
+      returned: slice.length,
+      hasMore: start + slice.length < text.length,
+      text: slice,
+    }
+  },
+
+  // ---------- 写：往资料库加文件（找到的论文可以一键入库） ----------
+
+  /**
+   * 把一个**本机文件**加入资料库。
+   *
+   * 后端会立刻抽正文（PDF 走 PDFBox），所以返回的 textStatus/textChars 就是"能不能被检索"的答案；
+   * 抽不出（扫描件/图片/压缩包）也会如实返回状态，而不是静默入库一个空壳。
+   */
+  async upload_file({ path, categoryId }) {
+    if (!path) throw new Error('缺少 path（本机文件的绝对路径或相对当前工作目录的路径）')
+    let info
+    try {
+      info = await stat(path)
+    } catch {
+      throw new Error(`文件不存在或读不到：${path}`)
+    }
+    if (!info.isFile()) throw new Error(`不是文件：${path}`)
+    if (info.size > MAX_UPLOAD_BYTES) {
+      throw new Error(`文件 ${(info.size / 1048576).toFixed(1)}MB 超过后端 50MB 上限，未上传`)
+    }
+    const bytes = await readFile(path)
+    const created = await uploadBytes(bytes, basename(path), categoryId)
+    return { ok: true, uploaded: briefFile(created), source: 'local', path, notice: extractionNotice(created) }
+  },
+
+  /**
+   * 从 URL 下载并直接加入资料库（"找到论文 → 入库"的一步到位入口）。
+   *
+   * 两个刻意的守卫：
+   *  ① 只接受 http/https，且限制在 50MB 内（与后端一致）；
+   *  ② **返回 text/html 就拒收** —— 论文页面的落地页很常见，而把它当"全文"入库
+   *     会得到一份没有正文的资料，看起来成功、实际检索不到，是最难发现的那种脏数据。
+   *     真需要网页正文时，先抓页面把 PDF 直链找出来再传这个工具。
+   * 注意：这里不做任何"绕付费墙"的事，也不该被用来越权下载；地址必须来自用户给出或检索到的公开全文。
+   */
+  async upload_file_from_url({ url, filename, categoryId }) {
+    if (!url) throw new Error('缺少 url')
+    let target
+    try {
+      target = new URL(url)
+    } catch {
+      throw new Error(`不是合法 URL：${url}`)
+    }
+    if (!['http:', 'https:'].includes(target.protocol)) {
+      throw new Error(`只支持 http/https，收到：${target.protocol}`)
+    }
+    let resp
+    try {
+      resp = await fetch(target, {
+        redirect: 'follow',
+        headers: { 'User-Agent': 'learn-hub-mcp/1.0 (+local library import)' },
+        signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+      })
+    } catch (e) {
+      throw new Error(`下载失败：${e?.message || e}`)
+    }
+    if (!resp.ok) throw new Error(`下载失败：HTTP ${resp.status}（${target.href}）`)
+    const ctype = (resp.headers.get('content-type') || '').toLowerCase()
+    const declared = Number(resp.headers.get('content-length') || 0)
+    if (declared > MAX_UPLOAD_BYTES) {
+      throw new Error(`远端文件约 ${(declared / 1048576).toFixed(1)}MB，超过 50MB 上限，未下载`)
+    }
+    const bytes = Buffer.from(await resp.arrayBuffer())
+    if (bytes.length > MAX_UPLOAD_BYTES) {
+      throw new Error(`下载了 ${(bytes.length / 1048576).toFixed(1)}MB，超过 50MB 上限，未入库`)
+    }
+    if (ctype.includes('text/html') || bytes.subarray(0, 200).toString('utf8').toLowerCase().includes('<!doctype html')) {
+      throw new Error(
+        `这个地址返回的是网页（${ctype || 'html'}）而不是全文文件：${target.href}。` +
+          `请抓开该页面找到 PDF 直链（例如 arXiv 的 https://arxiv.org/pdf/<id>）再入库。`,
+      )
+    }
+    const created = await uploadBytes(bytes, filenameFrom(target.href, ctype, filename), categoryId)
+    return {
+      ok: true,
+      uploaded: briefFile(created),
+      source: target.href,
+      contentType: ctype || '',
+      bytes: bytes.length,
+      notice: extractionNotice(created),
+    }
   },
 
   // ---------- 写 ----------
@@ -449,6 +685,72 @@ const TOOL_DEFS = [
     },
     annotations: { readOnlyHint: false, destructiveHint: true },
   },
+
+  // ---------- 资料库 ----------
+  {
+    name: 'list_files',
+    description: '列出资料库（上传的 PDF / Office / 文本）里的资料，含抽取状态与字数。不返回正文。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        kw: { type: 'string', description: '按文件名过滤（可选）' },
+        categoryId: { type: 'number', description: '只看某个分类（可选）' },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: 'get_file_text',
+    description:
+      '取某份资料抽出来的正文片段（默认前 2000 字，可用 offset 翻页）。' +
+      'PDF 等文档上传后由后端自动抽正文，这份文本同时用于知识库检索。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'number', description: '资料 id（用 list_files / search_all 拿）' },
+        offset: { type: 'number', description: '从第几个字符开始（默认 0）' },
+        maxChars: { type: 'number', description: '本次最多返回多少字（200~20000，默认 2000）' },
+      },
+      required: ['id'],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true },
+  },
+  {
+    name: 'upload_file',
+    description:
+      '把一个本机文件加入资料库（后端会立刻抽正文，随后可被知识库检索）。' +
+      '适合：终端里已经下载好的论文 PDF。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: '本机文件路径（绝对路径，或相对 MCP 进程工作目录）' },
+        categoryId: { type: 'number', description: '归到某个分类（可选）' },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false },
+  },
+  {
+    name: 'upload_file_from_url',
+    description:
+      '从 URL 下载一份**全文文件**（如 arXiv/出版商/机构的 PDF 直链）并直接加入资料库。"找到论文→入库"用这个。' +
+      '只接受 http/https、≤50MB；返回网页（text/html）会被拒收（那说明给的是落地页不是全文）。' +
+      '地址必须来自用户给出或检索到的公开全文，不得用于绕过付费墙。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: '全文文件直链（http/https）' },
+        filename: { type: 'string', description: '入库文件名（可选；不给就从 URL 推断，PDF 会补 .pdf）' },
+        categoryId: { type: 'number', description: '归到某个分类（可选）' },
+      },
+      required: ['url'],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false },
+  },
 ]
 
 // ---------------------------------------------------------------- JSON-RPC 处理
@@ -479,8 +781,9 @@ async function handle(msg) {
         capabilities: { tools: {} },
         serverInfo: { name: 'learn-hub', version: '1.0.0' },
         instructions:
-          '这个服务连接的是本地 learn-hub 知识库（Markdown 笔记 + 速查卡 + 分类/标签）。' +
-          '不确定有什么内容时先调 stats 或 search_all。',
+          '这个服务连接的是本地 learn-hub 知识库（Markdown 笔记 + 速查卡 + 分类/标签）与资料库（上传的文档，' +
+          'PDF 会被自动抽成正文并参与检索）。不确定有什么内容时先调 stats / search_all / list_files。' +
+          '找到论文想留档时用 upload_file_from_url 直接入库（只传公开全文直链，别传落地页）。',
       })
       return
     }

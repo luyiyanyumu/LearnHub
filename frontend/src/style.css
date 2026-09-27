@@ -849,6 +849,93 @@ html.theme-switching *::after {
   transition: none !important;
 }
 
+/* ============ 阅读器工具条（PDF 阅读器与「抽取正文」两行控件共用同一套观感）============
+   为什么单独抽出来：原文工具条是自研按钮（不用 EP 组件，因为要在 canvas 之上精确定位），
+   而「抽取正文」那一行原来用 el-radio-group + el-button：两行控件的高度/圆角/字号都不一样，
+   上下叠在一起像两个不同产品的拼盘。统一成一套 token 之后，切换两个页签时控件位置也不跳。
+
+   选择器里同时写了 .pdf-btn 这一组「历史类名」：Vite 的 HMR 在改组件模板 + 样式时，
+   会出现"样式已更新、DOM 还是旧模板"的中间态 —— 那一瞬间旧类名的按钮会掉成浏览器默认样式
+   （实测：红色方框里那一行方头方脑）。两个类名指向同一套规则，这类中间态就不会再出现半截样式。 */
+.reader-toolbar,
+.pdf-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 6px 8px;
+  border: 1px solid var(--app-border-weak);
+  border-radius: var(--radius);
+  background: var(--app-card);
+  font-size: 12.5px;
+}
+
+.reader-btn,
+.pdf-btn {
+  border: 1px solid var(--app-border);
+  background: var(--app-bg);
+  color: var(--app-text-2);
+  border-radius: 6px;
+  padding: 3px 9px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+
+.reader-btn:hover:not(:disabled),
+.pdf-btn:hover:not(:disabled) {
+  color: var(--app-brand-deep);
+  border-color: color-mix(in srgb, var(--app-brand) 45%, transparent);
+}
+
+.reader-btn:disabled,
+.pdf-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* 选中态：适宽 / 单页 / 原文 这类"开关"按钮 */
+.reader-btn.on,
+.pdf-btn.on {
+  background: var(--app-brand-soft);
+  color: var(--app-brand-deep);
+  border-color: color-mix(in srgb, var(--app-brand) 45%, transparent);
+}
+
+.reader-select {
+  border: 1px solid var(--app-border);
+  background: var(--app-bg);
+  color: var(--app-text-2);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.reader-sep,
+.pdf-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--app-border-weak);
+}
+
+.reader-spacer,
+.pdf-spacer {
+  flex: 1 1 auto;
+}
+
+.reader-hint,
+.pdf-hint {
+  font-size: 11.5px;
+  color: var(--app-text-3);
+}
+
+.reader-link {
+  text-decoration: none;
+}
+
 /* ============ pdf.js 文字层（必须全局：span 是 pdf.js 运行时注入的）============
    原理：canvas 画像素，这一层叠同样位置的**透明文字**，于是可以选中/复制/搜索。
    关键点：容器要有 --scale-factor（pdf.js 用它算字号与位置，设错就完全选不中），

@@ -8,6 +8,7 @@ import org.dyh.learnhub.common.Result;
 import org.dyh.learnhub.dto.AiChatRequest;
 import org.dyh.learnhub.dto.AiPolishRequest;
 import org.dyh.learnhub.dto.AiTestRequest;
+import org.dyh.learnhub.dto.NoteMergeRequest;
 import org.dyh.learnhub.entity.AgentSession;
 import org.dyh.learnhub.service.AgentSessionService;
 import org.dyh.learnhub.service.SkillService;
@@ -169,10 +170,38 @@ public class AiController {
         }
     }
 
+    /**
+     * 把智能体的回答**融入当前笔记**（流式）：产出的是"完整的新正文"，由用户在编辑器里预览后替换。
+     *
+     * <p>为什么也是流式：这是一次整篇重写，思考型模型单次可能 1~3 分钟；没有进度条用户会以为卡死了。
+     * <p>为什么不做成自动保存：AI 只交候选正文，**提交决定留给用户**（点「替换正文」→ 点「保存」）。
+     */
+    @PostMapping(value = "/note-merge-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter noteMergeStream(@Valid @RequestBody NoteMergeRequest req) {
+        SseEmitter emitter = new SseEmitter(320_000L);
+
+        polishStreamPool.execute(() -> {
+            try {
+                // 整篇一次，所以只有"开始"这一个进度点（前端据此显示不确定态 + 已用时间）
+                send(emitter, "progress", Map.of("stage", "start", "total", 1));
+                String out = agentService.mergeIntoNote(req.getTitle(), req.getNote(),
+                        req.getQuestion(), req.getAnswer());
+                send(emitter, "done", Map.of("content", out == null ? "" : out));
+            } catch (Exception e) {
+                String msg = e.getMessage() == null ? "AI 服务异常" : e.getMessage();
+                log.warn("融入笔记失败: {}", msg);
+                send(emitter, "failed", Map.of("message", msg));
+            } finally {
+                emitter.complete();
+            }
+        });
+
+        return emitter;
+    }
+
     @PostMapping("/chat")
     public Result<AiChatVO> chat(@Valid @RequestBody AiChatRequest req) {
-        return Result.ok(agentService.chat(req));
-    }
+        return Result.ok(agentService.chat(req));    }
 
     /**
      * 会话回看：把事件日志投影成「气泡列表」返回。

@@ -22,9 +22,8 @@ import java.util.regex.Pattern;
 /**
  * PDF 的**排版还原**抽取（阅读器用；与检索用的 {@link DocumentTextService#extract} 是两码事）。
  *
- * <h3>为什么不能直接用 PDFTextStripper 的输出</h3>
- * 学术论文大多是**两栏排版**，而 PDFBox 是按坐标把"同一水平线上的文字"并成一行的 ——
- * 左栏一行、右栏一行会被并成同一条"行"，于是抽出来是这样的：
+ * <h3>为什么要单独做一遍</h3>
+ * 论文基本是两栏排版，而默认抽文是"按行"的纯文本，左右两栏逐行交错、句子被撕成两半：
  *
  * <pre>
  *   Abstract et al. 2023; Liu et al. 2024; Wang et al. 2026). During exe-
@@ -32,16 +31,38 @@ import java.util.regex.Pattern;
  *   their environments over long execution horizons. Errors that urations, or contaminate database states, forcing subsequent
  * </pre>
  *
- * 左右两栏逐行交错、句子被撕成两半：用来检索没问题（关键词都还在），但**没法读**。
- * 所以这里按坐标重建版面：中缝检测 → 分栏 → 栏内成行 → 成段 → 标题/列表/脚注分型，
- * 输出的是一份结构化正文（title / authors / heading / para / bullet / meta），
- * 前端照原文档的样子排版，"抽取正文"和"原文"看起来才是一份东西。
+ * 检索没问题（关键词都在），但**没法读**。这里按键面坐标重建版面：
+ * 定中缝 → 分栏 → 栏内成行 → 成段 → 标题/列表/脚注分型，前端照原文档的样子排版。
+ *
+ * <h3>PDFBox 的回调粒度（实测，别照直觉写）</h3>
+ * <ul>
+ *   <li>{@code writeString(String, List<TextPosition>)} 是**按词**回调的（19 页论文首页调了 679 次），
+ *       而且不调 1 参版本；词与词之间的**空格与换行是另外两个回调**
+ *       （{@code writeWordSeparator()} / {@code writeLineSeparator()}）。</li>
+ *   <li>只重写 writeString 会把整页拼成 "AgentRewind:RecoverableExecution" 这样的连体字 ——
+ *       按坐标猜空格也救不回来（有空格字形时几何间隙是 0）。正确做法是同时接管这两个分隔符回调，
+ *       于是**行分组直接拿 PDFBox 的**，我们只做"行内按中缝切栏"。</li>
+ *   <li>PDFBox 的行分组是"同一水平线"级的：跨栏的两个词会被并进同一行（这正是交错的原因），
+ *       所以行内还要按中缝的空隙再切一刀。</li>
+ * </ul>
+ *
+ * <h3>版面识别的三条实测依据（拿 uploads 里的论文调出来的）</h3>
+ * <ol>
+ *   <li><b>中缝靠投票</b>：首页顶部是通栏大标题，直接找"一条全页无字的竖带"会被标题盖住而误判单栏；
+ *       改成给"同一行里的大空隙"投票，票数最多且落在页面中部的就是中缝。</li>
+ *   <li><b>正文左边界取分位点</b>：摘要区常比正文再缩进一个字符位（实测 64 vs 54pt），
+ *       取"行首 x 的众数"会取到摘要的缩进值，于是正文每行都被当成首行缩进、碎成一句一段；
+ *       改用第 5 百分位，并且"上一行也在缩进位"时不算新段落。</li>
+ *   <li><b>首页标题区整体成块</b>：标题/作者/机构是居中的，行首既不贴正文左边界、也不贴右栏左边界 ——
+ *       用"正文之前 + 行首不在任何栏的边界上"圈出这一整块；否则作者行会被中缝切成两半，
+ *       前半截塞进左栏、后半截跑到右栏开头。</li>
+ * </ol>
  *
  * <h3>刻意不做的事</h3>
  * <ul>
  *   <li>不改写存库正文（{@code file_info.text_content}）—— 那是检索层的地基，换它就得全量重建向量与 wiki；
- *       排版还原只服务"看"，所以走单独的接口与单独的实现。</li>
- *   <li>不追求一字不差：PDF 里没有段落对象，只能靠坐标推断，目标是"读起来跟原文一致"。</li>
+ *       排版还原只服务"看"，所以单独接口、单独实现。</li>
+ *   <li>不追求一字不差：PDF 里没有段落对象，全靠坐标推断，目标是"读起来跟原文一致"。</li>
  * </ul>
  */
 @Slf4j
@@ -54,11 +75,8 @@ public class PdfLayoutExtractor {
     /** 判定为"中缝"的最小空隙（pt）。普通词间距只有 2~4pt，两栏之间通常 12pt 以上 */
     private static final double MIN_GUTTER = 12.0;
 
-    /** 行内断开成两段的空隙（按空格宽度的倍数）：两栏之间才够宽，justify 拉伸出来的空格不够 */
-    private static final double SEG_GAP = 2.2;
-
-    /** 拼字时的空格阈值（按字号）：小于它认为是同一个词的字符级碎片，不插空格 */
-    private static final double WORD_JOIN = 0.55;
+    /** 行首离栏边界多近算"贴边"（按字号倍数） */
+    private static final double FLUSH_TOL = 1.2;
 
     private static final Pattern BULLET = Pattern.compile("^\\s*[•●▪‣·◦*]\\s+");
     private static final Pattern NUMBERED = Pattern.compile("^(\\d+(?:\\.\\d+)*)\\.?\\s+\\S.*");
@@ -66,6 +84,15 @@ public class PdfLayoutExtractor {
             Pattern.compile("^(第[一二三四五六七八九十百]+[章节部分]|[一二三四五六七八九十]+[、.]|（[一二三四五六七八九十]+）)\\s*\\S.*");
     private static final Pattern SENTENCE_END = Pattern.compile("[.!?。！？…][\"'’”）)]?$");
     private static final Pattern PAGE_NUMBER = Pattern.compile("^[0-9IVXLCDMivxlcdm]{1,5}$");
+    private static final Pattern SPACE_BEFORE_PUNCT = Pattern.compile("\\s+([,.;:!?%)])");
+
+    /**
+     * arXiv 的页边标记（"arXiv:2510.05592v2 [cs.AI] 22 Jul 2026"）。
+     * <p>它**永远不是标题**，但会让"最大字号 + 够宽"的标题规则中招：实测有一篇论文的第一页
+     * 把它排成了横排且字号最大，于是整篇文档的标题变成了一个 arXiv 编号。
+     * 这类标记是排印噪声，直接按模式识别、并按页眉页脚丢弃。
+     */
+    private static final Pattern ARXIV_STAMP = Pattern.compile("^arxiv:\\s*\\S+", Pattern.CASE_INSENSITIVE);
 
     /** 论文里固定的小节名（字号不一定变大，靠词表兜住） */
     private static final List<String> KNOWN_HEADINGS = List.of(
@@ -89,15 +116,20 @@ public class PdfLayoutExtractor {
     public record Layout(String status, String error, List<PageLayout> pages, int chars, int pageCount) {
     }
 
-    /** 行内碎片：被大空隙切开的一段（同一条"行"里可能同时有左栏与右栏） */
-    private record Segment(double x0, double x1, double y, double size, boolean bold, boolean mono, String text) {
+    /** 一个词（PDFBox 的一次调用）：左上角 + 右边界 + 字号 + "前面有没有空格" */
+    private record Word(double x0, double x1, double y, double size, boolean bold, boolean spaceBefore,
+                        String text) {
     }
 
-    /** 栏内的一行 */
-    private record Line(double x0, double x1, double y, double size, boolean bold, boolean mono, String text) {
+    /** 一栏内的一行 */
+    private record Line(double x0, double x1, double y, double size, boolean bold, String text) {
     }
 
-    /** 一栏：几何（左边界 = 段落 flush-left 位置）+ 行 */
+    /** 带纵向位置的块：用来把"跨栏通栏块"按 y 插回栏内阅读顺序 */
+    private record Placed(Block block, double y) {
+    }
+
+    /** 一栏：几何 + 行 */
     private record Column(double left, double right, double top, double bottom, List<Line> lines) {
     }
 
@@ -138,7 +170,7 @@ public class PdfLayoutExtractor {
     }
 
     // ------------------------------------------------------------------
-    // 单页：收集碎片 → 定中缝 → 分栏 → 成行 → 成段
+    // 单页
     // ------------------------------------------------------------------
 
     private PageLayout layoutPage(PDDocument doc, PDPage page, int pageNo) throws IOException {
@@ -153,90 +185,127 @@ public class PdfLayoutExtractor {
         collector.setSuppressDuplicateOverlappingText(true);
         collector.setStartPage(pageNo);
         collector.setEndPage(pageNo);
-        collector.getText(doc);                      // 只为触发 writeString 回调，返回值不用
+        collector.getText(doc);                      // 只为触发回调，返回值不用
 
-        List<List<Segment>> rows = collector.rows;
+        List<List<Word>> rows = collector.rows;
         if (rows.isEmpty()) {
             return new PageLayout(pageNo, 1, List.of());
         }
+        double bodySize = bodySize(rows);
+        // 旋转页（横排大表）坐标系被换过，硬做分栏只会更乱 —— 退化成"一段一段往下排"
+        double gutter = rotation == 0 ? detectGutter(rows, width) : width + 1;
+        boolean twoColumn = gutter < width;
+        double leftFlush = flushOf(rows, bodySize, width, true);
+        double rightFlush = flushOf(rows, bodySize, width, false);
+        double bodyStartY = bodyStartY(rows, bodySize, leftFlush, rightFlush, gutter, twoColumn);
 
-        // 旋转页（横排大表）：坐标系被换过，硬做分栏只会更乱 —— 退化成"一段一段往下排"
-        boolean twoColumn = rotation == 0 && detectGutter(rows, width) < width;
-        double gutter = twoColumn ? detectGutter(rows, width) : width + 1;
-
-        List<Segment> wideSegs = new ArrayList<>();
-        List<Segment> leftSegs = new ArrayList<>();
-        List<Segment> rightSegs = new ArrayList<>();
-        for (List<Segment> row : rows) {
-            for (Segment s : row) {
-                if (!twoColumn) {
-                    wideSegs.add(s);
-                } else if (s.x1() <= gutter + 2) {
-                    leftSegs.add(s);
-                } else if (s.x0() >= gutter - 2) {
-                    rightSegs.add(s);
+        // 分流：行内先按中缝切，再决定这一段属于哪一栏（居中块整行当通栏，不切）
+        List<List<Word>> wide = new ArrayList<>();
+        List<List<Word>> left = new ArrayList<>();
+        List<List<Word>> right = new ArrayList<>();
+        for (List<Word> row : rows) {
+            double rowSize = row.stream().mapToDouble(Word::size).max().orElse(bodySize);
+            boolean aboveBody = row.get(0).y() < bodyStartY - 0.6 * rowSize;
+            boolean centeredRow = aboveBody && row.stream().anyMatch(w -> !nearFlush(w, leftFlush, rightFlush, gutter));
+            for (List<Word> part : splitByGutter(row, twoColumn && !centeredRow, gutter)) {
+                if (!twoColumn || centeredRow) {
+                    wide.add(part);
+                } else if (crossesGutter(part, gutter)) {
+                    wide.add(part);
+                } else if (part.get(0).x0() >= gutter) {
+                    right.add(part);
                 } else {
-                    // 跨过中缝：整行是全宽内容（大标题 / 跨栏表格 / 图注）
-                    wideSegs.add(s);
+                    left.add(part);
                 }
             }
         }
 
-        List<Line> wideLines = toLines(wideSegs);
-        List<Line> leftLines = toLines(leftSegs);
-        List<Line> rightLines = toLines(rightSegs);
-        double bodySize = bodySize(wideLines, leftLines, rightLines);
+        if (!twoColumn) {
+            List<Line> lines = toLines(wide);
+            List<Line> head = new ArrayList<>();
+            List<Line> body = new ArrayList<>();
+            for (Line ln : lines) {
+                if (ln.y() < bodyStartY - 0.6 * ln.size()) {
+                    head.add(ln);
+                } else {
+                    body.add(ln);
+                }
+            }
+            List<Block> blocks = new ArrayList<>(headBlocks(head, bodySize, pageNo, width));
+            blocks.addAll(plain(columnPlaced(columnOf(body), bodySize, pageNo, height)));
+            return new PageLayout(pageNo, 1, blocks);
+        }
 
-        Column left = columnOf(leftLines);
-        Column right = columnOf(rightLines);
-        double columnTop = Math.min(left == null ? Double.MAX_VALUE : left.top(),
-                right == null ? Double.MAX_VALUE : right.top());
+        List<Line> leftLines = toLines(left);
+        List<Line> rightLines = toLines(right);
+        List<Placed> leftBlocks = columnPlaced(columnOf(leftLines), bodySize, pageNo, height);
+        List<Placed> rightBlocks = columnPlaced(columnOf(rightLines), bodySize, pageNo, height);
+        mergeColumnSeam(leftBlocks, rightBlocks);
 
-        // 阅读顺序：正文上方通栏（标题/作者/摘要）→ 左栏 → 右栏 → 正文下方通栏（跨栏图注/脚注）
+        // 通栏块：栏目之上的（标题区）走标题处理，栏目之间/之下的按 y 插回左栏顺序
         List<Line> head = new ArrayList<>();
-        List<Line> tail = new ArrayList<>();
-        for (Line ln : wideLines) {
+        List<Line> spanningLines = new ArrayList<>();
+        double columnTop = Math.min(firstY(leftLines), firstY(rightLines));
+        for (Line ln : toLines(wide)) {
             if (ln.y() < columnTop - 1) {
                 head.add(ln);
             } else {
-                tail.add(ln);
+                spanningLines.add(ln);
             }
         }
-
-        List<Block> leftBlocks = columnBlocks(left, bodySize, pageNo, height);
-        List<Block> rightBlocks = columnBlocks(right, bodySize, pageNo, height);
-        mergeColumnSeam(leftBlocks, rightBlocks);
-
-        List<Block> blocks = new ArrayList<>(headBlocks(head, bodySize, pageNo));
-        blocks.addAll(leftBlocks);
-        blocks.addAll(rightBlocks);
-        blocks.addAll(columnBlocks(columnOf(tail), bodySize, pageNo, height));
-        return new PageLayout(pageNo, twoColumn ? 2 : 1, blocks);
+        List<Placed> spanning = columnPlaced(columnOf(spanningLines), bodySize, pageNo, height);
+        List<Block> blocks = new ArrayList<>(headBlocks(head, bodySize, pageNo, width));
+        blocks.addAll(plain(interleave(leftBlocks, spanning)));
+        blocks.addAll(plain(rightBlocks));
+        return new PageLayout(pageNo, 2, blocks);
     }
 
     /**
-     * 中缝检测：给"同一行里的大空隙"投票，票数最多、且落在页面中部的那条就是中缝。
-     * <p>为什么不直接找"一条全页无字的竖带"：论文首页顶部是通栏大标题，会把那条竖带盖住，
-     * 于是被误判成单栏（实测这类误判会把两栏又拼回交错的样子）。
+     * 行内按中缝切：PDFBox 把同一水平线上的词并成一行，两栏的正文因此被并在一起；
+     * 只要某一对相邻词之间的空隙足够大、且落在页面中部，就在那里切开。
      */
-    private double detectGutter(List<List<Segment>> rows, double pageWidth) {
+    private List<List<Word>> splitByGutter(List<Word> row, boolean enable, double gutter) {
+        if (!enable || row.size() < 2) {
+            return List.of(row);
+        }
+        List<Word> sorted = new ArrayList<>(row);
+        sorted.sort(Comparator.comparingDouble(Word::x0));
+        List<List<Word>> parts = new ArrayList<>();
+        List<Word> cur = new ArrayList<>();
+        for (Word w : sorted) {
+            if (!cur.isEmpty()) {
+                Word prev = cur.get(cur.size() - 1);
+                double gap = w.x0() - prev.x1();
+                double mid = (prev.x1() + w.x0()) / 2;
+                // 只在"中缝附近"切：正文里的宽空格（表格、公式）不该被当成栏缝
+                if (gap >= MIN_GUTTER && Math.abs(mid - gutter) <= gap / 2 + 8) {
+                    parts.add(cur);
+                    cur = new ArrayList<>();
+                    w = new Word(w.x0(), w.x1(), w.y(), w.size(), w.bold(), false, w.text());
+                }
+            }
+            cur.add(w);
+        }
+        parts.add(cur);
+        return parts;
+    }
+
+    /** 中缝检测：给"同一行里的大空隙"投票，票数最多、且落在页面中部的那条就是中缝 */
+    private double detectGutter(List<List<Word>> rows, double pageWidth) {
         double lo = pageWidth * 0.28;
         double hi = pageWidth * 0.72;
         Map<Integer, Integer> votes = new HashMap<>();
         int rowsWithGap = 0;
-        for (List<Segment> row : rows) {
-            if (row.size() < 2) {
-                continue;
-            }
+        for (List<Word> row : rows) {
+            List<Word> sorted = new ArrayList<>(row);
+            sorted.sort(Comparator.comparingDouble(Word::x0));
             boolean voted = false;
-            for (int i = 1; i < row.size(); i++) {
-                Segment prev = row.get(i - 1);
-                Segment cur = row.get(i);
-                double gap = cur.x0() - prev.x1();
-                if (gap < Math.max(MIN_GUTTER, SEG_GAP * spaceWidth(cur))) {
+            for (int i = 1; i < sorted.size(); i++) {
+                double gap = sorted.get(i).x0() - sorted.get(i - 1).x1();
+                if (gap < MIN_GUTTER) {
                     continue;
                 }
-                double mid = (prev.x1() + cur.x0()) / 2;
+                double mid = (sorted.get(i - 1).x1() + sorted.get(i).x0()) / 2;
                 if (mid < lo || mid > hi) {
                     continue;
                 }
@@ -252,80 +321,139 @@ public class PdfLayoutExtractor {
         }
         Map.Entry<Integer, Integer> best = votes.entrySet().stream()
                 .max(Comparator.comparingInt(Map.Entry::getValue)).orElseThrow();
-        // 至少要有四分之一的"多段行"投同一条中缝才认，免得把表格里的空档当成栏缝
-        if (best.getValue() < Math.max(2, Math.round(rowsWithGap * 0.25))) {
+        // 至少要有六分之一的"有缝行"投同一条中缝才认，免得把表格里的空档当成栏缝
+        if (best.getValue() < Math.max(2, Math.round(rowsWithGap / 6.0))) {
             return pageWidth + 1;
         }
         return best.getKey() * 5.0;
     }
 
-    /** 碎片 → 行：y 相近的拼成一行，另外的另起一行 */
-    private List<Line> toLines(List<Segment> segs) {
-        if (segs.isEmpty()) {
-            return List.of();
-        }
-        List<Segment> sorted = new ArrayList<>(segs);
-        sorted.sort(Comparator.comparingDouble(Segment::y).thenComparingDouble(Segment::x0));
-        List<Line> lines = new ArrayList<>();
-        List<Segment> cur = new ArrayList<>();
-        for (Segment s : sorted) {
-            if (!cur.isEmpty()) {
-                Segment prev = cur.get(cur.size() - 1);
-                if (Math.abs(s.y() - prev.y()) > 0.45 * Math.max(s.size(), prev.size())) {
-                    lines.add(finishLine(cur));
-                    cur = new ArrayList<>();
-                }
+    /** 栏的正文左边界：取 5% 分位（避开居中标题与页边水印），只统计"像正文"的整行 */
+    private double flushOf(List<List<Word>> rows, double bodySize, double pageWidth, boolean leftHalf) {
+        List<Double> xs = new ArrayList<>();
+        for (List<Word> row : rows) {
+            double x0 = row.stream().mapToDouble(Word::x0).min().orElse(-1);
+            double size = row.stream().mapToDouble(Word::size).max().orElse(bodySize);
+            if (x0 < 0 || text(row).length() < 20 || size < bodySize * 0.75 || size > bodySize * 1.35) {
+                continue;
             }
-            cur.add(s);
+            boolean inHalf = leftHalf ? x0 < pageWidth * 0.55 : x0 >= pageWidth * 0.45;
+            if (inHalf) {
+                xs.add(x0);
+            }
         }
-        lines.add(finishLine(cur));
-        return lines;
+        if (xs.isEmpty()) {
+            return leftHalf ? 0 : pageWidth;
+        }
+        xs.sort(Double::compare);
+        return xs.get(Math.min(xs.size() - 1, (int) Math.floor(xs.size() * 0.05)));
     }
 
-    private Line finishLine(List<Segment> segs) {
+    /** 正文第一行的 y：首页标题区与正文的分界线（"够长 + 贴栏边"的行里最高的那行） */
+    private double bodyStartY(List<List<Word>> rows, double bodySize, double leftFlush, double rightFlush,
+                              double gutter, boolean twoColumn) {
+        double min = Double.MAX_VALUE;
+        double first = Double.MAX_VALUE;
+        for (List<Word> row : rows) {
+            first = Math.min(first, row.get(0).y());
+            if (text(row).length() < 40) {
+                continue;
+            }
+            // 逐词判断：首页那一行常常是"左栏小标题 + 右栏正文"拼在一起，
+            // 只看整行最左边的 x 会把右栏正文一起判成居中块（实测摘要行就是这么被吞掉的）
+            for (Word w : row) {
+                if (w.size() < bodySize * 0.75 || w.size() > bodySize * 1.35) {
+                    continue;
+                }
+                if (twoColumn && !nearFlush(w, leftFlush, rightFlush, gutter)) {
+                    continue;
+                }
+                min = Math.min(min, w.y());
+            }
+        }
+        if (min != Double.MAX_VALUE) {
+            return min;
+        }
+        // 整页都是标题/图（找不到"像正文"的行）：那就从页面最上面开始，不要留空档
+        return first == Double.MAX_VALUE ? 0 : first - 1;
+    }
+
+    private static boolean crossesGutter(List<Word> part, double gutter) {
+        double x0 = part.get(0).x0();
+        double x1 = part.get(part.size() - 1).x1();
+        return x0 < gutter - 2 && x1 > gutter + 2;
+    }
+
+    private static boolean nearFlush(Word w, double leftFlush, double rightFlush, double gutter) {
+        double flush = w.x0() >= gutter ? rightFlush : leftFlush;
+        return Math.abs(w.x0() - flush) <= FLUSH_TOL * w.size();
+    }
+
+    private static double firstY(List<Line> lines) {
+        double min = Double.MAX_VALUE;
+        for (Line ln : lines) {
+            min = Math.min(min, ln.y());
+        }
+        return min;
+    }
+
+    // ------------------------------------------------------------------
+    // 词 → 行
+    // ------------------------------------------------------------------
+
+    /** 每一段词拼成一行（空格来自 PDFBox 的词分隔回调，不要按坐标猜） */
+    private List<Line> toLines(List<List<Word>> parts) {
+        List<Line> out = new ArrayList<>();
+        for (List<Word> part : parts) {
+            if (part.isEmpty()) {
+                continue;
+            }
+            List<Word> sorted = new ArrayList<>(part);
+            sorted.sort(Comparator.comparingDouble(Word::x0));
+            StringBuilder sb = new StringBuilder();
+            int total = 0;
+            int boldChars = 0;
+            double x0 = Double.MAX_VALUE;
+            double x1 = -Double.MAX_VALUE;
+            double size = 0;
+            for (Word w : sorted) {
+                if (w.spaceBefore() && sb.length() > 0) {
+                    char last = sb.charAt(sb.length() - 1);
+                    char next = w.text().isEmpty() ? ' ' : w.text().charAt(0);
+                    if (!(isCjk(last) && isCjk(next))) {
+                        sb.append(' ');
+                    }
+                }
+                sb.append(w.text());
+                int n = Math.max(1, w.text().length());
+                total += n;
+                if (w.bold()) {
+                    boldChars += n;
+                }
+                x0 = Math.min(x0, w.x0());
+                x1 = Math.max(x1, w.x1());
+                size = Math.max(size, w.size());
+            }
+            out.add(new Line(x0, x1, sorted.get(0).y(), size, boldChars * 2 > total, tidyInline(sb.toString())));
+        }
+        out.sort(Comparator.comparingDouble(Line::y));
+        return out;
+    }
+
+    /** 一行拼成的纯文本（只用于长度判断） */
+    private static String text(List<Word> row) {
         StringBuilder sb = new StringBuilder();
-        int total = 0;
-        int boldChars = 0;
-        boolean mono = true;
-        double x0 = Double.MAX_VALUE;
-        double x1 = -Double.MAX_VALUE;
-        double y = segs.get(0).y();
-        double size = 0;
-        for (int i = 0; i < segs.size(); i++) {
-            Segment s = segs.get(i);
-            if (i > 0 && s.x0() - segs.get(i - 1).x1() > WORD_JOIN * s.size()
-                    && sb.length() > 0 && sb.charAt(sb.length() - 1) != ' ') {
+        for (Word w : row) {
+            if (w.spaceBefore() && sb.length() > 0 && !(isCjk(sb.charAt(sb.length() - 1))
+                    && !w.text().isEmpty() && isCjk(w.text().charAt(0)))) {
                 sb.append(' ');
             }
-            sb.append(s.text());
-            int n = Math.max(1, s.text().length());
-            total += n;
-            if (s.bold()) {
-                boldChars += n;
-            }
-            mono = mono && s.mono();
-            x0 = Math.min(x0, s.x0());
-            x1 = Math.max(x1, s.x1());
-            size = Math.max(size, s.size());
+            sb.append(w.text());
         }
-        return new Line(x0, x1, y, size, boldChars * 2 > total, mono, sb.toString().trim());
+        return sb.toString();
     }
 
-    /** 正文字号：按字数加权的众数（0.5pt 一档）—— 标题与脚注是少数派，不该拉偏基准 */
-    @SafeVarargs
-    private final double bodySize(List<Line>... groups) {
-        Map<Integer, Integer> weight = new HashMap<>();
-        for (List<Line> group : groups) {
-            for (Line ln : group) {
-                weight.merge((int) Math.round(ln.size() * 2), ln.text().length(), Integer::sum);
-            }
-        }
-        int best = weight.entrySet().stream().max(Map.Entry.comparingByValue())
-                .map(Map.Entry::getKey).orElse(20);
-        return best / 2.0;
-    }
-
-    /** 栏几何：行首 x 的众数就是段落 flush-left 位置（缩进行不影响它） */
+    /** 行首 x 的众数就是段落 flush-left 位置（缩进行不影响它） */
     private Column columnOf(List<Line> lines) {
         if (lines == null || lines.isEmpty()) {
             return null;
@@ -347,39 +475,102 @@ public class PdfLayoutExtractor {
         return new Column(left, right, top, bottom, sorted);
     }
 
+    /** 正文字号：按字数加权的众数（0.5pt 一档）—— 标题与脚注是少数派，不该拉偏基准 */
+    private double bodySize(List<List<Word>> rows) {
+        Map<Integer, Integer> weight = new HashMap<>();
+        for (List<Word> row : rows) {
+            for (Word w : row) {
+                weight.merge((int) Math.round(w.size() * 2), Math.max(1, w.text().length()), Integer::sum);
+            }
+        }
+        int best = weight.entrySet().stream().max(Map.Entry.comparingByValue())
+                .map(Map.Entry::getKey).orElse(20);
+        return best / 2.0;
+    }
+
     // ------------------------------------------------------------------
     // 成段
     // ------------------------------------------------------------------
 
-    /** 正文上方通栏：首页大字号 = 标题，次大 = 作者，其余按元信息/正文处理 */
-    private List<Block> headBlocks(List<Line> lines, double bodySize, int pageNo) {
+    /**
+     * 首页标题区：最大字号并成标题、次大并成作者，其余按元信息/小标题处理。
+     * <p>标题还要求"够宽"：论文页边常有一条**竖排的 arXiv 水印**（"arXiv:2608.14380v1 [cs.AI] 14 Aug 2026"），
+     * 它的字号是整页最大的、宽度却只有一个字高 —— 不加这条会被它抢走标题位（实测踩过）。
+     */
+    private List<Block> headBlocks(List<Line> lines, double bodySize, int pageNo, double pageWidth) {
         List<Block> out = new ArrayList<>();
-        boolean titleDone = false;
+        StringBuilder title = new StringBuilder();
+        StringBuilder authors = new StringBuilder();
+        double minTitleWidth = pageWidth * 0.25;
+        double maxSize = lines.stream()
+                .filter(l -> l.x1() - l.x0() >= minTitleWidth)
+                .mapToDouble(Line::size).max().orElse(bodySize);
         for (Line ln : lines) {
             String text = ln.text();
             if (text.isEmpty()) {
                 continue;
             }
-            if (pageNo == 1 && !titleDone && ln.size() >= bodySize * 1.45) {
-                out.add(new Block("title", text, 0));
-                titleDone = true;
+            // 上标脚注标记（"1,3,4 ∗"）单独成行，纯噪声；arXiv 页边标记也不是内容
+            if (text.length() < 24 && ln.size() < bodySize * 0.85) {
                 continue;
             }
-            if (pageNo == 1 && titleDone && ln.size() > bodySize * 1.08 && ln.size() < bodySize * 1.45) {
-                out.add(new Block("authors", text, 0));
+            if (ARXIV_STAMP.matcher(text).find()) {
                 continue;
             }
-            out.add(new Block(ln.size() < bodySize * 0.94 ? "meta" : "para", text, 0));
+            // 标题/作者判定要排在"小标题判定"之前：论文标题本身常常是加粗的，
+            // 先走 headingLevel 会把大标题判成二级小标题（实测踩过）
+            boolean wideEnough = ln.x1() - ln.x0() >= minTitleWidth;
+            if (pageNo == 1 && wideEnough && maxSize >= bodySize * 1.2 && ln.size() >= maxSize * 0.95) {
+                append(title, text);                       // 标题常折成两三行：并成一条
+                continue;
+            }
+            if (pageNo == 1 && title.length() > 0 && ln.size() >= bodySize * 1.1) {
+                append(authors, text);
+                continue;
+            }
+            int level = headingLevel(text, ln, bodySize);
+            if (level > 0) {
+                flushHead(out, title, authors);
+                out.add(new Block("heading", text, level));
+                continue;
+            }
+            flushHead(out, title, authors);
+            // 首页标题区里的小字不都是元信息：机构/邮箱是居中的，而表格、公式是贴边的 ——
+            // 一律按"小字"处理会把表格整块变成居中的灰字（实测第 5 页的实验结果表就是这样）
+            double center = (ln.x0() + ln.x1()) / 2;
+            boolean centered = center > pageWidth * 0.40 && center < pageWidth * 0.60;
+            out.add(new Block(centered && ln.size() < bodySize * 1.02 ? "meta" : "para", text, 0));
         }
+        flushHead(out, title, authors);
         return out;
     }
 
-    private List<Block> columnBlocks(Column column, double bodySize, int pageNo, double pageHeight) {
-        List<Block> out = new ArrayList<>();
+    private static void append(StringBuilder sb, String text) {
+        if (sb.length() > 0) {
+            sb.append(' ');
+        }
+        sb.append(text);
+    }
+
+    private static void flushHead(List<Block> out, StringBuilder title, StringBuilder authors) {
+        if (title.length() > 0) {
+            out.add(new Block("title", tidyInline(title.toString()), 0));
+            title.setLength(0);
+        }
+        if (authors.length() > 0) {
+            out.add(new Block("authors", tidyInline(authors.toString()), 0));
+            authors.setLength(0);
+        }
+    }
+
+    /** 一栏 → 块（带 y，便于通栏块插回阅读顺序） */
+    private List<Placed> columnPlaced(Column column, double bodySize, int pageNo, double pageHeight) {
+        List<Placed> out = new ArrayList<>();
         if (column == null) {
             return out;
         }
         StringBuilder para = new StringBuilder();
+        double paraY = 0;
         boolean bullet = false;
         Line prev = null;
 
@@ -390,48 +581,64 @@ public class PdfLayoutExtractor {
             }
             int level = headingLevel(text, ln, bodySize);
             if (level > 0) {
-                flush(out, para, bullet);
+                flushPlaced(out, para, bullet, paraY);
                 bullet = false;
-                out.add(new Block("heading", text, level));
+                out.add(new Placed(new Block("heading", text, level), ln.y()));
                 prev = ln;
                 continue;
             }
             if (BULLET.matcher(text).find()) {
-                flush(out, para, bullet);
+                flushPlaced(out, para, bullet, paraY);
                 bullet = true;
+                paraY = ln.y();
                 para.append(BULLET.matcher(text).replaceFirst(""));
                 prev = ln;
                 continue;
             }
-            // 页脚/侧边注释：字号小一档 + 挨着页面底部
-            if (ln.size() < bodySize * 0.92 && text.length() < 160 && ln.y() > pageHeight * 0.78
-                    && para.length() == 0) {
-                out.add(new Block("meta", text, 0));
+            // 页脚/侧边注释：字号小一档 + 挨着页面底部 + 不是正在拼的段落
+            if (para.length() == 0 && ln.size() < bodySize * 0.92 && text.length() < 160
+                    && ln.y() > pageHeight * 0.78) {
+                out.add(new Placed(new Block("meta", text, 0), ln.y()));
                 prev = ln;
                 continue;
             }
             if (para.length() > 0 && prev != null && paragraphBreak(column, prev, ln, bodySize)) {
-                flush(out, para, bullet);
+                flushPlaced(out, para, bullet, paraY);
                 bullet = false;
             }
             if (para.length() > 0) {
                 joinLine(para, prev, text);
             } else {
+                paraY = ln.y();
                 para.append(text);
             }
             prev = ln;
         }
-        flush(out, para, bullet);
+        flushPlaced(out, para, bullet, paraY);
         return out;
     }
 
-    /** 段落断开判定：段间距 / 首行缩进 / 上一行是"没写满的最后一行" */
+    private static List<Block> plain(List<Placed> placed) {
+        List<Block> out = new ArrayList<>(placed.size());
+        for (Placed p : placed) {
+            out.add(p.block());
+        }
+        return out;
+    }
+
+    /**
+     * 段落断开判定：段间距 / 首行缩进 / 上一行是"没写满的最后一行"。
+     * <p>首行缩进必须**和上一行比较**：摘要区整体比正文再缩进一个字位，
+     * 只看"离栏左边界多远"会把摘要里每一行都当成新段落（一句一段）。
+     */
     private boolean paragraphBreak(Column column, Line prev, Line cur, double bodySize) {
         if (cur.y() - prev.y() > 1.55 * Math.max(prev.size(), bodySize)) {
             return true;
         }
-        double indent = cur.x0() - column.left();
-        if (indent > 0.6 * cur.size() && indent < (column.right() - column.left()) * 0.25) {
+        double indentCur = cur.x0() - column.left();
+        double indentPrev = prev.x0() - column.left();
+        if (indentCur > 0.55 * cur.size() && indentCur < (column.right() - column.left()) * 0.25
+                && indentPrev <= 0.55 * prev.size()) {
             return true;
         }
         return SENTENCE_END.matcher(prev.text()).find()
@@ -466,17 +673,17 @@ public class PdfLayoutExtractor {
         return !s.isEmpty() && Character.isLetter(s.charAt(0));
     }
 
-    private void flush(List<Block> out, StringBuilder para, boolean bullet) {
+    private static void flushPlaced(List<Placed> out, StringBuilder para, boolean bullet, double y) {
         String text = para.toString().trim();
         para.setLength(0);
         if (!text.isEmpty()) {
-            out.add(new Block(bullet ? "bullet" : "para", text, 0));
+            out.add(new Placed(new Block(bullet ? "bullet" : "para", tidyInline(text), 0), y));
         }
     }
 
     /**
      * 标题判定：编号小节（1 / 1.1 / 一、）、词表里的固定小节、明显加粗且大一号。
-     * <p>三个条件都必须"短 + 不以句末标点结尾" —— 正文里出现 "Introduction" 一个词不该被当成标题。
+     * <p>都必须"短 + 不以句末标点结尾" —— 正文里出现 "Introduction" 一个词不该被当成标题。
      */
     private int headingLevel(String text, Line ln, double bodySize) {
         String t = text.trim();
@@ -504,25 +711,53 @@ public class PdfLayoutExtractor {
     }
 
     /**
-     * 栏缝续接：摘要这类"左栏写到底、右栏接着写"的段落会被栏边界切成两段。
-     * 判据很直接：左栏最后一段没写完（无句末标点），右栏第一段又以小写字母/汉字开头。
+     * 栏缝续接：左栏最后一段没写完（无句末标点），右栏第一段又以小写字母/汉字开头 ——
+     * 说明它们本来是同一段，被栏边界切开了（实测首页摘要就是这样）。
      */
-    private void mergeColumnSeam(List<Block> leftBlocks, List<Block> rightBlocks) {
+    private void mergeColumnSeam(List<Placed> leftBlocks, List<Placed> rightBlocks) {
         if (leftBlocks.isEmpty() || rightBlocks.isEmpty()) {
             return;
         }
-        Block a = leftBlocks.get(leftBlocks.size() - 1);
-        Block b = rightBlocks.get(0);
-        if (!"para".equals(a.type()) || !"para".equals(b.type()) || SENTENCE_END.matcher(a.text()).find()) {
+        Placed a = leftBlocks.get(leftBlocks.size() - 1);
+        Placed b = rightBlocks.get(0);
+        if (!"para".equals(a.block().type()) || !"para".equals(b.block().type())
+                || SENTENCE_END.matcher(a.block().text()).find()) {
             return;
         }
-        char first = b.text().isEmpty() ? ' ' : b.text().charAt(0);
+        char first = b.block().text().isEmpty() ? ' ' : b.block().text().charAt(0);
         if (!Character.isLowerCase(first) && !isCjk(first)) {
             return;
         }
-        leftBlocks.set(leftBlocks.size() - 1,
-                new Block("para", a.text() + (isCjk(first) ? "" : " ") + b.text(), 0));
+        String merged = a.block().text() + (isCjk(first) ? "" : " ") + b.block().text();
+        leftBlocks.set(leftBlocks.size() - 1, new Placed(new Block("para", merged, 0), a.y()));
         rightBlocks.remove(0);
+    }
+
+    /**
+     * 把跨栏通栏块按 y 插回栏内顺序。
+     * <p>典型场景：摘要下面的 "Code — https://…" 是通栏的，但阅读顺序上紧跟摘要；
+     * 直接放到页面最后就成了"读到结尾突然冒出两行链接"。
+     */
+    private List<Placed> interleave(List<Placed> column, List<Placed> spanning) {
+        if (spanning.isEmpty()) {
+            return column;
+        }
+        List<Placed> sorted = new ArrayList<>(spanning);
+        sorted.sort(Comparator.comparingDouble(Placed::y));
+        List<Placed> out = new ArrayList<>();
+        int i = 0;
+        for (Placed p : column) {
+            while (i < sorted.size() && sorted.get(i).y() < p.y()) {
+                out.add(sorted.get(i));
+                i++;
+            }
+            out.add(p);
+        }
+        while (i < sorted.size()) {
+            out.add(sorted.get(i));
+            i++;
+        }
+        return out;
     }
 
     // ------------------------------------------------------------------
@@ -549,6 +784,9 @@ public class PdfLayoutExtractor {
             List<Block> keep = new ArrayList<>();
             for (int i = 0; i < all.size(); i++) {
                 Block b = all.get(i);
+                if (ARXIV_STAMP.matcher(b.text().trim()).find()) {
+                    continue;                                    // arXiv 页边标记（每页都有，且常与页码粘连）
+                }
                 String key = furnitureKey(b.text());
                 if (key != null && freq.getOrDefault(key, 0) >= need) {
                     continue;                                    // 页眉 / 页脚 / 侧边 arXiv 水印
@@ -574,8 +812,10 @@ public class PdfLayoutExtractor {
         return key.length() >= 2 ? key : null;
     }
 
-    private static double spaceWidth(Segment s) {
-        return Math.max(1.5, 0.25 * s.size());
+    /** 行内小清洗：修双重编码乱码、去掉标点前多余空格、压掉重复空格 */
+    private static String tidyInline(String s) {
+        return SPACE_BEFORE_PUNCT.matcher(DocumentTextService.repairMojibake(s).replaceAll("\\s+", " "))
+                .replaceAll("$1").trim();
     }
 
     private static String brief(String s) {
@@ -584,22 +824,33 @@ public class PdfLayoutExtractor {
     }
 
     // ------------------------------------------------------------------
-    // PDFBox 回调：把"一行"按大空隙拆成碎片（左栏 / 右栏）
+    // PDFBox 回调：词 + 词分隔 + 行分隔
     // ------------------------------------------------------------------
 
     /**
-     * 收集每一行的文字碎片。
-     * <p>PDFBox 的 {@code writeString} 已经把同一水平线上的文字并成了一行（跨栏的也并进来），
-     * 这里只做一件事：遇到大空隙就断开 —— 于是"左栏结尾 + 右栏开头"那种拼接会被拆回两段。
-     * <p>碎片位置来自 {@link TextPosition}：{@code xDirAdj} 是"从上到下、从左到右"的坐标，
-     * 每页都是从 0 开始，正好可以直接当版面坐标用。
+     * 收集"行 → 词"。PDFBox 按词回调 {@code writeString}，空格与换行靠
+     * {@code writeWordSeparator()} / {@code writeLineSeparator()} 两个回调表达 ——
+     * 只重写 writeString 会丢掉所有空格（实测），所以两个分隔符都要接管。
      */
     private static final class RowCollector extends PDFTextStripper {
 
-        private final List<List<Segment>> rows = new ArrayList<>();
+        private final List<List<Word>> rows = new ArrayList<>();
+        private List<Word> cur = new ArrayList<>();
+        private boolean spacePending = false;
 
         private RowCollector() throws IOException {
             super();
+        }
+
+        @Override
+        protected void writeWordSeparator() {
+            spacePending = true;
+        }
+
+        @Override
+        protected void writeLineSeparator() {
+            flushLine();
+            spacePending = false;
         }
 
         @Override
@@ -607,51 +858,30 @@ public class PdfLayoutExtractor {
             if (positions == null || positions.isEmpty()) {
                 return;
             }
-            List<Segment> row = new ArrayList<>();
             StringBuilder sb = new StringBuilder();
-            double x0 = positions.get(0).getXDirAdj();
-            double x1 = x0;
-            double y = positions.get(0).getYDirAdj();
-            double size = fontSize(positions.get(0));
-            boolean bold = isBold(positions.get(0));
-            boolean mono = isMono(positions.get(0));
-
-            for (int i = 0; i < positions.size(); i++) {
-                TextPosition p = positions.get(i);
-                if (i > 0) {
-                    TextPosition prev = positions.get(i - 1);
-                    double gap = p.getXDirAdj() - (prev.getXDirAdj() + prev.getWidthDirAdj());
-                    double space = spaceWidth(p);
-                    if (gap > SEG_GAP * space && sb.length() > 0) {
-                        row.add(new Segment(x0, x1, y, size, bold, mono, sb.toString()));
-                        sb.setLength(0);
-                        x0 = p.getXDirAdj();
-                        y = p.getYDirAdj();
-                        size = fontSize(p);
-                        bold = isBold(p);
-                        mono = isMono(p);
-                    } else if (gap > WORD_JOIN * fontSize(p) && sb.length() > 0
-                            && sb.charAt(sb.length() - 1) != ' ') {
-                        sb.append(' ');
-                    }
-                }
+            for (TextPosition p : positions) {
                 String u = p.getUnicode();
                 if (u != null) {
                     sb.append(u);
                 }
-                x1 = p.getXDirAdj() + p.getWidthDirAdj();
             }
-            if (sb.length() > 0) {
-                row.add(new Segment(x0, x1, y, size, bold, mono, sb.toString().trim()));
+            String word = sb.toString();
+            if (word.isBlank()) {
+                spacePending = true;
+                return;
             }
-            if (!row.isEmpty()) {
-                rows.add(row);
-            }
+            TextPosition first = positions.get(0);
+            TextPosition last = positions.get(positions.size() - 1);
+            cur.add(new Word(first.getXDirAdj(), last.getXDirAdj() + last.getWidthDirAdj(),
+                    first.getYDirAdj(), fontSize(first), isBold(first), spacePending, word));
+            spacePending = false;
         }
 
-        private static double spaceWidth(TextPosition p) {
-            double w = p.getWidthOfSpace();
-            return w > 0 ? w : 0.25 * fontSize(p);
+        private void flushLine() {
+            if (!cur.isEmpty()) {
+                rows.add(cur);
+                cur = new ArrayList<>();
+            }
         }
 
         private static double fontSize(TextPosition p) {
@@ -662,11 +892,6 @@ public class PdfLayoutExtractor {
         private static boolean isBold(TextPosition p) {
             String n = fontName(p);
             return n.contains("bold") || n.contains("black") || n.contains("heavy");
-        }
-
-        private static boolean isMono(TextPosition p) {
-            String n = fontName(p);
-            return n.contains("mono") || n.contains("courier") || n.contains("consol");
         }
 
         private static String fontName(TextPosition p) {

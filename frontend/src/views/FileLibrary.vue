@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { categoryApi, fileApi, saveBlob } from '../api'
 import PdfReader from '../components/PdfReader.vue'
+import DocTextView from '../components/DocTextView.vue'
 
 const loading = ref(false)
 const uploading = ref(false)
@@ -91,6 +92,39 @@ const readerText = ref('')
 const readerStatus = ref('')
 const readerError = ref('')
 const readerLoading = ref(false)
+/**
+ * 排版还原后的正文（{ pages:[{page,columns,blocks}] }）。
+ *
+ * 与 readerText 的关系：readerText 是**检索层那份纯文本**（PDF 两栏会逐行交错），
+ * 只有排版还原不了（非 PDF、扫描件、失败）时才拿它兜底显示。
+ * 懒加载：默认打开的是「原文」，切到「抽取正文」才去拉，PDF 解析那 1 秒不该让开卷就等。
+ */
+const readerLayout = ref(null)
+const layoutLoading = ref(false)
+
+/** 有没有可用的排版还原结果（决定「抽取正文」是文档视图还是分段兜底视图） */
+const layoutUsable = computed(() =>
+  readerLayout.value?.status === 'ok' && (readerLayout.value.pages?.length || 0) > 0)
+
+async function ensureLayout() {
+  const id = reader.value?.id
+  if (!id || readerLayout.value || layoutLoading.value) return
+  layoutLoading.value = true
+  try {
+    readerLayout.value = await fileApi.layout(id)
+  } catch (e) {
+    /* 拦截器已提示；这里把状态降级，让下面的分段正文继续可用 */
+    readerLayout.value = { status: 'failed', error: e?.message || '', pages: [], chars: 0, pageCount: 0 }
+  } finally {
+    layoutLoading.value = false
+  }
+}
+
+/** 切换原文 / 抽取正文：切到正文时顺带把排版还原拉回来 */
+function switchReaderTab(tab) {
+  readerTab.value = tab
+  if (tab === 'text') ensureLayout()
+}
 
 /** 能交给浏览器原生渲染的类型（iframe/img/video） */
 const docKind = computed(() => {
@@ -171,6 +205,7 @@ async function openReader(row) {
   readerText.value = ''
   readerStatus.value = ''
   readerError.value = ''
+  readerLayout.value = null
   readerLoading.value = true
   try {
     fileApi.translateCaps().then((c) => { transCaps.value = c || {} }).catch(() => {})
@@ -394,23 +429,43 @@ onBeforeUnmount(() => {
       @close="reader = null"
     >
       <div v-if="reader" class="reader">
-        <div class="reader-meta">
-          <span class="hint">{{ (reader.ext || '').toUpperCase() }} · {{ fmtSize(reader.size) }}</span>
-          <span v-if="readerTab === 'text'" class="hint"> · {{ readerText.length }} 字 · {{ paragraphs.length }} 段</span>
-          <span class="spacer" />
-          <el-radio-group v-model="readerTab" size="small">
-            <el-radio-button value="doc">原文</el-radio-button>
-            <el-radio-button value="text">抽取正文</el-radio-button>
-          </el-radio-group>
-          <el-select v-if="readerTab === 'text'" v-model="targetLang" size="small" style="width: 118px">
-            <el-option v-for="l in ['简体中文', 'English', '日本語', '한국어']" :key="l" :label="l" :value="l" />
-          </el-select>
-          <el-button v-if="readerTab === 'text'" size="small" :disabled="!paragraphs.length" @click="translateFirst(5)">
-            翻译前 5 段
-          </el-button>
-          <el-button size="small" @click="onDownload(reader)">下载</el-button>
-          <a :href="fileApi.rawUrl(reader.id)" target="_blank" rel="noreferrer">
-            <el-button size="small">新标签打开</el-button>
+        <!--
+          工具条：与下面的 PDF 工具条（PdfReader 的 .reader-toolbar）用**同一套控件样式**。
+          之前这里是 el-radio-group + el-button，和自研的 PDF 工具条叠在一起像两个拼盘：
+          高度、圆角、字号都不一样；统一之后切页签时控件位置也不跳。
+        -->
+        <div class="reader-toolbar reader-meta">
+          <span class="reader-hint">{{ (reader.ext || '').toUpperCase() }} · {{ fmtSize(reader.size) }}</span>
+          <span v-if="readerTab === 'text'" class="reader-hint">
+            · 检索层正文 {{ readerText.length }} 字 / {{ paragraphs.length }} 段
+          </span>
+          <span class="reader-sep" />
+          <button type="button" class="reader-btn" :class="{ on: readerTab === 'doc' }" @click="switchReaderTab('doc')">
+            原文
+          </button>
+          <button type="button" class="reader-btn" :class="{ on: readerTab === 'text' }" @click="switchReaderTab('text')">
+            抽取正文
+          </button>
+          <template v-if="readerTab === 'text'">
+            <span class="reader-sep" />
+            <select v-model="targetLang" class="reader-select" title="翻译目标语言">
+              <option v-for="l in ['简体中文', 'English', '日本語', '한국어']" :key="l" :value="l">{{ l }}</option>
+            </select>
+            <!-- 文档视图自带逐段翻译控件，这里的批量按钮只服务分段兜底视图 -->
+            <button
+              v-if="!layoutUsable"
+              type="button"
+              class="reader-btn"
+              :disabled="!paragraphs.length"
+              @click="translateFirst(5)"
+            >
+              翻译前 5 段
+            </button>
+          </template>
+          <span class="reader-spacer" />
+          <button type="button" class="reader-btn" @click="onDownload(reader)">下载</button>
+          <a class="reader-link" :href="fileApi.rawUrl(reader.id)" target="_blank" rel="noreferrer">
+            <button type="button" class="reader-btn">新标签打开</button>
           </a>
         </div>
 
@@ -435,41 +490,65 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <!-- 抽取正文：检索层实际用的那份文本 -->
-        <div v-show="readerTab === 'text'" v-loading="readerLoading" class="reader-body reader-text-wrap">
+        <!--
+          抽取正文：**优先**用后端排版还原出来的结构（标题/章节/段落/列表，按页回传），
+          照原文档排版；还原不了（非 PDF / 扫描件 / 失败）时才退回"检索层纯文本分段"，
+          并保留下面的逐段翻译 —— 两条路都不会让这一页空着。
+        -->
+        <div v-show="readerTab === 'text'" v-loading="layoutLoading || readerLoading" class="reader-body reader-text-wrap">
           <p v-if="statusHint()" class="warn-line">{{ statusHint() }}</p>
-          <div class="reader-text-head">
-            <span class="hint">按段落读：点每段右上「译」即可逐段翻译</span>
-            <span class="spacer" />
-            <el-button size="small" text :disabled="!readerText" @click="copyReaderText">复制正文</el-button>
-          </div>
-          <p v-if="transCaps.profile" class="hint trans-cap">
-            翻译用「{{ transCaps.profile }} / {{ transCaps.model }}」（可在「模型参数」里换档案；单段上限 {{ transCaps.maxChars }} 字）
+          <p v-if="readerLayout && readerLayout.status === 'failed'" class="warn-line">
+            排版还原失败（{{ readerLayout.error || '未知原因' }}），下面是检索层正文。
           </p>
-          <!-- 按段落翻译：整篇翻会撞输出上限（实测两万字就被截断），读到哪里翻到哪里更稳 -->
-          <div class="reader-paras">
-            <div v-for="p in paragraphs" :key="p.key" class="para">
-              <div class="para-head">
-                <span class="para-no">¶{{ p.key + 1 }}</span>
-                <el-button
-                  size="small"
-                  text
-                  :loading="translatingKey === p.key"
-                  :disabled="tooLong(p) || translatingKey !== ''"
-                  @click="translatePara(p)"
-                >
-                  {{ translations[p.key] ? '重译' : '译' }}
-                </el-button>
-                <span v-if="tooLong(p)" class="hint">超单段上限，请选中更小的一段</span>
-              </div>
-              <p class="para-text">{{ p.text }}</p>
-              <div v-if="translations[p.key]" class="para-trans">
-                <span class="trans-tag">译 · {{ translations[p.key].profile || translations[p.key].model }}</span>
-                <p class="trans-text">{{ translations[p.key].text }}</p>
-              </div>
+          <p v-else-if="readerLayout && !layoutUsable && readerLayout.status !== 'ok'" class="hint">
+            {{ readerLayout.error || '这份资料没有可还原的版面' }}，下面是检索层正文。
+          </p>
+
+          <DocTextView
+            v-if="layoutUsable"
+            :file-id="reader.id"
+            :pages="readerLayout.pages"
+            :chars="readerLayout.chars"
+            :page-count="readerLayout.pageCount"
+            :target-lang="targetLang"
+            :max-chars="transCaps.maxChars"
+          />
+
+          <!-- 兜底：检索层那份纯文本，按段落读、逐段翻译 -->
+          <template v-else>
+            <div class="reader-text-head">
+              <span class="hint">按段落读：点每段右上「译」即可逐段翻译</span>
+              <span class="spacer" />
+              <el-button size="small" text :disabled="!readerText" @click="copyReaderText">复制正文</el-button>
             </div>
-            <p v-if="!paragraphs.length" class="hint">（无正文）</p>
-          </div>
+            <p v-if="transCaps.profile" class="hint trans-cap">
+              翻译用「{{ transCaps.profile }} / {{ transCaps.model }}」（可在「模型参数」里换档案；单段上限 {{ transCaps.maxChars }} 字）
+            </p>
+            <!-- 按段落翻译：整篇翻会撞输出上限（实测两万字就被截断），读到哪里翻到哪里更稳 -->
+            <div class="reader-paras">
+              <div v-for="p in paragraphs" :key="p.key" class="para">
+                <div class="para-head">
+                  <span class="para-no">¶{{ p.key + 1 }}</span>
+                  <el-button
+                    size="small"
+                    text
+                    :loading="translatingKey === p.key"
+                    :disabled="tooLong(p) || translatingKey !== ''"
+                    @click="translatePara(p)"
+                  >
+                    {{ translations[p.key] ? '重译' : '译' }}
+                  </el-button>
+                  <span v-if="tooLong(p)" class="hint">超单段上限，请选中更小的一段</span>
+                </div>
+                <p class="para-text">{{ p.text }}</p>
+                <div v-if="translations[p.key]" class="para-trans">
+                  <span class="trans-tag">译 · {{ translations[p.key].profile || translations[p.key].model }}</span>
+                  <p class="trans-text">{{ translations[p.key].text }}</p>
+                </div>
+              </div>
+              <p v-if="!paragraphs.length" class="hint">（无正文）</p>
+            </div>
+          </template>
         </div>
       </div>
     </el-dialog>
@@ -487,13 +566,10 @@ onBeforeUnmount(() => {
   height: 100%;
   gap: 8px;
 }
+/* 阅读器工具条：外观全部来自全局 .reader-toolbar（与 PDF 工具条同一套），这里只留位置 */
 .reader-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--app-border-weak);
+  flex: 0 0 auto;
+  margin-bottom: 8px;
 }
 .reader-body {
   flex: 1 1 auto;

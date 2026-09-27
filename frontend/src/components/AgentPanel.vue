@@ -4,6 +4,11 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { aiApi, categoryApi, noteApi, modelApi, settingsApi } from '../api'
 import { fixHtmlQuotes } from '../utils/htmlQuotes'
+import {
+  AGENT_NOTE_CONTEXT_EVENT,
+  AGENT_NOTE_MERGE_EVENT,
+  AGENT_NOTE_MERGE_RESULT_EVENT,
+} from '../utils/agentNoteMerge'
 import { isDark } from '../composables/useTheme'
 
 /**
@@ -76,6 +81,29 @@ const busy = ref(false)
 const input = ref('')
 const listRef = ref(null)
 const messages = ref([])
+
+/** 最后一条助手回答的下标：用于「最新一轮的思考过程默认展开」 */
+const lastAssistantIndex = computed(() => {
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    if (messages.value[i].role === 'assistant') return i
+  }
+  return -1
+})
+
+/**
+ * 「我现在开着哪篇笔记」——由笔记编辑页广播（见 utils/agentNoteMerge.js）。
+ *
+ * 为什么要有它：在笔记页里打开悬浮窗，问的问题天然是关于这篇笔记的，
+ * 那么回答的归宿也就不该是"另存成一篇新笔记"（那会得到一堆零碎小笔记），
+ * 而是**融进当前这篇**。面板不必知道编辑页长什么样，只认这个广播。
+ */
+const activeNote = ref(null)
+
+/** 弹窗/按钮上显示的短标题 */
+const activeNoteLabel = computed(() => {
+  const t = activeNote.value?.title || ''
+  return t.length > 14 ? t.slice(0, 14) + '…' : t
+})
 
 /**
  * 会话 id：存 localStorage，刷新后接着聊。
@@ -196,6 +224,8 @@ async function loadSession() {
       role: m.role,
       content: m.content,
       events: m.events || [],
+      // 思考过程（thinking 模型才有）：刷新后由事件流还原，和当轮显示同一套渲染
+      reasoning: m.reasoning || '',
       toolUsed: !!m.toolUsed,
     }))
     pending.value = s.pendingActions || []
@@ -328,9 +358,11 @@ async function send(text, ctx) {
       sessionId: sessionId.value,
       // 会话级模型：带上它后端就用这个档案（空 = 跟随任务分工表）
       modelProfileId: chatProfile.value || undefined,
-      noteId: ctx?.noteId,
-      noteTitle: ctx?.noteTitle,
-      noteContext: ctx?.noteContext,
+      // 笔记页里打开的面板：把「当前笔记」当背景一起发（后端只截前 1500 字注入，
+      // 并明确告知模型"仅供理解背景"）。显式传来的 ctx（知识图谱/wiki 的「问智能体」）优先。
+      noteId: ctx?.noteId ?? activeNote.value?.noteId ?? undefined,
+      noteTitle: ctx?.noteTitle ?? activeNote.value?.title ?? undefined,
+      noteContext: ctx?.noteContext ?? activeNote.value?.context ?? undefined,
     })
     if (res.sessionId && res.sessionId !== sessionId.value) {
       sessionId.value = res.sessionId
@@ -344,6 +376,8 @@ async function send(text, ctx) {
     holder.content = res.reply || ''
     holder.events = res.events || []
     holder.retrieved = res.retrieved || []
+    // 思考过程：thinking 模型才会返回；不拼进正文（正文要能原样存成笔记）
+    holder.reasoning = res.reasoning || ''
     holder.toolUsed = res.toolUsed
     // 本轮若发起了写操作，它们是"待确认"状态，攒到下面的确认卡片里
     if (res.pendingActions?.length) {
@@ -358,6 +392,76 @@ async function send(text, ctx) {
   } finally {
     busy.value = false
     scrollBottom()
+  }
+}
+
+/**
+ * 笔记编辑页广播「我现在开着哪篇笔记」时记下来；广播 detail 为空 = 离开了笔记页，
+ * 主操作随之回退成「保存为笔记」。
+ */
+function noteContextFromEvent(e) {
+  const d = e?.detail
+  activeNote.value = d && (d.noteId || d.title || d.isNew)
+    ? { noteId: d.noteId || null, title: d.title || '', isNew: !!d.isNew, context: d.context || '' }
+    : null
+}
+
+/** 取这条回答对应的提问（往前找最近一条用户消息）——它要当插入小节里的标题 */
+function questionBefore(index) {
+  for (let i = index - 1; i >= 0; i--) {
+    if (messages.value[i].role === 'user') return messages.value[i].content || ''
+  }
+  return ''
+}
+
+/** 正在等融入结果的那条回答（面板 + 笔记页是"发请求 → 收结果"的两段式，要记住收件人） */
+const mergeTarget = ref(null)
+
+/**
+ * 把这条回答**融入**当前笔记。
+ *
+ * 面板只递材料（问 + 答），真正的活由笔记页干：它手里才有"含未保存改动的正文"，
+ * 还要用它的进度弹窗和预览按钮走"确认后替换"。所以这里派发事件后进入"融入中"状态，
+ * 等笔记页回报结果（见 mergeResultFromEvent）再决定打勾还是恢复按钮。
+ */
+function mergeIntoNote(holder, index) {
+  const note = activeNote.value
+  if (!note || !holder?.content) return
+  if (mergeTarget.value) {
+    ElMessage.info('上一条还在融入中，稍等一下')
+    return
+  }
+  mergeTarget.value = holder
+  holder.mergePending = true
+  window.dispatchEvent(new CustomEvent(AGENT_NOTE_MERGE_EVENT, {
+    detail: { noteId: note.noteId, question: questionBefore(index), answer: holder.content },
+  }))
+  // 兜底：万一笔记页没接住（比如刚好被卸载），别让按钮永远停在"融入中"
+  setTimeout(() => {
+    if (mergeTarget.value === holder) {
+      holder.mergePending = false
+      mergeTarget.value = null
+      ElMessage.warning('没收到笔记页的回应，已取消本次融入（正文未改动）')
+    }
+  }, 6 * 60 * 1000)
+}
+
+/**
+ * 笔记页回报融入结果。
+ *
+ * 失败要**恢复按钮**而不是打勾：失败时正文没有改动，用户应该能直接重试或改用「复制」。
+ */
+function mergeResultFromEvent(e) {
+  const d = e?.detail || {}
+  const holder = mergeTarget.value
+  if (!holder) return
+  mergeTarget.value = null
+  holder.mergePending = false
+  if (d.ok) {
+    holder.merged = true
+    ElMessage.success(d.message || '已在笔记页打开融入预览')
+  } else {
+    ElMessage.error('融入失败：' + (d.message || '未知原因') + '（正文未改动）')
   }
 }
 
@@ -470,6 +574,10 @@ onMounted(() => {
   window.addEventListener('lh-agent-sessions-open', openSessionsFromEvent)
   // 智能体页的会话侧栏点了某条会话：切过去并载入它的历史
   window.addEventListener('lh-agent-switch', switchFromEvent)
+  // 笔记编辑页广播「当前开着哪篇笔记」：决定回答后的主操作是「融入当前笔记」还是「保存为笔记」
+  window.addEventListener(AGENT_NOTE_CONTEXT_EVENT, noteContextFromEvent)
+  // 编辑页把融入结果回报过来（成功=预览已打开；失败=正文未改动，按钮要能重试）
+  window.addEventListener(AGENT_NOTE_MERGE_RESULT_EVENT, mergeResultFromEvent)
   // 让侧栏知道"当前是哪条会话"（高亮、以及它用哪个模型）
   notifyCurrentSession()
 })
@@ -479,6 +587,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('lh-ask-agent', askFromEvent)
   window.removeEventListener('lh-agent-sessions-open', openSessionsFromEvent)
   window.removeEventListener('lh-agent-switch', switchFromEvent)
+  window.removeEventListener(AGENT_NOTE_CONTEXT_EVENT, noteContextFromEvent)
+  window.removeEventListener(AGENT_NOTE_MERGE_RESULT_EVENT, mergeResultFromEvent)
 })
 
 /** 外部（会话侧栏）要求切换会话 */
@@ -651,19 +761,47 @@ function askFromEvent(e) {
                   <div v-if="m.events?.length" class="evt-list">
                     <span v-for="(ev, j) in m.events" :key="j" class="evt">{{ ev }}</span>
                   </div>
+                  <!--
+                    思考过程（thinking 模型的 reasoning_content）。
+                    默认**折叠**：它动辄几千字，摊开会把正文挤到看不见；
+                    但最新一轮默认展开 —— 用户点「发消息」后最想看的恰恰是"它到底怎么想的"。
+                  -->
+                  <details v-if="m.reasoning" class="think" :open="i === lastAssistantIndex">
+                    <summary class="think-head">
+                      <span class="think-title">思考过程</span>
+                      <span class="think-meta">{{ m.reasoning.length }} 字 · 点此{{ i === lastAssistantIndex ? '收起' : '展开' }}</span>
+                    </summary>
+                    <div class="think-body">{{ m.reasoning }}</div>
+                  </details>
                   <!-- 自动检索透明度：这轮回答参考了你自己的哪些记录（事件里不存它，刷新后不显示） -->
                   <div v-if="m.retrieved?.length" class="ref-line">
                     <span class="ref-label">参考了你的记录</span>
                     <span v-for="(h, j) in m.retrieved" :key="j" class="ref-item">{{ h.title }}</span>
                   </div>
                   <div class="md-body"><MdPreview :modelValue="fixHtmlQuotes(m.content || '')" :theme="isDark ? 'dark' : 'light'" previewTheme="github" /></div>
-                  <!-- 每次回答后：询问是否沉淀 -->
-                  <div v-if="m.content && !m.saved" class="msg-actions">
-                    <button type="button" class="act-btn primary" @click="askSave(m)">
+                  <!--
+                    每次回答后：询问是否沉淀。
+                    在笔记页里打开的面板，主操作是「融入当前笔记」——问的问题本来就是关于这篇的，
+                    另存成新笔记只会攒出一堆零碎小笔记；不在笔记页时维持「保存为笔记」。
+                  -->
+                  <div v-if="m.content && !m.saved && !m.merged" class="msg-actions">
+                    <button
+                      v-if="activeNote"
+                      type="button"
+                      class="act-btn primary"
+                      :disabled="m.mergePending"
+                      @click="mergeIntoNote(m, i)"
+                    >
+                      <span class="btn-ico"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg></span>
+                      <template v-if="m.mergePending">正在融入…</template>
+                      <template v-else>融入当前笔记<template v-if="activeNoteLabel"> · {{ activeNoteLabel }}</template></template>
+                    </button>
+                    <button v-else type="button" class="act-btn primary" @click="askSave(m)">
                       <span class="btn-ico"><svg viewBox="0 0 24 24"><path d="M6.5 3.5h11v17l-5.5-4-5.5 4z" /></svg></span>保存为笔记
                     </button>
                     <button type="button" class="act-btn" @click="copyText(m.content)">复制</button>
                   </div>
+                  <div v-else-if="m.merged" class="saved-tag">✓ 融入预览已在笔记页打开（点「替换正文」后保存生效）</div>
                   <div v-else-if="m.saved" class="saved-tag">✓ 已保存为笔记</div>
                 </template>
               </div>
@@ -1214,6 +1352,45 @@ html.dark .cfg-tip {
   background: var(--app-brand-soft);
   padding: 3px 8px;
   border-radius: 999px;
+}
+
+/* 思考过程：折叠块。刻意做得比正文"轻"——虚线感的分隔 + 弱化文字，
+   让它读起来像"过程记录"，而不是回答的一部分（回答才是主视觉）。 */
+.think {
+  margin: 0 0 10px;
+  border: 1px dashed var(--app-border);
+  border-radius: var(--radius);
+  background: var(--app-code-bg);
+}
+.think-head {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 11.5px;
+  color: var(--app-text-2);
+  user-select: none;
+}
+.think-head:hover {
+  color: var(--app-brand-deep);
+}
+.think-title {
+  font-weight: 600;
+}
+.think-meta {
+  color: var(--app-text-3);
+}
+/* 长思考要能滚动：几千字全摊开会把整条对话推得找不着回答 */
+.think-body {
+  max-height: 320px;
+  overflow: auto;
+  padding: 0 12px 10px;
+  font-size: 12.5px;
+  line-height: 1.8;
+  color: var(--app-text-2);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* 自动检索的透明度提示：刻意比工具角标更轻（工具是"做了事"，这个是"看了什么"）。

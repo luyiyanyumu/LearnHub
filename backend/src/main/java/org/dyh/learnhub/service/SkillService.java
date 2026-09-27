@@ -49,6 +49,8 @@ public class SkillService {
     public static final String SKILL_POLISH = "markdown-polish";
     /** 整理格式技能 id */
     public static final String SKILL_BEAUTIFY = "markdown-beautify";
+    /** 「融入当前笔记」技能 id：把一条新内容按结构并进已有笔记（不是追加到文末） */
+    public static final String SKILL_NOTE_MERGE = "note-merge";
 
     /** 显式配置的技能目录（留空则按候选顺序自动探测） */
     @Value("${learnhub.skills-dir:}")

@@ -1,9 +1,10 @@
 # learn-hub MCP server
 
-把 learn-hub 的 REST 接口暴露成 **MCP 工具**，让 DeepSeek Harness（或任何 MCP 客户端）能直接读写你的笔记库——
-查笔记、建笔记、打标签、管分类、记速查卡，都不用手动复制粘贴。
+把 learn-hub 的 REST 接口暴露成 **MCP 工具**，让 DeepSeek Harness（或任何 MCP 客户端）能直接读写你的知识库——
+查笔记、建笔记、打标签、管分类、记速查卡、**把找到的论文一键存进资料库**，都不用手动复制粘贴。
 
-- **零依赖**：一个 `.mjs` 文件，手写 JSON-RPC 2.0 over stdio，不 import 任何包（Node 18+ 自带 `fetch`）
+- **零 npm 依赖**：一个 `.mjs` 文件，手写 JSON-RPC 2.0 over stdio，不 import 任何包
+  （Node 18+ 自带 `fetch` / `FormData` / `Blob`，文件读写用 `node:fs/promises`）
 - **不改后端**：全部走已有的 REST 接口，后端不用重启、不用加依赖
 - **不带数据库连接**：它只是后端的客户端，所以后端停了它才有感知（首次调用时给出可读提示）
 
@@ -21,8 +22,9 @@ java -jar target/learn-hub-backend-0.0.1-SNAPSHOT.jar
 
 ```powershell
 cd mcp
-node smoke-test.mjs            # 只读检查：握手 / 工具清单 / 检索 / 错误路径（14 项）
-node smoke-test.mjs --write    # 额外跑「建 → 改标题验正文不丢 → 删」闭环（19 项，会自己清理）
+node smoke-test.mjs            # 只读检查：握手 / 工具清单 / 笔记检索 / 资料库读取 / 错误路径（19 项）
+node smoke-test.mjs --write    # 额外跑「建笔记→改标题验正文不丢→删」+「本机文件入库→抽正文→能检索→删」
+                               # 两个写入闭环（31 项，全部自己清理）
 ```
 
 期望输出 `结果：N 通过 / 0 失败`，退出码 0。
@@ -59,7 +61,7 @@ node smoke-test.mjs --write    # 额外跑「建 → 改标题验正文不丢 �
 **验证**：保存后再问 DSH 一句「用 learnhub 工具看看我知识库里有什么」，或直接让它调 `stats`。
 工具没出现就看 dsh 的日志——默认 `failOnStartupError: false`，服务端起不来时 harness 照常启动、只记一条错误。
 
-## 4. 工具清单（15 个）
+## 4. 工具清单（19 个）
 
 | 工具 | 作用 | 类型 |
 | --- | --- | --- |
@@ -69,15 +71,27 @@ node smoke-test.mjs --write    # 额外跑「建 → 改标题验正文不丢 �
 | `list_categories` | 分类树（拉平成带 `depth` 的列表） | 只读 |
 | `list_tags` | 标签及其使用次数，可按关键词过滤 | 只读 |
 | `list_quick_refs` | 速查卡列表（含正文） | 只读 |
-| `search_all` | 跨资源统一检索（笔记 + 速查卡） | 只读 |
+| `search_all` | 跨资源统一检索（笔记 + 速查卡 + **资料库正文**） | 只读 |
+| `list_files` | 资料库列表：文件名/类型/大小/**抽取状态与字数**（不含正文） | 只读 |
+| `get_file_text` | 取资料抽出来的正文片段（默认 2000 字，`offset` 翻页） | 只读 |
 | `create_note` | 新建笔记，标签**可直接给中文名**（不存在自动创建） | 写入 |
 | `update_note` | 改笔记，**只传要改的字段** | 写入 |
 | `create_category` | 新建分类（可指定父分类） | 写入 |
 | `create_tag` | 单独新建标签 | 写入 |
 | `create_quick_ref` | 新建速查卡 | 写入 |
 | `update_quick_ref` | 改速查卡 | 写入 |
+| `upload_file` | **把本机文件加入资料库**（后端立刻抽正文 → 可被检索） | 写入 |
+| `upload_file_from_url` | **从 URL 下载全文并加入资料库**（"找到论文→入库"一步到位） | 写入 |
 | `delete_note` | 删除笔记（**不可恢复**，带 `destructiveHint` 标注） | 危险 |
 | `delete_quick_ref` | 删除速查卡（**不可恢复**） | 危险 |
+
+**典型用法：找论文 → 入库 → 检索。** 让模型查一篇论文，拿到 arXiv/出版商的 PDF 直链后调
+`upload_file_from_url`，再 `list_files` 确认 `textStatus=ok`，之后这篇论文的正文就进了统一检索
+（`search_all`）与知识库问答的召回范围。资料库的删除没有开放成 MCP 工具（不做回收站，误删代价太大），
+要删请用界面或 REST。
+
+> 应用内那个悬浮智能体也有一套等价工具（`add_file_from_url` / `list_files`，写操作走"待确认卡片"），
+> 所以"帮我把这篇论文放进资料库"在应用里与在 DSH 里都能做。两者共用后端同一条落盘/抽文链路。
 
 ## 5. 几个刻意的设计决定
 
@@ -101,14 +115,34 @@ node smoke-test.mjs --write    # 额外跑「建 → 改标题验正文不丢 �
 这里对得上就回声，对不上退回 `2025-06-18`。同时必须声明 `capabilities.tools`，否则客户端直接报
 `Server does not support tools`。
 
+**⑦ 资料列表同样不返回正文，而且正文要分页给。** 资料库里的 PDF 抽出来常有十几万字
+（实测一份论文 88,764 字），`get_file_text` 默认只给 2000 字 + 总长度 + `hasMore`，模型按需翻页。
+这和 ① 是同一条原则：**列表与默认返回都要按"上下文预算"设计**。
+
+**⑧ URL 入库要按 Content-Type 认类型，认不出就拒收。** 实测踩过：arXiv 的 PDF 直链是
+`https://arxiv.org/pdf/1706.03762`，**没有 `.pdf` 后缀**，按 URL 猜出来的扩展名是 `03762`，
+后端于是把它判成 `unsupported`——文件进去了、正文没抽出来，界面上有记录、检索里却没有它，
+是最难发现的那种脏数据。现在：后缀不认识就用 Content-Type 补（`application/pdf` → `.pdf`），
+补不出来的直接报错，让调用方显式给带扩展名的 `filename`。
+
+**⑨ 入库后必须能一眼看出"抽没抽出正文"。** 两个上传工具都会回 `textStatus` / `textChars`，
+抽不出时额外给一句 `notice`（例如"扫描版 PDF 抽不出字，只能按文件名与说明检索"）——
+避免模型把"上传成功"误读成"已经能检索了"。
+
 ## 6. 已知边界
 
 - **只桥接工具**：MCP 的 resources / prompts 不支持（与 DSH 的 MCP 桥接一致）。
 - **删除是真的删**：没有回收站。`delete_*` 已加 `destructiveHint` 标注，但**真正的防线在权限侧**——
   这个 MCP server 跑在本机、能读写你的知识库，请按「给本机受信任程序授权」的尺度使用。
+  （资料库的删除**没有**开放成工具，就是为了少一个误删入口。）
+- **上传大文件会等**：`upload_file` / `upload_file_from_url` 会在后端同步抽正文，几十 MB 的 PDF
+  可能要几十秒；超时另有两档配置（见第 8 节），默认 180s。
+- **URL 入库只认全文直链**：返回 `text/html` 会被拒收（那是落地页不是论文），
+  且大小上限 50MB（与后端 `multipart.max-file-size` 一致）。它**不做**任何绕过付费墙的事。
+- **不做去重**：同一篇论文传两次就是两条记录（arXiv 版与会议版本来就该分开存）。
 - **不做鉴权**：它假设后端只在本机（`localhost:18080`）。若后端暴露到网络，任何能起这个
   MCP server 的程序都能读写数据。
-- **无分页续页处理**：15 个工具一次返回，未使用 `cursor`（数量远小于需要分页的量级）。
+- **无分页续页处理**：工具清单一次返回，未使用 `cursor`（数量远小于需要分页的量级）。
 
 ## 7. 排错
 
@@ -126,3 +160,5 @@ node smoke-test.mjs --write    # 额外跑「建 → 改标题验正文不丢 �
 | --- | --- | --- |
 | `LEARNHUB_BASE_URL` | `http://localhost:18080` | 后端地址 |
 | `LEARNHUB_TIMEOUT_MS` | `15000` | 单次 HTTP 超时 |
+| `LEARNHUB_UPLOAD_TIMEOUT_MS` | `180000` | 上传资料（含后端抽正文）的超时 |
+| `LEARNHUB_DOWNLOAD_TIMEOUT_MS` | `180000` | `upload_file_from_url` 下载远端的超时 |

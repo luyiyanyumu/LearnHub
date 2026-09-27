@@ -410,28 +410,29 @@ window.addEventListener('keydown', onKey)
 
 <template>
   <div class="pdfreader">
-    <div class="pdf-toolbar">
-      <button type="button" class="pdf-btn" title="目录" @click="showOutline = !showOutline">
+    <!-- 控件样式走全局 .reader-btn / .reader-toolbar：与「抽取正文」那一行共用同一套观感 -->
+    <div class="reader-toolbar pdf-toolbar">
+      <button type="button" class="reader-btn" title="目录" @click="showOutline = !showOutline">
         ☰ 目录<template v-if="outline.length">（{{ outline.length }}）</template>
       </button>
-      <button type="button" class="pdf-btn" :disabled="pageNo <= 1" @click="go(-1)">‹</button>
+      <button type="button" class="reader-btn" :disabled="pageNo <= 1" @click="go(-1)">‹</button>
       <span class="pdf-page">
         <input :value="pageNo" class="pdf-input" @change="(e) => jump(e.target.value)" />
         {{ pageLabel.replace(String(pageNo), '').trim() }}
       </span>
-      <button type="button" class="pdf-btn" :disabled="pageNo >= totalPages" @click="go(1)">›</button>
-      <span class="pdf-sep" />
-      <button type="button" class="pdf-btn" @click="zoom(-0.15)">−</button>
+      <button type="button" class="reader-btn" :disabled="pageNo >= totalPages" @click="go(1)">›</button>
+      <span class="reader-sep" />
+      <button type="button" class="reader-btn" @click="zoom(-0.15)">−</button>
       <span class="pdf-zoom">{{ Math.round(scale * 100) }}%</span>
-      <button type="button" class="pdf-btn" @click="zoom(0.15)">＋</button>
-      <button type="button" class="pdf-btn" :class="{ on: fitWidth }" @click="setFitWidth">适宽</button>
-      <span class="pdf-sep" />
-      <button type="button" class="pdf-btn" :class="{ on: mode === 'single' }" @click="setMode('single')">单页</button>
-      <button type="button" class="pdf-btn" :class="{ on: mode === 'double' }" @click="setMode('double')">双页</button>
-      <button type="button" class="pdf-btn" :class="{ on: mode === 'continuous' }" @click="setMode('continuous')">连续</button>
-      <span class="pdf-spacer" />
-      <button type="button" class="pdf-btn" @click="translateFullPage">翻译本页</button>
-      <span class="pdf-hint">选中文字即翻译 · PageUp/Down 翻页</span>
+      <button type="button" class="reader-btn" @click="zoom(0.15)">＋</button>
+      <button type="button" class="reader-btn" :class="{ on: fitWidth }" @click="setFitWidth">适宽</button>
+      <span class="reader-sep" />
+      <button type="button" class="reader-btn" :class="{ on: mode === 'single' }" @click="setMode('single')">单页</button>
+      <button type="button" class="reader-btn" :class="{ on: mode === 'double' }" @click="setMode('double')">双页</button>
+      <button type="button" class="reader-btn" :class="{ on: mode === 'continuous' }" @click="setMode('continuous')">连续</button>
+      <span class="reader-spacer" />
+      <button type="button" class="reader-btn" @click="translateFullPage">翻译本页</button>
+      <span class="reader-hint">选中文字即翻译 · PageUp/Down 翻页</span>
     </div>
 
     <div class="pdf-main">
@@ -481,8 +482,8 @@ window.addEventListener('keydown', onKey)
       <div class="sel-head">
         <b>选中翻译</b>
         <span class="pdf-hint">{{ sel.model ? '用 ' + sel.model : '' }}</span>
-        <span class="pdf-spacer" />
-        <button type="button" class="pdf-btn" @click="sel = null">关闭</button>
+        <span class="reader-spacer" />
+        <button type="button" class="reader-btn" @click="sel = null">关闭</button>
       </div>
       <p class="sel-src">{{ sel.text }}</p>
       <p v-if="sel.loading" class="pdf-hint">翻译中…</p>
@@ -501,37 +502,7 @@ window.addEventListener('keydown', onKey)
   min-height: 0;
 }
 .pdf-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  padding: 6px 8px;
-  border: 1px solid var(--app-border-weak);
-  border-radius: 8px;
-  background: var(--app-card);
-  font-size: 12.5px;
-}
-.pdf-btn {
-  border: 1px solid var(--app-border);
-  background: var(--app-bg);
-  color: var(--app-text-2);
-  border-radius: 6px;
-  padding: 3px 9px;
-  font-size: 12.5px;
-  cursor: pointer;
-}
-.pdf-btn:hover:not(:disabled) {
-  color: var(--app-brand-deep);
-  border-color: color-mix(in srgb, var(--app-brand) 45%, transparent);
-}
-.pdf-btn:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-.pdf-btn.on {
-  background: var(--app-brand-soft);
-  color: var(--app-brand-deep);
-  border-color: color-mix(in srgb, var(--app-brand) 45%, transparent);
+  flex: 0 0 auto;
 }
 .pdf-page {
   color: var(--app-text-2);
@@ -553,14 +524,6 @@ window.addEventListener('keydown', onKey)
   min-width: 42px;
   text-align: center;
   color: var(--app-text-2);
-}
-.pdf-sep {
-  width: 1px;
-  height: 16px;
-  background: var(--app-border-weak);
-}
-.pdf-spacer {
-  flex: 1 1 auto;
 }
 .pdf-hint {
   font-size: 11.5px;

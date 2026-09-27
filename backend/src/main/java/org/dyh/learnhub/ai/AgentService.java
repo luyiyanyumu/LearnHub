@@ -31,6 +31,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
 import java.net.http.HttpTimeoutException;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -38,6 +39,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -144,6 +146,111 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
 
     public String polish(String text, String mode) {
         return polish(text, mode, null);
+    }
+
+    /** 「融入当前笔记」的笔记正文长度上限：整篇一次重写，超了必然被输出上限截断 */
+    private static final int MERGE_MAX_CHARS = 16000;
+
+    /**
+     * 把「新内容」（通常是一条智能体回答）**按结构融入**原笔记，返回完整的新正文。
+     *
+     * <p>与 {@link #polish} 的三点关键差别：
+     * <ol>
+     *   <li><b>不分段</b>：润色是"逐段改写"，分段不影响质量；而"这段话该放哪一节"必须看到
+     *       整篇结构才知道，分段会把这件事做废。代价是笔记太长时输出会超上限 —— 所以有长度闸门。</li>
+     *   <li><b>长度下界更严（默认 0.9）</b>：融入是只增不减的事，明显变短就是丢了原笔记的信息。</li>
+     *   <li><b>失败不改动</b>：任何异常（超长、输出缩水、长得离谱）都抛错，由界面提示用户，
+     *       正文保持原样 —— 绝不静默追加或塞半截结果。</li>
+     * </ol>
+     */
+    public String mergeIntoNote(String title, String note, String question, String answer) {
+        ensureConfigured();
+        String body = note == null ? "" : note;
+        String add = answer == null ? "" : answer.trim();
+        if (!StringUtils.hasText(add)) {
+            throw new IllegalStateException("没有可融入的内容（回答为空）");
+        }
+        if (body.length() > MERGE_MAX_CHARS) {
+            throw new IllegalStateException(String.format(
+                    "这篇笔记太长了（%d 字，上限 %d 字）：整篇融入会被输出上限截断，而截断的结果看起来像是完成的。"
+                    + "请把这段内容手动贴到对应小节，或先精简这篇笔记再试。", body.length(), MERGE_MAX_CHARS));
+        }
+        // 技能缺失时直接抛错，不静默回退到内置文本（与润色一致：静默回退会让人以为改动生效了）
+        String system = skillService.prompt(SkillService.SKILL_NOTE_MERGE);
+
+        StringBuilder user = new StringBuilder();
+        user.append("【原笔记】\n");
+        if (StringUtils.hasText(title)) {
+            user.append("标题：").append(title.trim()).append('\n');
+        }
+        user.append(StringUtils.hasText(body) ? body : "（空笔记，请把新内容整理成一篇有层次的笔记）");
+        user.append("\n\n【要融入的新内容】\n").append(add);
+        if (StringUtils.hasText(question)) {
+            user.append("\n\n【用户当时问的问题】（仅用于判断主题与放置位置，不必原样写进笔记）\n")
+                    .append(question.trim());
+        }
+        user.append("\n\n【要求】输出融入后的完整笔记 Markdown，不要任何说明文字、不要用代码围栏包整篇。");
+
+        try {
+            long remain = ROUND_BUDGET_MS;
+            JsonNode reply = chatOnce(List.of(msg("system", system), msg("user", user.toString())), null, true,
+                    Duration.ofMillis(remain));
+            String result = reply.path("content").asText("").trim();
+            if (!StringUtils.hasText(result)) {
+                throw new IllegalStateException("AI 未返回有效内容，请稍后重试");
+            }
+            result = stripFence(result);
+            // 闸门①：不能比原笔记短 —— 短了就是丢信息（空笔记 / 极短笔记不判）
+            double minRatio = skillService.minRatio(SkillService.SKILL_NOTE_MERGE, MERGE_MIN_RATIO);
+            if (body.trim().length() >= 120 && result.length() < body.trim().length() * minRatio) {
+                throw new IllegalStateException(String.format(
+                        "模型输出疑似丢了内容（原笔记 %d 字 → 结果 %d 字，下界 %.0f%%），已放弃本次改动。"
+                        + "可重试一次，或改用「复制」手动贴到对应小节。",
+                        body.trim().length(), result.length(), minRatio * 100));
+            }
+            // 闸门②：不能长得离谱 —— 远超"原文 + 新内容"的和，多半是自己重写/编造了一篇
+            long ceiling = (long) ((body.length() + add.length()) * 3L + 4000);
+            if (result.length() > ceiling) {
+                throw new IllegalStateException(String.format(
+                        "模型输出远超预期（原笔记 %d 字 + 新内容 %d 字 → 结果 %d 字），疑似整篇重写或编造，已放弃。",
+                        body.length(), add.length(), result.length()));
+            }
+            return result;
+        } catch (IllegalStateException e) {
+            throw e;
+        } catch (HttpTimeoutException e) {
+            throw new IllegalStateException("AI 请求超时（本轮剩余时间不足）。可以把「思考模式」切为「关闭」后重试。");
+        } catch (Exception e) {
+            log.error("融入笔记失败", e);
+            throw new IllegalStateException("AI 服务异常: " + e.getMessage());
+        }
+    }
+
+    /** 融入结果的长度下界（技能 frontmatter 的 min_ratio 优先） */
+    private static final double MERGE_MIN_RATIO = 0.9;
+
+    /** 模型偶尔会把整篇包进 ``` 围栏：剥掉它，否则正文里会多出一层代码块 */
+    static String stripFence(String md) {
+        String t = md.trim();
+        if (!t.startsWith("```")) {
+            return t;
+        }
+        int firstBreak = t.indexOf('\n');
+        if (firstBreak < 0) {
+            return t;
+        }
+        String fence = t.substring(0, firstBreak).trim();
+        // 只剥"整篇一层"的围栏（``` 或 ```markdown），中间出现 ``` 说明是多块内容，不动
+        if (!fence.matches("```[a-zA-Z]*")) {
+            return t;
+        }
+        String rest = t.substring(firstBreak + 1);
+        int last = rest.lastIndexOf("```");
+        if (last < 0) {
+            return t;
+        }
+        String inner = rest.substring(0, last);
+        return inner.contains("```") ? t : inner.trim();
     }
 
     public String polish(String text, String mode, ChunkListener listener) {
@@ -498,6 +605,27 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
     // 2. 智能体对话（function calling 循环）
     // ------------------------------------------------------------------
 
+    /**
+     * 把这一轮模型返回的思考内容收进累计串（thinking 模型才有 {@code reasoning_content}）。
+     *
+     * <p>为什么要按轮累计、并用空行分隔：一轮提问里模型可能被工具结果打断多次
+     * （调用工具 → 看到结果 → 再想一段），这些"分段思考"恰好是用户最想看的推理链：
+     * 先怀疑什么、查到了什么、因此改判成什么。只保留最后一次会丢掉因果。
+     */
+    private void collectReasoning(StringBuilder sink, JsonNode message) {
+        if (message == null) {
+            return;
+        }
+        String rc = message.path("reasoning_content").asText("");
+        if (!StringUtils.hasText(rc)) {
+            return;
+        }
+        if (sink.length() > 0) {
+            sink.append("\n\n");
+        }
+        sink.append(rc.trim());
+    }
+
     public AiChatVO chat(AiChatRequest req) {
         ensureConfigured();
 
@@ -638,6 +766,10 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
         try {
             boolean outOfTime = false;
             int toolCallsTotal = 0;
+            // 本轮模型吐出的**思考过程**（thinking 模型返回的 reasoning_content）。
+            // 以前这里只取 content，思考内容直接被丢掉 —— 用户看到的是"模型突然给出结论"，
+            // 而中间那些"先查什么、为什么这么判断"全没了。现在按轮收起来，随回答一起回给界面。
+            StringBuilder think = new StringBuilder();
             // 同一轮里完全相同的调用（同名+同参数）计数：模型偶尔会陷进去反复调同一个工具，
             // 每次结果都一样，却把 8 轮预算烧光（实测：连调 13 次 get_file 后回一句"没有获取到有效回复"）。
             Map<String, Integer> callSeen = new HashMap<>();
@@ -651,6 +783,7 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                     break;
                 }
                 JsonNode message = chatOnce(messages, tools, false, Duration.ofMillis(remain), chatProfile);
+                collectReasoning(think, message);
                 JsonNode toolCalls = message.path("tool_calls");
                 if (toolCalls.isArray() && !toolCalls.isEmpty()) {
                     // 1) 把模型这条含 tool_calls 的消息原样放回历史
@@ -739,6 +872,7 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                     messages.addAll(noTools);
                     long remain = Math.max(MIN_STEP_BUDGET_MS, deadline - System.currentTimeMillis());
                     JsonNode finalMsg = chatOnce(messages, null, false, Duration.ofMillis(remain), chatProfile);
+                    collectReasoning(think, finalMsg);
                     String text = finalMsg.path("content").asText("").trim();
                     if (StringUtils.hasText(text)) {
                         vo.setReply(text);
@@ -782,6 +916,13 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                 }
             } catch (Exception e) {
                 log.debug("答案校验跳过：{}", e.toString());
+            }
+            // 思考过程先落库（顺序决定界面上它显示在回答**上方**）。
+            // 它不参与模型投影（AgentSessionService.turns() 只取 user/assistant），
+            // 所以刷新后能回看，又不会把历史思考再喂回模型、白白撑大请求体。
+            if (think.length() > 0) {
+                sessionService.append(sessionId, AgentSessionService.ROLE_REASONING, think.toString(), null, null);
+                vo.setReasoning(think.toString());
             }
             // 最终回复落库：下一次请求的投影就靠它把上下文接起来
             sessionService.append(sessionId, AgentSessionService.ROLE_ASSISTANT, reply, null, null);
@@ -1084,6 +1225,10 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                 return getQuickRef(args);
             case "get_file":
                 return getFile(args);
+            case "list_files":
+                return listFiles(args);
+            case "add_file_from_url":
+                return addFileFromUrl(args, events);
             case "search_code":
                 return searchCode(args);
             case "get_code":
@@ -1493,6 +1638,175 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
     }
 
     /**
+     * 列出资料库里的资料（**不含正文**，只给元数据 + 抽取状态）。
+     * <p>
+     * 为什么要有它：`search_knowledge` 是按关键词找内容，回答"资料库里都有什么"或
+     * "这篇论文是不是已经存过"时用不上（空关键词只会给最近的几条）。
+     * 列表刻意不带正文：一份 PDF 抽出来常有八万字，一次列表就能把上下文烧光。
+     */
+    private String listFiles(JsonNode args) {
+        String kw = args.path("keyword").asText("").trim();
+        List<Map<String, Object>> all = fileStorageService.list(null, StringUtils.hasText(kw) ? kw : null);
+        ObjectNode out = objectMapper.createObjectNode();
+        out.put("ok", true);
+        out.put("count", all.size());
+        ArrayNode arr = out.putArray("files");
+        int limit = Math.min(all.size(), 30);
+        for (int i = 0; i < limit; i++) {
+            Map<String, Object> f = all.get(i);
+            ObjectNode o = arr.addObject();
+            o.put("file_id", toLong(f.get("id")));
+            o.put("name", nullTo(String.valueOf(f.getOrDefault("originName", ""))));
+            o.put("ext", nullTo(String.valueOf(f.getOrDefault("ext", ""))));
+            o.put("size", toLong(f.get("size")));
+            o.put("text_status", nullTo(String.valueOf(f.getOrDefault("textStatus", ""))));
+            o.put("text_chars", toInt(f.get("textChars")));
+            String summary = nullTo(String.valueOf(f.getOrDefault("summary", "")));
+            if (StringUtils.hasText(summary)) {
+                o.put("summary", summary.length() > 80 ? summary.substring(0, 80) + "…" : summary);
+            }
+        }
+        if (all.size() > limit) {
+            out.put("note", "仅列出最近 " + limit + " 份（共 " + all.size() + " 份）");
+        }
+        out.put("next", "要找内容用 search_knowledge（资料正文参与统一检索）；读某份资料的正文用 get_file。");
+        return out.toString();
+    }
+
+    /**
+     * 把网上的**全文文件**下载并存进资料库（"帮我放进资料库"就靠它）。
+     *
+     * <p>三条守卫，都来自实测会踩的坑：
+     * <ol>
+     *   <li><b>只收文件、不收网页</b>：论文的落地页（arXiv 的 /abs/、DOI 页）很常见，
+     *       把网页存进去会得到一条"有记录、抽不出正文、检索里查不到"的资料 —— 最难看出来的脏数据。</li>
+     *   <li><b>只收抽得出正文的类型</b>：后端只对 PDF/Office/文本类抽文；
+     *       压缩包、图片、数据集存进来同样是空壳，直接拒收并说明原因。</li>
+     *   <li><b>入库后如实回报抽取状态</b>：扫描版 PDF 会抽不出字（empty），
+     *       这时要告诉用户"能打开但检索不到"，而不是含糊地说"已经放好了"。</li>
+     * </ol>
+     */
+    private String addFileFromUrl(JsonNode args, List<String> events) {
+        String blocked = webBlocked();
+        if (blocked != null) {
+            return blocked;
+        }
+        String url = args.path("url").asText("").trim();
+        if (!StringUtils.hasText(url)) {
+            return err("缺少 url：要入库的是全文文件的直链（如 https://arxiv.org/pdf/1706.03762）");
+        }
+        WebService.DownloadResult dl;
+        try {
+            dl = webService.download(url);
+        } catch (Exception e) {
+            return err("下载失败：" + e.getMessage() + "。请确认这是**文件的直链**（可先用 web_fetch 打开页面找链接）。");
+        }
+        String ct = nullTo(dl.contentType());
+        if (ct.contains("text/html") || looksLikeHtml(dl.body())) {
+            return err("这个地址返回的是网页（" + ct + "）而不是全文文件。"
+                    + "请先用 web_fetch 打开该页面，从里面找到 PDF 直链（例如 arXiv 的 https://arxiv.org/pdf/<id>），"
+                    + "再用本工具传那个直链。");
+        }
+        String name = args.path("filename").asText("").trim();
+        if (!StringUtils.hasText(name)) {
+            name = guessFileName(dl.url(), ct);
+        }
+        if (!StringUtils.hasText(name)) {
+            return err("无法从地址判断文件名，请显式传 filename（例如 attention-is-all-you-need.pdf）");
+        }
+        String ext = extOfName(name);
+        if (!LIBRARY_TEXT_EXTS.contains(ext)) {
+            return err("「" + name + "」这种类型（" + (ct.isEmpty() ? "未知类型" : ct) + "）后端抽不出正文，"
+                    + "入库后只会是一条检索不到的空壳，已拒绝。请传 PDF / Office / 文本类的全文文件。");
+        }
+        Long categoryId = resolveCategoryId(args, events);
+        org.dyh.learnhub.entity.FileInfo info = fileStorageService.uploadBytes(name, dl.body(), categoryId);
+        String status = nullTo(info.getTextStatus());
+        ObjectNode out = objectMapper.createObjectNode();
+        out.put("ok", true);
+        out.put("file_id", info.getId());
+        out.put("name", nullTo(info.getOriginName()));
+        out.put("size", info.getSize() == null ? 0L : info.getSize());
+        out.put("from", dl.url());
+        out.put("text_status", status);
+        out.put("text_chars", info.getTextChars() == null ? 0 : info.getTextChars());
+        if ("ok".equals(status)) {
+            out.put("note", "正文已抽出 " + (info.getTextChars() == null ? 0 : info.getTextChars())
+                    + " 字，已进入知识库检索（回答用户时可以据此引用，并说明已存入资料库）。");
+        } else {
+            out.put("note", "文件已入库，但正文抽取状态是 " + status + "（" + nullTo(info.getTextError()) + "）："
+                    + "这份资料只能按文件名与手写说明参与检索。要如实告诉用户，不要说成「内容已经能检索」。");
+        }
+        return out.toString();
+    }
+
+    /** 常见"抽得出正文"的扩展名（与后端 DocumentTextService 的白名单一致，这里只列文档类） */
+    private static final Set<String> LIBRARY_TEXT_EXTS = Set.of(
+            "pdf", "doc", "docx", "docm", "xls", "xlsx", "xlsm", "ppt", "pptx", "pptm",
+            "md", "markdown", "txt", "text", "log", "csv", "tsv", "json", "yml", "yaml",
+            "xml", "html", "htm", "tex");
+
+    private static String extOfName(String name) {
+        int dot = name.lastIndexOf('.');
+        return dot < 0 || dot == name.length() - 1 ? "" : name.substring(dot + 1).toLowerCase(Locale.ROOT);
+    }
+
+    /** 响应体开头是不是 HTML（有些站点 Content-Type 给的是 application/octet-stream） */
+    static boolean looksLikeHtml(byte[] body) {
+        if (body == null || body.length == 0) {
+            return false;
+        }
+        String head = new String(body, 0, Math.min(body.length, 400), StandardCharsets.UTF_8)
+                .toLowerCase(Locale.ROOT).trim();
+        return head.startsWith("<!doctype html") || head.startsWith("<html") || head.contains("<head>");
+    }
+
+    /** 由 URL 与 Content-Type 猜一个带扩展名的文件名（URL 末段没有可用扩展名时按类型补）；判不出返回空串 */
+    static String guessFileName(String url, String contentType) {
+        String last = "";
+        try {
+            String path = java.net.URI.create(url).getPath();
+            last = path == null ? "" : path.substring(path.lastIndexOf('/') + 1);
+        } catch (Exception e) {
+            last = "";
+        }
+        last = last.replaceAll("[\\\\/:*?\"<>|]", "_").trim();
+        if (last.length() > 120) {
+            last = last.substring(0, 120);
+        }
+        String ext = extOfName(last);
+        if (LIBRARY_TEXT_EXTS.contains(ext)) {
+            return last;
+        }
+        String byType = contentType.contains("pdf") ? ".pdf"
+                : contentType.contains("wordprocessingml") ? ".docx"
+                : contentType.contains("spreadsheetml") ? ".xlsx"
+                : contentType.contains("presentationml") ? ".pptx"
+                : "text/plain".equals(contentType) ? ".txt"
+                : "";
+        if (byType.isEmpty()) {
+            return "";
+        }
+        // 后缀不可信（如 arxiv.org/pdf/1706.03762 的 ".03762"）：整名保留再补一个真后缀
+        return (last.isEmpty() ? "download" : last) + byType;
+    }
+
+    private String err(String message) {
+        ObjectNode o = objectMapper.createObjectNode();
+        o.put("ok", false);
+        o.put("error", message == null ? "" : message);
+        return o.toString();
+    }
+
+    private static long toLong(Object v) {
+        return v instanceof Number n ? n.longValue() : 0L;
+    }
+
+    private static int toInt(Object v) {
+        return v instanceof Number n ? n.intValue() : 0;
+    }
+
+    /**
      * 联网开关关闭时的统一回应。
      * <p>
      * 刻意"保留工具可见并返回可读错误"，而不是把工具从列表里摘掉（与 DSH 的做法一致）：
@@ -1650,7 +1964,8 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
     // ------------------------------------------------------------------
 
     /** 需要用户确认的写操作（读操作直接执行） */
-    private static final Set<String> WRITE_TOOLS = Set.of("create_note", "update_note", "append_to_note", "create_quick_ref");
+    private static final Set<String> WRITE_TOOLS = Set.of("create_note", "update_note", "append_to_note",
+            "create_quick_ref", "add_file_from_url");
 
     /**
      * 写操作需要审批 —— 这是本工程唯一能防「AI 误改用户数据」的机制。
@@ -1711,6 +2026,11 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
             case "create_quick_ref" -> {
                 String title = a.path("title").asText("");
                 return "新建速查卡《" + (StringUtils.hasText(title) ? title : "无标题") + "》";
+            }
+            case "add_file_from_url" -> {
+                String fname = a.path("filename").asText("");
+                return "存进资料库：从 " + a.path("url").asText("") + " 下载"
+                        + (StringUtils.hasText(fname) ? "（存为 " + fname + "）" : "");
             }
             default -> {
                 return fn;
@@ -2283,6 +2603,22 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                         param("file_id", "integer", "资料 id", true),
                         param("query", "string", "要在文档全文里查找的词（返回命中片段；查长文档务必用这个）", false),
                         param("offset", "integer", "顺读时的起始字符位置（默认 0；接着上次的 next_offset 传）", false))));
+        defs.add(tool("list_files",
+                "列出「资料库」里的资料（文件名/类型/大小/**抽取状态与字数**），可选按关键词过滤文件名。"
+                + "回答「资料库里都有什么」、或入库前查重（这篇论文是不是已经存过）时用它。"
+                + "⚠️ 列表不含正文：找内容用 search_knowledge，读某份资料的正文用 get_file。",
+                List.of(param("keyword", "string", "按文件名过滤（可空，空则列出最近的全部）", false))));
+        defs.add(tool("add_file_from_url",
+                "把网上的**全文文件**下载并存进「资料库」（用户说「帮我放进资料库」时用这个）。"
+                + "只接受**文件直链**：PDF 等（如 https://arxiv.org/pdf/1706.03762）；"
+                + "给论文落地页（arXiv 的 /abs/ 页、DOI 摘要页）会被拒收——那说明要找 PDF 直链，"
+                + "可先用 web_fetch 打开页面把直链找出来。入库后后端会立刻抽正文，返回里带 text_status："
+                + "**只有 ok 才算能被检索**，empty（扫描件）等要如实告诉用户。"
+                + "这是写操作，需要用户在卡片上确认后才会真正下载。",
+                List.of(
+                        param("url", "string", "全文文件的直链（http/https）", true),
+                        param("filename", "string", "入库文件名（可空；不给则从 URL 推断，PDF 会补 .pdf）", false),
+                        param("category_name", "string", "目标分类名（不存在会自动创建；可留空）", false))));
         defs.add(tool("search_code",
                 "检索「代码库」里保存的代码片段（独立于笔记/资料，**不含**知识库全文）。"
                 + "当用户问某段代码是怎么写的、某个方法/类在哪定义、某个项目怎么实现时用它。"

@@ -79,9 +79,34 @@ const AI_TIMEOUT = 300000
  * @returns {Promise<string>} 处理后的 Markdown
  */
 async function polishStream(data, onEvent, signal) {
+  return streamPost('/api/ai/polish-stream', data, onEvent, signal)
+}
+
+/**
+ * 把智能体的回答**融入当前笔记**（SSE）。
+ *
+ * 与润色不同，这是一次**整篇重写**：后端把「原笔记 + 新内容 + 提问」交给模型，
+ * 产出把新知识放到合适位置的新正文（提示词是 skills/note-merge/SKILL.md）。
+ * 同样只返回候选正文 —— 是否替换由用户在编辑器弹窗里点「替换正文」决定。
+ *
+ * @param {{noteId?:number,title?:string,note:string,question?:string,answer:string}} data
+ * @returns {Promise<string>} 融入后的完整笔记 Markdown
+ */
+async function mergeNoteStream(data, onEvent, signal) {
+  return streamPost('/api/ai/note-merge-stream', data, onEvent, signal)
+}
+
+/**
+ * 流式 POST 的公共实现（润色 / 融入笔记共用）。
+ *
+ * 为什么不用 axios：要逐段读响应流；而 axios 的响应拦截器做的是「一次性 json 解包 + 统一报错」，
+ * 对 SSE 不适用。所以这里用 fetch 手工读流，并**自行复刻拦截器的报错文案**
+ * （err.response.data.msg → err.message → '网络错误'），保证错误提示风格与其他接口一致。
+ */
+async function streamPost(path, data, onEvent, signal) {
   let resp
   try {
-    resp = await fetch('/api/ai/polish-stream', {
+    resp = await fetch(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
@@ -149,6 +174,8 @@ export const aiApi = {
   polish: (data) => request.post('/ai/polish', data, { timeout: AI_TIMEOUT }),
   /** 同上，但带分段进度（SSE）。编辑器里的润色/整理格式走这个 */
   polishStream: (data, onEvent, signal) => polishStream(data, onEvent, signal),
+  /** 把智能体的回答融入当前笔记（SSE，整篇重写；调用方预览后由用户决定是否替换正文） */
+  mergeNoteStream: (data, onEvent, signal) => mergeNoteStream(data, onEvent, signal),
   /** 智能体对话：{ message, sessionId, history?, noteId?, noteTitle?, noteContext? } → AiChatVO（最多 8 轮工具调用，耗时叠加） */
   chat: (data) => request.post('/ai/chat', data, { timeout: AI_TIMEOUT }),
   /** 会话回看：把事件日志投影成气泡列表（刷新页面后靠它恢复对话） */
@@ -293,6 +320,14 @@ export const fileApi = {
   },
   /** 抽取出来的正文（阅读器用；**不含在 detail 里**，因为正文动辄十几万字） */
   text: (id) => request.get(`/files/${id}/text`),
+  /**
+   * **排版还原**后的正文（阅读器「抽取正文」页用）。
+   *
+   * 与 text 的分工：text 是检索层实际用的那份纯文本（PDF 两栏会逐行交错，只能检索不能读），
+   * 这个按键面坐标把两栏、段落、章节标题重建出来（title/authors/heading/para/bullet/meta）。
+   * 单独一个接口：PDF 解析要几百毫秒到一两秒，而阅读器默认打开的是「原文」，切过来才付这个成本。
+   */
+  layout: (id) => request.get(`/files/${id}/text-layout`, { timeout: 120000 }),
   /** 分段翻译（阅读器用）：只接受一段，超长会被后端拒绝并说明上限 */
   translate: (id, text, targetLang) => request.post(`/files/${id}/translate`, { text, targetLang }, { timeout: 180000 }),
   /** 翻译能力：用哪个档案翻、单段上限多少 */
