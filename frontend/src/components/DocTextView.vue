@@ -160,6 +160,9 @@ watch(() => props.targetLang, () => {
           <h3 v-else-if="b.type === 'heading'" class="doc-heading" :class="'doc-lv' + (b.level || 1)">
             {{ b.text }}
           </h3>
+          <!-- 代码 / 表格：按"一行一行"原样渲染，不参与翻译（翻代码没有意义，还会把缩进搅乱） -->
+          <pre v-else-if="b.type === 'code'" class="doc-code">{{ b.text }}</pre>
+          <pre v-else-if="b.type === 'table'" class="doc-table">{{ b.text }}</pre>
           <div v-else class="doc-block">
             <button
               type="button"
@@ -336,6 +339,31 @@ watch(() => props.targetLang, () => {
   border-left: 3px solid color-mix(in srgb, var(--app-brand) 55%, transparent);
   background: var(--app-brand-soft);
   border-radius: 0 8px 8px 0;
+}
+
+/* 代码块 / 表格块：保持原样（换行、缩进都要留住），横向放不下就自己滚 */
+.doc-code,
+.doc-table {
+  margin: 10px 0;
+  padding: 10px 14px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--app-text-1) 4%, transparent);
+  font-size: 12.5px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
+.doc-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Courier New', monospace;
+}
+
+/* 表格块里的"一行"是原文档的一行，字体不换等宽，读数字更舒服 */
+.doc-table {
+  font-size: 13px;
+  letter-spacing: 0.02em;
 }
 
 .doc-trans-tag {

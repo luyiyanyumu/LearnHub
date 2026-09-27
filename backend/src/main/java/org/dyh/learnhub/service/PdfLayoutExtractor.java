@@ -79,7 +79,7 @@ public class PdfLayoutExtractor {
     private static final double FLUSH_TOL = 1.2;
 
     private static final Pattern BULLET = Pattern.compile("^\\s*[•●▪‣·◦*]\\s+");
-    private static final Pattern NUMBERED = Pattern.compile("^(\\d+(?:\\.\\d+)*)\\.?\\s+\\S.*");
+    private static final Pattern NUMBERED = Pattern.compile("^(\\d+(?:\\.\\d+)*)\\.?\\s+(\\S.*)");
     private static final Pattern CN_HEADING =
             Pattern.compile("^(第[一二三四五六七八九十百]+[章节部分]|[一二三四五六七八九十]+[、.]|（[一二三四五六七八九十]+）)\\s*\\S.*");
     private static final Pattern SENTENCE_END = Pattern.compile("[.!?。！？…][\"'’”）)]?$");
@@ -94,6 +94,18 @@ public class PdfLayoutExtractor {
      */
     private static final Pattern ARXIV_STAMP = Pattern.compile("^arxiv:\\s*\\S+", Pattern.CASE_INSENSITIVE);
 
+    /**
+     * 纯数字/刻度的行（"60 68.8 72.3"、"0"、"20.0"…）。
+     * <p>坐标轴刻度与表格数据都是这个形态：以前它们会被"加粗 + 字号大"的行规则判成**小标题**
+     * （实测某篇论文的柱状图数字变成了 `[heading1] 60 68.8 72.3`）。
+     */
+    private static final Pattern NUMBERISH = Pattern.compile("^[\\d\\s.,%$€¥:+\\-–—/()\\[\\]{}=]*\\d[\\d\\s.,%$€¥:+\\-–—/()\\[\\]{}=]*$");
+
+    /** 代码/数据结构行的形态（不等宽字体也能认出来：键值对、括号串、注解、命令行…） */
+    private static final Pattern CODE_LINE = Pattern.compile(
+            "^\\s*(?:[\\{\\}\\[\\]<>]|\"[^\"]{1,40}\"\\s*[:=]|//|/\\*|\\*\\s|@[\\w.]+\\s*[({]|"
+            + "[A-Za-z_$][\\w.$-]*\\s*[:=]\\s|\\$\\s|>>>|sudo\\s|npm\\s|mvn\\s|git\\s|docker\\s|curl\\s)");
+
     /** 论文里固定的小节名（字号不一定变大，靠词表兜住） */
     private static final List<String> KNOWN_HEADINGS = List.of(
             "abstract", "introduction", "related work", "background", "preliminaries",
@@ -106,7 +118,7 @@ public class PdfLayoutExtractor {
     // 对外结构（前端按 type 排版）
     // ------------------------------------------------------------------
 
-    /** type: title / authors / heading / para / bullet / meta；heading 用 level 表示层级（1 最高） */
+    /** type: title / authors / heading / para / bullet / meta / code / table；heading 用 level 表示层级（1 最高） */
     public record Block(String type, String text, int level) {
     }
 
@@ -116,13 +128,13 @@ public class PdfLayoutExtractor {
     public record Layout(String status, String error, List<PageLayout> pages, int chars, int pageCount) {
     }
 
-    /** 一个词（PDFBox 的一次调用）：左上角 + 右边界 + 字号 + "前面有没有空格" */
+    /** 一个词（PDFBox 的一次调用）：左上角 + 右边界 + 字号 + "前面有没有空格" + 是不是等宽字体 */
     private record Word(double x0, double x1, double y, double size, boolean bold, boolean spaceBefore,
-                        String text) {
+                        boolean mono, String text) {
     }
 
     /** 一栏内的一行 */
-    private record Line(double x0, double x1, double y, double size, boolean bold, String text) {
+    private record Line(double x0, double x1, double y, double size, boolean bold, boolean mono, String text) {
     }
 
     /** 带纵向位置的块：用来把"跨栏通栏块"按 y 插回栏内阅读顺序 */
@@ -197,7 +209,7 @@ public class PdfLayoutExtractor {
         boolean twoColumn = gutter < width;
         double leftFlush = flushOf(rows, bodySize, width, true);
         double rightFlush = flushOf(rows, bodySize, width, false);
-        double bodyStartY = bodyStartY(rows, bodySize, leftFlush, rightFlush, gutter, twoColumn);
+        double bodyStartY = bodyStartY(rows, bodySize, leftFlush, rightFlush, gutter, twoColumn, width, height);
 
         // 分流：行内先按中缝切，再决定这一段属于哪一栏（居中块整行当通栏，不切）
         List<List<Word>> wide = new ArrayList<>();
@@ -224,12 +236,18 @@ public class PdfLayoutExtractor {
             List<Line> lines = toLines(wide);
             List<Line> head = new ArrayList<>();
             List<Line> body = new ArrayList<>();
-            for (Line ln : lines) {
-                if (ln.y() < bodyStartY - 0.6 * ln.size()) {
-                    head.add(ln);
-                } else {
-                    body.add(ln);
+            if (pageNo == 1) {
+                for (Line ln : lines) {
+                    if (ln.y() < bodyStartY - 0.6 * ln.size()) {
+                        head.add(ln);
+                    } else {
+                        body.add(ln);
+                    }
                 }
+            } else {
+                // 非首页没有"标题区"：标题锚点偶尔会把页首几行（甚至一整块代码）划进 head，
+                // 而 head 里的行是**逐行**落块的，一块 JSON 会被切成十几行 `[para]`（实测 p94）。
+                body.addAll(lines);
             }
             List<Block> blocks = new ArrayList<>(headBlocks(head, bodySize, pageNo, width));
             blocks.addAll(plain(columnPlaced(columnOf(body), bodySize, pageNo, height)));
@@ -242,12 +260,14 @@ public class PdfLayoutExtractor {
         List<Placed> rightBlocks = columnPlaced(columnOf(rightLines), bodySize, pageNo, height);
         mergeColumnSeam(leftBlocks, rightBlocks);
 
-        // 通栏块：栏目之上的（标题区）走标题处理，栏目之间/之下的按 y 插回左栏顺序
+        // 通栏块：**首页**栏目之上的（标题区）走标题处理；其余（含后续页面的页首通栏行）
+        // 一律按正文顺序走，交给 columnPlaced 做段落/表格/代码合并 ——
+        // 实测把后续页面的通栏行塞进 headBlocks，会变成"一行一个段落"，整页碎掉。
         List<Line> head = new ArrayList<>();
         List<Line> spanningLines = new ArrayList<>();
         double columnTop = Math.min(firstY(leftLines), firstY(rightLines));
         for (Line ln : toLines(wide)) {
-            if (ln.y() < columnTop - 1) {
+            if (pageNo == 1 && ln.y() < columnTop - 1) {
                 head.add(ln);
             } else {
                 spanningLines.add(ln);
@@ -281,7 +301,7 @@ public class PdfLayoutExtractor {
                 if (gap >= MIN_GUTTER && Math.abs(mid - gutter) <= gap / 2 + 8) {
                     parts.add(cur);
                     cur = new ArrayList<>();
-                    w = new Word(w.x0(), w.x1(), w.y(), w.size(), w.bold(), false, w.text());
+                    w = new Word(w.x0(), w.x1(), w.y(), w.size(), w.bold(), false, w.mono(), w.text());
                 }
             }
             cur.add(w);
@@ -321,8 +341,10 @@ public class PdfLayoutExtractor {
         }
         Map.Entry<Integer, Integer> best = votes.entrySet().stream()
                 .max(Comparator.comparingInt(Map.Entry::getValue)).orElseThrow();
-        // 至少要有六分之一的"有缝行"投同一条中缝才认，免得把表格里的空档当成栏缝
-        if (best.getValue() < Math.max(2, Math.round(rowsWithGap / 6.0))) {
+        // 支持率要够：原来是"有缝行"的 1/6 就算数，实测有一页只有零星几行凑出中缝，
+        // 整页正文被切成"通栏 + 左栏 + 右栏"三份，读起来七零八落。改成按**整页行数**算，要求 ≥25%。
+        int need = Math.max(3, (int) Math.round(rows.size() * 0.25));
+        if (best.getValue() < need) {
             return pageWidth + 1;
         }
         return best.getKey() * 5.0;
@@ -351,11 +373,27 @@ public class PdfLayoutExtractor {
 
     /** 正文第一行的 y：首页标题区与正文的分界线（"够长 + 贴栏边"的行里最高的那行） */
     private double bodyStartY(List<List<Word>> rows, double bodySize, double leftFlush, double rightFlush,
-                              double gutter, boolean twoColumn) {
-        double min = Double.MAX_VALUE;
+                              double gutter, boolean twoColumn, double pageWidth, double pageHeight) {
         double first = Double.MAX_VALUE;
         for (List<Word> row : rows) {
             first = Math.min(first, row.get(0).y());
+        }
+        // 页眉（"Published as a conference paper at ICLR 2026"）的字号常常**和正文一样**、又贴栏边，
+        // 于是被当成了"正文第一行"，整块标题区被并进正文 —— 实测某篇论文的标题因此变成了 meta。
+        // 修正：标题这类"字号更大 + 够宽"的行是分界锚点，正文起点只能落在最后一个锚点下面。
+        double anchor = Double.NEGATIVE_INFINITY;
+        for (List<Word> row : rows) {
+            double rowSize = row.stream().mapToDouble(Word::size).max().orElse(bodySize);
+            double x0 = row.get(0).x0();
+            double x1 = row.get(row.size() - 1).x1();
+            if (rowSize >= bodySize * 1.08 && x1 - x0 >= pageWidth * 0.25 && row.get(0).y() < pageHeight * 0.35) {
+                anchor = Math.max(anchor, row.get(0).y());
+            }
+        }
+        double floor = anchor == Double.NEGATIVE_INFINITY ? 0 : anchor + 1;
+        double min = Double.MAX_VALUE;
+        double relaxed = Double.MAX_VALUE;
+        for (List<Word> row : rows) {
             if (text(row).length() < 40) {
                 continue;
             }
@@ -368,11 +406,17 @@ public class PdfLayoutExtractor {
                 if (twoColumn && !nearFlush(w, leftFlush, rightFlush, gutter)) {
                     continue;
                 }
-                min = Math.min(min, w.y());
+                relaxed = Math.min(relaxed, w.y());
+                if (w.y() >= floor) {
+                    min = Math.min(min, w.y());
+                }
             }
         }
         if (min != Double.MAX_VALUE) {
             return min;
+        }
+        if (relaxed != Double.MAX_VALUE) {
+            return relaxed;                              // 锚点下面再没有正文（罕见）：退回原判据
         }
         // 整页都是标题/图（找不到"像正文"的行）：那就从页面最上面开始，不要留空档
         return first == Double.MAX_VALUE ? 0 : first - 1;
@@ -413,6 +457,7 @@ public class PdfLayoutExtractor {
             StringBuilder sb = new StringBuilder();
             int total = 0;
             int boldChars = 0;
+            int monoChars = 0;
             double x0 = Double.MAX_VALUE;
             double x1 = -Double.MAX_VALUE;
             double size = 0;
@@ -430,11 +475,15 @@ public class PdfLayoutExtractor {
                 if (w.bold()) {
                     boldChars += n;
                 }
+                if (w.mono()) {
+                    monoChars += n;
+                }
                 x0 = Math.min(x0, w.x0());
                 x1 = Math.max(x1, w.x1());
                 size = Math.max(size, w.size());
             }
-            out.add(new Line(x0, x1, sorted.get(0).y(), size, boldChars * 2 > total, tidyInline(sb.toString())));
+            out.add(new Line(x0, x1, sorted.get(0).y(), size, boldChars * 2 > total,
+                    monoChars * 2 > total, tidyInline(sb.toString())));
         }
         out.sort(Comparator.comparingDouble(Line::y));
         return out;
@@ -502,7 +551,10 @@ public class PdfLayoutExtractor {
         StringBuilder title = new StringBuilder();
         StringBuilder authors = new StringBuilder();
         double minTitleWidth = pageWidth * 0.25;
+        // arXiv 标记要排除在"最大字号"之外：实测某篇论文把它横排成 20pt（比 17pt 的标题还大），
+        // 于是 maxSize 被它抬走，真正的标题连"够大"这条都过不了，最后一个标题块都没有。
         double maxSize = lines.stream()
+                .filter(l -> !ARXIV_STAMP.matcher(l.text()).find())
                 .filter(l -> l.x1() - l.x0() >= minTitleWidth)
                 .mapToDouble(Line::size).max().orElse(bodySize);
         for (Line ln : lines) {
@@ -520,7 +572,9 @@ public class PdfLayoutExtractor {
             // 标题/作者判定要排在"小标题判定"之前：论文标题本身常常是加粗的，
             // 先走 headingLevel 会把大标题判成二级小标题（实测踩过）
             boolean wideEnough = ln.x1() - ln.x0() >= minTitleWidth;
-            if (pageNo == 1 && wideEnough && maxSize >= bodySize * 1.2 && ln.size() >= maxSize * 0.95) {
+            // 1.12 而不是 1.2：有些期刊把标题排成 1.15 倍正文（实测某篇论文标题没被认出来，
+            // 整条标题变成了正文第一段）；同时要求它在本页头部里确实"够大"。
+            if (pageNo == 1 && wideEnough && maxSize >= bodySize * 1.12 && ln.size() >= maxSize * 0.93) {
                 append(title, text);                       // 标题常折成两三行：并成一条
                 continue;
             }
@@ -535,11 +589,17 @@ public class PdfLayoutExtractor {
                 continue;
             }
             flushHead(out, title, authors);
-            // 首页标题区里的小字不都是元信息：机构/邮箱是居中的，而表格、公式是贴边的 ——
-            // 一律按"小字"处理会把表格整块变成居中的灰字（实测第 5 页的实验结果表就是这样）
+            // 首页标题区里剩下的行要分两类：长的完整句子是摘要/正文，短碎片是元信息（单位、邮箱、日期、脚注）。
+            // 不能一律当"小字"（会把表格整块变灰字，实测第 5 页实验结果表），也不能一律当正文
+            // （作者单位会挤进摘要首段）。判据按"像不像句子"来定。
+            boolean prose = text.length() >= 120
+                    || (text.length() >= 60 && SENTENCE_END.matcher(text).find());
             double center = (ln.x0() + ln.x1()) / 2;
             boolean centered = center > pageWidth * 0.40 && center < pageWidth * 0.60;
-            out.add(new Block(centered && ln.size() < bodySize * 1.02 ? "meta" : "para", text, 0));
+            boolean metaFragment = (centered && ln.size() < bodySize * 1.02)
+                    || (text.length() < 60 && text.split("\\s+").length <= 6
+                        && !SENTENCE_END.matcher(text).find());
+            out.add(new Block(prose || !metaFragment ? "para" : "meta", text, 0));
         }
         flushHead(out, title, authors);
         return out;
@@ -572,6 +632,15 @@ public class PdfLayoutExtractor {
         StringBuilder para = new StringBuilder();
         double paraY = 0;
         boolean bullet = false;
+        double pitch = linePitch(column.lines());
+        // 代码/数据段：连续的"代码样"行攒成**一个** code 块（不这样，一页 JSON 会变成二十个段落）
+        StringBuilder code = new StringBuilder();
+        int codeLines = 0;
+        double codeY = 0;
+        // 表格行：连续 3 行以上"像表格"的行攒成一个 table 块（行距判定同代码段）
+        StringBuilder rows = new StringBuilder();
+        int rowLines = 0;
+        double rowY = 0;
         Line prev = null;
 
         for (Line ln : column.lines()) {
@@ -579,11 +648,68 @@ public class PdfLayoutExtractor {
             if (text.isEmpty()) {
                 continue;
             }
+            boolean rowishLine = rowish(text, ln, column);
+            // 表格行结束：只要遇到一行"不像表格"的，就先把攒着的表格落地（这样下面所有分支都不用管它）
+            if (rowLines > 0 && !rowishLine) {
+                flushRows(out, rows, rowLines, rowY);
+                rowLines = 0;
+            }
             int level = headingLevel(text, ln, bodySize);
             if (level > 0) {
                 flushPlaced(out, para, bullet, paraY);
                 bullet = false;
+                flushCode(out, code, codeLines, codeY);
+                codeLines = 0;
                 out.add(new Placed(new Block("heading", text, level), ln.y()));
+                prev = ln;
+                continue;
+            }
+            // 代码/数据行：等宽字体是字体级证据；不是等宽也能靠形态认（键值对、括号、注解、命令）
+            if (ln.mono() || looksLikeCode(text)) {
+                flushPlaced(out, para, bullet, paraY);
+                bullet = false;
+                // 与原代码段隔了明显空行 → 当作另一段。判据同样要看**实际行距**：
+                // 代码区行距本来就比正文松，只按字号比会把每行都当成新的一段（一块 JSON 又碎成十几段）
+                double codeGap = Math.max(2.2 * Math.max(ln.size(), bodySize), 2.5 * pitch);
+                if (codeLines > 0 && prev != null && ln.y() - prev.y() > codeGap) {
+                    flushCode(out, code, codeLines, codeY);
+                    codeLines = 0;
+                }
+                if (codeLines == 0) {
+                    codeY = ln.y();
+                }
+                if (code.length() > 0) {
+                    code.append('\n');
+                }
+                code.append(text);
+                codeLines++;
+                prev = ln;
+                continue;
+            }
+            // 非代码行：先把攒着的代码段落地
+            if (codeLines > 0) {
+                flushCode(out, code, codeLines, codeY);
+                codeLines = 0;
+                prev = ln;
+            }
+            // 表格行：短、无句末标点、不含汉字、以大写/数字/符号开头（"Model NQ TQA"、"Gold 44.9"）。
+            // 先攒着，结束或成段时再决定是"一张表"还是"几个短段落"。
+            if (rowishLine) {
+                flushPlaced(out, para, bullet, paraY);
+                bullet = false;
+                double rowGap = Math.max(2.2 * Math.max(ln.size(), bodySize), 2.5 * pitch);
+                if (rowLines > 0 && prev != null && ln.y() - prev.y() > rowGap) {
+                    flushRows(out, rows, rowLines, rowY);
+                    rowLines = 0;
+                }
+                if (rowLines == 0) {
+                    rowY = ln.y();
+                }
+                if (rows.length() > 0) {
+                    rows.append('\n');
+                }
+                rows.append(text);
+                rowLines++;
                 prev = ln;
                 continue;
             }
@@ -596,13 +722,13 @@ public class PdfLayoutExtractor {
                 continue;
             }
             // 页脚/侧边注释：字号小一档 + 挨着页面底部 + 不是正在拼的段落
-            if (para.length() == 0 && ln.size() < bodySize * 0.92 && text.length() < 160
-                    && ln.y() > pageHeight * 0.78) {
+            if (para.length() == 0 && ln.size() < bodySize * 0.9 && text.length() < 160
+                    && ln.y() > pageHeight * 0.88) {
                 out.add(new Placed(new Block("meta", text, 0), ln.y()));
                 prev = ln;
                 continue;
             }
-            if (para.length() > 0 && prev != null && paragraphBreak(column, prev, ln, bodySize)) {
+            if (para.length() > 0 && prev != null && paragraphBreak(column, prev, ln, bodySize, pitch)) {
                 flushPlaced(out, para, bullet, paraY);
                 bullet = false;
             }
@@ -615,7 +741,167 @@ public class PdfLayoutExtractor {
             prev = ln;
         }
         flushPlaced(out, para, bullet, paraY);
+        flushCode(out, code, codeLines, codeY);
+        flushRows(out, rows, rowLines, rowY);
+        // 表格/图表里的短块（单元格、坐标轴刻度、图例）合成一个块：
+        // 不合并的话它们会以"正文段落"的样子出现，一页结果表能刷出几十个一句一行的段落
+        return mergeTableCellRuns(out);
+    }
+
+    /**
+     * 把攒下来的表格行落地。
+     * <p>≥3 行才算一张表；少于 3 行更可能是正文里的短句（"the correct answer"），按普通短段落逐行输出，
+     * 免得把正文伪装成表格。
+     */
+    private static void flushRows(List<Placed> out, StringBuilder rows, int lines, double y) {
+        String text = rows.toString();
+        rows.setLength(0);
+        if (text.isEmpty()) {
+            return;
+        }
+        if (lines >= 3) {
+            out.add(new Placed(new Block("table", text, 0), y));
+            return;
+        }
+        for (String row : text.split("\n")) {
+            out.add(new Placed(new Block("para", row, 0), y));
+        }
+    }
+
+    /**
+     * 像表格/图表标签的一行：短、没有句末标点、不是列表项、不含汉字、以大写字母/数字/符号开头，
+     * 而且**没有顶到栏的右边界**。
+     * <p>不含汉字这条很重要：中文短行（"本章主要涉及的知识点有："）绝大多数是正文小标题或列表，
+     * 把它们当单元格会让整段说明变成"一张表"。右边界这条同样重要：正文的折行会顶到右边界，
+     * 表格/图里的单元格不会 —— 少了它，正文里任何一行短句都会被割出来（实测段落被切回一行一段）。
+     */
+    private static boolean rowish(String text, Line ln, Column column) {
+        String t = text.trim();
+        if (t.isEmpty() || t.length() > 70) {
+            return false;
+        }
+        if (SENTENCE_END.matcher(t).find() || BULLET.matcher(t).find()) {
+            return false;
+        }
+        if (t.codePoints().anyMatch(c -> c >= 0x2E80)) {
+            return false;
+        }
+        if (column.right() - ln.x1() < 1.2 * ln.size()) {
+            return false;
+        }
+        char first = t.charAt(0);
+        boolean strongStart = Character.isUpperCase(first) || Character.isDigit(first)
+                || "([{<\"'#+-".indexOf(first) >= 0;
+        if (!strongStart) {
+            return false;
+        }
+        // 纯数字行（刻度、数据行）长度可以放到 70："32.1 33.1 17.5 22.3 55.5 …" 这种整行都是数
+        return NUMBERISH.matcher(t).matches() || (allStrong(t) && t.length() <= 60);
+    }
+
+    /**
+     * 每个词都以大写字母/数字/符号开头，且至少两个词。
+     * <p>这是"表格行 / 图表图例"最稳的形态特征（"Model NQ TQA"、"Gold 44.9"、"Task Input"）；
+     * 正文折行里几乎总有 the/of/and 这类小写词（"the original"）。单看"短"是不够的，
+     * 短句子太多了，会把正常段落割开。
+     */
+    private static boolean allStrong(String t) {
+        String[] words = t.split("\\s+");
+        if (words.length < 2) {
+            return false;
+        }
+        for (String w : words) {
+            if (!w.isEmpty() && Character.isLowerCase(w.charAt(0))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 把攒下来的代码段落地。
+     * <p>只认**连续两行以上**：单行"像代码"的文本很可能是正文里的一句（例如以 `@` 开头的注解说明），
+     * 硬塞进 code 块反而会把它从段落里割出来 —— 单行就按普通段落处理。
+     */
+    private static void flushCode(List<Placed> out, StringBuilder code, int lines, double y) {
+        String text = code.toString().trim();
+        code.setLength(0);
+        if (text.isEmpty()) {
+            return;
+        }
+        out.add(new Placed(new Block(lines >= 2 ? "code" : "para", text, 0), y));
+    }
+
+    /** 像代码/数据结构的一行：等宽之外的第二重证据（很多书与论文的代码并不用等宽字体） */
+    private static boolean looksLikeCode(String text) {
+        String t = text.trim();
+        if (t.isEmpty() || t.length() > 90 || SENTENCE_END.matcher(t).find()) {
+            return false;
+        }
+        if (CODE_LINE.matcher(t).find()) {
+            return true;
+        }
+        // 括号/引号/等号密集且很短 → 多半是 JSON、SQL、配置或命令行
+        int symbol = 0;
+        for (char c : t.toCharArray()) {
+            if ("{}()[]\"'=;:<>|\\".indexOf(c) >= 0) {
+                symbol++;
+            }
+        }
+        return symbol >= 4 && symbol * 4 >= t.length();
+    }
+
+    /**
+     * 表格 / 图表区域合并。
+     * <p>判据：连续 ≥3 个"短、且不像完整句子"的段落块。这类块在真实文档里几乎只有两种来源 ——
+     * 表格单元格（"Doc 3"、"Task Input"）与图里的刻度/图例（"0"、"60 68.8 72.3"）。
+     * 合成一个 `table` 块后，界面按"一行一行"紧凑渲染，而不是排版成一段段正文。
+     */
+    private static List<Placed> mergeTableCellRuns(List<Placed> blocks) {
+        List<Placed> out = new ArrayList<>();
+        int i = 0;
+        while (i < blocks.size()) {
+            if (!cellish(blocks.get(i).block())) {
+                out.add(blocks.get(i));
+                i++;
+                continue;
+            }
+            int j = i;
+            while (j < blocks.size() && cellish(blocks.get(j).block())) {
+                j++;
+            }
+            if (j - i >= 3) {
+                StringBuilder sb = new StringBuilder();
+                for (int k = i; k < j; k++) {
+                    if (sb.length() > 0) {
+                        sb.append('\n');
+                    }
+                    sb.append(blocks.get(k).block().text().trim());
+                }
+                out.add(new Placed(new Block("table", sb.toString(), 0), blocks.get(i).y()));
+                i = j;
+            } else {
+                out.add(blocks.get(i));
+                i++;
+            }
+        }
         return out;
+    }
+
+    private static boolean cellish(Block b) {
+        if (!"para".equals(b.type())) {
+            return false;
+        }
+        String t = b.text().trim();
+        if (t.isEmpty() || t.length() > 36) {
+            return false;
+        }
+        // 完整句子（有句末标点）或列表项不算单元格
+        if (SENTENCE_END.matcher(t).find() || BULLET.matcher(t).find()) {
+            return false;
+        }
+        // 纯刻度数字，或很短的标签（表格单元格/图例）
+        return NUMBERISH.matcher(t).matches() || t.length() <= 24;
     }
 
     private static List<Block> plain(List<Placed> placed) {
@@ -630,9 +916,13 @@ public class PdfLayoutExtractor {
      * 段落断开判定：段间距 / 首行缩进 / 上一行是"没写满的最后一行"。
      * <p>首行缩进必须**和上一行比较**：摘要区整体比正文再缩进一个字位，
      * 只看"离栏左边界多远"会把摘要里每一行都当成新段落（一句一段）。
+     * <p>段间距也不能只跟字号比：行距 1.6 倍的中文书里"相邻两行"就超过 1.55×字号，
+     * 结果整本书被按行切碎（实测 44% 的段落不到 40 字）。所以要跟**实测行距**取大者。
      */
-    private boolean paragraphBreak(Column column, Line prev, Line cur, double bodySize) {
-        if (cur.y() - prev.y() > 1.55 * Math.max(prev.size(), bodySize)) {
+    private boolean paragraphBreak(Column column, Line prev, Line cur, double bodySize, double pitch) {
+        double limit = Math.max(1.55 * Math.max(prev.size(), bodySize), 1.45 * pitch);
+        limit = Math.min(limit, 2.5 * Math.max(prev.size(), bodySize));
+        if (cur.y() - prev.y() > limit) {
             return true;
         }
         double indentCur = cur.x0() - column.left();
@@ -643,6 +933,26 @@ public class PdfLayoutExtractor {
         }
         return SENTENCE_END.matcher(prev.text()).find()
                 && column.right() - prev.x1() > 1.6 * prev.size();
+    }
+
+    /**
+     * 栏内行距：相邻行 y 差的 40% 分位。
+     * <p>用分位而不是中位数：段与段之间的大空隙是少数，中位数会被它们抬高，
+     * 抬到最后"任何空隙都不算换段"。40% 分位落在"同一段内的相邻行"上。
+     */
+    private static double linePitch(List<Line> lines) {
+        List<Double> gaps = new ArrayList<>();
+        for (int i = 1; i < lines.size(); i++) {
+            double g = lines.get(i).y() - lines.get(i - 1).y();
+            if (g > 0.5) {
+                gaps.add(g);
+            }
+        }
+        if (gaps.isEmpty()) {
+            return 0;
+        }
+        gaps.sort(Double::compare);
+        return gaps.get(Math.min(gaps.size() - 1, (int) Math.floor(gaps.size() * 0.4)));
     }
 
     /** 行与行拼接：连字符续行要吃掉连字符，否则满篇 "exe-cution" */
@@ -690,8 +1000,28 @@ public class PdfLayoutExtractor {
         if (t.isEmpty() || t.length() > 120) {
             return 0;
         }
+        // 先过"是不是文字"这一关：坐标轴刻度（"60 68.8 72.3"）、表格里的数字串都长成标题的样子
+        // （短、加粗、还常常比正文大一号），实测某篇论文的柱状图数字变成了 [heading1]。
+        int letters = 0;
+        int digits = 0;
+        for (char c : t.toCharArray()) {
+            if (Character.isLetter(c)) {
+                letters++;
+            } else if (Character.isDigit(c)) {
+                digits++;
+            }
+        }
+        if (letters == 0 || digits > letters * 2) {
+            return 0;
+        }
+        // 编号小节要"像小节"：章节号不会长到 2016，整行也要够短，而且编号后面要是"词"——
+        // 图表里的轴标签/图例偏偏长着"数字 + 空格 + 大写词"的样子（"39 RAG-Seq 40"、
+        // "2016 world leaders and 68% ..."），公式片段更像（"1 ∗ a"），实测都被当成 [heading1] 混进正文。
         var numbered = NUMBERED.matcher(t);
-        if (numbered.matches() && !SENTENCE_END.matcher(t).find()) {
+        if (numbered.matches() && !SENTENCE_END.matcher(t).find()
+                && t.length() <= 70 && t.split("\\s+").length <= 12
+                && sectionNumberish(numbered.group(1))
+                && startsLikeHeadingWord(numbered.group(2))) {
             return Math.min(3, numbered.group(1).split("\\.").length);
         }
         if (SENTENCE_END.matcher(t).find()) {
@@ -707,7 +1037,41 @@ public class PdfLayoutExtractor {
         if (KNOWN_HEADINGS.contains(bare)) {
             return ln.size() >= bodySize * 1.05 ? 1 : 2;
         }
-        return ln.bold() && ln.size() > bodySize * 1.04 && t.split("\\s+").length <= 10 ? 2 : 0;
+        // 「加粗 + 大一号」这条最容易被图表里的标签蹭到，所以额外收三个口子：
+        //   ① 长度 ≤60（更长的加粗文本多半是图注/要点句，不是小节标题）；
+        //   ② 不以数字开头（"80 Before tuning" 是图的纵轴标签）；
+        //   ③ 单个拉丁词不算（"Bamboogle" 是横轴刻度；真正的小节词如 References 已在词表里）。
+        if (!ln.bold() || ln.size() <= bodySize * 1.04 || t.split("\\s+").length > 10) {
+            return 0;
+        }
+        if (t.length() > 60 || t.matches("^[\\d.]+\\s.*")) {
+            return 0;
+        }
+        // 图里的数值标签（"Acc: 77.2% (+17.2%) Acc: 76.0%"）也常加粗：一半以上是数字/符号的直接否掉
+        if (letters * 2 < t.length()) {
+            return 0;
+        }
+        boolean cjk = t.codePoints().anyMatch(c -> c >= 0x2E80);
+        return (cjk || t.split("\\s+").length >= 2) ? 2 : 0;
+    }
+
+    /** 章节号是否可信：首段 ≤30（"2016" 这种年份不是章节号） */
+    private static boolean sectionNumberish(String num) {
+        String head = num.split("\\.")[0];
+        try {
+            return Integer.parseInt(head) <= 30;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
+    /** 章节号后面接的是不是"标题词"：大写开头的拉丁词、数字、汉字，或者括号编号（"(1) …"） */
+    private static boolean startsLikeHeadingWord(String rest) {
+        if (rest.isEmpty()) {
+            return false;
+        }
+        char c = rest.charAt(0);
+        return Character.isUpperCase(c) || Character.isDigit(c) || c >= 0x2E80 || "（(【".indexOf(c) >= 0;
     }
 
     /**
@@ -873,7 +1237,7 @@ public class PdfLayoutExtractor {
             TextPosition first = positions.get(0);
             TextPosition last = positions.get(positions.size() - 1);
             cur.add(new Word(first.getXDirAdj(), last.getXDirAdj() + last.getWidthDirAdj(),
-                    first.getYDirAdj(), fontSize(first), isBold(first), spacePending, word));
+                    first.getYDirAdj(), fontSize(first), isBold(first), spacePending, isMono(first), word));
             spacePending = false;
         }
 
@@ -892,6 +1256,13 @@ public class PdfLayoutExtractor {
         private static boolean isBold(TextPosition p) {
             String n = fontName(p);
             return n.contains("bold") || n.contains("black") || n.contains("heavy");
+        }
+
+        /** 等宽字体：代码块的**字体级**证据（很多书/论文的代码也用等宽，这是最可靠的信号） */
+        private static boolean isMono(TextPosition p) {
+            String n = fontName(p);
+            return n.contains("mono") || n.contains("courier") || n.contains("consol") || n.contains("menlo")
+                    || n.contains("typewriter") || n.contains("ttype") || n.contains("code");
         }
 
         private static String fontName(TextPosition p) {

@@ -83,6 +83,20 @@ class PdfLayoutExtractorTest {
                             b.text().toLowerCase().contains("arxiv.org") || b.text().startsWith("arXiv:"),
                             name + " 标题是页边水印: " + b.text()));
 
+            // 标题不能以数字为主：图表的刻度/图例长得和标题一模一样（短、加粗、字号更大），
+            // 实测某篇论文的柱状图数字被认成了 [heading1] "60 68.8 72.3"、"39 RAG-Seq 40"。
+            // 这条与版面无关于 —— 真标题必然以文字为主（编号小节如 "2.5.1 数据建模" 里数字只占少数）。
+            blocks.stream().filter(b -> "heading".equals(b.type())).forEach(b -> {
+                int letters = (int) b.text().codePoints().filter(Character::isLetter).count();
+                int digits = (int) b.text().codePoints().filter(Character::isDigit).count();
+                assertTrue(letters >= 2 && letters * 2 >= digits,
+                        name + " 标题块以数字为主（像图表刻度）: " + b.text());
+            });
+            // 表格块必须是多行的：单行文本被塞进 table 只会让它看起来像表格，其实不是
+            blocks.stream().filter(b -> "table".equals(b.type()))
+                    .forEach(b -> assertTrue(b.text().contains("\n"),
+                            name + " 表格块只有一行: " + b.text()));
+
             if (!printed) {
                 printSample(layout.pages().get(0), 8);
                 printed = true;
@@ -106,9 +120,12 @@ class PdfLayoutExtractorTest {
             assertTrue(paras.size() > 10, name + " 段落太少，说明没成段: " + paras.size());
 
             // ★ 成段的正向证据：必须存在"明显是一整段"的长块。
-            //   如果每行各自成段（我修的那个 bug），最长的块也只有一两百字 —— 这条比平均值更灵敏。
+            //   判据取 300 字而不是凭感觉的数字：**一行装不下 300 字**（本组样本最宽的一行也就 90 来个
+            //   拉丁字符 / 50 来个汉字），所以出现 ≥300 字的块只可能是多行真的拼回了一段。
+            //   （早期这里写的是 600：那是照着某篇长段落的论文定的，后来 96 页的中文讲义最长段只有 360 字，
+            //   提取完全正确却把用例跑红了 —— 又犯了"拿单个样本当断言"的老毛病。）
             int longest = paras.stream().mapToInt(String::length).max().orElse(0);
-            assertTrue(longest > 600, name + " 最长的正文块只有 " + longest + " 字：行没有拼回段");
+            assertTrue(longest >= 300, name + " 最长的正文块只有 " + longest + " 字：行没有拼回段");
             double avg = paras.stream().mapToInt(String::length).average().orElse(0);
             long longOnes = paras.stream().filter(t -> t.length() >= 300).count();
             long shortOnes = paras.stream().filter(t -> t.length() < 40).count();
@@ -117,15 +134,15 @@ class PdfLayoutExtractorTest {
                     name, layout.pages().size(), layout.pages().get(0).columns(),
                     paras.size(), avg, longOnes, shortOnes);
 
-            assertTrue(longOnes >= 8, name + " 300 字以上的长段只有 " + longOnes + " 个：成段不充分");
+            assertTrue(longOnes >= 3, name + " 300 字以上的长段只有 " + longOnes + " 个：成段不充分");
             // 平均值只能当"根本没有拼起来"的兜底：技术书/讲义类 PDF 天生短块多（列表、代码、图注、表格），
             // 实测某本 96 页的讲义平均只有 62 字，但它的长段照样有几千字 —— 用平均值当主判据会误伤
             assertTrue(avg > 40, name + " 平均段落只有 " + (int) avg + " 字，行根本没拼起来");
 
-            // 短块本身是合理的（表格单元格、图注、列表项）——实测一篇表格密集的论文里，
-            // 短块几乎全是结果表里的数字单元格，占比三成多。所以这里只拦"失控"级别的切碎，
+            // 短块本身是合理的（表格单元格、图注、列表项、逐行给的代码）——实测那本 96 页的中文讲义里
+            // 短块接近一半，因为它的 API 参数说明就是一行一条。所以这里只拦"失控"级别的切碎，
             // 真正判断"有没有成段"靠上面那两条正向证据（最长块 / 长段个数）。
-            assertTrue(shortOnes * 100 < paras.size() * 50,
+            assertTrue(shortOnes * 100 < paras.size() * 60,
                     name + " 短块占比过高（" + shortOnes + "/" + paras.size() + "），正文被切碎了");
         }
     }

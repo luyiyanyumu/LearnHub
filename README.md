@@ -74,7 +74,7 @@ learn-hub/
 │       └── data.sql      # 种子数据(INSERT IGNORE 幂等)
 ├── frontend/    # Vue3 前端 (dev 端口 5174, /api 代理到 18080)
 ├── skills/      # 技能目录：润色 / 整理格式的提示词（每个技能一个目录，见 skills/README.md）
-├── docs/        # 设计文档（记忆与检索、排版与润色的设计论证）
+├── docs/        # 设计文档（记忆与检索、PDF 版面还原、排版与润色的设计论证）
 └── mcp/         # MCP server：把 REST 接口暴露给 DeepSeek Harness 等 MCP 客户端（零依赖，见 mcp/README.md）
 ```
 
@@ -352,6 +352,16 @@ TCP 连到【已校验的 IP】 → HTTPS 在其上做 TLS，SNI 与证书校验
 
 依赖：PDFBox 3.0.3 + POI 5.3.0（jar 从 29 MB → **52 MB**）。抽文失败**绝不影响上传**，
 原因写进 `text_error` 存库、界面可见。
+
+#### 阅读器里的「抽取正文」＝版面还原，不是取字
+
+直接倒 `getText()` 得到的是"双栏串行、图表数字混进正文、一页 JSON 碎成 17 行"的一坨文本。
+`PdfLayoutExtractor` 按坐标重建版面，输出带类型的块（`title / authors / heading / para / bullet / code / table / meta`）：
+中缝投票分栏 → 标题区与正文起点 → 按**实测行距**拼段 → 编号/加粗/词表判小节 → 等宽与形态判代码 →
+连续 ≥3 行判表格 → 跨页重复的页眉页脚丢弃。实测一本 96 页中文讲义的段落数 **1119 → 695**、
+平均段长 **39 → 63 字**，一页 JSON 从 17 个段落变成 1 个代码块；代码/表格块按行原样渲染且不进翻译链路。
+
+完整流程、6 个已修缺陷的前后数据、以及**仍然做不到的事**见 **[docs/pdf-layout-design.md](docs/pdf-layout-design.md)**。
 
 ### 四个接入点
 
