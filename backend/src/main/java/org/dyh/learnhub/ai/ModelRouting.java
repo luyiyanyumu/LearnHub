@@ -83,8 +83,9 @@ public class ModelRouting {
                 "要严格 JSON 与相关性判断"));
         META.put(TASK_TRIPLE, new TaskMeta(TASK_TRIPLE, "概念三元组抽取", MAIN,
                 "要判定两个概念之间到底是哪种关系（属于/前置/易混），判错就是往图里写假事实"));
-        META.put(TASK_RERANK, new TaskMeta(TASK_RERANK, "检索结果重排", LOCAL,
-                "输入只有标题+摘要、每次提问都要跑一次，本地够用且免费"));
+        META.put(TASK_RERANK, new TaskMeta(TASK_RERANK, "检索结果重排", MAIN,
+                "要把候选按「对回答这个问题有多大用处」排序，得读懂问题与候选的关系"
+                        + "（实测 97 条用例：本地 qwen3:8b 的 MRR 0.759/0.743≈不重排，deepseek-flash 0.902）"));
         META.put(TASK_GROUNDING, new TaskMeta(TASK_GROUNDING, "答案核对（有没有依据）", MAIN,
                 "判断“这句话有没有被材料支撑”，判不准就会误报或漏报"));
         META.put(TASK_TRANSLATE, new TaskMeta(TASK_TRANSLATE, "阅读器翻译", LOCAL,
