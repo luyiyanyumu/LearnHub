@@ -52,6 +52,9 @@ public class SettingsController {
             Map.entry("wikiApiKey", SettingsService.KEY_WIKI_API_KEY),
             // 检索词自动扩展（仅第一遍无命中时启用）
             Map.entry("queryRewrite", SettingsService.KEY_QUERY_REWRITE),
+            // 第三/四路证据源（主题 wiki / 概念图谱）的注入开关：跑"开 vs 关"对照用
+            Map.entry("wikiInject", SettingsService.KEY_WIKI_INJECT),
+            Map.entry("kgInject", SettingsService.KEY_KG_INJECT),
             Map.entry("autoRecompile", SettingsService.KEY_AUTO_RECOMPILE),
             Map.entry("modelForChat", SettingsService.modelForTaskKey("chat")),
             Map.entry("modelForWiki", SettingsService.modelForTaskKey("wiki")),

@@ -99,6 +99,10 @@ public class SettingsService {
                 // 而开关按钮只看到 500、值其实没变（这个坑踩过一次：A/B 两轮跑出完全一样的数字，
                 // 一模一样的结果本身就是"开关没生效"的证据）。
                 "kb.contextual_embed", "kb.rerank", "kb.auto_index", "kb.grounding",
+                // 第三、四路证据源的注入开关（2026-09-29 加）：wiki 与概念图谱一直**默认注入**，
+                // 但它们是四路里唯二不在评测集里的 —— 加开关是为了能跑"开/关"对照，
+                // 判断这两块上下文到底有没有带来收益（没有开关就只能靠感觉）。
+                KEY_WIKI_INJECT, KEY_KG_INJECT,
                 // 当前激活的模型档案（模型配置已改为"档案列表"，各任务指向档案 id）
                 "ai.active_profile"));
         // 每个任务的"用哪个档案"键，全部从任务清单派生
@@ -161,6 +165,20 @@ public class SettingsService {
     /** 智能体联网总开关 */
     public boolean webEnabled() {
         return !"0".equals(effective(KEY_WEB_ENABLED));
+    }
+
+    /** 主题 wiki 注入开关（默认开；关掉只影响"本轮上下文"，不影响页面与自动刷新） */
+    public static final String KEY_WIKI_INJECT = "kb.wiki_inject";
+
+    /** 概念图谱注入开关（默认开；关掉不影响图谱页面与 graph_* 两个工具） */
+    public static final String KEY_KG_INJECT = "kg.inject";
+
+    public boolean wikiInjectEnabled() {
+        return !"0".equals(effective(KEY_WIKI_INJECT));
+    }
+
+    public boolean kgInjectEnabled() {
+        return !"0".equals(effective(KEY_KG_INJECT));
     }
 
     /**

@@ -719,7 +719,9 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
         // ⑤' wiki 注入：主题 wiki 是"整理过一遍"的内容，比零散笔记更完整；
         //     命中时作为第二块上下文附上（评分不足会自动返回 null，不塞无关内容）。
         //     注意这里只记标记 —— vo 在下面才创建，不能提前往它里面写东西。
-        String wikiBlock = wikiService.retrievalBlock(req.getMessage(), Math.max(0, budget));
+        String wikiBlock = settingsService.wikiInjectEnabled()
+                ? wikiService.retrievalBlock(req.getMessage(), Math.max(0, budget))
+                : null;
         if (wikiBlock != null) {
             messages.add(msg("user", wikiBlock));
             injectedBlocks.add(wikiBlock);
@@ -729,7 +731,9 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
         //      "相关概念之间是什么关系"——属于/前置/易混，以及按本体规则推出来的隐含事实。
         //      这是文件检索与向量检索都拿不到的信息：向量能告诉你"这两段像"，
         //      但说不出"学 GC 之前要先懂堆与栈"这种定向关系，更推不出没直接写着的事实。
-        String graphBlock = kgGraphService.retrievalBlock(req.getMessage(), Math.max(0, budget));
+        String graphBlock = settingsService.kgInjectEnabled()
+                ? kgGraphService.retrievalBlock(req.getMessage(), Math.max(0, budget))
+                : null;
         if (graphBlock != null && !graphBlock.isBlank()) {
             messages.add(msg("user", graphBlock));
             injectedBlocks.add(graphBlock);
@@ -752,6 +756,7 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
             m.put("type", "wiki");
             m.put("id", 0L);
             m.put("title", "知识库 wiki 摘要");
+            m.put("chars", wikiBlock.length());   // 注入成本：界面/对照实验都要看这个数
             vo.getRetrieved().add(m);
         }
         if (graphBlock != null && !graphBlock.isBlank()) {
@@ -759,6 +764,7 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
             m.put("type", "graph");
             m.put("id", 0L);
             m.put("title", "概念图谱关联");
+            m.put("chars", graphBlock.length());
             vo.getRetrieved().add(m);
         }
         List<String> events = vo.getEvents();

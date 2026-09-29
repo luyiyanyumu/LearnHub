@@ -50,7 +50,7 @@ public class KgGraphService {
     /** 邻居展开最大跳数（再多结果会爆炸） */
     public static final int MAX_HOPS = 4;
     /** Graph RAG 注入上下文最多带多少条三元组 */
-    private static final int BLOCK_MAX_TRIPLES = 24;
+    private static final int BLOCK_MAX_TRIPLES = 6;
     /** 向量兜底识别的相似度下限。实测 0.5 太松：问"容器编排该用什么"会拉进"打印合成后的配置树"这种弱相关概念，
      *  而注入的每一条都会挤占模型上下文，宁缺毋滥。 */
     private static final double VECTOR_MIN_SCORE = 0.62;
@@ -536,6 +536,66 @@ public class KgGraphService {
         return retrievalBlock(question, Integer.MAX_VALUE);
     }
 
+    /**
+     * 这个问题是不是在**问关系**（决定要不要注入概念图谱）。
+     *
+     * <p>判据来自 A/B 实测（见 {@link #retrievalBlock} 的注释）：图谱块只在"关系型问题"上有信息量，
+     * 对常识型问题（"MQTT 适合什么场景"）既不改变答案、又白占上下文预算。
+     *
+     * @param conceptHits 精确识别到的概念个数
+     */
+    private static boolean asksRelation(String question, int conceptHits) {
+        if (conceptHits >= 2) {
+            return true;                     // 两个概念同时出现，问的多半就是它们之间的关系
+        }
+        for (String w : RELATION_WORDS) {
+            if (question.contains(w)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 出现这些词就认为用户在问关系（宁可多注入几题，也不要把关系题漏掉） */
+    private static final List<String> RELATION_WORDS = List.of(
+            "关系", "区别", "区别在哪", "不同", "差异", "易混", "混淆",
+            // "学前置知识"的几种常见问法：实测漏掉过"学 GC 之前要先掌握什么"
+            // （只有一个概念命中 + 不含"先学"，于是这条**前置知识**问题反而不注入图谱）
+            "先学", "先掌握", "要先", "该先", "前置", "之前要", "之前先",
+            "属于", "包含", "依赖");
+
+    /** 排序时优先展示的关系类型：定向、可推理、最能回答问题里那个"什么关系" */
+    private static final Set<String> VALUABLE_RELATIONS =
+            Set.of("prerequisite", "contrast_with", "is_a", "part_of");
+
+    /**
+     * 同一对实体只留一条边（对称关系两向注入是纯浪费）。
+     * <p>优先留**有原文证据**的那条；都没证据就留先遇到的（抽取边通常先于推导边）。
+     */
+    private static List<Map<String, Object>> dedupePairs(List<Map<String, Object>> lines) {
+        Map<String, Map<String, Object>> best = new LinkedHashMap<>();
+        for (Map<String, Object> m : lines) {
+            String a = String.valueOf(m.get("head"));
+            String b = String.valueOf(m.get("tail"));
+            String pair = a.compareTo(b) <= 0 ? a + "|" + b : b + "|" + a;
+            Map<String, Object> cur = best.get(pair);
+            if (cur == null) {
+                best.put(pair, m);
+                continue;
+            }
+            boolean curHasEvidence = hasEvidence(cur);
+            boolean newHasEvidence = hasEvidence(m);
+            if (!curHasEvidence && newHasEvidence) {
+                best.put(pair, m);
+            }
+        }
+        return new ArrayList<>(best.values());
+    }
+
+    private static boolean hasEvidence(Map<String, Object> m) {
+        return m.get("evidence") instanceof String s && !s.isBlank();
+    }
+
     /** 同上，带上下文预算（见 WikiService#retrievalBlock 里对"四路预算"的说明） */
     public String retrievalBlock(String question, int maxChars) {
         if (question == null || question.isBlank() || maxChars <= 0) {
@@ -551,6 +611,15 @@ public class KgGraphService {
         // 但实体描述太短、阈值不好标定，当前准确率不足以驱动注入。
         // 要重新启用，得先用"问题→概念"的标注集把它标定出来。
         if (hits.isEmpty()) {
+            return "";
+        }
+        // **只回答"关系型问题"**：一跳邻域不是通用的上下文增强。
+        // 2026-09-29 的 A/B 实测（12 题 × 开/关注入、同模型同 prompt）：关键短语命中 46/48 vs 45/48，
+        // 逐题 10 题无差异 —— 对"MQTT 适合什么场景"这类常识问题，注入既不改变答案、又白占预算。
+        // 所以只在问题**确实在问关系**时才注入：
+        //   ① 命中 ≥2 个概念（"JVM 和 JDK 是什么关系"）：块里的共同邻域与最短路径才是答案骨架；
+        //   ② 或问题里出现"关系 / 区别 / 易混 / 先学 / 属于 / 包含 / 依赖"这类关系词。
+        if (!asksRelation(question, hits.size())) {
             return "";
         }
         Map<String, KgNode> byId = index();
@@ -608,9 +677,14 @@ public class KgGraphService {
                 m.put("evidence", r.getEvidence());
                 m.put("sources", splitAliases(r.getSources()));
                 m.put("bridging", both);
+                m.put("rel", r.getRelation());
                 lines.add(m);
             }
         }
+        // **对称补齐边是零信息**：`A 易混 B` 与 `B 易混 A（推导）` 说的是同一件事，
+        // 两向都注入等于白占一半预算（实测 JVM/JDK 那题的块里有一半是这种补齐边）。
+        // 规则：同一对实体只留**有证据**的那条；两边都没证据（都是推导）时留正向那条。
+        lines = dedupePairs(lines);
         // 命中多个实体时，把两两之间最短路径的结论也算出来（这就是"多跳"回答的依据）
         List<Map<String, Object>> paths = new ArrayList<>();
         for (int i = 0; i < hits.size() && paths.size() < 3; i++) {
@@ -622,7 +696,11 @@ public class KgGraphService {
                 }
             }
         }
-        lines.sort(Comparator.comparing((Map<String, Object> m) -> !Boolean.TRUE.equals(m.get("bridging"))));
+        // 排序 = 信息量：① 两端都命中（多跳骨架）② 有原文证据的抽取边 ③ 高价值关系 ④ 其余
+        lines.sort(Comparator
+                .comparing((Map<String, Object> m) -> !Boolean.TRUE.equals(m.get("bridging")))
+                .thenComparing(m -> "derived".equals(m.get("origin")))
+                .thenComparing(m -> !VALUABLE_RELATIONS.contains(String.valueOf(m.get("rel")))));
         // 命中了实体但一条边都取不到 → 这一块没有信息量，不如不注入（避免模型对着空块瞎猜）
         if (lines.isEmpty() && paths.isEmpty()) {
             return "";

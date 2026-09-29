@@ -104,7 +104,7 @@ public class WikiService {
     private static final int RECENT_SOURCES = 5;
 
     /** 检索注入：最多几页、每页截多长 */
-    private static final int RAG_MAX_PAGES = 2;
+    private static final int RAG_MAX_PAGES = 1;
     private static final int RAG_EXCERPT = 600;
     private static final int RAG_MIN_SCORE = 3;
 
@@ -891,9 +891,11 @@ public class WikiService {
             if (n >= RAG_MAX_PAGES) {
                 break;
             }
+            // **只注入与问题最相关的那一段**，而不是文件头 600 字。
+            // 理由：整页是"这一主题的全貌"，问题往往只问其中一节；从头发截等于把
+            // "哪一段相关"的判断权交给模型，还可能正好截在无关段落上（页均 762 字、最长 4441 字）。
             String body = h.page().getContentMd().replaceAll("\\n{3,}", "\n\n").trim();
-            String piece = body.length() > RAG_EXCERPT
-                    ? body.substring(0, RAG_EXCERPT) + "…（完整内容见知识库 wiki 页）" : body;
+            String piece = bestExcerpt(body, terms);
             // 预算不够就停：宁可少注入一页，也不要挤掉后面的证据
             if (sb.length() + piece.length() > maxChars) {
                 break;
@@ -905,6 +907,34 @@ public class WikiService {
             return null;   // 一页都放不下 = 预算已耗尽，不注入空块
         }
         return sb.toString();
+    }
+
+    /**
+     * 从 wiki 正文里挑"与问题最相关的一段"。
+     *
+     * <p>按 Markdown 小节切分，逐段用与全局检索同一套词面打分（复用 {@code AgentService.score}），
+     * 取分最高的那一段并截到 {@link #RAG_EXCERPT} 字。
+     * <p>为什么不是"整页截前 600 字"：A/B 实测（12 题 × 开/关注入）里关键短语命中 46/48 vs 45/48，
+     * 逐题 10 题无差异 —— 说明"整页摘要"这种注入方式的信息密度不够（页均 762 字、最长 4441 字，
+     * 而问题通常只问其中一小节）。改成只给最相关的一段，才有机会让注入真正改变答案。
+     */
+    private String bestExcerpt(String body, List<String> terms) {
+        String[] paras = body.split("\\n(?=#{1,4}\\s)");
+        String best = null;
+        int bestScore = -1;
+        for (String p : paras) {
+            String t = p.trim();
+            if (t.isEmpty()) {
+                continue;
+            }
+            int s = AgentService.score(terms, null, t);
+            if (s > bestScore) {
+                bestScore = s;
+                best = t;
+            }
+        }
+        String piece = best == null || best.isEmpty() ? body : best;
+        return piece.length() > RAG_EXCERPT ? piece.substring(0, RAG_EXCERPT) + "…（完整内容见知识库 wiki 页）" : piece;
     }
 
     // ------------------------------------------------------------------
