@@ -59,6 +59,10 @@ public class SettingsController {
             Map.entry("vectorBackend", "kb.vector_backend"),
             Map.entry("milvusUri", "kb.milvus_uri"),
             Map.entry("milvusToken", "kb.milvus_token"),
+            // 精排后端：llm（列表重排，默认）/ cross（Cross-Encoder sidecar）+ 服务地址
+            Map.entry("rerankBackend", "kb.rerank_backend"),
+            Map.entry("rerankUrl", "kb.rerank_url"),
+            Map.entry("rerankSnippet", "kb.rerank_snippet"),
             Map.entry("autoRecompile", SettingsService.KEY_AUTO_RECOMPILE),
             Map.entry("modelForChat", SettingsService.modelForTaskKey("chat")),
             Map.entry("modelForWiki", SettingsService.modelForTaskKey("wiki")),

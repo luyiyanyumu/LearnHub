@@ -101,6 +101,21 @@ public class VectorController {
         return Result.ok(rerankService.status());
     }
 
+    /**
+     * 切换精排后端：{@code backend=llm|cross}。
+     * <p>{@code cross} 需要先起 sidecar（{@code python tools/rerank-server.py}，默认 8091）。
+     * 服务没起时不会报错，只是自动用 llm —— 状态里的 {@code active} 字段看得出来实际用了哪个。
+     */
+    @PostMapping("/rerank/backend")
+    public Result<Object> setRerankBackend(@RequestParam String backend) {
+        String b = backend == null ? "" : backend.trim().toLowerCase();
+        if (!b.isEmpty() && !"llm".equals(b) && !"cross".equals(b)) {
+            throw new IllegalArgumentException("backend 只能是 llm 或 cross");
+        }
+        settingsService.update(RerankService.SETTING_BACKEND, b);
+        return Result.ok(rerankService.status());
+    }
+
     // ---------------- 上下文嵌入开关（A/B 实测用） ----------------
 
     @GetMapping("/contextual")

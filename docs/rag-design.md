@@ -370,6 +370,79 @@ wiki 页平均只聚合 **1.9 条来源**（39 页里 29 页带「待补充」�
 对话不受影响；Milvus 不可用期间写入的向量只落在 MySQL，恢复后 `vector/sync` 补齐
 （`vector/status` 的 `consistent` 字段会显示漂移，**不允许悄悄不一致**）。
 
+---
+
+## 6.6 精排：有，但不是 Cross-Encoder（2026-09-29 补上 Cross-Encoder 并实测）
+
+**先说结论**：召回 Top-K 之后**确实有精排**，但原来的实现是 **LLM 列表重排（listwise）**，
+不是 Cross-Encoder —— 把候选（标题 + 120 字摘要）交给对话模型，让它输出 `{"order":[...]}`。
+2026-09-29 抽出了 `Reranker` 接口并接上真正的 Cross-Encoder，用**同一批 97 条用例**做了对照。
+
+| 精排后端 | 实现 | recall@5 | **MRR** | 97 条耗时 |
+| --- | --- | --- | --- | --- |
+| 关（基线） | — | 0.938 | 0.748 | 121s |
+| `llm` | `LlmListwiseReranker`：对话模型输出 order 数组 | 0.938 | **0.902** | 204s |
+| `cross` | `CrossEncoderReranker`：bge-reranker-base（278M，XLM-R）逐对打分 | 0.938 | **0.774** | 134s |
+
+**实测结论（与直觉相反，所以更值得记下来）**：完整矩阵（同一批 97 条用例，mode=fused）：
+
+| 精排配置 | recall@5 | **MRR** | 97 条耗时 |
+| --- | --- | --- | --- |
+| 关（基线） | 0.938 | 0.748 | 121s |
+| `llm` @ **本地 qwen3:8b**（当前配置） | 0.938 / 0.928（两次） | **0.759 / 0.743** | ~5 min |
+| `llm` @ deepseek-flash | 0.938 | **0.902** | 204s |
+| `cross` bge-reranker-base（120 字） | 0.938 | 0.774 | 134s |
+| `cross` bge-reranker-base（600 字） | 0.928 | 0.789 | 196s |
+| `cross` bge-reranker-v2-m3（120 字） | 0.928 | 0.822 | 184s |
+| `cross` bge-reranker-v2-m3（600 字） | 0.938 | **0.843** | 369s |
+
+三条结论：
+
+1. **最大的收益不在换架构，而在换模型**：重排任务现在指向**本地 qwen3:8b**，
+   两轮实测 MRR 0.759 / 0.743 —— 也就是"**几乎白干**"（其中一轮还低于不重排的 0.748）。
+   把它指向 deepseek-flash，同一批用例 MRR **0.902（+15.4pp）**。
+   重排这个活要的是"读得懂问题和候选的关系"，8B 本地模型做 listwise 排序明显不够。
+2. **Cross-Encoder 用对了模型才有意义**：`bge-reranker-base`（278M）只有 0.774，
+   而 `bge-reranker-v2-m3`（568M，多语言）到 **0.843** —— 同一套代码，只换模型 +13pp~7pp。
+   原因基本可以确定是**跨语言**：查询是中文口语、片段常是英文 PDF 正文，
+   base 版以英文语料为主，这类匹配是它的弱项。
+3. **候选文本长度对 cross 有用、对 listwise 有害**（所以做成了设置 `kb.rerank_snippet`）：
+   cross 从 120 → 600 字，v2-m3 是 0.822 → **0.843**；而 base 版 0.774 → 0.789。
+   listwise 那边文本越长提示词越挤，默认保持 120。
+
+**当前建议**：日常用 `llm` + **较强的云端模型**（0.902，每问多一次调用）；
+想省钱或离线时用 `cross` + v2-m3（0.843，完全本地、免费）。
+把重排指向本地 8B 是"省了钱但基本没效果"的组合，要么换模型、要么干脆关掉。
+
+
+**代码结构（照抄向量层那次的写法）**：
+
+```
+service/rerank/Reranker        接口：name / available / rerank / status
+ ├─ LlmListwiseReranker        （原 RerankService 的逻辑整体搬过来，行为未改）
+ └─ CrossEncoderReranker       （HTTP：POST /rerank，兼容 Jina/TEI/Cohere 形状）
+service/RerankService          门面：选后端 + 回退链 + 状态
+tools/rerank-server.py         sidecar：sentence-transformers CrossEncoder + 标准库 HTTP
+开关：kb.rerank_backend = llm（默认）| cross    地址：kb.rerank_url（默认 http://127.0.0.1:8091/rerank）
+```
+
+**回退链（门面存在的主要理由）**：选中的后端失败 → 换另一个 → 都失败 → **原顺序**。
+`cross` 探活失败（sidecar 没起）时 `active` 自动是 `llm`，状态里两个后端都报，
+一眼能看出"这次到底用哪个重排的"。实测：sidecar 没起时 `cross.healthy=false / active=llm`，
+检索照常（**不**每次白等一次连接超时 —— 这个坑在向量层踩过，这里一开始就规避了）。
+
+**为什么 sidecar 而不是 JVM 内嵌**：这台机器 **Maven Central 不通**（加不了 `onnxruntime` 之类依赖），
+而 Python 侧已有 torch 2.11+cpu / onnxruntime / tokenizers —— 起个九十来行的标准库 HTTP 服务是最短路径。
+
+**速度**：cross 打 3 条候选 158ms；97 条整轮 134s（含嵌入与召回），比 llm 那轮（204s，跑在云端
+deepseek-flash 上）还快；如果 llm 那轮用配置里的**本地 qwen3:8b**，97 条要**半小时以上**
+（实测 25 分钟没跑完）。所以 cross 现在买到的是"**快而稳**"，不是"更准"。
+
+**顺带记一个配置问题**：`ai.model_for_rerank` 原来指向 `f8c42ef9`，一个**已不存在的档案 id**
+（现有档案只有 dd32310c / 09e70120 / addd41a4）。`ModelRouting.forTask` 解析不到就落到默认，
+行为一直是对的（本地 Ollama），但配置本身悬空 —— 换模型时容易被它误导。
+
+
 ### 顺带补掉的两个生命周期缺陷
 
 1. **按来源删除**：以前资料/笔记删掉后，ANN 库里会留孤儿向量（检索命中但补不到正文，

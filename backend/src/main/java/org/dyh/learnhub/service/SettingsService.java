@@ -106,6 +106,8 @@ public class SettingsService {
                 // 向量后端（2026-09-29 加）：空/mysql = 全量扫描，milvus = ANN。
                 // 加开关的两个理由：Milvus 不可用时要能回退；两后端要在同一批用例上对比。
                 "kb.vector_backend", "kb.milvus_uri", "kb.milvus_token",
+                // 精排后端（2026-09-29 加）：llm（对话模型列表重排）| cross（Cross-Encoder sidecar）
+                "kb.rerank_backend", "kb.rerank_url", "kb.rerank_snippet",
                 // 当前激活的模型档案（模型配置已改为"档案列表"，各任务指向档案 id）
                 "ai.active_profile"));
         // 每个任务的"用哪个档案"键，全部从任务清单派生
