@@ -842,7 +842,7 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                         } else {
                             allRepeats = false;
                             try {
-                                result = dispatch(fn, argsRaw, events);
+                                result = dispatch(fn, argsRaw, events, sessionId, vo);
                             } catch (Exception e) {
                                 log.warn("工具 {} 执行失败: {}", fn, e.getMessage());
                                 result = "{\"ok\":false,\"error\":\"" + esc(e.getMessage()) + "\"}";
@@ -1247,12 +1247,26 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
         return out.toString();
     }
 
-    private String dispatch(String fn, String argsRaw, List<String> events) throws Exception {        JsonNode args = StringUtils.hasText(argsRaw) ? objectMapper.readTree(argsRaw) : objectMapper.createObjectNode();
+    private String dispatch(String fn, String argsRaw, List<String> events) throws Exception {
+        return dispatch(fn, argsRaw, events, null, null);
+    }
+
+    /**
+     * 同上，但把**会话与响应体**带进去。
+     *
+     * <p>为什么需要：{@code write_long_note} 要自己挂一张待确认卡片（它是"生成完再交给审批"，
+     * 而不是"把参数交给审批"），而挂完必须让界面看到 —— 卡片是通过 {@code vo.pendingActions} 回到前端的。
+     * 审批通过后的重放路径（{@code approveAction}）仍然用不带这两个参数的旧签名。
+     */
+    private String dispatch(String fn, String argsRaw, List<String> events, String sessionId, AiChatVO vo) throws Exception {
+        JsonNode args = StringUtils.hasText(argsRaw) ? objectMapper.readTree(argsRaw) : objectMapper.createObjectNode();
         switch (fn) {
             case "create_note":
                 return createNote(args, events);
             case "update_note":
                 return updateNote(args, events);
+            case "write_long_note":
+                return writeLongNote(args, events, sessionId, vo);
             case "append_to_note":
                 return appendToNote(args, events);
             case "query_notes":
@@ -1291,8 +1305,217 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
     }
 
     /** 创建笔记；支持 category_name 自动建分类 */
-    private String createNote(JsonNode args, List<String> events) {
+    // ------------------------------------------------------------------
+    // 长文写笔记：分段生成 → 拼成一篇 → 只挂一张确认卡片
+    // ------------------------------------------------------------------
+
+    /** 一节最多生成多少 token（约 2000 字）；再长就该拆成两节，而不是把一节写爆 */
+    private static final int LONG_NOTE_SECTION_TOKENS = 2500;
+    /** 一篇文章最多几节：再多就不是"一篇文章"了，应该拆成多篇 */
+    private static final int LONG_NOTE_MAX_SECTIONS = 12;
+
+    /** 大纲里认这几种小节写法：`## 名称` / `- 名称：要点` / `1. 名称` / `一、名称` */
+    private static final java.util.regex.Pattern OUTLINE_HEAD =
+            java.util.regex.Pattern.compile("^\\s*(?:#{1,4}\\s+|[-*+]\\s+|\\d+[.、)]\\s+|[一二三四五六七八九十]+[、.]\\s*)(.+)$");
+
+    /**
+     * 写长文进**一篇**笔记：逐节生成、拼起来，最后挂一张 {@code create_note} 待确认卡片。
+     *
+     * <h3>为什么要有这个工具</h3>
+     * 一次生成 2 万字必然被 max_tokens 截断（实测 16384 上限时正文只到 13724 token，
+     * 思考还要再占一截），结果是"半句话 + 参数非法"，用户想放进一篇笔记就只能手动一次次追加。
+     * 这里把"分段"这件事收进**一次工具调用**：
+     * <ul>
+     *   <li>每节一次独立的模型调用（思考关闭、上限 {@value #LONG_NOTE_SECTION_TOKENS} token），
+     *       单节永远不会撞到全局上限；</li>
+     *   <li>每节都带上"全文大纲 + 已写小节名"，避免重复与跑题；</li>
+     *   <li>拼好后**只挂一张卡片** —— 复用 create_note 的审批与执行路径，用户点一次就成一篇；</li>
+     *   <li>进度通过 events 回报（"已写 3/8 节…"），不是几分钟的静默。</li>
+     * </ul>
+     * 某一节失败不影响其它节（写一句占位，并提示可以重写这一节）。
+     */
+    private String writeLongNote(JsonNode args, List<String> events, String sessionId, AiChatVO vo) {
         String title = args.path("title").asText("").trim();
+        String outline = args.path("outline").asText("").trim();
+        if (!StringUtils.hasText(title) || !StringUtils.hasText(outline)) {
+            return "{\"ok\":false,\"error\":\"title 与 outline 都不能为空\"}";
+        }
+        if (!StringUtils.hasText(sessionId) || vo == null) {
+            return "{\"ok\":false,\"error\":\"缺少会话上下文，无法挂待确认卡片\"}";
+        }
+        ModelRouting.ModelTarget t = routing.forTask(ModelRouting.TASK_CHAT);
+        List<String[]> sections = parseOutline(outline);
+        if (sections.size() < 2) {
+            // 大纲是一坨没结构的文字：额外花一次调用把它拆成小节
+            sections = expandOutline(title, outline, t, events);
+        }
+        if (sections.size() > LONG_NOTE_MAX_SECTIONS) {
+            events.add("ℹ️ 大纲有 " + sections.size() + " 节，只写前 " + LONG_NOTE_MAX_SECTIONS
+                    + " 节（再多建议拆成多篇）");
+            sections = sections.subList(0, LONG_NOTE_MAX_SECTIONS);
+        }
+        StringBuilder doc = new StringBuilder("# ").append(title).append('\n');
+        List<String> done = new ArrayList<>();
+        int chars = 0;
+        int truncated = 0;
+        for (int i = 0; i < sections.size(); i++) {
+            String heading = sections.get(i)[0];
+            String points = sections.get(i)[1];
+            DeepSeekClient.ChatResult r = writeSection(title, outline, done, heading, points, t);
+            String body = r == null ? "" : r.message().path("content").asText("").trim();
+            if (r != null && r.truncated()) {
+                truncated++;
+                // 单节被截断：立刻重写一次，这次明确要求"压缩到上限内、必须写完"
+                DeepSeekClient.ChatResult retry = writeSection(title, outline, done, heading,
+                        points + "\n（注意：上一版超长被截断，请把这一节压缩到 2000 字以内，必须写完。）", t);
+                if (retry != null && StringUtils.hasText(retry.message().path("content").asText(""))) {
+                    body = retry.message().path("content").asText("").trim();
+                }
+            }
+            if (!StringUtils.hasText(body)) {
+                body = "（本节生成失败，可以对我说「重写「" + heading + "」」）";
+                events.add("⚠️ 第 " + (i + 1) + " 节「" + heading + "」生成失败");
+            }
+            doc.append("\n## ").append(heading).append("\n\n").append(body).append('\n');
+            done.add(heading);
+            chars += body.length();
+            events.add("✍️ 已写 " + (i + 1) + "/" + sections.size() + " 节：「" + heading
+                    + "」（累计约 " + chars + " 字）");
+        }
+        ObjectNode payload = objectMapper.createObjectNode();
+        payload.put("title", title);
+        payload.put("content", doc.toString());
+        String category = args.path("category_name").asText("").trim();
+        if (StringUtils.hasText(category)) {
+            payload.put("category_name", category);
+        }
+        try {
+            String argsJson = objectMapper.writeValueAsString(payload);
+            AgentPendingAction staged = sessionService.stageAction(sessionId, "create_note", argsJson,
+                    "创建笔记「" + title + "」（" + sections.size() + " 节 / 约 " + chars + " 字，分段生成）");
+            vo.getPendingActions().add(AgentSessionService.actionBrief(staged));
+            return "{\"ok\":true,\"staged\":true,\"action_id\":" + staged.getId()
+                    + ",\"sections\":" + sections.size() + ",\"chars\":" + chars
+                    + ",\"truncatedSections\":" + truncated
+                    + ",\"message\":\"长文已分段生成并拼成**一篇**，已提交给用户确认，尚未写入笔记。"
+                    + "请告诉用户：共 N 节约 M 字，请在下方卡片确认。不要说你已经写进笔记了。\"}";
+        } catch (Exception e) {
+            log.warn("长文挂待确认失败：{}", e.toString());
+            return "{\"ok\":false,\"error\":\"" + esc(e.getMessage()) + "\"}";
+        }
+    }
+
+    /** 大纲文字 → [[小节标题, 本节要点], ...] */
+    private static List<String[]> parseOutline(String outline) {
+        List<String[]> out = new ArrayList<>();
+        String cur = null;
+        StringBuilder points = new StringBuilder();
+        for (String raw : outline.split("\\R")) {
+            String line = raw.trim();
+            if (line.isEmpty()) {
+                continue;
+            }
+            java.util.regex.Matcher m = OUTLINE_HEAD.matcher(line);
+            if (m.matches()) {
+                if (cur != null) {
+                    out.add(new String[]{cur, points.toString().trim()});
+                }
+                String text = m.group(1).trim();
+                // `- 名称：要点` 这种写法：冒号前是节名、后面是本节要点
+                int cut = text.indexOf('：');
+                if (cut < 0) {
+                    cut = text.indexOf(':');
+                }
+                if (cut > 0 && cut < text.length() - 1) {
+                    cur = text.substring(0, cut).trim();
+                    points = new StringBuilder(text.substring(cut + 1).trim()).append('\n');
+                } else {
+                    cur = text;
+                    points = new StringBuilder();
+                }
+            } else if (cur != null) {
+                points.append(line).append('\n');
+            }
+        }
+        if (cur != null) {
+            out.add(new String[]{cur, points.toString().trim()});
+        }
+        return out;
+    }
+
+    /** 大纲没有结构时，花一次（便宜的）调用把它拆成小节；失败就退化成"整篇一节" */
+    private List<String[]> expandOutline(String title, String outline, ModelRouting.ModelTarget t,
+                                         List<String> events) {
+        try {
+            String system = "你是技术文档编辑。把用户给的文档大纲拆成 4~10 个小节，"
+                    + "只输出严格 JSON：{\"sections\":[{\"heading\":\"小节名\",\"points\":\"本节要点（可空）\"}]}，"
+                    + "不要输出 JSON 之外的内容。";
+            DeepSeekClient.ChatResult r = callModel(
+                    List.of(msg("system", system), msg("user", "文档标题：" + title + "\n大纲：\n" + outline)),
+                    t, 1200);
+            JsonNode arr = objectMapper.readTree(stripFence(r.message().path("content").asText("")))
+                    .path("sections");
+            List<String[]> out = new ArrayList<>();
+            for (JsonNode n : arr) {
+                String h = n.path("heading").asText("").trim();
+                if (StringUtils.hasText(h)) {
+                    out.add(new String[]{h, n.path("points").asText("").trim()});
+                }
+            }
+            if (out.size() >= 2) {
+                events.add("🗂 大纲已拆成 " + out.size() + " 节");
+                return out;
+            }
+        } catch (Exception e) {
+            log.warn("大纲拆分失败（按整篇一节处理）：{}", e.toString());
+        }
+        // 注意别写成 List.of(new String[]{...})：那是 varargs 与"单元素"的重载二义，
+        // javac 会给出很难读的报错（实测踩到）。显式构造 ArrayList 最清楚。
+        List<String[]> fallback = new ArrayList<>();
+        fallback.add(new String[]{"正文", outline});
+        return fallback;
+    }
+
+    /** 写其中一节：思考关闭、显式 token 上限，避免单节撞全局上限 */
+    private DeepSeekClient.ChatResult writeSection(String title, String outline, List<String> done,
+                                                  String heading, String points, ModelRouting.ModelTarget t) {
+        String system = "你是技术文档作者。现在为一篇长文档写**其中一节**。"
+                + "只输出这一节的正文 Markdown：不要写 `#` 文档标题、不要重复其它小节、不要前言与结语。";
+        StringBuilder user = new StringBuilder();
+        user.append("文档标题：").append(title).append('\n');
+        user.append("全文大纲：\n").append(outline).append('\n');
+        user.append("已写完的小节（不要重复其内容）：")
+            .append(done.isEmpty() ? "（无，这是第一节）" : String.join("、", done)).append('\n');
+        user.append("本次要写的小节：## ").append(heading).append('\n');
+        if (StringUtils.hasText(points)) {
+            user.append("这一节的要点：\n").append(points).append('\n');
+        }
+        user.append("要求：把要点展开写透（可以有子标题、列表、表格、代码），"
+                + "但**必须一次写完**；输出上限约 ").append(LONG_NOTE_SECTION_TOKENS)
+            .append(" token，宁可精炼也不要写到一半停住。");
+        try {
+            return callModel(List.of(msg("system", system), msg("user", user.toString())), t,
+                    LONG_NOTE_SECTION_TOKENS);
+        } catch (Exception e) {
+            log.warn("写「{}」失败：{}", heading, e.toString());
+            return null;
+        }
+    }
+
+    /** 长文分节专用调用：思考**关闭**（把预算全留给正文）、显式 token 上限、超时放宽 */
+    private DeepSeekClient.ChatResult callModel(List<?> messages, ModelRouting.ModelTarget t, int maxTokens)
+            throws Exception {
+        String thinking = client.thinkingOf(t.id());
+        // 机械型写作任务：思考开着只会吃掉本该给正文的 token（实测 400 token 全被思考用完、正文 0 字）
+        if (!"enabled".equalsIgnoreCase(thinking)) {
+            thinking = "disabled";
+        }
+        return client.chatFull(messages, null, t.baseUrl(), t.apiKey(), t.model(), maxTokens,
+                client.temperatureOf(t.id()), thinking,
+                t.separate() ? null : client.reasoningEffortOf(t.id()), Duration.ofSeconds(180));
+    }
+
+    private String createNote(JsonNode args, List<String> events) {        String title = args.path("title").asText("").trim();
         String content = args.path("content").asText("");
         if (!StringUtils.hasText(title)) {
             return "{\"ok\":false,\"error\":\"标题不能为空\"}";
@@ -2609,6 +2832,16 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                         param("note_id", "integer", "笔记 id", true),
                         param("title", "string", "新标题（不传则保留原标题）", false),
                         param("content", "string", "新 Markdown 正文（不传则保留原正文）", false))));
+        defs.add(tool("write_long_note",
+                "写**长文**（讲义 / 综述 / 多节文档）时用它：内部按大纲**逐节生成、再拼成一篇**完整笔记，"
+                + "最后只挂一张待确认卡片。"
+                + "为什么要这样：单次输出受 max_tokens 限制，一次写两万字必然在半句处被截断"
+                + "（实测 16384 上限时正文只到 13724 token，思考还占掉一部分）。"
+                + "想让内容更多就**多分几节**，而不是让某一节更长。",
+                List.of(
+                        param("title", "string", "笔记标题", true),
+                        param("outline", "string", "大纲：每行一节（`## 小节名` 或 `- 小节名：本节要点`），行内可跟本节要点", true),
+                        param("category_name", "string", "目标分类名（不存在会自动创建；可留空）", false))));
         defs.add(tool("append_to_note",
                 "把一段 Markdown **追加**到已有笔记末尾（原有内容一字不动）。"
                 + "**给笔记补充新章节时优先用它**，而不是 update_note 整篇重写 —— "
@@ -2617,8 +2850,7 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                 + "每次追加请控制在 4000 字以内；内容多就分多次调用。",
                 List.of(
                         param("note_id", "integer", "笔记 id", true),
-                        param("markdown", "string", "要追加的 Markdown 片段（≤4000 字）", true))));        defs.add(tool("query_notes",
-                "按关键词检索用户已有笔记，返回标题+摘要列表（不含全文）。回答前若想参考用户以前学过什么可以调用。",
+                        param("markdown", "string", "要追加的 Markdown 片段（≤4000 字）", true))));        defs.add(tool("query_notes",                "按关键词检索用户已有笔记，返回标题+摘要列表（不含全文）。回答前若想参考用户以前学过什么可以调用。",
                 List.of(param("keyword", "string", "检索关键词（可空，空则取最近笔记）", false))));
         defs.add(tool("search_knowledge",
                 "跨「笔记 + 速查卡」全库检索，返回带上下文片段的统一列表。回答用户提问前，若问题可能与用户已记录的知识相关（报错排查、命令用法、概念解释等），应优先调用本工具参考用户已有知识；需要某篇笔记全文时再用 get_note 跟进。",
