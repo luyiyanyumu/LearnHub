@@ -187,12 +187,30 @@ public class AgentSessionService {
 
     /** 追加一条事件（append-only），并顺带把会话的 updated_at 推到当前时间 */
     public void append(String sessionId, String role, String content, String toolName, String toolCallId) {
+        append(sessionId, role, content, toolName, toolCallId, null, null);
+    }
+
+    /**
+     * 同上，但把**token 用量与 finish_reason** 一起落库。
+     *
+     * <p>为什么值得存：{@code agent_event.tokens} 这一列以前一直是 NULL，
+     * 于是"回答是不是被输出上限截断了"这种问题**在库里查不到任何证据** ——
+     * 只能事后猜（实测被问过一次）。存下来之后，一条 SQL 就能回答：
+     * {@code SELECT id, tokens, finish_reason FROM agent_event WHERE finish_reason='length'}。
+     *
+     * @param tokens      本次输出 token 总数（含思考）；未知传 null
+     * @param finishReason {@code stop} / {@code length} / {@code tool_calls}；未知传 null
+     */
+    public void append(String sessionId, String role, String content, String toolName, String toolCallId,
+                       Integer tokens, String finishReason) {
         AgentEvent e = new AgentEvent();
         e.setSessionId(sessionId);
         e.setRole(role);
         e.setContent(content);
         e.setToolName(toolName);
         e.setToolCallId(toolCallId);
+        e.setTokens(tokens);
+        e.setFinishReason(finishReason);
         eventMapper.insert(e);
         sessionMapper.touch(sessionId);
     }

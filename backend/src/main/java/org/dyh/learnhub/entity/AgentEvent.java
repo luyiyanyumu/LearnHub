@@ -36,8 +36,15 @@ public class AgentEvent {
     /** 对应模型返回的 tool_call id（role=tool 时） */
     private String toolCallId;
 
-    /** 该轮 token 用量（接口返回 usage 时记录，可为空） */
+    /** 该轮 token 用量（含思考）；接口返回 usage 时记录，可为空 */
     private Integer tokens;
+
+    /**
+     * 最后一次调用的 finish_reason：{@code stop} / {@code length}（被 max_tokens 截断）/ {@code tool_calls}。
+     * <p>以前只打日志不落库，于是"这句话是不是被截断了"事后**无法回答**（实测被问过一次）；
+     * 落库之后一条 SQL 就能列出所有被截断的回答。
+     */
+    private String finishReason;
 
     private LocalDateTime createdAt;
 }

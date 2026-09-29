@@ -98,7 +98,8 @@ CREATE TABLE IF NOT EXISTS agent_event (
     content       MEDIUMTEXT  NULL COMMENT '文本内容（assistant 存最终回复，summary 存压缩摘要）',
     tool_name     VARCHAR(64) NULL COMMENT '工具名（role=tool 时）',
     tool_call_id  VARCHAR(64) NULL COMMENT '对应模型返回的 tool_call id',
-    tokens        INT         NULL COMMENT '该轮 token 用量（接口返回 usage 时记录）',
+    tokens        INT         NULL COMMENT '该轮 token 用量（含思考；接口返回 usage 时记录）',
+    finish_reason VARCHAR(16) NULL COMMENT 'stop/length（被 max_tokens 截断）/tool_calls；用于事后查哪条回答被截断了',
     created_at    DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     KEY idx_agent_event_session (session_id, id)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT ='智能体会话事件';
@@ -389,6 +390,18 @@ PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS
            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'model_profile' AND COLUMN_NAME = 'max_tokens');
 SET @ddl := IF(@c = 0, 'ALTER TABLE model_profile ADD COLUMN max_tokens INT NULL COMMENT ''输出上限；空=跟随全局'' AFTER note', 'SELECT 1');
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- =====================================================================
+-- 10) agent_event 记录 finish_reason（2026-09-29 新增）
+--     背景：回答被 max_tokens 截断时只在后端日志里 warn 一行，日志一滚就无从考证 ——
+--     实测被用户问过一次"是不是达到最大字数了"，只能靠事后算 token 数去倒推。
+--     落库之后一条 SQL 就能列出来：
+--       SELECT id, tokens, finish_reason FROM agent_event WHERE finish_reason = 'length';
+-- =====================================================================
+SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS
+           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'agent_event' AND COLUMN_NAME = 'finish_reason');
+SET @ddl := IF(@c = 0, 'ALTER TABLE agent_event ADD COLUMN finish_reason VARCHAR(16) NULL COMMENT ''stop/length（被 max_tokens 截断）/tool_calls'' AFTER tokens', 'SELECT 1');
 PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS

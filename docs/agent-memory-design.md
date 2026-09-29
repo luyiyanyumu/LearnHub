@@ -103,6 +103,33 @@ user      ：本轮用户输入
 
 ---
 
+## 4.5 输出上限与"截断可见"（2026-09-29 补）
+
+**问题**：回答在句子中间断掉，用户完全不知道原因。实测被问过一次"是不是达到最大字数了" ——
+当时**库里查不到任何证据**：`finish_reason` 只用来打一行日志（日志一滚就没了），
+`agent_event.tokens` 列一直是 NULL。事后只能把那条回答导出来、用 DeepSeek 分词器数字数倒推。
+
+**机制（实测确认，容易踩）**：**思考（thinking）的 token 与正文共享 `max_tokens`**。
+用 `max_tokens=400` 直接打 API 验证：`completion_tokens=399`、`reasoning_tokens=399`、**正文 0 字**
+—— 400 个 token 全被思考吃掉了。所以"正文没写多少却撞上限"通常是思考在吃预算，
+而不是正文太长（那次 16384 上限的回答：正文 13724 token + 思考约 2660 token = 正好 16384）。
+
+**现在怎么做**：
+
+| 环节 | 做法 |
+| --- | --- |
+| 返回值 | `DeepSeekClient.chatFull()` 把 `finish_reason` 与 `usage`（含 `reasoning_tokens`）带回调用方；`chat()` 仍是它的薄封装 |
+| 对用户 | `finish_reason=length` 时在回答末尾附一句：输出多少 token、其中思考占多少、可以说「继续」；
+思考吃光预算时直接点明"正文还没开始写" |
+| 对接口 | `AiChatVO.truncated / finishReason / completionTokens / reasoningTokens`（机器可读，界面可做徽标） |
+| 对排查 | `agent_event` 新增 `finish_reason` 列并写入 `tokens` —— `SELECT id, tokens, finish_reason FROM agent_event WHERE finish_reason='length'` 一条 SQL 列出所有被截断的回答 |
+| 默认预算 | `ai.max_tokens` 16384 → **32768**：长文任务（"整理一份讲义"）实测需要 ~16400，原值刚好卡死 |
+
+**为什么默认值不是"越大越好"**：只按实际生成付费，调大不额外花钱；但一次吐三万字既慢又难读，
+真正的长文场景更适合**分段产出并落到笔记里**（agent 本来就有 create_note / append_to_note）。
+
+---
+
 ## 5. 记忆的三层（对照 DSH 之类 agent runtime 的分层）
 
 | 层 | 本项目的实现 | 对应 DSH 的机制 |

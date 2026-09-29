@@ -193,8 +193,9 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
 
         try {
             long remain = ROUND_BUDGET_MS;
-            JsonNode reply = chatOnce(List.of(msg("system", system), msg("user", user.toString())), null, true,
+            DeepSeekClient.ChatResult replyResult = chatOnce(List.of(msg("system", system), msg("user", user.toString())), null, true,
                     Duration.ofMillis(remain));
+            JsonNode reply = replyResult.message();
             String result = reply.path("content").asText("").trim();
             if (!StringUtils.hasText(result)) {
                 throw new IllegalStateException("AI 未返回有效内容，请稍后重试");
@@ -295,8 +296,9 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                         : "【这是全文的第 " + (i + 1) + "/" + chunks.size()
                           + " 段，请只处理本段，保持与原文相同的详略程度，不要写任何说明文字】\n\n" + part;
                 // 只给这一块「剩余预算」，避免单次调用把整轮时间吃光
-                JsonNode reply = chatOnce(List.of(msg("system", system), msg("user", userText)), null, true,
+                DeepSeekClient.ChatResult replyResult2 = chatOnce(List.of(msg("system", system), msg("user", userText)), null, true,
                         Duration.ofMillis(remain));
+                JsonNode reply = replyResult2.message();
                 String content = reply.path("content").asText("");
                 if (!StringUtils.hasText(content)) {
                     throw new IllegalStateException("AI 未返回有效内容，请稍后重试");
@@ -537,7 +539,7 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
      *                   却要多花 3-4 倍时间，所以只有用户「显式开启」思考时才开启；
      *                   「自动/关闭」一律走非思考快速通道（更快，且温度参数重新生效）。
      */
-    private JsonNode chatOnce(List<?> messages, List<?> tools, boolean mechanical) throws Exception {
+    private DeepSeekClient.ChatResult chatOnce(List<?> messages, List<?> tools, boolean mechanical) throws Exception {
         return chatOnce(messages, tools, mechanical, DeepSeekClient.DEFAULT_TIMEOUT);
     }
 
@@ -546,7 +548,8 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
      *
      * @param timeout 本次 HTTP 请求的超时上限
      */
-    private JsonNode chatOnce(List<?> messages, List<?> tools, boolean mechanical, Duration timeout) throws Exception {
+    private DeepSeekClient.ChatResult chatOnce(List<?> messages, List<?> tools, boolean mechanical,
+                                               Duration timeout) throws Exception {
         return chatOnce(messages, tools, mechanical, timeout, null);
     }
 
@@ -555,8 +558,8 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
      *
      * @param profileId 会话指定的档案 id；null = 按分工表里"对话问答"这一项走
      */
-    private JsonNode chatOnce(List<?> messages, List<?> tools, boolean mechanical, Duration timeout,
-                              String profileId) throws Exception {
+    private DeepSeekClient.ChatResult chatOnce(List<?> messages, List<?> tools, boolean mechanical, Duration timeout,
+                                               String profileId) throws Exception {
         ModelRouting.ModelTarget t = profileId == null || profileId.isBlank()
                 ? routing.forTask(ModelRouting.TASK_CHAT)
                 : routing.forProfile(profileId);
@@ -565,7 +568,7 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
             thinking = "disabled";
         }
         // 换了服务端就不要带 DeepSeek 专有的思考参数（本地/第三方不认）
-        return client.chat(messages, tools, t.baseUrl(), t.apiKey(), t.model(),
+        return client.chatFull(messages, tools, t.baseUrl(), t.apiKey(), t.model(),
                 client.maxTokensOf(t.id()), client.temperatureOf(t.id()), thinking,
                 t.separate() ? null : client.reasoningEffortOf(t.id()), timeout);
     }
@@ -772,6 +775,8 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
         try {
             boolean outOfTime = false;
             int toolCallsTotal = 0;
+            /** 最终答案那次调用的 finish_reason 与 token 用量 —— 用来判断"是不是被输出上限截断了" */
+            DeepSeekClient.ChatResult finalResult = null;
             // 本轮模型吐出的**思考过程**（thinking 模型返回的 reasoning_content）。
             // 以前这里只取 content，思考内容直接被丢掉 —— 用户看到的是"模型突然给出结论"，
             // 而中间那些"先查什么、为什么这么判断"全没了。现在按轮收起来，随回答一起回给界面。
@@ -788,7 +793,8 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                     log.warn("对话超出 {}s 预算，在第 {} 轮提前收尾", ROUND_BUDGET_MS / 1000, round);
                     break;
                 }
-                JsonNode message = chatOnce(messages, tools, false, Duration.ofMillis(remain), chatProfile);
+                DeepSeekClient.ChatResult once = chatOnce(messages, tools, false, Duration.ofMillis(remain), chatProfile);
+                JsonNode message = once.message();
                 collectReasoning(think, message);
                 JsonNode toolCalls = message.path("tool_calls");
                 if (toolCalls.isArray() && !toolCalls.isEmpty()) {
@@ -863,6 +869,7 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                 } else {
                     // 没有 tool_calls → 收尾
                     vo.setReply(message.path("content").asText("").trim());
+                    finalResult = once;
                     break;
                 }
             }
@@ -877,11 +884,14 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                             + "请明确请用户到下方卡片上确认或取消；若信息确实不足，就直接说明缺什么。）"));
                     messages.addAll(noTools);
                     long remain = Math.max(MIN_STEP_BUDGET_MS, deadline - System.currentTimeMillis());
-                    JsonNode finalMsg = chatOnce(messages, null, false, Duration.ofMillis(remain), chatProfile);
+                    DeepSeekClient.ChatResult finalOnce = chatOnce(messages, null, false,
+                            Duration.ofMillis(remain), chatProfile);
+                    JsonNode finalMsg = finalOnce.message();
                     collectReasoning(think, finalMsg);
                     String text = finalMsg.path("content").asText("").trim();
                     if (StringUtils.hasText(text)) {
                         vo.setReply(text);
+                        finalResult = finalOnce;
                     }
                 } catch (Exception e) {
                     log.warn("收尾回答失败：{}", e.getMessage());
@@ -901,6 +911,27 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
             }
             if (outOfTime) {
                 reply = reply + "\n\n（本轮已达到时间上限，AI 提前收尾；如需继续，请再发一条消息。）";
+            }
+            // **输出被 max_tokens 截断时必须说出来**。以前这里只打一行日志，用户看到的是
+            // "回答在句子中间断了"，完全不知道为什么（实测被问过一次"是不是达到最大字数了"）。
+            // 注意：思考（thinking）的 token 与正文**共享** max_tokens —— 所以"正文没写多少却撞上限"
+            // 通常是思考吃掉了预算（实测 max_tokens=400 时 399 个 token 全归思考，正文 0 字）。
+            if (finalResult != null && finalResult.truncated()) {
+                vo.setTruncated(true);
+                vo.setFinishReason(finalResult.finishReason());
+                vo.setCompletionTokens(finalResult.completionTokens());
+                vo.setReasoningTokens(finalResult.reasoningTokens());
+                boolean thinkingAteAll = finalResult.completionTokens() > 0
+                        && finalResult.reasoningTokens() >= finalResult.completionTokens();
+                reply = reply + "\n\n（本次回答达到输出上限（max_tokens）被截断：本次输出 "
+                        + finalResult.completionTokens() + " token，其中思考占 "
+                        + finalResult.reasoningTokens() + " token。"
+                        + (thinkingAteAll ? "**思考就用光了全部预算，正文还没开始写**；" : "")
+                        + "可以说「继续」让我接着写，或在设置里调大「最大输出 token」。）";
+            } else if (finalResult != null) {
+                vo.setFinishReason(finalResult.finishReason());
+                vo.setCompletionTokens(finalResult.completionTokens());
+                vo.setReasoningTokens(finalResult.reasoningTokens());
             }
             vo.setReply(reply);
             // ② 答案级校验：核对回答有没有超出本轮注入的证据。
@@ -930,8 +961,11 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                 sessionService.append(sessionId, AgentSessionService.ROLE_REASONING, think.toString(), null, null);
                 vo.setReasoning(think.toString());
             }
-            // 最终回复落库：下一次请求的投影就靠它把上下文接起来
-            sessionService.append(sessionId, AgentSessionService.ROLE_ASSISTANT, reply, null, null);
+            // 最终回复落库：下一次请求的投影就靠它把上下文接起来。
+            // 顺带存 token 用量与 finish_reason —— 这样"回答是不是被截断了"以后一条 SQL 可查。
+            sessionService.append(sessionId, AgentSessionService.ROLE_ASSISTANT, reply, null, null,
+                    finalResult == null ? null : finalResult.completionTokens(),
+                    finalResult == null ? null : finalResult.finishReason());
             return vo;
         } catch (IllegalStateException e) {
             throw e;
@@ -994,7 +1028,7 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
             long timeout = Math.min(remain, 60_000); // 压缩是机械任务，给 60s 上限就够
             JsonNode reply = chatOnce(
                     List.of(msg("system", COMPACT_SYSTEM), msg("user", userMsg.toString())),
-                    null, true, Duration.ofMillis(timeout));
+                    null, true, Duration.ofMillis(timeout)).message();
             text = reply.path("content").asText("").trim();
             if (!StringUtils.hasText(text)) {
                 text = extractiveDigest(pending);

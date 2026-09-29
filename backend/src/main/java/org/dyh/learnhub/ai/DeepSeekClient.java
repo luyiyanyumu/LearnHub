@@ -443,6 +443,37 @@ public class DeepSeekClient {
                          int maxTokens, double temperature,
                          String thinking, String reasoningEffort,
                          Duration timeout) throws Exception {
+        return chatFull(messages, tools, baseUrl, apiKey, model, maxTokens, temperature,
+                thinking, reasoningEffort, timeout).message();
+    }
+
+    /**
+     * 一次调用的完整结果。
+     *
+     * <p>为什么需要它：{@code finish_reason} 与 token 用量以前只用来打一行日志 ——
+     * 于是"回答看起来少了半句"这种问题**在库里查不到任何证据**（只能靠事后猜，
+     * 实测就被问过一次"是不是达到最大字数了"）。把它们带回调用方，
+     * 才能给用户一句明确提示、并落库备查。
+     *
+     * @param finishReason      {@code stop} / {@code length}（截断）/ {@code tool_calls}
+     * @param completionTokens  本次输出 token 总数（**含思考**）
+     * @param reasoningTokens   其中被思考用掉的 token —— 它和正文共享 max_tokens，
+     *                          所以"正文没写多少却撞上限"通常就是它在吃预算（实测：max_tokens=400 时
+     *                          399 个 token 全归思考，正文 0 字）
+     */
+    public record ChatResult(JsonNode message, String finishReason, int completionTokens, int reasoningTokens) {
+        /** 是否因为达到 max_tokens 被截断 */
+        public boolean truncated() {
+            return "length".equals(finishReason);
+        }
+    }
+
+    /** 与 {@link #chat} 同参数，但把 finish_reason 与 token 用量一起返回 */
+    public ChatResult chatFull(List<?> messages, List<?> tools,
+                               String baseUrl, String apiKey, String model,
+                               int maxTokens, double temperature,
+                               String thinking, String reasoningEffort,
+                               Duration timeout) throws Exception {
         String payload = objectMapper.writeValueAsString(
                 buildBody(messages, tools, baseUrl, model, maxTokens, temperature, thinking, reasoningEffort, false));
         HttpRequest request = HttpRequest.newBuilder()
@@ -470,12 +501,18 @@ public class DeepSeekClient {
             throw new RuntimeException("AI 服务返回格式异常");
         }
         String finish = choice.path("finish_reason").asText("");
+        JsonNode usage = root.path("usage");
+        int completion = usage.path("completion_tokens").asInt(0);
+        int reasoning = usage.path("completion_tokens_details").path("reasoning_tokens").asInt(0);
         if ("length".equals(finish)) {
-            log.warn("AI 输出被 max_tokens={} 截断，建议调大设置里的最大输出 token", maxTokens);
+            log.warn("AI 输出被 max_tokens={} 截断（输出 {} token，其中思考 {} token），"
+                            + "建议调大设置里的最大输出 token",
+                    maxTokens, completion, reasoning);
         }
-        log.info("AI 请求完成 cost={}ms 模型={} 消息数={} 思考={} finish={}",
-                cost, model, messages.size(), isThinkingOn(model, thinking) ? "on" : "off", finish);
-        return message;
+        log.info("AI 请求完成 cost={}ms 模型={} 消息数={} 思考={} finish={} tokens={}(思考 {})",
+                cost, model, messages.size(), isThinkingOn(model, thinking) ? "on" : "off",
+                finish, completion, reasoning);
+        return new ChatResult(message, finish, completion, reasoning);
     }
 
     private String truncate(String s, int max) {

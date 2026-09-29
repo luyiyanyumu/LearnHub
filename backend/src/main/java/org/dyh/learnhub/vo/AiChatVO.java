@@ -55,4 +55,23 @@ public class AiChatVO {
      * 把核对结论亮出来，用户才知道这句回答是"你记过的"还是"它自己补的"。
      */
     private Map<String, Object> grounding;
+
+    /**
+     * 本次回答是否因为**达到输出上限（max_tokens）被截断**。
+     * <p>存在的理由：截断以前只写在后端日志里，用户看到"回答在句子中间断了"却无从判断；
+     * 更要紧的是「保存为笔记」会把一份残缺内容存下来。回答正文里也会附一句说明，
+     * 这个字段是给界面/接口用的机器可读版本。
+     * <p>注意：思考（thinking）的 token 与正文**共享** max_tokens，
+     * 所以 {@code completionTokens - reasoningTokens} 才是正文实际能用的量。
+     */
+    private boolean truncated;
+
+    /** 最后一次调用的 finish_reason：{@code stop} / {@code length}（截断）/ {@code tool_calls} */
+    private String finishReason;
+
+    /** 本次输出 token 总数（含思考） */
+    private Integer completionTokens;
+
+    /** 其中被思考用掉的 token */
+    private Integer reasoningTokens;
 }
