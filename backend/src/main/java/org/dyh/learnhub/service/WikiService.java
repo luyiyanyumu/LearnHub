@@ -103,9 +103,20 @@ public class WikiService {
     /** 影响分析看几条最近变更的素材 */
     private static final int RECENT_SOURCES = 5;
 
-    /** 检索注入：最多几页、每页截多长 */
-    private static final int RAG_MAX_PAGES = 1;
-    private static final int RAG_EXCERPT = 600;
+    /**
+     * 检索注入：最多几页、块的门槛分。
+     * <p>注入的**内容形态**在 2026-09-29 改过：从"整页摘要/最相关一段"（{@code RAG_EXCERPT} 字）
+     * 改成"目录 + 缺口"（{@link #indexEntry}，约 100~200 字）—— 详见该方法的注释。
+     * <p>页数从 1 放回 2 是同一批实测的副产品：近重复主题（`MQTT` / `MQTT协议`）会让
+     * 问题**正好命中那个没有「待补充」的页**，缺口信息就丢了；两条目录条目一共 250~350 字，
+     * 仍比原来一页 600 字的摘要便宜。主题去重（合并近重复页）是更根本的修法，见 rag-design §2.5。
+     */
+    private static final int RAG_MAX_PAGES = 2;
+    /** 「待补充」里最多列几条缺口、每条截多长 */
+    private static final int RAG_GAP_ITEMS = 4;
+    private static final int RAG_GAP_ITEM_CHARS = 40;
+    /** 目录里最多列几个小节名 */
+    private static final int RAG_SECTIONS = 6;
     private static final int RAG_MIN_SCORE = 3;
 
     private final NoteService noteService;
@@ -869,10 +880,12 @@ public class WikiService {
         record Scored(WikiPage page, int score) {
         }
         List<Scored> hits = new ArrayList<>();
+        int totalPages = 0;
         for (WikiPage p : pages) {
             if (!StringUtils.hasText(p.getContentMd())) {
                 continue;
             }
+            totalPages++;
             int s = AgentService.score(terms, p.getTitle(), p.getContentMd());
             if (s >= RAG_MIN_SCORE) {
                 hits.add(new Scored(p, s));
@@ -881,27 +894,63 @@ public class WikiService {
         if (hits.isEmpty()) {
             return null;
         }
-        hits.sort(Comparator.comparingInt(Scored::score).reversed());
+        // 排序：**标题命中优先** → 分数 → 短的在前。
+        // 为什么标题优先不能少：长页靠词频就能压过对症的短页。实测问"关于 MQTT，我的知识库里还缺
+        // 哪些关键点？"，注入的是 AI Agent / Docker 两个长页（各 7 分），**MQTT 页根本没进去**，
+        // 模型于是声称"索引里没有 MQTT 页"——其实有（517 字、还带着待补充清单）。
+        // 排序失当会直接制造幻觉，这已经不是排序好不好看的问题。
+        hits.sort(Comparator
+                .comparing((Scored h) -> !titleHit(terms, h.page().getTitle()))
+                .thenComparing(Comparator.comparingInt(Scored::score).reversed())
+                .thenComparingInt(h -> h.page().getContentMd().length()));
 
-        StringBuilder sb = new StringBuilder();
-        sb.append("【你自己知识库的 wiki 摘要】这是你之前让系统按主题整理过的内容，比零散笔记更完整；")
-          .append("优先参考它，需要原文时用 get_note / list_quick_refs。\n");
-        int n = 0;
+        List<String> entries = new ArrayList<>();
+        int used = 0;
         for (Scored h : hits) {
-            if (n >= RAG_MAX_PAGES) {
+            if (entries.size() >= RAG_MAX_PAGES) {
                 break;
             }
-            // **只注入与问题最相关的那一段**，而不是文件头 600 字。
-            // 理由：整页是"这一主题的全貌"，问题往往只问其中一节；从头发截等于把
-            // "哪一段相关"的判断权交给模型，还可能正好截在无关段落上（页均 762 字、最长 4441 字）。
-            String body = h.page().getContentMd().replaceAll("\\n{3,}", "\n\n").trim();
-            String piece = bestExcerpt(body, terms);
-            // 预算不够就停：宁可少注入一页，也不要挤掉后面的证据
-            if (sb.length() + piece.length() > maxChars) {
+            String entry = indexEntry(h.page());
+            // 预算不够就停：宁可少注入一页，也不要挤掉后面的证据（表头约 200 字，先扣掉）
+            if (used + entry.length() + 200 > maxChars) {
+                break;
+            }
+            entries.add(entry);
+            used += entry.length();
+        }
+        if (entries.isEmpty()) {
+            return null;   // 一页都放不下 = 预算已耗尽，不注入空块
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("【知识库 wiki 索引】同一主题的记录已被整理成页面 —— 这里**只给目录与缺口**，")
+          .append("正文请用 get_note / get_file 取原文，不要把这当成素材内容。")
+          .append("若回答涉及下面「待补充」里的点，请明确说明「你的知识库里没有记这一点」，再考虑是否另说标准知识。");
+        // **必须给分母**：只列命中的前几页，不等于知识库只有这几页。少了这句，模型会把
+        // 局部目录当全集（实测就这么编出过"没有 MQTT 页"）。
+        sb.append("本次命中的 ").append(entries.size()).append(" 页（知识库共 ").append(totalPages)
+          .append(" 页）；**没列出的主题不代表知识库里没有**，完整清单见知识库页。\n");
+        entries.forEach(sb::append);
+        return sb.toString();
+    }
+
+    /** 问题里的检索词有没有出现在页标题上（最可靠的相关性信号） */
+    private static boolean titleHit(List<String> terms, String title) {
+        String t = title == null ? "" : title.toLowerCase();
+        for (String term : terms) {
+            if (term.length() >= 2 && t.contains(term.toLowerCase())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 把一页 wiki 压成"目录 + 缺口"条目（约 100~200 字）。
+            if (sb.length() + entry.length() > maxChars) {
                 break;
             }
             n++;
-            sb.append("\n【").append(h.page().getTitle()).append("】\n").append(piece).append('\n');
+            sb.append(entry);
         }
         if (n == 0) {
             return null;   // 一页都放不下 = 预算已耗尽，不注入空块
@@ -910,31 +959,130 @@ public class WikiService {
     }
 
     /**
-     * 从 wiki 正文里挑"与问题最相关的一段"。
+     * 注入探针：返回"这个问题会注入什么 wiki 块"（不调模型）。
      *
-     * <p>按 Markdown 小节切分，逐段用与全局检索同一套词面打分（复用 {@code AgentService.score}），
-     * 取分最高的那一段并截到 {@link #RAG_EXCERPT} 字。
-     * <p>为什么不是"整页截前 600 字"：A/B 实测（12 题 × 开/关注入）里关键短语命中 46/48 vs 45/48，
-     * 逐题 10 题无差异 —— 说明"整页摘要"这种注入方式的信息密度不够（页均 762 字、最长 4441 字，
-     * 而问题通常只问其中一小节）。改成只给最相关的一段，才有机会让注入真正改变答案。
+     * <p>存在的理由与图谱的 {@code /api/kg/concept/recognize} 一样：注入是"看不见的输入"，
+     * 没有探针就只能靠跑一次对话反推 —— 而判断"目录 + 缺口"这类改动值不值，
+     * 第一步是能直接看到块内容。
+     *
+     * @return {question, block, chars, hits:[{title, score, quality, itemCount, gaps}]}
      */
-    private String bestExcerpt(String body, List<String> terms) {
-        String[] paras = body.split("\\n(?=#{1,4}\\s)");
-        String best = null;
-        int bestScore = -1;
-        for (String p : paras) {
-            String t = p.trim();
-            if (t.isEmpty()) {
+    public Map<String, Object> probe(String question, int maxChars) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("question", question);
+        String block = retrievalBlock(question, maxChars);
+        out.put("block", block);
+        out.put("chars", block == null ? 0 : block.length());
+        List<String> terms = AgentService.retrievalTerms(question);
+        List<Map<String, Object>> hits = new ArrayList<>();
+        int totalPages = 0;
+        for (WikiPage p : mapper.selectList(Wrappers.<WikiPage>lambdaQuery().isNotNull(WikiPage::getContentMd))) {
+            if (!StringUtils.hasText(p.getContentMd())) {
                 continue;
             }
-            int s = AgentService.score(terms, null, t);
-            if (s > bestScore) {
-                bestScore = s;
-                best = t;
+            totalPages++;
+            int s = AgentService.score(terms, p.getTitle(), p.getContentMd());
+            if (s >= RAG_MIN_SCORE) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("title", p.getTitle());
+                m.put("score", s);
+                m.put("titleHit", titleHit(terms, p.getTitle()));
+                m.put("quality", p.getQuality());
+                m.put("itemCount", p.getItemCount());
+                m.put("gaps", gapItems(p.getContentMd()));
+                hits.add(m);
             }
         }
-        String piece = best == null || best.isEmpty() ? body : best;
-        return piece.length() > RAG_EXCERPT ? piece.substring(0, RAG_EXCERPT) + "…（完整内容见知识库 wiki 页）" : piece;
+        // 与真实注入**同一套排序**，否则探针显示的"会注入什么"和行为不一致
+        hits.sort(Comparator
+                .comparing((Map<String, Object> m) -> !Boolean.TRUE.equals(m.get("titleHit")))
+                .thenComparing(m -> -(int) m.get("score")));
+        out.put("totalPages", totalPages);
+        out.put("hits", hits);
+        return out;
+    }
+
+    /** 小节标题（## / ### / ####） */
+    private static final java.util.regex.Pattern SECTION_HEAD =
+            java.util.regex.Pattern.compile("(?m)^#{2,4}\\s+(.+?)\\s*$");
+
+    /**
+     * 把一页 wiki 压成"目录 + 缺口"条目（约 100~200 字）。
+     *
+     * <h3>为什么不注入正文摘要</h3>
+     * 2026-09-29 的 A/B 实测：注入整页摘要（→ 后来改的"最相关一段"）对答案关键短语命中**没有影响**
+     * （关 46/48 vs 开 45/48，逐题 10 题无差异）。机制上说得通 —— 页均只聚合 **1.9 条来源**，
+     * 内容与同一轮召回的原文 chunk 高度重复，等于"同一份信息的第三种写法"。
+     *
+     * <h3>为什么"目录 + 缺口"才可能有增量</h3>
+     * 这两样东西**chunk 里没有、模型自己也不可能知道**：
+     * <ul>
+     *   <li><b>目录</b>：这个主题由哪几条记录构成、分了哪几个小节（"我库里有什么"）；</li>
+     *   <li><b>缺口</b>：{@code ## 待补充} 里列的、素材**明确没记**的点（"我库里没什么"）。
+     *       有了它，模型才能把"你记的"与"我知道的"分开说 —— 这是 wiki 相对三路文本检索唯一的增量。</li>
+     * </ul>
+     */
+    private String indexEntry(WikiPage p) {
+        String body = p.getContentMd() == null ? "" : p.getContentMd();
+        StringBuilder sb = new StringBuilder();
+        sb.append("\n· ").append(p.getTitle())
+          .append("（来源 ").append(p.getItemCount() == null ? 1 : p.getItemCount()).append(" 条");
+        if (StringUtils.hasText(p.getQuality())) {
+            sb.append("；质量 ").append(p.getQuality());
+        }
+        sb.append("）\n");
+        List<String> sections = new ArrayList<>();
+        java.util.regex.Matcher m = SECTION_HEAD.matcher(body);
+        while (m.find()) {
+            String t = m.group(1).trim();
+            if (!"待补充".equals(t)) {
+                sections.add(t);
+            }
+        }
+        if (!sections.isEmpty()) {
+            int max = Math.min(sections.size(), RAG_SECTIONS);
+            sb.append("  小节：").append(String.join(" / ", sections.subList(0, max)))
+              .append(sections.size() > max ? " …" : "").append('\n');
+        }
+        List<String> gaps = gapItems(body);
+        if (!gaps.isEmpty()) {
+            sb.append("  待补充（素材里明确没记）：").append(String.join("；", gaps)).append('\n');
+        }
+        return sb.toString();
+    }
+
+    /** 取 {@code ## 待补充} 一节里的条目（`-` 开头的行），最多 {@link #RAG_GAP_ITEMS} 条 */
+    private static List<String> gapItems(String body) {
+        java.util.regex.Matcher m = SECTION_HEAD.matcher(body);
+        while (m.find()) {
+            String title = m.group(1).trim();
+            if (!title.startsWith("待补充")) {
+                continue;
+            }
+            // 从标题行**之后**开始，到下一个标题为止（之前用固定 +5 位移，把标题最后一个字
+            // 当成了第一条缺口：实测输出过「充；QoS 的具体等级…」）
+            String tail = body.substring(m.end());
+            java.util.regex.Matcher next = SECTION_HEAD.matcher(tail);
+            if (next.find()) {
+                tail = tail.substring(0, next.start());
+            }
+            List<String> out = new ArrayList<>();
+            for (String line : tail.split("\\R")) {
+                String t = line.trim().replaceFirst("^[-*+]\\s*", "").trim();
+                if (t.isEmpty()) {
+                    continue;
+                }
+                if (t.length() > RAG_GAP_ITEM_CHARS) {
+                    t = t.substring(0, RAG_GAP_ITEM_CHARS) + "…";
+                }
+                out.add(t);
+                if (out.size() >= RAG_GAP_ITEMS) {
+                    break;
+                }
+            }
+            return out;
+        }
+        return List.of();
     }
 
     // ------------------------------------------------------------------

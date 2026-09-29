@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -51,6 +52,22 @@ public class WikiController {
     @GetMapping("/pages/{topicKey}")
     public Result<Map<String, Object>> page(@PathVariable String topicKey) {
         return Result.ok(wikiService.page(topicKey));
+    }
+
+    /**
+     * 注入探针：把"这个问题会往对话里注入什么 wiki 块"原样返回（**不调模型**）。
+     *
+     * <p>与 {@code /api/kg/concept/recognize} 对称：图谱那边一直有探针，wiki 这边没有，
+     * 于是"注入到底发了什么"只能靠跑一次完整对话去猜。做"目录 + 缺口"这个改动的验收、
+     * 以及以后任何注入形态的对比，都需要能直接看块内容。
+     *
+     * @param q      问题（按它的检索词打分选页）
+     * @param budget 上下文预算（留空 = 不限）
+     */
+    @GetMapping("/probe")
+    public Result<Map<String, Object>> probe(@RequestParam String q,
+                                             @RequestParam(required = false) Integer budget) {
+        return Result.ok(wikiService.probe(q, budget == null ? Integer.MAX_VALUE : budget));
     }
 
     /** 生成要等模型返回（几秒到几十秒），前端显示"生成中…"并设长超时 */
