@@ -55,6 +55,10 @@ public class SettingsController {
             // 第三/四路证据源（主题 wiki / 概念图谱）的注入开关：跑"开 vs 关"对照用
             Map.entry("wikiInject", SettingsService.KEY_WIKI_INJECT),
             Map.entry("kgInject", SettingsService.KEY_KG_INJECT),
+            // 向量后端：mysql（全扫，默认）/ milvus（ANN）+ 连接参数
+            Map.entry("vectorBackend", "kb.vector_backend"),
+            Map.entry("milvusUri", "kb.milvus_uri"),
+            Map.entry("milvusToken", "kb.milvus_token"),
             Map.entry("autoRecompile", SettingsService.KEY_AUTO_RECOMPILE),
             Map.entry("modelForChat", SettingsService.modelForTaskKey("chat")),
             Map.entry("modelForWiki", SettingsService.modelForTaskKey("wiki")),

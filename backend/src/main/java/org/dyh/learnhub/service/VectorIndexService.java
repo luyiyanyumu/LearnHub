@@ -51,6 +51,115 @@ public class VectorIndexService {
     private final KbIndexStateMapper stateMapper;
     private final EmbeddingClient embedder;
     private final SettingsService settingsService;
+    /** 全量扫描后端（默认）：向量存在 kb_chunk.vec，检索在内存里算余弦 */
+    private final org.dyh.learnhub.service.vector.MysqlVectorStore mysqlStore;
+    /** ANN 后端：按 kb.vector_backend 切换，连不上时**自动降级**回上面的全扫 */
+    private final org.dyh.learnhub.service.vector.MilvusVectorStore milvusStore;
+
+    /**
+     * 向量后端开关：空/`mysql` = 全量扫描（默认）；`milvus` = ANN。
+     * <p>为什么必须做成开关：① Milvus 不可用时要有回退路径，否则一次部署失误就是"语义检索整体失效"；
+     * ② 两个后端要在同一批评测用例上对比（同一问题、同一模型，只有后端不同），
+     * 没有开关就只能靠改代码来回切，测出来的东西说不清是不是别的原因。
+     */
+    public static final String KEY_VECTOR_BACKEND = "kb.vector_backend";
+
+    /**
+     * 当前生效的向量后端。Milvus 配置了但探活失败时**静默降级**为 MySQL 全扫：
+     * 语义检索是"锦上添花"的一路，不能因为它挂了就让整个对话失败。
+     */
+    private org.dyh.learnhub.service.vector.VectorStore store() {
+        if (!"milvus".equalsIgnoreCase(String.valueOf(settingsService.effective(KEY_VECTOR_BACKEND)).trim())) {
+            return mysqlStore;
+        }
+        return milvusStore.healthy() ? milvusStore : mysqlStore;
+    }
+
+    /** 当前配置的后端名（不问健康，用于状态展示与写入路径） */
+    public String configuredBackend() {
+        return store().name();
+    }
+
+    // ------------------------------------------------------------------
+    // 向量后端的运维入口（体检 / 对比 / 迁移）
+    // ------------------------------------------------------------------
+
+    /**
+     * 向量后端体检：两个后端各自的块数、是否一致、Milvus 是否可达。
+     * <p>为什么要专门看这个：写入路径可能"MySQL 成功、Milvus 失败"（Milvus 临时不可用），
+     * 于是两边的向量数会**悄悄漂开**——检索结果变少但没有任何报错。
+     * 一致性问题必须能被看见，否则就是下一个"我说不清为什么少了几条"。
+     */
+    public Map<String, Object> vectorBackendStatus() {
+        Map<String, Object> o = new LinkedHashMap<>();
+        o.put("configured", String.valueOf(settingsService.effective(KEY_VECTOR_BACKEND)).isBlank()
+                ? "mysql" : settingsService.effective(KEY_VECTOR_BACKEND));
+        o.put("active", configuredBackend());
+        o.put("mysql", mysqlStore.stats());
+        long mysqlChunks = mysqlStore.countAll();
+        o.put("mysqlChunks", mysqlChunks);
+        Map<String, Object> mv = new LinkedHashMap<>();
+        mv.put("uri", milvusStore.effectiveUri());
+        boolean healthy = milvusStore.healthy();
+        mv.put("healthy", healthy);
+        long vecCount = healthy ? milvusStore.vectorCount() : -1;
+        mv.put("vectors", vecCount);
+        if (!milvusStore.lastError().isBlank()) {
+            mv.put("lastError", milvusStore.lastError());
+        }
+        o.put("milvus", mv);
+        // 一致性判定必须能表达"不知道"：Milvus 不可达时不是"一致"，而是**没法判断**。
+        // （第一版写成 `vecCount < 0 || 相等`，于是"集合还不存在"被显示成"一致"—— 正好是相反的意思。）
+        Boolean consistent = !healthy ? null : (vecCount >= 0 && vecCount == mysqlChunks);
+        o.put("consistent", consistent);
+        o.put("hint", !healthy ? "Milvus 不可达：检索会自动降级为 MySQL 全扫"
+                : Boolean.TRUE.equals(consistent) ? "两个后端向量数一致"
+                : "Milvus 与 MySQL 向量数不一致（Milvus=" + vecCount + "，MySQL=" + mysqlChunks
+                  + "）：POST /api/kb/vector/sync 补齐（向量已在 MySQL，无需重新嵌入）");
+        return o;
+    }
+
+    /**
+     * 把 MySQL 里已有的向量**直接灌进 Milvus**（不重新嵌入、不调模型）。
+     * <p>迁移与补数用：换后端后第一次同步一次即可；Milvus 临时挂过之后再同步一次也能补回来。
+     *
+     * @return {sources, chunks, ms}
+     */
+    public Map<String, Object> syncToMilvus() {
+        long t0 = System.currentTimeMillis();
+        String model = embedder.model();
+        List<KbChunk> all = mapper.loadAll();
+        Map<String, List<org.dyh.learnhub.service.vector.VectorStore.VecItem>> bySource = new LinkedHashMap<>();
+        int dim = 0;
+        for (KbChunk c : all) {
+            if (c.getVec() == null || (model != null && c.getModel() != null && !model.equals(c.getModel()))) {
+                continue;
+            }
+            float[] v = EmbeddingClient.toVector(c.getVec());
+            dim = v.length;
+            bySource.computeIfAbsent(c.getSourceType() + "#" + c.getSourceId(), k -> new ArrayList<>())
+                    .add(new org.dyh.learnhub.service.vector.VectorStore.VecItem(
+                            c.getId(), c.getSeq() == null ? 0 : c.getSeq(), v));
+        }
+        if (dim > 0) {
+            milvusStore.ensure(model, dim);
+        }
+        int chunks = 0;
+        for (Map.Entry<String, List<org.dyh.learnhub.service.vector.VectorStore.VecItem>> e : bySource.entrySet()) {
+            int cut = e.getKey().indexOf('#');
+            String type = e.getKey().substring(0, cut);
+            Long id = Long.parseLong(e.getKey().substring(cut + 1));
+            milvusStore.replaceSource(type, id, e.getValue());
+            chunks += e.getValue().size();
+        }
+        Map<String, Object> o = new LinkedHashMap<>();
+        o.put("model", model);
+        o.put("sources", bySource.size());
+        o.put("chunks", chunks);
+        o.put("ms", System.currentTimeMillis() - t0);
+        o.put("milvus", milvusStore.stats());
+        return o;
+    }
 
     /**
      * 上下文嵌入开关（默认开）：把「文档标题 · 小节」前置到块正文之前再向量化。
@@ -155,6 +264,12 @@ public class VectorIndexService {
             mapper.delete(Wrappers.<KbChunk>lambdaQuery());
             stateMapper.delete(Wrappers.<KbIndexState>lambdaQuery());
             invalidateCache();
+            // ANN 后端也要清：否则重建后旧向量还在，检索会命中"查不到正文"的 id
+            try {
+                storeForWrite().clear();
+            } catch (Exception e) {
+                log.warn("清空向量后端失败（{}）：{}", configuredBackend(), e.toString());
+            }
 
             job.stage = "分块并嵌入";
             String model = embedder.model();
@@ -206,6 +321,7 @@ public class VectorIndexService {
                     : c.text());
         }
         List<float[]> vecs = embedder.embedAll(embedInputs);   // 内部按 16 条一批
+        List<org.dyh.learnhub.service.vector.VectorStore.VecItem> items = new ArrayList<>(chunks.size());
         for (int i = 0; i < chunks.size(); i++) {
             TextChunker.Chunk c = chunks.get(i);
             KbChunk row = new KbChunk();
@@ -223,9 +339,33 @@ public class VectorIndexService {
             row.setUpdatedAt(LocalDateTime.now());
             row.setCreatedAt(LocalDateTime.now());
             mapper.insert(row);
+            // MySQL 是权威存储（向量也在里面），块 id 由插入回填 —— ANN 后端用同一个 id 建索引，
+            // 检索回来才不用再维护一张 id 映射表。
+            items.add(new org.dyh.learnhub.service.vector.VectorStore.VecItem(
+                    row.getId(), i, vecs.get(i)));
+        }
+        // 同步到向量后端：MySQL 实现只是作废缓存；Milvus 实现会先删该来源再插入。
+        // 写失败**不阻断**索引（MySQL 那份已经落库），只记日志 —— 否则 Milvus 一抖，
+        // 连"把笔记索引起来"这件事都做不成。漂移由 vectorBackendStatus() 暴露。
+        try {
+            storeForWrite().replaceSource(s.type(), s.id(), items);
+        } catch (Exception e) {
+            log.warn("向量后端写入失败（{}，MySQL 已落库，可用 /api/kb/vector/sync 补）：{}",
+                    configuredBackend(), e.toString());
         }
         upsertState(s, chunks.size());
         return chunks.size();
+    }
+
+    /**
+     * 写入用的后端：按**配置**选择，不因为健康检查失败就改写 MySQL 表之外的东西。
+     * <p>注意 MySQL 的向量行**永远**都会写（见上），所以这里选 Milvus 失败也不丢数据。
+     */
+    private org.dyh.learnhub.service.vector.VectorStore storeForWrite() {
+        if (!"milvus".equalsIgnoreCase(String.valueOf(settingsService.effective(KEY_VECTOR_BACKEND)).trim())) {
+            return mysqlStore;
+        }
+        return milvusStore;
     }
 
     /** 记录/更新该来源已索引内容的指纹（增量索引靠它判断"变了没有"） */
@@ -289,6 +429,13 @@ public class VectorIndexService {
                 mapper.deleteBySource(st.getSourceType(), st.getSourceId());
                 stateMapper.deleteById(st.getId());
                 removed++;
+                // ANN 后端也要删：资料/笔记被删掉后，孤儿向量会继续被检索到，
+                // 而补正文时查不到块行 → 结果是"凭空少几条"（没有报错，最难查的那种）。
+                try {
+                    storeForWrite().deleteSource(st.getSourceType(), st.getSourceId());
+                } catch (Exception ex) {
+                    log.warn("向量后端删除来源失败（{}#{}）：{}", st.getSourceType(), st.getSourceId(), ex.toString());
+                }
             }
         }
         if (reindexed > 0 || removed > 0) {
@@ -395,25 +542,14 @@ public class VectorIndexService {
                       String text, double score, int seq) {
     }
 
-    /** 内存缓存：几百块 + 向量约 1MB，避免每次提问都从库里读 */
-    private volatile List<KbChunk> cache;
-    private volatile String cacheFingerprint;
-
+    /**
+     * 作废块缓存。
+     *
+     * <p>缓存本体已经搬到 {@link org.dyh.learnhub.service.vector.MysqlVectorStore}（谁负责全扫，谁负责缓存），
+     * 这里保留一个转发是为了让"数据变了就作废"这件事在调用点仍然一眼可见。
+     */
     private void invalidateCache() {
-        cache = null;
-        cacheFingerprint = null;
-    }
-
-    private List<KbChunk> chunks() {
-        String fp = mapper.fingerprint();
-        List<KbChunk> local = cache;
-        if (local != null && fp != null && fp.equals(cacheFingerprint)) {
-            return local;
-        }
-        local = mapper.loadAll();
-        cache = local;
-        cacheFingerprint = fp;
-        return local;
+        mysqlStore.clear();
     }
 
     /**
@@ -427,9 +563,16 @@ public class VectorIndexService {
         if (query == null || query.isBlank() || !settingsService.vectorEnabled()) {
             return List.of();
         }
-        List<KbChunk> all = chunks();
-        if (all.isEmpty()) {
-            return List.of();
+        // 没有任何向量就别调嵌入了（"还没建索引"与"Milvus 刚清空"都会走到这里）。
+        // 注意：探活失败时会走 MySQL，所以这个判断要问**当前生效的那个后端**。
+        org.dyh.learnhub.service.vector.VectorStore active = store();
+        try {
+            if (!active.hasVectors()) {
+                return List.of();
+            }
+        } catch (Exception e) {
+            log.warn("向量后端（{}）状态检查失败，转用 MySQL：{}", active.name(), e.toString());
+            active = mysqlStore;
         }
         float[] qv;
         try {
@@ -442,13 +585,30 @@ public class VectorIndexService {
         if (qv == null) {
             return List.of();
         }
+        // 候选由后端给（MySQL 全扫 / Milvus ANN），阈值与相对带在这里统一施加 ——
+        // 放在这里而不是各后端里，是为了保证"换后端不改变命中口径"（否则同一个问题换后端结果不同，
+        // 是最难定位的那类 bug）。ANN 需要比 topK 更大的池子，因为相对带还会筛掉一批。
+        List<org.dyh.learnhub.service.vector.VectorStore.VecHit> candidates;
+        try {
+            candidates = active.search(embedder.model(), qv, Math.max(topK * 4, 64));
+        } catch (Exception e) {
+            log.warn("向量后端（{}）检索失败，本轮退化为 MySQL 全扫：{}", configuredBackend(), e.toString());
+            // 立刻标记不可用：否则 Milvus 真的挂了之后，每轮对话都要先等一次连接超时才降级
+            if (active == milvusStore) {
+                milvusStore.markUnhealthy(e.getMessage());
+            }
+            try {
+                candidates = mysqlStore.search(embedder.model(), qv, Integer.MAX_VALUE);
+            } catch (Exception e2) {
+                log.warn("回退检索也失败（本轮无语义召回）：{}", e2.toString());
+                return List.of();
+            }
+        }
         List<Hit> hits = new ArrayList<>();
-        for (KbChunk c : all) {
-            float[] v = EmbeddingClient.toVector(c.getVec());
-            double score = EmbeddingClient.cosine(qv, v);
-            if (score >= MIN_SCORE) {
-                hits.add(new Hit(c.getSourceType(), c.getSourceId(), c.getTitle(), c.getCategory(),
-                        c.getChunkText(), score, c.getSeq()));
+        for (org.dyh.learnhub.service.vector.VectorStore.VecHit c : candidates) {
+            if (c.score() >= MIN_SCORE) {
+                hits.add(new Hit(c.sourceType(), c.sourceId(), c.title(), c.category(),
+                        c.text(), c.score(), c.seq()));
             }
         }
         hits.sort(Comparator.comparingDouble(Hit::score).reversed());
@@ -496,6 +656,9 @@ public class VectorIndexService {
                 || !embedder.model().equals(o.get("indexedModel"))
                 || (!sourceLatest.isBlank() && !indexedAt.isBlank() && sourceLatest.compareTo(indexedAt) > 0);
         o.put("stale", stale);
+        // 向量后端信息也放进来：界面一眼看到"现在是全扫还是 ANN、两边数量一致不一致"
+        o.put("vectorBackend", String.valueOf(settingsService.effective(KEY_VECTOR_BACKEND)).isBlank()
+                ? "mysql" : settingsService.effective(KEY_VECTOR_BACKEND));
         return o;
     }
 

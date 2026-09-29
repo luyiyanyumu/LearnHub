@@ -1,0 +1,44 @@
+# Milvus 最小形态（**单容器**：嵌入式 etcd + 本地存储）
+#
+# 为什么不是官方那套三容器（milvus + etcd + minio）：
+# Milvus 2.4 支持 `etcd.use.embed=true`（进程内 etcd）与 `common.storageType=local`（本地磁盘），
+# 于是可以只跑一个容器 —— 少两个服务、少两套备份、也绕开 minio 镜像在某些镜像源拉不到的问题。
+# 这正是官方 `standalone_embed.sh` 的形态，代价是：不能多副本、不支持分布式扩缩容
+# （个人知识库本来也不需要，判据见 docs/rag-design.md §6.5）。
+#
+# 启动：  docker compose -f docker-compose.milvus.yml up -d
+# 停掉：  docker compose -f docker-compose.milvus.yml down
+# 数据：  ./milvus-data/milvus（删掉即清空）
+#
+# 启用后端（二选一，之后可选地灌一次已有向量）：
+#   POST /api/kb/vector/backend?backend=milvus
+#   POST /api/kb/vector/sync        ← 把 MySQL 里现成的向量灌进去，**不重新嵌入**
+#   GET  /api/kb/vector/status      ← 两个后端向量数是否一致
+#
+# 资源：单容器实测启动约 15 秒；1024 维 10 万块向量约占 420MB。
+services:
+  milvus:
+    image: milvusdb/milvus:v2.4.15
+    container_name: learn-hub-milvus
+    command: ["milvus", "run", "standalone"]
+    restart: unless-stopped   # 机器重启后自动起来；真的起不来后端也会自动降级为 MySQL 全扫
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      # 嵌入式 etcd（进程内）：不再需要单独的 etcd 容器
+      ETCD_USE_EMBED: "true"
+      ETCD_DATA_DIR: /var/lib/milvus/etcd
+      ETCD_CONFIG_PATH: /milvus/configs/advanced/etcd.yaml
+      # 本地磁盘存储：不再需要 minio / S3
+      COMMON_STORAGETYPE: local
+    volumes:
+      - ./milvus-data/milvus:/var/lib/milvus
+    ports:
+      - "19530:19530"   # gRPC + v2 RESTful API（后端用这个）
+      - "9091:9091"     # 健康检查 / metrics
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 120s
+      timeout: 20s
+      retries: 3

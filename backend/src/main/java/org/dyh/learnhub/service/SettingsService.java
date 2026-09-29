@@ -103,6 +103,9 @@ public class SettingsService {
                 // 但它们是四路里唯二不在评测集里的 —— 加开关是为了能跑"开/关"对照，
                 // 判断这两块上下文到底有没有带来收益（没有开关就只能靠感觉）。
                 KEY_WIKI_INJECT, KEY_KG_INJECT,
+                // 向量后端（2026-09-29 加）：空/mysql = 全量扫描，milvus = ANN。
+                // 加开关的两个理由：Milvus 不可用时要能回退；两后端要在同一批用例上对比。
+                "kb.vector_backend", "kb.milvus_uri", "kb.milvus_token",
                 // 当前激活的模型档案（模型配置已改为"档案列表"，各任务指向档案 id）
                 "ai.active_profile"));
         // 每个任务的"用哪个档案"键，全部从任务清单派生
@@ -179,6 +182,17 @@ public class SettingsService {
 
     public boolean kgInjectEnabled() {
         return !"0".equals(effective(KEY_KG_INJECT));
+    }
+
+    /** 向量后端：空/`mysql` = 全量扫描；`milvus` = ANN（见 VectorIndexService#KEY_VECTOR_BACKEND） */
+    public String vectorBackend() {
+        String v = effective("kb.vector_backend");
+        return v == null ? "" : v.trim();
+    }
+
+    /** 当前用的向量后端名（空 = mysql） */
+    public boolean milvusEnabled() {
+        return "milvus".equalsIgnoreCase(vectorBackend());
     }
 
     /**

@@ -171,4 +171,37 @@ public class VectorController {
         out.put("vectorCount", ((List<?>) out.get("vector")).size());
         return Result.ok(out);
     }
+
+    // ---------------- 向量后端（2026-09-29：可切 Milvus，默认仍是 MySQL 全扫） ----------------
+
+    /**
+     * 向量后端体检：配置的是哪个、当前生效的是哪个、两个后端各有多少向量、是否一致。
+     * <p>为什么必须能看：写入路径可能"MySQL 成功、Milvus 失败"，两边数量会悄悄漂开 ——
+     * 表现是"检索结果莫名变少"而没有任何报错。
+     */
+    @GetMapping("/vector/status")
+    public Result<Map<String, Object>> vectorStatus() {
+        return Result.ok(vectorIndexService.vectorBackendStatus());
+    }
+
+    /**
+     * 把 MySQL 里已有的向量**直接灌进 Milvus**（不重新嵌入、不调模型）。
+     * <p>换后端后的第一次同步、以及 Milvus 挂过之后的补数都用它 ——
+     * 一次 1.3k 块约几秒；全量重建要重新嵌入（分钟级），没必要。
+     */
+    @PostMapping("/vector/sync")
+    public Result<Map<String, Object>> vectorSync() {
+        return Result.ok(vectorIndexService.syncToMilvus());
+    }
+
+    /** 切换向量后端：{@code backend=mysql|milvus}（切换本身不动数据，Milvus 缺向量用 sync/rebuild 补） */
+    @PostMapping("/vector/backend")
+    public Result<Map<String, Object>> setVectorBackend(@RequestParam String backend) {
+        String b = backend == null ? "" : backend.trim().toLowerCase();
+        if (!b.isEmpty() && !"mysql".equals(b) && !"milvus".equals(b)) {
+            throw new IllegalArgumentException("backend 只能是 mysql 或 milvus");
+        }
+        settingsService.update("kb.vector_backend", b);
+        return Result.ok(vectorIndexService.vectorBackendStatus());
+    }
 }
