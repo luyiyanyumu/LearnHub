@@ -89,10 +89,12 @@ class PdfLayoutExtractorTest {
             // 标题不能以数字为主：图表的刻度/图例长得和标题一模一样（短、加粗、字号更大），
             // 实测某篇论文的柱状图数字被认成了 [heading1] "60 68.8 72.3"、"39 RAG-Seq 40"。
             // 这条与版面无关于 —— 真标题必然以文字为主（编号小节如 "2.5.1 数据建模" 里数字只占少数）。
+            // 判据取"至少一个字母 + 数字不超过字母的两倍"：够挡住纯刻度行，又不会误伤
+            // 中文书里的短标题（新样本里出现过 "3 线+" 这样的三级标题，只有 1 个汉字）。
             blocks.stream().filter(b -> "heading".equals(b.type())).forEach(b -> {
                 int letters = (int) b.text().codePoints().filter(Character::isLetter).count();
                 int digits = (int) b.text().codePoints().filter(Character::isDigit).count();
-                assertTrue(letters >= 2 && letters * 2 >= digits,
+                assertTrue(letters >= 1 && digits <= letters * 2,
                         name + " 标题块以数字为主（像图表刻度）: " + b.text());
             });
             // 表格块必须是多行的：单行文本被塞进 table 只会让它看起来像表格，其实不是

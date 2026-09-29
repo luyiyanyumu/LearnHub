@@ -38,18 +38,18 @@ WHERE NOT EXISTS (SELECT 1 FROM app_setting WHERE setting_key = 'demo.seeded');
 -- 笔记 1：Maven 坐标
 INSERT IGNORE INTO note (id, title, content, category_id)
 SELECT * FROM (
-    SELECT 1 AS id, 'Maven 坐标三要素（材料清单怎么填）' AS title,
+    SELECT 1 AS id, 'Maven 坐标三要素' AS title,
 '# Maven 坐标三要素
 
-> 造价类比：坐标 = 材料的唯一编码，缺一个都领不到料。
+坐标唯一确定本地仓库里的一个构件，三要素缺一不可。
 
 ## 三要素
 
-| 元素 | 含义 | 类比 |
-|------|------|------|
-| groupId | 组织/公司标识 | 供应商名称 |
-| artifactId | 项目/模块名 | 材料名称 |
-| version | 版本号 | 材料规格等级 |
+| 元素 | 含义 |
+|------|------|
+| groupId | 组织/公司标识 |
+| artifactId | 项目/模块名 |
+| version | 版本号 |
 
 ## 示例
 

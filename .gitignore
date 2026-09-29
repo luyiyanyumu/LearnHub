@@ -40,3 +40,11 @@ dev.log
 Thumbs.db
 .idea/
 .vscode/
+
+# ===== IDE 工程元数据 =====
+# Eclipse/m2e 打开后端目录时会就地生成这些文件（含本机 JDK、Maven 仓库路径），
+# 不该进版本库：换台机器路径不同，diff 全是噪声。
+.classpath
+.project
+.factorypath
+.settings/
