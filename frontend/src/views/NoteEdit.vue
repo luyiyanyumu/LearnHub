@@ -49,7 +49,12 @@ function formFingerprint() {
   })
 }
 let savedSnapshot = ''
-const dirty = computed(() => formFingerprint() !== savedSnapshot)
+/**
+ * 「有未保存改动」= 表单与上次保存的指纹不同，**或者**预览里还有没反推回源码的改动。
+ * 后半句是单栏阅读模式（默认模式）的安全网：那一栏里敲的字先落在 DOM 上、失焦才反推回 Markdown，
+ * 只看指纹的话用户敲完还没离开正文时状态仍是「已保存」，点返回不会被拦，改动会静默丢掉。
+ */
+const dirty = computed(() => previewUnsynced.value || formFingerprint() !== savedSnapshot)
 
 /** 刚创建并跳转过来的笔记 id：用来跳过随之而来的那次重复加载 */
 let justCreatedId = null
@@ -104,8 +109,9 @@ ${FENCE}
 // ---- 格式条（RGB 颜色 / 语雀风格内联格式）----
 /** 把选中文字包进对应标签；md-editor 的 insert() 会自动保留撤销历史 */
 function applyFormat({ kind, value }) {
-  if (readonlyBlocked()) return
-  if (previewEditing.value) return previewApplyFormat({ kind, value })
+  if (previewEditing.value || (readingMode.value && ensurePreviewEditing())) {
+    return previewApplyFormat({ kind, value })
+  }
   const ed = editorRef.value
   if (!ed || typeof ed.insert !== 'function') {
     ElMessage.warning('编辑器尚未就绪，请稍后再试')
@@ -144,8 +150,10 @@ let previewBlurTimer = null
  * 不能再用 previewEditing 判断：失焦后它已经变回 false，
  * 但改动可能因为反推失败（含不支持的内联标签）还留在预览 DOM 里 ——
  * 那种情况必须拦住保存，否则改动会静默丢失。
+ * <p>必须是 **ref**：它直接参与 {@code dirty} 判定。单栏阅读模式下预览就是唯一的编辑面，
+ * 用户敲完字还没失焦时就必须显示「未保存」，否则点返回不会提醒、改动会悄悄丢掉。
  */
-let previewUnsynced = false
+const previewUnsynced = ref(false)
 
 /** 用户在预览里选中文字时记住选区；点工具条失焦后据此恢复 */
 function onPreviewSelectionChange() {
@@ -191,26 +199,12 @@ function attachPreviewEditable() {
   return true
 }
 
-/** 阅读模式下把预览区还原成只读（正文只读，不可误改） */
-function detachPreviewEditable() {
-  const el = previewEl()
-  if (!el) return
-  delete el.dataset.lhEditable
-  el.removeAttribute('contenteditable')
-  el.removeAttribute('spellcheck')
-  el.removeAttribute('autocorrect')
-  el.removeAttribute('autocapitalize')
-  el.classList.remove('lh-preview-editing')
-  el.removeEventListener('paste', onPreviewPaste)
-  el.removeEventListener('mouseover', onPreviewBlockHover)
-  el.removeEventListener('beforeinput', onPreviewBeforeInput)
-  pvUndoStack = []
-  pvRedoStack = []
-  clearTimeout(pvInputTimer)
-  pvInputTimer = null
-  previewUnsynced = false
-  hideBlockHandle()
-}
+/**
+ * 预览区的可编辑性是**常驻**的（attachPreviewEditable 只挂不摘）——
+ * 两个模式都允许直接改正文，所以这里不需要"还原成只读"的收尾动作。
+ * 历史里的 detachPreviewEditable() 已删除：它会摘掉 contenteditable，
+ * 让普通 div 失去可聚焦性，「点进去就能写」随即失效（见 attachPreviewEditable 的注释）。
+ */
 
 /** 预览区粘贴：统一按纯文本插入，避免把外部网页/Word 的样式噪音带进来 */
 function onPreviewPaste(e) {
@@ -226,7 +220,7 @@ function onPreviewPaste(e) {
  * 可编辑性由 @mouseenter / @click 提前挂好，这里只负责切状态。
  */
 function onPreviewFocusIn() {
-  if (readingMode.value || previewEditing.value) return
+  if (previewEditing.value) return
   if (!attachPreviewEditable()) return
   pvResetHistory()
   previewEditing.value = true
@@ -250,7 +244,7 @@ function onPreviewFocusOut() {
     if (ae && ae.closest && ae.closest('.ed-tools, .tb-menu, .block-menu, .color-picker')) return
     if (document.querySelector('.tb-menu, .block-menu, .color-picker')) return
     // 没有改动就不必反推（反推会重写 form.content，导致预览区白重渲染一次）
-    if (!previewUnsynced) {
+    if (!previewUnsynced.value) {
       exitPreviewEdit()
       return
     }
@@ -263,8 +257,20 @@ function onPreviewFocusOut() {
  * 这些地方点下去不产生 focusin，不补这一下用户会以为右侧不能编辑。
  */
 function onPreviewClick() {
-  if (readingMode.value || previewEditing.value) return
+  if (previewEditing.value) return
   onPreviewFocusIn()
+}
+
+/**
+ * 单栏（阅读）模式下工具条只可能作用于预览这一栏，但用户完全可能没点进正文就先按了「加粗」。
+ * 这里先补一次「点进正文」（进入可编辑态并聚焦）再执行命令 ——
+ * 否则命令会落到已经藏起来的源码栏上：内容真的改了，可见的正文里却毫无反应。
+ * @returns {boolean} 现在是否处于预览可编辑态
+ */
+function ensurePreviewEditing() {
+  if (previewEditing.value) return true
+  onPreviewFocusIn()
+  return previewEditing.value
 }
 
 function onPreviewKeydown(e) {
@@ -329,7 +335,7 @@ function syncPreviewToSource(silent = false) {
   const md = fixHtmlQuotes(previewHtmlToMd(el.innerHTML))
   const changed = md !== (form.value.content || '').trim()
   if (changed) form.value.content = md
-  previewUnsynced = false
+  previewUnsynced.value = false
   exitPreviewEdit()
   if (!silent) {
     if (changed) ElMessage.success('已把预览里的修改同步回 Markdown 源码，确认后点「保存」')
@@ -569,6 +575,8 @@ function flatten(nodes, depth = 0, out = []) {
 let loadSeq = 0
 
 async function loadNote() {
+  // 每次点进一篇笔记都从「单栏阅读」开始（用户要求）：源码对照需要显式进
+  readingMode.value = true
   if (isNew.value) {
     // 「编辑 A → 新建」时组件同样会被复用：必须把表单清空，
     // 否则新建的笔记里会残留上一篇文章的正文。
@@ -632,7 +640,7 @@ async function save() {
     return
   }
   // 预览里还有没反推回源码的改动时，直接保存会把它丢掉 —— 先自动同步（失败则中止保存）
-  if (previewUnsynced && !syncPreviewToSource(true)) return
+  if (previewUnsynced.value && !syncPreviewToSource(true)) return
   saving.value = true
   try {
     const payload = {
@@ -701,13 +709,18 @@ function onGlobalKeydown(e) {
 }
 
 // ==================================================================
-// 布局：三栏（源码 / 预览 / 大纲）+ 模式（专注 / 阅读 / 预览编辑）
+// 布局：单栏「阅读」（默认，可编辑）⇄ 源码对照（源码 / 预览 / 大纲）+ 专注模式
 // ==================================================================
 
 /** 源码栏宽度百分比（预览栏 = 100 - 源码 - 大纲在剩余空间内占比） */
 const editorPct = ref(Number(localStorage.getItem('lh-editor-pct') || 42))
 const outlineOpen = ref(true)
-const readingMode = ref(false)
+/**
+ * 单栏「阅读」模式 —— **默认就是这个**（用户要求：笔记点进去先进阅读模式，
+ * 源码对照从「更多」/ 右上角按钮进）。它不再是"只看不能改"：预览栏就是编辑面，
+ * 点进去直接写，顶部工具栏作用于这一栏。
+ */
+const readingMode = ref(true)
 const pvScrollRef = ref(null)
 
 watch(editorPct, (v) => localStorage.setItem('lh-editor-pct', String(Math.round(v))))
@@ -764,8 +777,10 @@ const showPreviewPane = computed(() => {
   return true
 })
 
-/** 工具条是否有内容可显示：Tab 模式下切到「预览」且非预览编辑时为空，避免出现空卡片 */
-const showTools = computed(() => layoutMode.value !== 'tab' || editorTab.value === 'edit' || previewEditing.value)
+/** 工具条是否有内容可显示：Tab 模式下切到「预览」且非预览编辑时为空，避免出现空卡片
+ *  （单栏阅读模式下永远显示：那一栏正文就是它的作用对象） */
+const showTools = computed(() => readingMode.value || layoutMode.value !== 'tab'
+  || editorTab.value === 'edit' || previewEditing.value)
 
 // ---- 拖拽调宽 ----
 let dragging = false
@@ -1065,28 +1080,23 @@ function toggleFocus() {
   focusMode.value = !focusMode.value
   if (focusMode.value) outlineOpen.value = false
 }
+/**
+ * 单栏「阅读」模式 ⇄ 「源码对照」模式。
+ * <p>阅读模式是**默认**进入的那一栏：只有一栏正文，点进去就能改（所见即所得），
+ * 顶部工具栏作用于这一栏；源码对照（左源码 / 右预览 / 大纲）从「更多」或右上角按钮进入 —— 相当于
+ * 把原来的两个模式反了过来。
+ * <p>切换前必须先把预览里没反推回 Markdown 的改动同步掉：否则切栏后看到的是旧正文，
+ * 甚至保存时把改动弄丢。
+ */
 function toggleReading() {
+  if (previewEditing.value || previewUnsynced.value) {
+    syncPreviewToSource(true)
+  }
   readingMode.value = !readingMode.value
   if (readingMode.value) {
-    // 只读：退出编辑态并把预览区还原为不可编辑
-    exitPreviewEdit()
-    detachPreviewEditable()
-  } else {
-    // 退出阅读模式后恢复「点右侧即可编辑」
-    nextTick(() => attachPreviewEditable())
+    // 单栏下预览就是编辑面：保证一进来点一下就写（可编辑性是幂等挂载）
+    nextTick(attachPreviewEditable)
   }
-}
-
-/**
- * 阅读模式的只读闸门。
- * <p>阅读模式**保留**顶部那两行工具栏（用户要求），但正文是只读的：不加这道闸门，
- * 点「加粗 / 颜色 / 表格」会静默改到已经被藏起来的源码栏里 —— 看不见却真的写进了正文。
- * 所以这些按钮点了只给一句提示，不改内容。
- */
-function readonlyBlocked() {
-  if (!readingMode.value) return false
-  ElMessage.info('阅读模式下正文只读，退出阅读后即可编辑')
-  return true
 }
 
 /** 「更多」菜单：导出（函数命令）+ 模式切换（字符串命令） */
@@ -1109,7 +1119,6 @@ function insertTemplate() {
 
 // ---- Markdown 插入（第二行工具条；走 md-editor insert 保留撤销历史）----
 function edInsert(builder) {
-  if (readonlyBlocked()) return
   const ed = editorRef.value
   if (!ed || typeof ed.insert !== 'function') {
     ElMessage.warning('编辑器尚未就绪，请稍后再试')
@@ -1182,8 +1191,7 @@ function mdLinePrefix(prefix) {
   })
 }
 function mdTool(name) {
-  if (readonlyBlocked()) return
-  if (previewEditing.value) return previewMdTool(name)
+  if (previewEditing.value || (readingMode.value && ensurePreviewEditing())) return previewMdTool(name)
   mdBtns[name]?.()
 }
 
@@ -1253,9 +1261,9 @@ function collectPreviewFormat() {
 
 /** 格式刷按钮：第一次点 = 取格式；第二次点（选中目标后）= 刷上并复位 */
 function formatPainterClick() {
-  if (readonlyBlocked()) return
+  const inPreview = previewEditing.value || (readingMode.value && ensurePreviewEditing())
   if (!formatPainter.active) {
-    const got = previewEditing.value ? collectPreviewFormat() : collectSourceFormat()
+    const got = inPreview ? collectPreviewFormat() : collectSourceFormat()
     if (!got) {
       ElMessage.info('先拖选一段带格式（加粗/颜色/高亮等）的文字')
       return
@@ -1264,7 +1272,7 @@ function formatPainterClick() {
     ElMessage.success('已取格式，选中目标文字后再点一次格式刷')
     return
   }
-  if (previewEditing.value) previewWrap(formatPainter.before, formatPainter.after, '文本')
+  if (inPreview) previewWrap(formatPainter.before, formatPainter.after, '文本')
   else mdWrap(formatPainter.before, formatPainter.after)
   formatPainter.active = false
 }
@@ -1381,7 +1389,7 @@ function pvPushUndo() {
     if (pvUndoStack.length > PV_UNDO_MAX) pvUndoStack.shift()
   }
   pvRedoStack = []
-  previewUnsynced = true // 有改动待反推回源码
+  previewUnsynced.value = true // 有改动待反推回源码
 }
 
 /** 连续键盘输入合并为一个撤销单元（800ms 防抖，只在输入前记一次） */
@@ -1416,7 +1424,7 @@ function pvResetHistory() {
   clearTimeout(pvInputTimer)
   pvInputTimer = null
   pvPushUndo() // 进入编辑时的初始快照作为撤销底线
-  previewUnsynced = false // 初始快照不算「待同步的改动」
+  previewUnsynced.value = false // 初始快照不算「待同步的改动」
 }
 
 /** 在预览区插入 HTML 片段（表格/图片/块级等 execCommand 覆盖不到的） */
@@ -2142,7 +2150,10 @@ watch(id, async (now, before) => {
     justCreatedId = null
     return
   }
-  if (previewEditing.value) exitPreviewEdit()
+  if (previewEditing.value || previewUnsynced.value) {
+    // 切笔记前先把预览里没反推的改动同步回 Markdown，否则它会被下一份内容覆盖掉
+    syncPreviewToSource(true)
+  }
   await loadNote()
 })
 
@@ -2276,8 +2287,23 @@ onBeforeUnmount(() => {
         <span>整理格式</span>
       </button>
 
-      <button v-if="readingMode" class="read-exit" type="button" @click="toggleReading" title="退出阅读模式，回到可编辑状态">
-        <span class="btn-ico"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" /></svg></span>退出阅读
+      <button
+        class="read-exit"
+        type="button"
+        @click="toggleReading"
+        :title="readingMode
+          ? '切到源码对照模式：左源码 / 右预览 / 大纲，适合边改边看差异'
+          : '切回单栏阅读模式：只有正文一栏，点进去就能直接写'"
+      >
+        <span class="btn-ico">
+          <svg v-if="readingMode" viewBox="0 0 24 24">
+            <path d="M5 4.5h5.5a2 2 0 0 1 2 2v13a2 2 0 0 0-2-2H5zM19 4.5h-5.5a2 2 0 0 0-2 2v13a2 2 0 0 1 2-2H19z" />
+          </svg>
+          <svg v-else viewBox="0 0 24 24">
+            <path d="M7 3.5h7a3 3 0 0 1 3 3V20.5H7a3 3 0 0 1-3-3v-11a3 3 0 0 1 3-3Z" />
+            <path d="M10 9h4M10 12h4M10 15h2" />
+          </svg>
+        </span>{{ readingMode ? '源码对照' : '阅读模式' }}
       </button>
 
       <el-dropdown trigger="click" @command="moreCommand">
@@ -2307,7 +2333,7 @@ onBeforeUnmount(() => {
               </span>{{ focusMode ? '退出专注模式' : '专注模式（隐藏侧栏与大纲）' }}
             </el-dropdown-item>
             <el-dropdown-item command="toggleReading">
-              <span class="dd-ico"><svg viewBox="0 0 24 24"><path d="M5 4.5h5.5a2 2 0 0 1 2 2v13a2 2 0 0 0-2-2H5zM19 4.5h-5.5a2 2 0 0 0-2 2v13a2 2 0 0 1 2-2H19z" /></svg></span>{{ readingMode ? '退出阅读模式' : '阅读模式（只看正文）' }}
+              <span class="dd-ico"><svg viewBox="0 0 24 24"><path d="M5 4.5h5.5a2 2 0 0 1 2 2v13a2 2 0 0 0-2-2H5zM19 4.5h-5.5a2 2 0 0 0-2 2v13a2 2 0 0 1 2-2H19z" /></svg></span>{{ readingMode ? '源码对照模式（左源码 / 右预览）' : '回到单栏阅读模式' }}
             </el-dropdown-item>
           </el-dropdown-menu>
         </template>
@@ -2316,11 +2342,11 @@ onBeforeUnmount(() => {
       <el-button type="primary" class="save-btn" :loading="saving" @click="save">{{ isNew ? '创建' : '保存' }}</el-button>
     </div>
 
-    <!-- ======== 顶部第二行：语雀式工具条（阅读模式也保留，只是点了不改内容；作用于当前有焦点的编辑区：源码栏或右侧预览） ======== -->
+    <!-- ======== 顶部第二行：语雀式工具条（单栏阅读模式也保留，作用于那一栏正文；源码对照下作用于当前有焦点的编辑区） ======== -->
     <div
       ref="toolsRef"
       class="ed-tools"
-      :class="{ 'has-left': toolsScroll.left, 'has-right': toolsScroll.right, 'is-inert': readingMode }"
+      :class="{ 'has-left': toolsScroll.left, 'has-right': toolsScroll.right }"
       v-if="showTools"
       @mousedown.prevent
       @scroll="updateToolsScroll"
@@ -3585,12 +3611,13 @@ html.dark .ol-item.active {
   position: relative;
 }
 
-/* ================= 阅读模式 =================
-   阅读模式不再换成「极简顶栏」：顶部两行工具栏原样保留并冻结在顶部（用户要求），
-   只在右端多一个「退出阅读」。工具条本身变淡（is-inert）表示这一排点了不改内容。 */
+/* ================= 阅读模式（默认那一栏） =================
+   单栏、可编辑：正文就在这一栏里改，顶部两行工具栏原样保留并冻结在顶部（用户要求）。
+   右上角的圆角按钮用来在「单栏阅读」与「源码对照」之间来回切。 */
 .read-exit {
   display: inline-flex;
   align-items: center;
+  gap: 5px;
   height: 30px;
   padding: 0 12px;
   flex-shrink: 0;
@@ -3602,13 +3629,14 @@ html.dark .ol-item.active {
   border-radius: 99px;
   cursor: pointer;
 }
+.read-exit .btn-ico svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
 .read-exit:hover {
   color: var(--app-brand-deep);
   border-color: color-mix(in srgb, var(--app-brand) 40%, var(--app-border));
-}
-/* 阅读模式下的工具条：能看、能悬停看提示，但点了不会静默改到看不见的源码栏 */
-.ed-tools.is-inert {
-  opacity: 0.55;
 }
 
 /* 专注模式：编辑区整体浮起来一点，四周留白加大 */
