@@ -104,6 +104,7 @@ ${FENCE}
 // ---- 格式条（RGB 颜色 / 语雀风格内联格式）----
 /** 把选中文字包进对应标签；md-editor 的 insert() 会自动保留撤销历史 */
 function applyFormat({ kind, value }) {
+  if (readonlyBlocked()) return
   if (previewEditing.value) return previewApplyFormat({ kind, value })
   const ed = editorRef.value
   if (!ed || typeof ed.insert !== 'function') {
@@ -1076,6 +1077,18 @@ function toggleReading() {
   }
 }
 
+/**
+ * 阅读模式的只读闸门。
+ * <p>阅读模式**保留**顶部那两行工具栏（用户要求），但正文是只读的：不加这道闸门，
+ * 点「加粗 / 颜色 / 表格」会静默改到已经被藏起来的源码栏里 —— 看不见却真的写进了正文。
+ * 所以这些按钮点了只给一句提示，不改内容。
+ */
+function readonlyBlocked() {
+  if (!readingMode.value) return false
+  ElMessage.info('阅读模式下正文只读，退出阅读后即可编辑')
+  return true
+}
+
 /** 「更多」菜单：导出（函数命令）+ 模式切换（字符串命令） */
 function moreCommand(cmd) {
   if (typeof cmd === 'function') {
@@ -1096,6 +1109,7 @@ function insertTemplate() {
 
 // ---- Markdown 插入（第二行工具条；走 md-editor insert 保留撤销历史）----
 function edInsert(builder) {
+  if (readonlyBlocked()) return
   const ed = editorRef.value
   if (!ed || typeof ed.insert !== 'function') {
     ElMessage.warning('编辑器尚未就绪，请稍后再试')
@@ -1168,6 +1182,7 @@ function mdLinePrefix(prefix) {
   })
 }
 function mdTool(name) {
+  if (readonlyBlocked()) return
   if (previewEditing.value) return previewMdTool(name)
   mdBtns[name]?.()
 }
@@ -1238,6 +1253,7 @@ function collectPreviewFormat() {
 
 /** 格式刷按钮：第一次点 = 取格式；第二次点（选中目标后）= 刷上并复位 */
 function formatPainterClick() {
+  if (readonlyBlocked()) return
   if (!formatPainter.active) {
     const got = previewEditing.value ? collectPreviewFormat() : collectSourceFormat()
     if (!got) {
@@ -1840,6 +1856,9 @@ const fmtTime = (d) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getM
 const saveState = computed(() => {
   if (saving.value) return { cls: 'saving', text: '正在保存…' }
   if (lastSavedAt.value && !dirty.value) return { cls: 'saved', text: `已保存 ${fmtTime(lastSavedAt.value)}` }
+  // 刚打开、还没在本会话里保存过：此时**已经和库里一致**，不能因为 lastSavedAt 是空就说「未保存」——
+  // 那会让人以为"打开笔记就产生了改动"（实测四个笔记全这样）。只有真的改过才提示未保存。
+  if (!dirty.value) return { cls: 'saved', text: '已保存' }
   return { cls: 'dirty', text: '未保存' }
 })
 
@@ -2201,8 +2220,10 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="edit-page" :class="{ 'is-focus': focusMode, 'is-reading': readingMode }" v-loading="loading">
-    <!-- ======== 顶部第一行：返回 · 标题 · 分类 · 标签 · 保存状态 · AI助手 · 更多 · 保存 ======== -->
-    <div class="ed-top" v-if="!readingMode">
+    <!-- ======== 顶部第一行：返回 · 标题 · 分类 · 标签 · 保存状态 · AI助手 · 更多 · 保存 ========
+         阅读模式**保留**这一行（用户要求：阅读时工具栏不消失，并冻结在顶部）；只把右端的
+         「保存」旁边多一个「退出阅读」，因为原来的极简顶栏已经去掉了。 -->
+    <div class="ed-top">
       <button class="icon-btn" type="button" title="返回列表" @click="onBack">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <path d="M19 12H5M11 18l-6-6 6-6" />
@@ -2255,6 +2276,10 @@ onBeforeUnmount(() => {
         <span>整理格式</span>
       </button>
 
+      <button v-if="readingMode" class="read-exit" type="button" @click="toggleReading" title="退出阅读模式，回到可编辑状态">
+        <span class="btn-ico"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" /></svg></span>退出阅读
+      </button>
+
       <el-dropdown trigger="click" @command="moreCommand">
         <button class="icon-btn" type="button" title="更多">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
@@ -2282,7 +2307,7 @@ onBeforeUnmount(() => {
               </span>{{ focusMode ? '退出专注模式' : '专注模式（隐藏侧栏与大纲）' }}
             </el-dropdown-item>
             <el-dropdown-item command="toggleReading">
-              <span class="dd-ico"><svg viewBox="0 0 24 24"><path d="M5 4.5h5.5a2 2 0 0 1 2 2v13a2 2 0 0 0-2-2H5zM19 4.5h-5.5a2 2 0 0 0-2 2v13a2 2 0 0 1 2-2H19z" /></svg></span>阅读模式（只看正文）
+              <span class="dd-ico"><svg viewBox="0 0 24 24"><path d="M5 4.5h5.5a2 2 0 0 1 2 2v13a2 2 0 0 0-2-2H5zM19 4.5h-5.5a2 2 0 0 0-2 2v13a2 2 0 0 1 2-2H19z" /></svg></span>{{ readingMode ? '退出阅读模式' : '阅读模式（只看正文）' }}
             </el-dropdown-item>
           </el-dropdown-menu>
         </template>
@@ -2291,23 +2316,12 @@ onBeforeUnmount(() => {
       <el-button type="primary" class="save-btn" :loading="saving" @click="save">{{ isNew ? '创建' : '保存' }}</el-button>
     </div>
 
-    <!-- 阅读模式下的极简顶栏 -->
-    <div class="read-top" v-if="readingMode">
-      <button class="icon-btn" type="button" @click="onBack" title="返回列表">
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M11 18l-6-6 6-6" /></svg>
-      </button>
-      <span class="read-title">{{ form.title || '无标题' }}</span>
-      <button class="read-exit" type="button" @click="toggleReading">
-        <span class="btn-ico"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" /></svg></span>退出阅读
-      </button>
-    </div>
-
-    <!-- ======== 顶部第二行：语雀式工具条（阅读模式隐藏；作用于当前有焦点的编辑区：源码栏或右侧预览） ======== -->
+    <!-- ======== 顶部第二行：语雀式工具条（阅读模式也保留，只是点了不改内容；作用于当前有焦点的编辑区：源码栏或右侧预览） ======== -->
     <div
       ref="toolsRef"
       class="ed-tools"
-      :class="{ 'has-left': toolsScroll.left, 'has-right': toolsScroll.right }"
-      v-if="!readingMode && showTools"
+      :class="{ 'has-left': toolsScroll.left, 'has-right': toolsScroll.right, 'is-inert': readingMode }"
+      v-if="showTools"
       @mousedown.prevent
       @scroll="updateToolsScroll"
       @wheel="onToolsWheel"
@@ -2659,6 +2673,13 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 8px;
   padding: 4px 2px 8px;
+  /* 冻结在顶部：阅读长笔记时工具栏不跟着正文滚走。
+     页面本身通常不滚（正文在预览栏内部滚），sticky 是兜底：窄屏/专注模式下万一整页滚动，
+     这两行也不会被卷走。背景必须不透明，否则会透出滚过去的正文。 */
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  background: var(--app-bg);
   /* 窄屏兜底：顶行内容优先保全，放不下时横向滚动而不是截断 */
   overflow-x: auto;
   scrollbar-width: none;
@@ -2834,7 +2855,9 @@ onBeforeUnmount(() => {
   margin-bottom: 8px;
   overflow-x: auto;
   scrollbar-width: none;
-  position: relative;
+  position: sticky;   /* 与第一行一起冻结在顶部（同一 z 轴，见 .ed-top 的说明） */
+  top: 42px;
+  z-index: 6;
   background: var(--app-card);
   border: 1px solid var(--app-border);
   border-radius: 10px;
@@ -3562,27 +3585,15 @@ html.dark .ol-item.active {
   position: relative;
 }
 
-/* ================= 阅读模式 ================= */
-.read-top {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 4px 2px 10px;
-}
-.read-title {
-  flex: 1;
-  font-size: 16px;
-  font-weight: 650;
-  color: var(--app-text-1);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
+/* ================= 阅读模式 =================
+   阅读模式不再换成「极简顶栏」：顶部两行工具栏原样保留并冻结在顶部（用户要求），
+   只在右端多一个「退出阅读」。工具条本身变淡（is-inert）表示这一排点了不改内容。 */
 .read-exit {
   display: inline-flex;
   align-items: center;
   height: 30px;
   padding: 0 12px;
+  flex-shrink: 0;
   font-size: 12.5px;
   font-family: inherit;
   color: var(--app-text-2);
@@ -3594,6 +3605,10 @@ html.dark .ol-item.active {
 .read-exit:hover {
   color: var(--app-brand-deep);
   border-color: color-mix(in srgb, var(--app-brand) 40%, var(--app-border));
+}
+/* 阅读模式下的工具条：能看、能悬停看提示，但点了不会静默改到看不见的源码栏 */
+.ed-tools.is-inert {
+  opacity: 0.55;
 }
 
 /* 专注模式：编辑区整体浮起来一点，四周留白加大 */
