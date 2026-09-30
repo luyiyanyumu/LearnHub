@@ -1559,35 +1559,48 @@ function setCodeFenceLang(index, lang) {
  * 不会把数字写进代码里。
  */
 function decorateCodeRowNumbers() {
-  // 直接按本页预览容器的类名找（类名写在模板的 MdPreview 上）：
-  // 不走 previewEl() —— 阅读模式/对照模式下它的取法不同，实测拿不到节点，
-  // 行号就永远画不出来（hasGutter=false）。.pv-md 只出现在本页预览上，
-  // 不会误伤 AI 弹窗里的预览。
-  const boxes = document.querySelectorAll('.pv-md .md-editor-code')
+  const boxes = [...document.querySelectorAll('.pv-md .md-editor-code')].filter((b) => {
+    const pre = b.querySelector('pre')
+    return pre && pre.querySelector('code')
+  })
   if (!boxes.length) return
-  boxes.forEach((box) => {
-    const pre = box.querySelector('pre')
-    const code = pre && pre.querySelector('code')
-    if (!pre || !code) return
-    // 代码文本**结尾通常带一个换行**，直接 split 会多算出一行（1 行代码画出两个 "1"），
-    // 所以先去掉结尾换行再数。
+
+  // 需要画的期望行数
+  const want = boxes.map((box) => {
+    const code = box.querySelector('pre code')
+    // 代码文本**结尾通常带一个换行**，直接 split 会多算出一行（1 行代码画出两个 "1"）
     const text = (code.textContent || '').replace(/\n$/, '')
-    const count = text.split('\n').length
-    let gutter = box.querySelector('.code-row-numbers')
-    if (!gutter) {
-      gutter = document.createElement('span')
-      gutter.className = 'code-row-numbers'
-      gutter.setAttribute('aria-hidden', 'true')
-      box.appendChild(gutter)
-    }
-    // 顶到代码区（跳过头部），左右与代码同一套 padding 由 CSS 负责
+    return text.split('\n').length
+  })
+
+  // 先校验：数量对不对、每个块是不是恰好一条行号栏、内容是否一致。
+  // 都对了就**一个字都不改**（这点很关键：函数被 MutationObserver 调用，
+  // 每次调用都写 DOM 会自触发成死循环）。
+  const gutters = [...document.querySelectorAll('.pv-md .code-row-numbers')]
+  let ok = gutters.length === boxes.length
+  if (ok) {
+    boxes.forEach((box, i) => {
+      const own = [...box.children].filter((c) => c.classList.contains('code-row-numbers'))
+      // 必须是"恰好一条"，且是这个块自己的（重复注入会变成两条 → 数字成对出现）
+      if (own.length !== 1 || own[0].dataset.count !== String(want[i])) ok = false
+    })
+  }
+  if (ok) return
+
+  // 不对才重建：先清掉页面里所有旧栏（含孤儿节点），再一块一条
+  gutters.forEach((g) => g.remove())
+  boxes.forEach((box, i) => {
+    const pre = box.querySelector('pre')
+    const gutter = document.createElement('span')
+    gutter.className = 'code-row-numbers'
+    gutter.setAttribute('aria-hidden', 'true')
+    box.appendChild(gutter)
+    // 顶到代码区（跳过头部）；左右留白与代码一致由 CSS 负责
     gutter.style.top = pre.offsetTop + 'px'
-    if (gutter.dataset.count !== String(count)) {
-      gutter.dataset.count = String(count)
-      let text = ''
-      for (let i = 1; i <= count; i++) text += i + (i < count ? '\n' : '')
-      gutter.textContent = text
-    }
+    gutter.dataset.count = String(want[i])
+    let nums = ''
+    for (let n = 1; n <= want[i]; n++) nums += n + (n < want[i] ? '\n' : '')
+    gutter.textContent = nums
   })
 }
 
