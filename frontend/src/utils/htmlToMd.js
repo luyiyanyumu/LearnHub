@@ -221,6 +221,10 @@ export function previewHtmlToMd(html) {
       .replace(/\u00a0/g, ' ') // &nbsp; → 普通空格
       .replace(/[ \t]+$/gm, '') // 行尾空格（含硬换行的两个空格，等价于 breaks:true 下的软换行）
       .replace(/^(\s*)([-*+]|\d+\.)\s+(?=\[[ xX]\])/gm, '$1$2 ') // 任务列表项："-   [x]" → "- [x]"
+      // 勾选框**后面**多余的空格也要收敛：md-editor 渲染任务项时是
+      // `<li class="task-list-item"><input type="checkbox" disabled> 任务</li>`（框后带一个空格），
+      // 反推回来就成了 `- [ ]  任务`（两个空格）—— 渲染无差别，但源码不整齐。
+      .replace(/^(\s*(?:[-*+]|\d+\.)\s+\[[ xX]\])\s{2,}/gm, '$1 ')
       .replace(/^(\s*)([-*+]|\d+\.)\s{2,}/gm, '$1$2 ') // 其它列表项多余缩进
       .replace(/\n{3,}/g, '\n\n') // 连续空行压成一个
   return splitByFence(md)

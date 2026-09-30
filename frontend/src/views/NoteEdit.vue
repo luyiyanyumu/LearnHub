@@ -1440,6 +1440,33 @@ function previewInsertHtml(html) {
 /** 折叠块的占位文字（与源码路径 FORMAT_PRESETS.details 保持一致） */
 const DETAILS_PLACEHOLDER = '折叠内容'
 
+/**
+ * 让用户填一个地址（链接 / 图片）。
+ *
+ * <p>为什么不用 `window.prompt`（原来是它）：
+ * <ol>
+ *   <li>样式是浏览器原生弹窗，和这个界面完全不搭；</li>
+ *   <li>部分浏览器/嵌入式 webview 会**直接屏蔽** prompt（返回 null），功能静默失效；</li>
+ *   <li>在 headless/自动化环境里它还会**永久阻塞页面** —— 我自己写审计脚本时就被它卡死过一次。</li>
+ * </ol>
+ * 换成 Element Plus 的输入弹层（项目里其它确认框本来就用它），取消/空值一律当"没填"处理。
+ *
+ * @returns {Promise<string|null>} 去掉首尾空白的地址；取消或空值返回 null
+ */
+function askUrl(title, initial) {
+  return ElMessageBox.prompt(title, title, {
+    inputValue: initial,
+    confirmButtonText: '插入',
+    cancelButtonText: '取消',
+    inputPlaceholder: 'https://…',
+  })
+    .then(({ value }) => {
+      const v = (value || '').trim()
+      return v === '' || v === initial ? null : v
+    })
+    .catch(() => null)
+}
+
 /** 预览区里能作为"块"的标签：块级插入要挂到它的兄弟位置 */
 const BLOCK_SELECTOR = 'p,li,h1,h2,h3,h4,h5,h6,blockquote,pre,table,details,div,hr,ul,ol'
 
@@ -1555,17 +1582,21 @@ function previewMdTool(name) {
       return previewInsertBlock(document.createElement('hr'))
     case 'inlineCode': return previewWrap('<code>', '</code>', '代码')
     case 'link': {
+      // 先取选区（会把选区存进 savedPreviewRange），弹层关掉后再插 —— 否则焦点在弹层上，
+      // 插进去的位置就没了。原来用 window.prompt，现在换成页内弹层（见 askUrl 的说明）。
       const text = previewSelText()
-      const url = window.prompt('链接地址', 'https://')
-      if (url == null || !url.trim()) return
-      // 链接是**行内**元素：插在光标处正是期望行为，继续走 execCommand
-      previewInsertHtml(`<a href="${url.trim()}">${escapeHtml(text || url.trim())}</a>`)
+      askUrl('链接地址', 'https://').then((url) => {
+        if (!url) return
+        // 链接是**行内**元素：插在光标处正是期望行为，继续走 execCommand
+        previewInsertHtml(`<a href="${url}">${escapeHtml(text || url)}</a>`)
+      })
       return
     }
     case 'image': {
-      const url = window.prompt('图片地址', 'https://')
-      if (url == null || !url.trim()) return
-      previewInsertHtml(`<img src="${url.trim()}" alt="图片描述" />`)
+      askUrl('图片地址', 'https://').then((url) => {
+        if (!url) return
+        previewInsertHtml(`<img src="${url}" alt="图片描述" />`)
+      })
       return
     }
     case 'codeBlock': {
