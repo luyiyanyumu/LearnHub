@@ -12,6 +12,7 @@
 import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { Editor } from '@tiptap/core'
 import StarterKit from '@tiptap/starter-kit'
+import { CodeBlockCm } from '../utils/codeBlockCm'
 import { EditorContent } from '@tiptap/vue-3'
 import MarkdownIt from 'markdown-it'
 import mdCallout from '../utils/mdCallout'
@@ -32,8 +33,8 @@ function build(html) {
   editor.value?.destroy()
   editor.value = new Editor({
     element: host.value,
-    editable: false,
-    extensions: [StarterKit],
+    editable: true,
+    extensions: [StarterKit.configure({ codeBlock: false }), CodeBlockCm],
     content: html,
   })
 }
