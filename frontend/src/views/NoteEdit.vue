@@ -3152,7 +3152,7 @@ onBeforeUnmount(() => {
         @mouseenter="attachPreviewEditable"
         @focusin="onPreviewFocusIn"
         @focusout="onPreviewFocusOut"
-        @click="onPreviewClick" @dblclick="onPreviewDblClick"
+        @click="onPreviewClick"
       >
         <div ref="pvScrollRef" class="pv-scroll" @scroll="onPreviewScroll">
           <div class="pv-inner">
@@ -3305,19 +3305,7 @@ onBeforeUnmount(() => {
     </el-dialog>
   </div>
 
-<!-- 代码块编辑（双击代码块打开）：CodeMirror 放在弹窗里，不与"预览即编辑"抢焦点 -->
-          <el-dialog v-model="codeEdit.open" title="编辑代码块" width="820px" append-to-body destroy-on-close>
-            <CodeBlockEditor
-              :code="codeEdit.text"
-              :lang="codeEdit.lang"
-              :dark="isDark"
-              @change="(v) => (codeEdit.text = v)"
-            />
-            <template #footer>
-              <el-button @click="codeEdit.open = false">取消</el-button>
-              <el-button type="primary" @click="saveCodeEdit">保存</el-button>
-            </template>
-          </el-dialog>
+
 </template>
 
 <style scoped>
