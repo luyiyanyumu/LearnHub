@@ -1626,7 +1626,48 @@ function saveCodeEdit() {
  * <p>行间换行放进 display:none 的 .code-br：视觉换行由 .code-line{display:block} 决定，
  * 而 code.textContent 与原文一字不差（复制代码 / 反推 Markdown 都读它）。
  */
+/**
+ * 取代码块里**排除行号元素**的纯文本。
+ * 必须排除 .code-num：否则重排第二次时会把行号当代码文本吞进去
+ * （实测后果很严重：14 行代码被渲染成 28 行 —— 行号混进了内容）。
+ */
+function codeTextEl(code) {
+  let out = ''
+  const walk = (n) => {
+    n.childNodes.forEach((c) => {
+      if (c.nodeType === 3) out += c.textContent
+      else if (c.nodeType === 1 && !c.classList.contains('code-num')) walk(c)
+    })
+  }
+  walk(code)
+  return out
+}
+
+/** 把光标放到 root 内第 offset 个字符处（重排后恢复光标用） */
+function setCaretAtOffset(root, offset) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  let acc = 0
+  let node = walker.nextNode()
+  while (node) {
+    const len = node.textContent.length
+    if (acc + len >= offset) {
+      const range = document.createRange()
+      range.setStart(node, Math.max(0, Math.min(offset - acc, len)))
+      range.collapse(true)
+      const sel = window.getSelection()
+      sel.removeAllRanges()
+      sel.addRange(range)
+      return true
+    }
+    acc += len
+    node = walker.nextNode()
+  }
+  return false
+}
 function decorateCodeRowNumbers() {
+  // 预览里的自动行号已下线：后处理 DOM 的路子反复出问题（重排会把行号吞进内容、打字会丢光标）。
+  // 行号改由「双击代码块」的 CodeMirror 弹窗提供；预览保持 md-editor 的原样渲染。
+  return
   const codes = [...document.querySelectorAll('.pv-md .md-editor-code pre code')]
   if (!codes.length) return
   const lineCount = (c) => (c.textContent || '').replace(/\n$/, '').split('\n').length
@@ -1634,6 +1675,17 @@ function decorateCodeRowNumbers() {
   if (codes.every((c) => c.querySelectorAll(':scope > .code-line').length === lineCount(c))) return
 
   codes.forEach((code) => {
+    // 打字重排时**必须保住光标**：先记下光标在整段代码文本里的字符偏移，重排完再放回去。
+    // 否则每输入一个字符就把光标弄丢（这也是之前"新行没有号"的真正原因 —— 不敢重排）。
+    const sel0 = window.getSelection()
+    let caretOffset = -1
+    if (sel0 && sel0.rangeCount && code.contains(sel0.getRangeAt(0).startContainer)) {
+      const r0 = sel0.getRangeAt(0)
+      const pre0 = document.createRange()
+      pre0.selectNodeContents(code)
+      pre0.setEnd(r0.startContainer, r0.startOffset)
+      caretOffset = pre0.toString().length
+    }
     // 1) 按文档顺序摊平文本片段，记住每段各自的祖先链（标签+类名）→ 保住高亮
     const pieces = []
     const walk = (node, chain) => {
@@ -1700,10 +1752,11 @@ function decorateCodeRowNumbers() {
       })
     })
     // 结尾换行会多造一个空行元素（多一个号）——去掉；那个 \n 仍留在上一行的 .code-br 里
-    if (line && !line.textContent && frag.lastChild === line) line.remove()
+    if (line && !line.textContent.replace(/^\d+$/, '') && frag.lastChild === line) line.remove()
 
     code.textContent = ''
     code.appendChild(frag)
+    if (caretOffset >= 0) setCaretAtOffset(code, caretOffset)
   })
 }
 
