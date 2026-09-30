@@ -91,8 +91,7 @@ JDK 21、Maven 3.9+、Node 18+、Docker（含 MySQL 8 镜像）。
 
 ### 1. 数据库（首次自行安装mysql）
 
-> **端口固定 3307，不要用 3306。** 本机 3306 已被另一个项目（报销系统）的
-> `reimb-mysql-local` 容器占用，两者 root 密码不同；若连 3306 后端会以
+> `reimb-mysql-local` 容器占用，两者 root 密码不同
 > `Access denied for user 'root'@'172.17.0.1'` 启动失败。
 > 对应 `backend/src/main/resources/application.yml` 里的 `localhost:3307`。
 
