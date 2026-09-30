@@ -20,7 +20,6 @@ async function langExt(lang) {
 }
 
 onMounted(async () => {
-  console.log('[nv] mounted, code=', JSON.stringify((props.node.attrs.code || '').slice(0, 40)), 'lang=', props.node.attrs.language)
   const state = EditorState.create({
     doc: props.node.attrs.code || '',
     extensions: [

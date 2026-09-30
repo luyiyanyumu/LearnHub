@@ -644,7 +644,7 @@ async function save() {
     return
   }
   // 预览里还有没反推回源码的改动时，直接保存会把它丢掉 —— 先自动同步（失败则中止保存）
-  if (previewUnsynced.value && !syncPreviewToSource(true)) return
+  if (previewUnsynced.value && !useBlockPreview && !syncPreviewToSource(true)) return
   saving.value = true
   try {
     const payload = {
