@@ -2360,8 +2360,19 @@ onBeforeUnmount(() => {
         <button class="tb" type="button" title="重做 (Ctrl+Y)" @click="mdTool('redo')">
           <svg viewBox="0 0 24 24"><path d="m15.5 5.5 4 4-4 4M19.5 9.5h-9a5.5 5.5 0 0 0 0 11h2" /></svg>
         </button>
-        <button class="tb" type="button" :class="{ on: formatPainter.active }" title="格式刷：先选带格式文字点我，再选目标文字点我" @click="formatPainterClick">
-          <svg viewBox="0 0 24 24"><path d="M15.5 3.5l5 5M8 21l3.5-3.5M10.5 17 14.5 8c.4-.8 1.4-1 2.1-.6l2.2 1.5c.8.4 1 1.4.6 2.1l-4.9 7M3 21c0-1.8 1.3-2.8 2.7-2.8 1.3 0 2 .9 2 1.9 0 1.4-2.1 1.7-4.7.9Z" /></svg>
+        <button class="tb tb-painter" type="button" :class="{ on: formatPainter.active }" title="格式刷：先选带格式文字点我，再选目标文字点我" @click="formatPainterClick">
+          <!--
+            刷子图标（Lucide `paintbrush`，MIT）。
+            选它的过程：把 5 个候选按真实尺寸（16px）与放大尺寸渲染出来对比过 ——
+            原来的自绘曲线在 16px 下像一个"小勾/音符"（用户："都不是刷子"）；
+            Lucide `brush`（笔+颜料团）和自绘扁刷在 16px 下都像**笔**；`paintbrush-2` 像铲子。
+            只有这一条是"斜置宽头刷 + 三根刷毛 + 手柄"，两个尺寸下都一眼认得出是刷子。
+          -->
+          <svg viewBox="0 0 24 24">
+            <path d="m14.622 17.897-10.68-2.913" />
+            <path d="M18.376 2.622a1 1 0 1 1 3.002 3.002L17.36 9.643a.5.5 0 0 0 0 .707l.944.944a2.41 2.41 0 0 1 0 3.408l-.944.944a.5.5 0 0 1-.707 0L8.354 7.348a.5.5 0 0 1 0-.707l.944-.944a2.41 2.41 0 0 1 3.408 0l.944.944a.5.5 0 0 0 .707 0z" />
+            <path d="M9 8c-1.804 2.71-3.97 3.46-6.583 3.948a.507.507 0 0 0-.302.819l7.32 8.883a1 1 0 0 0 1.185.204C12.735 20.405 16 16.792 16 15" />
+          </svg>
         </button>
 
         <i class="tb-sep" />
@@ -3010,6 +3021,26 @@ onBeforeUnmount(() => {
 }
 html.dark .tb.on {
   color: var(--app-brand);
+}
+/*
+  格式刷是**两步操作**（先取格式、再刷到目标），所以"已取格式"这个中间态必须看得见 ——
+  只靠背景变色在满屏工具栏里容易被忽略，这里再补一圈细描边 + 右下角一个小圆点。
+*/
+.tb-painter {
+  position: relative;
+}
+.tb-painter.on {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--app-brand) 55%, transparent);
+}
+.tb-painter.on::after {
+  content: '';
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
 }
 .tb-menu {
   position: fixed; /* .ed-tools 有 overflow-x:auto，absolute 会被裁；fixed 按视口坐标定位 */
