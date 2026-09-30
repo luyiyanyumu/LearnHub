@@ -1440,6 +1440,50 @@ function previewInsertHtml(html) {
 /** 折叠块的占位文字（与源码路径 FORMAT_PRESETS.details 保持一致） */
 const DETAILS_PLACEHOLDER = '折叠内容'
 
+/** 预览区里能作为"块"的标签：块级插入要挂到它的兄弟位置 */
+const BLOCK_SELECTOR = 'p,li,h1,h2,h3,h4,h5,h6,blockquote,pre,table,details,div,hr,ul,ol'
+
+/**
+ * 在预览区插入**块级元素**（折叠块 / 提示块 / 居中段落等）。
+ *
+ * <p>为什么不走 {@code execCommand('insertHTML')} —— 这是踩了两次的坑：
+ * <ol>
+ *   <li><b>正文会丢</b>：`<details><summary>…</summary>折叠内容</details>` 插进去只剩空壳
+ *       （正文整段消失，用户反馈"没有实际功能"）；</li>
+ *   <li><b>块会被降级</b>：`<div class="md-callout">` 插在段落中间时被浏览器改写成
+ *       一串行内 `<span>`（只剩底色），还把原段落劈成两半 —— 提示块看起来"没生效"。</li>
+ * </ol>
+ * 现在统一：**直接构造 DOM**（textContent 赋值，不经过 HTML 解析）+ 插到**光标所在块之后**
+ * 的兄弟位置（找不到块就追加到末尾）。@param placeholderSelected 是否把新块内的文字选中，
+ * 方便用户直接打字替换（只在正文是占位文字时才选，避免覆盖用户选中的内容）。
+ */
+function previewInsertBlock(el, placeholderSelected = false) {
+  const host = previewEl()
+  if (!host || !previewFocusAndRestore()) return false
+  pvPushUndo()
+  const sel = window.getSelection()
+  let block = null
+  if (sel && sel.rangeCount > 0) {
+    const node = sel.getRangeAt(0).startContainer
+    const start = node.nodeType === 1 ? node : node.parentElement
+    block = start ? start.closest(BLOCK_SELECTOR) : null
+    if (block && !host.contains(block)) block = null
+  }
+  if (block && block.parentElement) block.parentElement.insertBefore(el, block.nextSibling)
+  else host.appendChild(el)
+
+  if (placeholderSelected) {
+    const range = document.createRange()
+    range.selectNodeContents(el)
+    if (sel) {
+      sel.removeAllRanges()
+      sel.addRange(range)
+      savedPreviewRange = range.cloneRange()
+    }
+  }
+  return true
+}
+
 /**
  * 插入折叠块（预览路径）。
  *
@@ -1455,7 +1499,6 @@ function previewInsertDetails(selectedText) {
   const el = previewEl()
   if (!el || !previewFocusAndRestore()) return
   const text = (selectedText || '').trim()
-  pvPushUndo()
 
   const details = document.createElement('details')
   const summary = document.createElement('summary')
@@ -1464,26 +1507,8 @@ function previewInsertDetails(selectedText) {
   body.textContent = text || DETAILS_PLACEHOLDER
   details.append(summary, body)
 
-  // 插到光标所在块的后面（找不到块就追加到末尾）—— 与"在当前行插入"的直觉一致
-  const sel = window.getSelection()
-  let block = null
-  if (sel && sel.rangeCount > 0) {
-    const node = sel.getRangeAt(0).startContainer
-    const start = node.nodeType === 1 ? node : node.parentElement
-    block = start ? start.closest('p,li,h1,h2,h3,h4,h5,h6,blockquote,pre,table,details,div') : null
-    if (block && !el.contains(block)) block = null
-  }
-  const parent = block ? block.parentElement || el : el
-  if (block && parent.contains(block)) parent.insertBefore(details, block.nextSibling)
-  else parent.appendChild(details)
-
-  if (text) return   // 正文就是用户选中的内容，不动选区
-  const range = document.createRange()
-  range.selectNodeContents(body)
-  if (!sel) return
-  sel.removeAllRanges()
-  sel.addRange(range)
-  savedPreviewRange = range.cloneRange()
+  // 复用统一的块级插入（构造 DOM + 插到光标块之后），并选中占位文字
+  previewInsertBlock(details, !text)
 }
 
 /** 用标签包住预览里的选中文字（无选中时插入占位） */
@@ -1514,13 +1539,26 @@ function previewMdTool(name) {
     case 'quote': return previewExec('formatBlock', 'blockquote')
     case 'ul': return previewExec('insertUnorderedList')
     case 'ol': return previewExec('insertOrderedList')
-    case 'todo': return previewInsertHtml('<ul><li><input type="checkbox" disabled> 任务</li></ul>')
-    case 'hr': return previewInsertHtml('<hr>')
+    case 'todo': {
+      // 同折叠块/提示块：块级内容必须直接构造 DOM 并挂成兄弟节点，
+      // 用 insertHTML 插 `<ul>` 会被降级成行内内容、还会把光标所在段落劈开（实测）。
+      const ul = document.createElement('ul')
+      const li = document.createElement('li')
+      const box = document.createElement('input')
+      box.type = 'checkbox'
+      box.disabled = true
+      li.append(box, document.createTextNode(' 任务'))
+      ul.append(li)
+      return previewInsertBlock(ul, true)
+    }
+    case 'hr':
+      return previewInsertBlock(document.createElement('hr'))
     case 'inlineCode': return previewWrap('<code>', '</code>', '代码')
     case 'link': {
       const text = previewSelText()
       const url = window.prompt('链接地址', 'https://')
       if (url == null || !url.trim()) return
+      // 链接是**行内**元素：插在光标处正是期望行为，继续走 execCommand
       previewInsertHtml(`<a href="${url.trim()}">${escapeHtml(text || url.trim())}</a>`)
       return
     }
@@ -1532,11 +1570,28 @@ function previewMdTool(name) {
     }
     case 'codeBlock': {
       const text = previewSelText()
-      previewInsertHtml(`<pre><code class="language-java">${escapeHtml(text)}</code></pre>`)
-      return
+      const pre = document.createElement('pre')
+      const code = document.createElement('code')
+      code.className = 'language-java'
+      code.textContent = text
+      pre.append(code)
+      return previewInsertBlock(pre, !text)
     }
-    case 'table':
-      return previewInsertHtml('<table><thead><tr><th>列A</th><th>列B</th></tr></thead><tbody><tr><td> </td><td> </td></tr></tbody></table>')
+    case 'table': {
+      const table = document.createElement('table')
+      const thead = table.createTHead()
+      const hr = thead.insertRow()
+      for (const label of ['列A', '列B']) {
+        const th = document.createElement('th')
+        th.textContent = label
+        hr.append(th)
+      }
+      const tbody = table.createTBody()
+      const bodyRow = tbody.insertRow()
+      bodyRow.insertCell().textContent = ' '
+      bodyRow.insertCell().textContent = ' '
+      return previewInsertBlock(table)
+    }
   }
 }
 
@@ -1553,7 +1608,13 @@ function previewApplyFormat({ kind, value }) {
     case 'sub': return previewWrap('<sub>', '</sub>', '2')
     case 'center': {
       const text = previewSelText()
-      return previewInsertHtml(`<p style="text-align: center">${escapeHtml(text || '居中文字')}</p>`)
+      return previewInsertBlock(
+        Object.assign(document.createElement('p'), {
+          style: 'text-align: center',
+          textContent: text || '居中文字',
+        }),
+        !text,
+      )
     }
     case 'align': {
       // 段落对齐：作用于光标所在块（左对齐 = 移除对齐样式）
@@ -1571,7 +1632,15 @@ function previewApplyFormat({ kind, value }) {
     }
     case 'callout': {
       const text = previewSelText()
-      return previewInsertHtml(`<div class="md-callout md-callout-tip"><p>${escapeHtml(text || '提示内容')}</p></div>`)
+      // 提示块必须插成**块级兄弟节点**（见 previewInsertBlock 的说明）：
+      // 原来用 insertHTML 在段落中间插 `<div class="md-callout">`，实测被浏览器降级成
+      // 一串行内 <span>（只剩个底色），还把原段落劈成两半 —— 用户看到的就是"提示框没生效"。
+      const div = document.createElement('div')
+      div.className = 'md-callout md-callout-tip'
+      const p = document.createElement('p')
+      p.textContent = text || '提示内容'
+      div.append(p)
+      return previewInsertBlock(div, !text)
     }
     case 'clear': {
       const text = previewSelText()
