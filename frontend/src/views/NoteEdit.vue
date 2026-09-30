@@ -1498,6 +1498,12 @@ const lastCodeLang = ref('java')
 /** Stage 0 开关：?editor=block 时用 Tiptap 只读渲染器（默认关闭，绝不影响日常使用） */
 const useBlockPreview = new URLSearchParams(window.location.search).get('editor') === 'block'
 
+/** 块编辑器（?editor=block）编辑回写：Tiptap 反推出的 Markdown 写回源码 */
+function onBlockPreviewUpdate(markdown) {
+  form.value.content = markdown
+  previewUnsynced.value = true
+}
+
 /**
  * 光标所在块之后，在**源码**里的插入偏移；拿不到（没进编辑态/找不到块）返回 null。
  *
@@ -3167,7 +3173,7 @@ onBeforeUnmount(() => {
             </div>
 
             <!-- Stage 0/1：块编辑器渲染器（?editor=block 时启用，默认关闭走 md-editor） -->
-            <BlockPreview v-if="useBlockPreview" key="block-preview" :content="form.content" />
+            <BlockPreview v-if="useBlockPreview" key="block-preview" :content="form.content" @update="onBlockPreviewUpdate" />
             <MdPreview
               v-else
               :modelValue="form.content"
