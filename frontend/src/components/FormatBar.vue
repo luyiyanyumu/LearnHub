@@ -106,9 +106,9 @@ function pickBg(c) {
     <!--
       上标 / 下标：原来直接用浏览器默认的 <sup>/<sub>，13px 字号下偏移只有约 4px ——
       两个按钮并排都是"x2"，用户反馈"上标和下标不明显"。
-      现在给它们专门的类并把三件事拉开：x 放大到 15px、角标缩到 10.5px、
-      偏移从默认 ~4px 加大到 上标 -5px / 下标 +4.5px（vertical-align 归零后用 relative 精确定位），
-      下标刻意比上标多压一点 —— 只压 3px 时肉眼仍像"贴着基线"。
+      现在给它们专门的类并把三件事拉开：x 放大到 15px、角标缩到 9px（约 0.6 倍，排印常规比例）、
+      偏移从默认 ~4px 加大到 上标 -4.5px / 下标 +3.5px（vertical-align 归零后用 relative 精确定位）。
+      角标一开始给的是 10.5px（0.7 倍），用户反馈"2 大了、不协调"，收到 9px。
     -->
     <button class="fb-btn fb-sup" type="button" title="上标（x²）" @click="apply('sup')">x<sup>2</sup></button>
     <button class="fb-btn fb-sub" type="button" title="下标（x₂）" @click="apply('sub')">x<sub>2</sub></button>
@@ -241,7 +241,8 @@ function pickBg(c) {
 }
 .fb-btn.fb-sup sup,
 .fb-btn.fb-sub sub {
-  font-size: 10.5px;
+  /* 角标字号 = 基字的 ~0.6（排印常规比例）；先前 10.5/15 = 0.7，2 显得跟 x 一样重，不协调 */
+  font-size: 9px;
   font-weight: 400;
   /* 归零浏览器默认的 vertical-align，再用 relative 精确抬起/压低 */
   vertical-align: baseline;
@@ -249,11 +250,11 @@ function pickBg(c) {
   line-height: 1;
 }
 .fb-btn.fb-sup sup {
-  top: -5px;
+  top: -4.5px;
   margin-left: 1px;
 }
 .fb-btn.fb-sub sub {
-  top: 4.5px;
+  top: 3.5px;
   margin-left: 1px;
 }
 
