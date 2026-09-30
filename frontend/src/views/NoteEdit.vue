@@ -1806,7 +1806,9 @@ function previewMdTool(name, arg) {
       // 插入位置 = **光标所在块之后**：预览的每个块都带 data-line（md-editor 标的源码行号），
       // 取光标所在块、再看它后面那个块的 data-line，围栏就插在那之前（没有下一个块就追加到文末）。
       const src = form.value.content || ''
-      const fence = '```' + lang + '\n\n```'
+      // 围栏内**不留空行**：原来是 ```lang + 空行 + ```，
+      // 那个空行会被行号算成第 1 行 —— 用户接着往下写代码，看到的就是"序号整体差一行"。
+      const fence = '```' + lang + '\n```'
       const at = caretInsertOffset()
       form.value.content =
         at == null
