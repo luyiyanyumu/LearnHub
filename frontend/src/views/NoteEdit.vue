@@ -1,4 +1,4 @@
-﻿<script setup>
+<script setup>
 import { computed, h, nextTick, render, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -1598,9 +1598,16 @@ function decorateCodeRowNumbers() {
 
     const hostEl = document.createElement('div')
     hostEl.className = 'code-edit-overlay'
-    // 只盖住代码区（跳过头部），并把原 <pre> 藏起来（保留它的 textContent 供复制/反推）
-    hostEl.style.cssText = `position:absolute;left:0;right:0;top:${pre.offsetTop}px;height:${pre.offsetHeight}px;z-index:2;background:var(--app-card);`
+    // 关键：**不要**给覆盖层固定高度。原来写的是 height:pre.offsetHeight + overflow:auto，
+    // 于是编辑器内部的滚动条把新行（和它的行号）挡在可视区之外 ——
+    // 用户按回车看到的就是"没有行号"。现在改成：
+    //  · 原 <pre> 移出布局流（position:absolute + hidden）—— textContent 仍供复制/反推使用；
+    //  · 覆盖层在文档流里，**随编辑器内容长高**，代码块整体竖向完全展开，没有内部滚动窗口。
+    hostEl.className = 'code-edit-overlay'
+    pre.style.position = 'absolute'
     pre.style.visibility = 'hidden'
+    pre.style.pointerEvents = 'none'
+    pre.style.maxHeight = 'none'
     box.appendChild(hostEl)
 
     render(

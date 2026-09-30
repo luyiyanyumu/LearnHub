@@ -147,13 +147,18 @@ watch(
 </template>
 
 <style scoped>
-/* 编辑器铺满被它覆盖的那块代码区域（外层给的定位上下文由 NoteEdit 提供） */
+/* 代码块**竖向完全展开**：不设固定高度、不出现内部滚动条（用户要求"不需要滑动窗口"）。
+   长行交给 lineWrapping 折行，所以也不需要横向滚动。 */
 .code-block-editor {
-  height: 100%;
-  overflow: auto;
+  height: auto;
+  overflow: visible;
 }
 
 .code-block-editor :deep(.cm-editor) {
-  height: 100%;
+  height: auto;
+}
+
+.code-block-editor :deep(.cm-scroller) {
+  overflow: visible;
 }
 </style>

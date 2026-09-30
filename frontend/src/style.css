@@ -532,7 +532,19 @@ html.dark .md-editor-preview.md-editor-preview code:not(.md-editor-code-block) {
      用户明确要求白底（2026-09-30）。深色模式沿用深色面板（见下方 html.dark）。 */
   background: var(--app-card);
   overflow: hidden;
-  position: relative; /* 行号栏 absolute 的定位上下文 */
+  position: relative; /* 行号栏 / 编辑覆盖层的定位上下文 */
+  /* 竖向完全展开：主题会给代码区设 max-height（出现内部滚动条），这里按掉 */
+  max-height: none;
+}
+
+/* 内嵌 CodeMirror 覆盖层：在文档流里，随内容长高 */
+.md-editor-preview.md-editor-preview .md-editor-code .code-edit-overlay {
+  padding: 0 0 0 4px;
+}
+
+.md-editor-preview.md-editor-preview .md-editor-code pre {
+  max-height: none !important;
+  overflow: visible !important;
 }
 
 /* 行号：**按行**的元素结构（NoteEdit 的 decorateCodeRowNumbers 把代码拆成 .code-line，
