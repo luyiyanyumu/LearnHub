@@ -532,6 +532,29 @@ html.dark .md-editor-preview.md-editor-preview code:not(.md-editor-code-block) {
      用户明确要求白底（2026-09-30）。深色模式沿用深色面板（见下方 html.dark）。 */
   background: var(--app-card);
   overflow: hidden;
+  position: relative; /* 行号栏 absolute 的定位上下文 */
+}
+
+/* 行号栏（语雀式）：md-editor 把代码按 white-space:pre 排版、**没有一行一个元素**，
+   所以 CSS 计数器画不出来 —— 这里另起一栏，用与代码完全相同的 font-size / line-height，
+   逐行写数字，对齐就自动成立（不需要逐行测量）。
+   由 NoteEdit 的 decorateCodeRowNumbers() 注入，并且已加入 htmlToMd 的 DROP_SELECTOR，
+   反推 Markdown 时会被剔除，不会把数字写进代码里。 */
+.md-editor-preview.md-editor-preview .md-editor-code .code-row-numbers {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 44px;
+  padding-right: 12px;
+  box-sizing: border-box;
+  text-align: right;
+  white-space: pre;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: var(--app-text-3);
+  user-select: none;
+  pointer-events: none;
 }
 
 html.dark .md-editor-preview.md-editor-preview .md-editor-code {

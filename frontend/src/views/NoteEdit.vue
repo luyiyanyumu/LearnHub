@@ -1548,6 +1548,84 @@ function setCodeFenceLang(index, lang) {
 }
 
 /**
+ * 给预览里的代码块画行号（语雀式）。
+ *
+ * <p>为什么另起一栏而不是用 CSS 计数器：md-editor 把代码按 `white-space: pre` 排版，
+ * 行与行之间只是**换行符**（实测 15 行代码只有 2 个 `.md-editor-code-block` span），
+ * 没有"一行一个元素"，计数器无从数起。
+ * 这一栏用与代码**完全相同**的 font-size / line-height，逐行写数字，
+ * 因此对齐是"同款排版"自然得到的，不需要逐行测量像素。
+ * 纯装饰节点，已加入 htmlToMd 的 DROP_SELECTOR —— 反推 Markdown 时会剔除，
+ * 不会把数字写进代码里。
+ */
+function decorateCodeRowNumbers() {
+  // 直接按本页预览容器的类名找（类名写在模板的 MdPreview 上）：
+  // 不走 previewEl() —— 阅读模式/对照模式下它的取法不同，实测拿不到节点，
+  // 行号就永远画不出来（hasGutter=false）。.pv-md 只出现在本页预览上，
+  // 不会误伤 AI 弹窗里的预览。
+  const boxes = document.querySelectorAll('.pv-md .md-editor-code')
+  if (!boxes.length) return
+  boxes.forEach((box) => {
+    const pre = box.querySelector('pre')
+    const code = pre && pre.querySelector('code')
+    if (!pre || !code) return
+    // 代码文本**结尾通常带一个换行**，直接 split 会多算出一行（1 行代码画出两个 "1"），
+    // 所以先去掉结尾换行再数。
+    const text = (code.textContent || '').replace(/\n$/, '')
+    const count = text.split('\n').length
+    let gutter = box.querySelector('.code-row-numbers')
+    if (!gutter) {
+      gutter = document.createElement('span')
+      gutter.className = 'code-row-numbers'
+      gutter.setAttribute('aria-hidden', 'true')
+      box.appendChild(gutter)
+    }
+    // 顶到代码区（跳过头部），左右与代码同一套 padding 由 CSS 负责
+    gutter.style.top = pre.offsetTop + 'px'
+    if (gutter.dataset.count !== String(count)) {
+      gutter.dataset.count = String(count)
+      let text = ''
+      for (let i = 1; i <= count; i++) text += i + (i < count ? '\n' : '')
+      gutter.textContent = text
+    }
+  })
+}
+
+// 预览重渲染后补行号（内容变化 / 切换明暗主题都会重渲染，行号要跟着重画）
+// flush: 'post' 很关键：默认 flush 在 DOM 更新**之前**跑，首次加载时预览还是空的，
+// 而笔记内容只设置一次、之后不再变化 —— 那样行号永远画不出来（实测 hasGutter=false）。
+watch(() => [form.value.content, isDark.value], () => nextTick(decorateCodeRowNumbers), {
+  immediate: true,
+  flush: 'post',
+})
+
+// 行号栏是**注入的装饰节点**，预览一旦被 Vue 重渲染就会连它一起抹掉。
+// 只靠 watch(content) 不够：内容没变但组件重渲染的情况（切模式、主题、异步渲染）
+// 会把行号弄丢 —— 实测同一次会话里能抓到 20 个行号栏，下一次查询就一个都不剩。
+// 所以用 MutationObserver 盯着预览容器：子节点一变就重画。
+// 只观察 childList（不观察 attributes），而 decorate 只在**首次**给某个块加节点，
+// 之后只改 style.top/dataset —— 不会触发自身再次回调，不存在死循环。
+let rowNumberObserver = null
+
+onMounted(() => {
+  const attach = () => {
+    const host = document.querySelector('.pv-md')
+    if (!host) {
+      setTimeout(attach, 300)
+      return
+    }
+    rowNumberObserver = new MutationObserver(() => decorateCodeRowNumbers())
+    rowNumberObserver.observe(host, { childList: true, subtree: true })
+    decorateCodeRowNumbers()
+  }
+  attach()
+})
+
+onBeforeUnmount(() => {
+  rowNumberObserver?.disconnect()
+  rowNumberObserver = null
+})
+/**
  * 点代码块左上角的语言名 → 换语言（语雀式：语言就在块上，不必回源码改围栏）。
  * 预览里 .md-editor-code 的顺序与源码里围栏的顺序一致，所以用**序号**对应。
  * 注意：md-editor 自己的代码块头部有个折叠箭头也在左上区域，这里只认语言名那个元素。

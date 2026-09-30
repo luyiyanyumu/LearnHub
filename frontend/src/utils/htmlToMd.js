@@ -25,6 +25,8 @@ const DROP_SELECTOR = [
   '.md-editor-code-action',
   '.md-editor-icon',
   '.md-editor-heading-anchor',
+  // 我们自己画的行号栏：纯装饰，绝不能反推进代码里（否则每行会被写上数字）
+  '.code-row-numbers',
   '[rn-wrapper]',
 ].join(',')
 
