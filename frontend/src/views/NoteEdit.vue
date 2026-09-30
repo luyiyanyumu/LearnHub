@@ -19,6 +19,7 @@ import { FORMAT_PRESETS, stripInline } from '../utils/richFormat'
 import { findUnsupported, previewHtmlToMd } from '../utils/htmlToMd'
 import FormatBar from '../components/FormatBar.vue'
 import CodeBlockEditor from '../components/CodeBlockEditor.vue'
+import BlockPreview from '../components/BlockPreview.vue'
 import { findTable, addRow, deleteRow, addCol, deleteCol, setHeaderRow, alignColumn, deleteTable } from '../utils/mdTable'
 import { ensureColgroup, findColgroup } from '../utils/tableResize'
 
@@ -1493,6 +1494,9 @@ const CODE_LANGS = [
 
 /** 上次选的代码语言（本次会话内记住，默认 java = 改动前的行为） */
 const lastCodeLang = ref('java')
+
+/** Stage 0 开关：?editor=block 时用 Tiptap 只读渲染器（默认关闭，绝不影响日常使用） */
+const useBlockPreview = new URLSearchParams(window.location.search).get('editor') === 'block'
 
 /**
  * 光标所在块之后，在**源码**里的插入偏移；拿不到（没进编辑态/找不到块）返回 null。
@@ -3161,12 +3165,7 @@ onBeforeUnmount(() => {
               <div class="pv-empty-t">在这里直接写</div>
               <div class="pv-empty-s">右侧所见即所得：选中文字后用上方工具条加粗 / 改色 / 设字号，写完点别处即自动同步回 Markdown</div>
             </div>
-            <MdPreview
-              :modelValue="form.content"
-              :theme="isDark ? 'dark' : 'light'"
-              previewTheme="github"
-              class="pv-md"
-            />
+
           <!-- 代码块编辑（双击代码块打开）：CodeMirror 放在弹窗里，不与"预览即编辑"抢焦点 -->
           <el-dialog v-model="codeEdit.open" title="编辑代码块" width="820px" append-to-body destroy-on-close>
             <CodeBlockEditor
