@@ -1,5 +1,5 @@
-<script setup>
-import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+﻿<script setup>
+import { computed, h, nextTick, render, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { MdEditor, MdPreview } from 'md-editor-v3'
@@ -18,6 +18,7 @@ import { focusMode } from '../composables/useViewMode'
 import { FORMAT_PRESETS, stripInline } from '../utils/richFormat'
 import { findUnsupported, previewHtmlToMd } from '../utils/htmlToMd'
 import FormatBar from '../components/FormatBar.vue'
+import CodeBlockEditor from '../components/CodeBlockEditor.vue'
 import { findTable, addRow, deleteRow, addCol, deleteCol, setHeaderRow, alignColumn, deleteTable } from '../utils/mdTable'
 import { ensureColgroup, findColgroup } from '../utils/tableResize'
 
@@ -1558,94 +1559,67 @@ function setCodeFenceLang(index, lang) {
  * 纯装饰节点，已加入 htmlToMd 的 DROP_SELECTOR —— 反推 Markdown 时会剔除，
  * 不会把数字写进代码里。
  */
+/**
+ * 给预览里的代码块挂**内嵌 CodeMirror 编辑器**（语雀那种：直接在主文档里写代码）。
+ *
+ * <p>做法是**覆盖**而不是替换：md-editor 渲染出来的 `<pre><code>` 原样留在 DOM 里
+ * （`visibility: hidden`），编辑器绝对定位盖在它上面，编辑后把文本写回 `<code>`。
+ * 这样"复制代码"和"预览反推 Markdown"（两条路径都读 `code.textContent`）完全不受影响。
+ *
+ * <p>为什么必须换成真编辑器：行号此前是"渲染后按行拆 DOM"画出来的，
+ * 而**用户打字换行时浏览器在改 DOM** —— 重拆会销毁光标，不重拆就没有新行的号。
+ * 这是那条路线的固有矛盾，CodeMirror 的 lineNumbers() 由编辑器自己维护行号，天然没有这个问题。
+ */
+let codeEditors = [] // [{ hostEl, node }] 便于重渲染时清理
+
 function decorateCodeRowNumbers() {
-  const codes = [...document.querySelectorAll('.pv-md .md-editor-code pre code')]
-  if (!codes.length) return
-  const lineCount = (c) => (c.textContent || '').replace(/\n$/, '').split('\n').length
-  // 已经拆好的就**零写入**返回（本函数由 MutationObserver 调用，写 DOM 会自触发成死循环）
-  if (codes.every((c) => c.querySelectorAll(':scope > .code-line').length === lineCount(c))) return
+  const boxes = [...document.querySelectorAll('.pv-md .md-editor-code')]
+  if (!boxes.length) return
+  // 已经挂好且数量一致 → 零写入返回（本函数由 MutationObserver 调用，写 DOM 会自触发成死循环）
+  const mounted = codeEditors.filter((e) => e.hostEl.isConnected).length
+  if (mounted === boxes.length && mounted > 0) return
 
-  codes.forEach((code) => {
-    // 1) 按文档顺序把文本片段摊平，并记住每一段各自的祖先链（标签+类名）→ 保住高亮
-    const pieces = []
-    const walk = (node, chain) => {
-      [...node.childNodes].forEach((child) => {
-        if (child.nodeType === 3) {
-          if (child.textContent) pieces.push({ text: child.textContent, chain })
-        } else if (child.nodeType === 1) {
-          walk(child, chain.concat(child))
-        }
-      })
+  // 重渲染后旧实例的宿主已经脱离文档：销毁它们
+  codeEditors.forEach((e) => {
+    if (!e.hostEl.isConnected) {
+      render(null, e.hostEl)
+      e.hostEl.remove()
     }
-    walk(code, [])
+  })
+  codeEditors = codeEditors.filter((e) => e.hostEl.isConnected)
 
-    // 2) 按 \n 切分、逐行重建。**行间的换行放进 display:none 的 .code-br**：
-    //    这样 code.textContent 与原文一字不差（复制代码 / 反推 Markdown 都读它），
-    //    而视觉换行完全由 .code-line 的 display:block 决定 —— 一行一个元素，行号挂在行上。
-    const frag = document.createDocumentFragment()
-    let line = null
-    // 一行内**复用**同一套祖先元素：一个代码行由许多文本片段组成（关键词/字符串/注释…），
-    // 每个片段都重新克隆一遍祖先链的话，一行会被拆成好几个块级元素 ——
-    // 实测表现为"整块中间大片空白、文字碎片散在右边"。
-    // 所以按"链上第 i 层的源元素是否相同"决定复用还是新建。
-    let chainEls = []
-    let chainSrc = []
-    let lineNo = 0
-    const newLine = () => {
-      line = document.createElement('span')
-      line.className = 'code-line'
-      // 行号直接写成元素（不用 CSS 计数器：实测计数器会被加两次 → 2,4,6,8…）。
-      // 一行一个号元素，结构上不可能重复或翻倍。
-      const num = document.createElement('span')
-      num.className = 'code-num'
-      num.setAttribute('aria-hidden', 'true')
-      num.textContent = String(++lineNo)
-      line.appendChild(num)
-      frag.appendChild(line)
-      chainEls = []
-      chainSrc = []
-    }
-    const hostFor = (chain) => {
-      let host = line
-      for (let i = 0; i < chain.length; i++) {
-        if (chainSrc[i] === chain[i] && chainEls[i] && chainEls[i].parentElement === host) {
-          host = chainEls[i]
-          continue
-        }
-        for (let j = i; j < chain.length; j++) {
-          const clone = chain[j].cloneNode(false)
-          host.appendChild(clone)
-          chainEls[j] = clone
-          chainSrc[j] = chain[j]
-          host = clone
-        }
-        return host
-      }
-      return host
-    }
-    newLine()
-    pieces.forEach(({ text, chain }) => {
-      const parts = text.split('\n')
-      parts.forEach((part, i) => {
-        if (i > 0) {
-          const br = document.createElement('span')
-          br.className = 'code-br'
-          br.textContent = '\n'
-          line.appendChild(br)
-          newLine()
-        }
-        if (!part) return
-        hostFor(chain).appendChild(document.createTextNode(part))
-      })
-    })
-    // 代码结尾的换行会多造出一个空行元素（会多一个号）——去掉它，
-    // 那个 \n 仍留在上一行的 .code-br 里，textContent 不变
-    if (line && !line.textContent && frag.lastChild === line) line.remove()
+  boxes.forEach((box) => {
+    if (box.querySelector('.code-edit-overlay')) return // 这个块已经挂过
+    const pre = box.querySelector('pre')
+    const code = pre && pre.querySelector('code')
+    if (!pre || !code) return
+    const lang = (code.className.match(/language-([\w+#.-]+)/) || [, ''])[1]
+    const text = code.textContent || ''
 
-    code.textContent = ''
-    code.appendChild(frag)
+    const hostEl = document.createElement('div')
+    hostEl.className = 'code-edit-overlay'
+    // 只盖住代码区（跳过头部），并把原 <pre> 藏起来（保留它的 textContent 供复制/反推）
+    hostEl.style.cssText = `position:absolute;left:0;right:0;top:${pre.offsetTop}px;height:${pre.offsetHeight}px;z-index:2;background:var(--app-card);`
+    pre.style.visibility = 'hidden'
+    box.appendChild(hostEl)
+
+    render(
+      h(CodeBlockEditor, {
+        code: text,
+        lang,
+        dark: isDark.value,
+        // 内容变了就写回隐藏的 <code>（复制/反推读它），并标记"未同步"以便失焦/保存时落库
+        onChange: (v) => {
+          code.textContent = v
+          previewUnsynced.value = true
+        },
+      }),
+      hostEl,
+    )
+    codeEditors.push({ hostEl })
   })
 }
+
 
 // 预览重渲染后补行号（内容变化 / 切换明暗主题都会重渲染，行号要跟着重画）
 // flush: 'post' 很关键：默认 flush 在 DOM 更新**之前**跑，首次加载时预览还是空的，
