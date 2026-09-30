@@ -3299,7 +3299,8 @@ onBeforeUnmount(() => {
         <p class="ai-progress-tip">{{ aiHint }}</p>
       </div>
       <div v-else class="ai-preview">
-        <MdPreview :modelValue="fixHtmlQuotes(aiResult) || '*空内容*'" :theme="isDark ? 'dark' : 'light'" previewTheme="github" />
+        <BlockPreview v-if="useBlockPreview" :content="form.content" />
+        <MdPreview v-else :modelValue="fixHtmlQuotes(aiResult) || '*空内容*'" :theme="isDark ? 'dark' : 'light'" previewTheme="github" />
       </div>
       <template #footer>
         <el-button v-if="aiBusy" @click="cancelAiProcess">取消处理</el-button>
