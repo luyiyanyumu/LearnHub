@@ -1429,11 +1429,61 @@ function pvResetHistory() {
 
 /** 在预览区插入 HTML 片段（表格/图片/块级等 execCommand 覆盖不到的） */
 function previewInsertHtml(html) {
-  if (!previewFocusAndRestore()) return
+  if (!previewFocusAndRestore()) return false
   pvPushUndo()
   document.execCommand('insertHTML', false, html)
   const sel = window.getSelection()
   if (sel && sel.rangeCount > 0) savedPreviewRange = sel.getRangeAt(0).cloneRange()
+  return true
+}
+
+/** 折叠块的占位文字（与源码路径 FORMAT_PRESETS.details 保持一致） */
+const DETAILS_PLACEHOLDER = '折叠内容'
+
+/**
+ * 插入折叠块（预览路径）。
+ *
+ * <p>为什么不用 execCommand('insertHTML') 拼字符串（踩过的坑，两次）：
+ * 原来写 `<details><summary>点击展开</summary>折叠内容</details>` ——
+ * ① 裸文本正文经 contenteditable 的片段解析后**会整段丢掉**；
+ * ② 改用 `<p>` 包住之后正文仍然丢（实测插入结果是 `<details><summary>点击展开</summary><p></p></details>`）。
+ * 结果就是用户拿到一个空壳：点开「点击展开」什么都没有，反馈"只会有点击展开四个字，没有实际功能"。
+ * 现在**直接构造 DOM**（textContent 赋值，不经过 HTML 解析），从根上绕开这两次踩坑，
+ * 并且把占位文字选中（与源码路径 insertBlock 的行为对齐），用户可以直接打字替换。
+ */
+function previewInsertDetails(selectedText) {
+  const el = previewEl()
+  if (!el || !previewFocusAndRestore()) return
+  const text = (selectedText || '').trim()
+  pvPushUndo()
+
+  const details = document.createElement('details')
+  const summary = document.createElement('summary')
+  summary.textContent = '点击展开'
+  const body = document.createElement('p')
+  body.textContent = text || DETAILS_PLACEHOLDER
+  details.append(summary, body)
+
+  // 插到光标所在块的后面（找不到块就追加到末尾）—— 与"在当前行插入"的直觉一致
+  const sel = window.getSelection()
+  let block = null
+  if (sel && sel.rangeCount > 0) {
+    const node = sel.getRangeAt(0).startContainer
+    const start = node.nodeType === 1 ? node : node.parentElement
+    block = start ? start.closest('p,li,h1,h2,h3,h4,h5,h6,blockquote,pre,table,details,div') : null
+    if (block && !el.contains(block)) block = null
+  }
+  const parent = block ? block.parentElement || el : el
+  if (block && parent.contains(block)) parent.insertBefore(details, block.nextSibling)
+  else parent.appendChild(details)
+
+  if (text) return   // 正文就是用户选中的内容，不动选区
+  const range = document.createRange()
+  range.selectNodeContents(body)
+  if (!sel) return
+  sel.removeAllRanges()
+  sel.addRange(range)
+  savedPreviewRange = range.cloneRange()
 }
 
 /** 用标签包住预览里的选中文字（无选中时插入占位） */
@@ -1517,8 +1567,7 @@ function previewApplyFormat({ kind, value }) {
       return
     }
     case 'details': {
-      const text = previewSelText()
-      return previewInsertHtml(`<details><summary>点击展开</summary>${escapeHtml(text || '折叠内容')}</details>`)
+      return previewInsertDetails(previewSelText())
     }
     case 'callout': {
       const text = previewSelText()
