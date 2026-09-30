@@ -112,6 +112,9 @@ body {
 .markdown-body a { color: #0969da; text-decoration: none; }
 .markdown-body a:hover { text-decoration: underline; }
 .markdown-body img { max-width: 100%; }
+/* 行内荧光高亮（历史笔记里的 <mark>，以及"背景颜色=荧光黄"时写的 <font style=...>）：
+   不给规则的话 mark 走浏览器默认的亮黄底+黑字，导出件在暗色阅读器里会很刺眼 */
+.markdown-body mark { background: #fff3a3; color: inherit; padding: 0 1px; border-radius: 2px; }
 .markdown-body blockquote {
   margin: 1em 0; padding: .1em 1em; color: #57606a;
   border-left: 4px solid #d0d7de; background: #f6f8fa;

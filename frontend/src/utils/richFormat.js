@@ -15,11 +15,17 @@ export const TEXT_COLORS = [
   '#2f54eb', '#722ed1', '#eb2f96', '#8c6b4f',
 ]
 
-/** 常用背景色（浅色系，适合做行内标记） */
+/**
+ * 常用背景色（浅色系，适合做行内标记）。
+ *
+ * <p>第一个是**荧光黄**：原来"背景颜色"和"荧光高亮"是两个按钮做同一件事
+ * （`bg` 写 `<font style="background-color:X">`、`mark` 写 `<mark>`），
+ * 2026-09-30 合并成一个入口 —— 荧光黄作为调色板首色，一键可达且颜色可选。
+ * 取值与预览里 `<mark>` 的样式一致（`#fff3a3`），所以新旧高亮看起来是同一种黄。
+ */
 export const BG_COLORS = [
-  '#fde8e8', '#fdebd0', '#fdf6d8', '#e8f5d8',
-  '#d9f2e6', '#d8f0f2', '#dbeafe', '#e6e6fa',
-  '#f5e0f0', '#efe6dc', '#f2f2f2', '#ffffff',
+  '#fff3a3', '#fde8e8', '#fdebd0', '#fdf6d8', '#e8f5d8', '#d9f2e6',
+  '#d8f0f2', '#dbeafe', '#e6e6fa', '#f5e0f0', '#efe6dc', '#f2f2f2', '#ffffff',
 ]
 
 /** 字号档位（px） */
@@ -100,6 +106,9 @@ export const FORMAT_PRESETS = {
   color: (v) => wrapSelection(`<font style="color: ${v}">`, '</font>'),
   bg: (v) => wrapSelection(`<font style="background-color: ${v}">`, '</font>'),
   size: (v) => wrapSelection(`<font style="font-size: ${v}px">`, '</font>'),
+  // 入口已于 2026-09-30 合并进「背景颜色」（见 FormatBar 里的说明）：
+  // 保留这条是因为它仍是一个合法的行内格式，源码模式下手工加 <mark> 时还能用上；
+  // 历史笔记里的 <mark> 由预览 CSS 渲染（style.css）。
   mark: () => wrapSelection('<mark>', '</mark>', '高亮文字'),
   underline: () => wrapSelection('<u>', '</u>'),
   strike: () => wrapSelection('<s>', '</s>'),

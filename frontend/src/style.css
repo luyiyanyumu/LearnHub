@@ -356,6 +356,26 @@ html.dark .md-editor-previewOnly .markdown-body {
   text-wrap: pretty;
 }
 
+/*
+  <mark>：行内荧光高亮。
+  两处来源：① 历史笔记里用旧「荧光高亮」按钮写的 <mark>；② 现在"背景颜色"选荧光黄时写的是
+  <font style="background-color:#fff3a3">，颜色与这里保持一致，所以新旧看起来是一种黄。
+  为什么要显式定义：`mark` 的浏览器默认样式是**亮黄底 + 强制黑字**，
+  在暗色模式下刺眼、在彩色标题里也突兀；项目 CSS 与 md-editor-v3 主题里原本都没有这条规则。
+  color 用 inherit 而不是默认黑：否则放在标题/深色底里会自己变黑。
+*/
+.md-editor-preview.md-editor-preview mark {
+  background: #fff3a3;
+  color: inherit;
+  padding: 0 1px;
+  border-radius: 2px;
+}
+html.dark .md-editor-preview.md-editor-preview mark {
+  /* 暗色下用半透明暖黄：既保留"高亮"的语义，又不把文字压得看不清 */
+  background: rgba(255, 214, 102, 0.32);
+  color: inherit;
+}
+
 .md-editor-preview.md-editor-preview h1,
 .md-editor-preview.md-editor-preview h2,
 .md-editor-preview.md-editor-preview h3,

@@ -105,9 +105,14 @@ function pickBg(c) {
     <button class="fb-btn" type="button" title="下划线" @click="apply('underline')"><u>U</u></button>
     <button class="fb-btn" type="button" title="上标" @click="apply('sup')">x<sup>2</sup></button>
     <button class="fb-btn" type="button" title="下标" @click="apply('sub')">x<sub>2</sub></button>
-    <button class="fb-btn" type="button" title="荧光高亮" @click="apply('mark')">
-      <svg viewBox="0 0 24 24"><path d="m12 3 1.8 4.6L18.5 9l-4.7 1.4L12 15l-1.8-4.6L5.5 9l4.7-1.4L12 3ZM5 19h14" /></svg>
-    </button>
+    <!--
+      这里原来还有一个「荧光高亮」按钮（<mark>，不能选色的固定黄）—— 2026-09-30 合并掉了。
+      它和「背景颜色」是同一个功能（给文字加背景色），而且它的样式完全靠浏览器默认
+      （项目 CSS 与 md-editor-v3 主题里都没有 mark 规则）：亮黄底 + 强制黑字，
+      暗色模式下刺眼且不受主题控制；调色板里也没有那个黄，于是同一功能有两种视觉强度。
+      现在：荧光黄作为调色板的**第一个色**（#fff3a3），入口只剩一个、颜色可选、样式受控；
+      历史笔记里的 <mark> 仍然由预览 CSS 渲染（见 style.css 的 mark 规则）。
+    -->
 
     <i class="fb-sep" />
 
@@ -221,12 +226,8 @@ function pickBg(c) {
   margin-left: -1px;
 }
 
-.fb-mark {
-  background: #fff3a3;
-  color: #262626;
-  padding: 0 3px;
-  border-radius: 2px;
-}
+/* （这里原本有一条 .fb-mark —— 旧「荧光高亮」按钮的示例色块样式。
+    该按钮 2026-09-30 合并进「背景颜色」，这条规则已无引用，一并删除。） */
 
 /* 背景色按钮的高亮笔图标（16px：笔身 + 笔尖两段，笔尖吃当前色） */
 .fb-btn svg.fb-hl {
