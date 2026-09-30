@@ -1074,3 +1074,28 @@ html.theme-switching *::after {
 .pdf-pages.mode-continuous .pdf-page-box + .pdf-page-box {
   margin-top: 12px;
 }
+/* ===== 代码块行号（渲染期产出，见 utils/mdCodeLines.js）=====
+   行号用属性画（::before content: attr(data-line)）—— 不是文本，
+   所以复制代码 / 反推 Markdown 读 textContent 时绝不会带上行号。
+   换行放在 .code-br（display:none），视觉换行由 .code-line{display:block} 提供，
+   textContent 与原文一字不差。 */
+.md-editor-preview.md-editor-preview .md-editor-code .code-line {
+  display: block;
+  position: relative;
+}
+
+.md-editor-preview.md-editor-preview .md-editor-code .code-br {
+  display: none;
+}
+
+.md-editor-preview.md-editor-preview .md-editor-code .code-line::before {
+  content: attr(data-line);
+  position: absolute;
+  left: -47.25px;
+  width: 36px;
+  text-align: right;
+  color: var(--app-text-3);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+  pointer-events: none;
+}
