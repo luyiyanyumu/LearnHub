@@ -256,7 +256,9 @@ function onPreviewFocusOut() {
  * 点击预览区：兜住「点在不可聚焦区域」的情况（空正文占位、块之间的空白等）。
  * 这些地方点下去不产生 focusin，不补这一下用户会以为右侧不能编辑。
  */
-function onPreviewClick() {
+function onPreviewClick(e) {
+  // 点代码块左上角的语言名 = 换语言（要在"进入编辑态"之前处理，否则会先落光标）
+  if (e && onPreviewCodeLangClick(e)) return
   if (previewEditing.value) return
   onPreviewFocusIn()
 }
@@ -1492,6 +1494,82 @@ const CODE_LANGS = [
 const lastCodeLang = ref('java')
 
 /**
+ * 光标所在块之后，在**源码**里的插入偏移；拿不到（没进编辑态/找不到块）返回 null。
+ *
+ * <p>原理：md-editor 给预览里每个块标了 `data-line`（该块在源码里的起始行号）。
+ * 光标所在块的"下一块"的起始行就是插入点 —— 没有下一块则插到文末（返回 null 由调用方兜底）。
+ */
+function caretInsertOffset() {
+  const host = previewEl()
+  if (!host) return null
+  const sel = window.getSelection()
+  if (!sel || !sel.rangeCount) return null
+  const node = sel.getRangeAt(0).startContainer
+  const start = node.nodeType === 1 ? node : node.parentElement
+  if (!start || !host.contains(start)) return null
+  const block = start.closest('[data-line]')
+  if (!block) return null
+  const blocks = [...host.querySelectorAll('[data-line]')]
+  const next = blocks[blocks.indexOf(block) + 1]
+  const line = next ? Number(next.getAttribute('data-line')) : NaN
+  if (!Number.isInteger(line) || line < 0) return null
+  const lines = (form.value.content || '').split('\n')
+  return lines.slice(0, Math.min(line, lines.length)).join('\n').length + (line > 0 ? 1 : 0)
+}
+
+/**
+ * 改第 index 个代码围栏的语言（index 从 0 开始，与预览里 .md-editor-code 的顺序一致）。
+ * 用于"点代码块左上角的语言名换语言"。找不到第 index 个围栏返回 false。
+ */
+function setCodeFenceLang(index, lang) {
+  const lines = (form.value.content || '').split('\n')
+  let idx = -1
+  let inFence = false
+  let done = false
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^(\s*)(`{3,}|~{3,})(.*)$/)
+    if (!m) continue
+    if (!inFence) {
+      idx++
+      inFence = true
+      if (idx === index) {
+        lines[i] = m[1] + m[2] + lang
+        done = true
+        break
+      }
+    } else {
+      inFence = false // 闭合围栏
+    }
+  }
+  if (!done) return false
+  form.value.content = lines.join('\n')
+  previewUnsynced.value = false
+  return true
+}
+
+/**
+ * 点代码块左上角的语言名 → 换语言（语雀式：语言就在块上，不必回源码改围栏）。
+ * 预览里 .md-editor-code 的顺序与源码里围栏的顺序一致，所以用**序号**对应。
+ * 注意：md-editor 自己的代码块头部有个折叠箭头也在左上区域，这里只认语言名那个元素。
+ */
+function onPreviewCodeLangClick(e) {
+  const el = e.target?.closest?.('.md-editor-code-lang')
+  if (!el) return false
+  e.preventDefault()
+  e.stopPropagation()
+  const host = previewEl()
+  const box = el.closest('.md-editor-code')
+  const index = host && box ? [...host.querySelectorAll('.md-editor-code')].indexOf(box) : -1
+  if (index < 0) return true
+  askCodeLang().then((lang) => {
+    if (!lang) return
+    if (setCodeFenceLang(index, lang)) ElMessage.success(`已把代码块语言改为 ${lang}`)
+    else ElMessage.warning('这个代码块不是围栏写法（可能是内联 HTML），请在源码模式里改')
+  })
+  return true
+}
+
+/**
  * 选代码语言（方案 A：页内弹层，和链接/图片用的是同一种交互）。
  *
  * <p>为什么不做成工具栏下拉：试过 `el-dropdown`（`@command` 与菜单项直接绑 click 都试了），
@@ -1644,6 +1722,22 @@ function previewInsertDetails(selectedText) {
 /** 用标签包住预览里的选中文字（无选中时插入占位） */
 function previewWrap(before, after, placeholder = '文本') {
   if (!previewFocusAndRestore()) return
+  // 代码块里不给套内联格式：围栏代码在 Markdown 里**无法**表达颜色/字号，
+  // 硬套 <font> 只会把代码文字弄丢（用户反馈"代码块里面的字改成红色会消失"）——
+  // execCommand 在 <pre> 里替换内容时会把原文本吃掉。
+  // 这里直接提示，不动内容：宁可"没反应"，也不能弄丢代码。
+  const sel0 = window.getSelection()
+  const startEl =
+    sel0 && sel0.rangeCount
+      ? (() => {
+          const n = sel0.getRangeAt(0).startContainer
+          return n.nodeType === 1 ? n : n.parentElement
+        })()
+      : null
+  if (startEl && startEl.closest('pre, .md-editor-code')) {
+    ElMessage.info('代码块内的文字不参与"颜色/字号"这类内联格式（Markdown 围栏代码不支持），可在源码里用其它方式标注')
+    return
+  }
   pvPushUndo()
   const sel = window.getSelection()
   const text = sel ? sel.toString() : ''
@@ -1706,18 +1800,20 @@ function previewMdTool(name, arg) {
       const lang = arg || lastCodeLang.value
       lastCodeLang.value = lang
       // 直接改**源码**（form.content 是唯一真源），预览会自动重渲染成正式代码块。
+      // 为什么不在预览里插 DOM：插进去的是裸 <pre>，md-editor 不认识它，
+      // 渲染出来是没有语言头/复制/行号的空盒子，还要靠"反推回 Markdown"才能变正式块。
       //
-      // 为什么不在预览里插 DOM：插进去的是裸 <pre> —— md-editor 不认识它，
-      // 渲染出来就是一个没有语言头/复制/行号的空盒子（用户反馈"无法插入代码块"），
-      // 而且要靠"反推回 Markdown"才能变成正式代码块，实测这条链路带着弹层时并不可靠。
-      // 写源码则一步到位：Vue 重渲染 → .md-editor-code（语言头 + 复制 + 行号）直接出现。
-      //
-      // 位置：追加到文末（先保住"插得进去且样子正确"）。按光标位置插入需要
-      // 把预览块的 data-line 映射回源码偏移，留待下一步。
+      // 插入位置 = **光标所在块之后**：预览的每个块都带 data-line（md-editor 标的源码行号），
+      // 取光标所在块、再看它后面那个块的 data-line，围栏就插在那之前（没有下一个块就追加到文末）。
       const src = form.value.content || ''
-      form.value.content = src.replace(/\s*$/, '') + '\n\n```' + lang + '\n\n```\n'
+      const fence = '```' + lang + '\n\n```'
+      const at = caretInsertOffset()
+      form.value.content =
+        at == null
+          ? src.replace(/\s*$/, '') + '\n\n' + fence + '\n'
+          : src.slice(0, at).replace(/\s*$/, '') + '\n\n' + fence + '\n\n' + src.slice(at).replace(/^\s*/, '')
       previewUnsynced.value = false
-      nextTick(() => ElMessage.success(`已插入 ${lang} 代码块（在文末），点击代码块内部即可开始写`))
+      nextTick(() => ElMessage.success(`已插入 ${lang} 代码块，点击代码块内部即可开始写`))
       return
     }
     case 'table': {

@@ -538,8 +538,28 @@ html.dark .md-editor-preview.md-editor-preview .md-editor-code {
   background: var(--app-code-bg);
 }
 
-.md-editor-preview.md-editor-preview .md-editor-code-head {
+/* 主题（@vavt/markdown-theme/github.css）把灰底涂在**代码块内部**的元素上
+   （走 --md-theme-code-block-bg-color），只改外层 .md-editor-code 是不够的 ——
+   上一版就是这个原因导致"背景没变"。这里把变量与内部元素一起按掉。 */
+.md-editor-preview.md-editor-preview {
+  --md-theme-code-block-bg-color: transparent;
+  --md-theme-code-before-bg-color: transparent;
+}
+
+html.dark .md-editor-preview.md-editor-preview {
+  --md-theme-code-block-bg-color: transparent;
+}
+
+.md-editor-preview.md-editor-preview .md-editor-code pre,
+.md-editor-preview.md-editor-preview .md-editor-code pre code,
+.md-editor-preview.md-editor-preview .md-editor-code pre code .md-editor-code-block {
   background: transparent;
+}
+
+.md-editor-preview.md-editor-preview .md-editor-code .md-editor-code-head,
+.md-editor-preview.md-editor-preview .md-editor-code-head {
+  /* 主题对头部用了 3 层选择器 + 变量色，普通写法压不住（实测仍是 #f6f8fa），这里加 !important */
+  background: transparent !important;
   border-bottom: 1px solid var(--app-border-weak);
 }
 
