@@ -535,15 +535,11 @@ html.dark .md-editor-preview.md-editor-preview code:not(.md-editor-code-block) {
   position: relative; /* 行号栏 absolute 的定位上下文 */
 }
 
-/* 行号：**按行**的元素结构（NoteEdit 的 decorateCodeRowNumbers 把代码拆成 .code-line）。
-   一行一个元素、行号用 CSS 计数器挂在行上 —— 结构上不可能出现重复或错位，
-   也不需要另画一栏去对齐像素。
+/* 行号：**按行**的元素结构（NoteEdit 的 decorateCodeRowNumbers 把代码拆成 .code-line，
+   并在每行里放一个 .code-num）。一行一个号元素 —— 不用 CSS 计数器，
+   因为计数器实测会被加两次（显示成 2,4,6,8…），行元素则结构上不可能翻倍。
    行间换行放在 display:none 的 .code-br 里，保证 code.textContent 与原文一字不差
    （复制代码 / 反推 Markdown 都读 textContent）。 */
-.md-editor-preview.md-editor-preview .md-editor-code pre code {
-  counter-reset: code-line;
-}
-
 .md-editor-preview.md-editor-preview .md-editor-code .code-line {
   display: block;
   position: relative;
@@ -554,9 +550,7 @@ html.dark .md-editor-preview.md-editor-preview code:not(.md-editor-code-block) {
 }
 
 /* 行号画在代码左侧那块留白里（主题给 code 留了 47.25px 的 padding-left） */
-.md-editor-preview.md-editor-preview .md-editor-code .code-line::before {
-  counter-increment: code-line;
-  content: counter(code-line);
+.md-editor-preview.md-editor-preview .md-editor-code .code-num {
   position: absolute;
   left: -47.25px;
   width: 36px;

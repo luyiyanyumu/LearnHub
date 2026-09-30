@@ -1584,10 +1584,44 @@ function decorateCodeRowNumbers() {
     //    而视觉换行完全由 .code-line 的 display:block 决定 —— 一行一个元素，行号挂在行上。
     const frag = document.createDocumentFragment()
     let line = null
+    // 一行内**复用**同一套祖先元素：一个代码行由许多文本片段组成（关键词/字符串/注释…），
+    // 每个片段都重新克隆一遍祖先链的话，一行会被拆成好几个块级元素 ——
+    // 实测表现为"整块中间大片空白、文字碎片散在右边"。
+    // 所以按"链上第 i 层的源元素是否相同"决定复用还是新建。
+    let chainEls = []
+    let chainSrc = []
+    let lineNo = 0
     const newLine = () => {
       line = document.createElement('span')
       line.className = 'code-line'
+      // 行号直接写成元素（不用 CSS 计数器：实测计数器会被加两次 → 2,4,6,8…）。
+      // 一行一个号元素，结构上不可能重复或翻倍。
+      const num = document.createElement('span')
+      num.className = 'code-num'
+      num.setAttribute('aria-hidden', 'true')
+      num.textContent = String(++lineNo)
+      line.appendChild(num)
       frag.appendChild(line)
+      chainEls = []
+      chainSrc = []
+    }
+    const hostFor = (chain) => {
+      let host = line
+      for (let i = 0; i < chain.length; i++) {
+        if (chainSrc[i] === chain[i] && chainEls[i] && chainEls[i].parentElement === host) {
+          host = chainEls[i]
+          continue
+        }
+        for (let j = i; j < chain.length; j++) {
+          const clone = chain[j].cloneNode(false)
+          host.appendChild(clone)
+          chainEls[j] = clone
+          chainSrc[j] = chain[j]
+          host = clone
+        }
+        return host
+      }
+      return host
     }
     newLine()
     pieces.forEach(({ text, chain }) => {
@@ -1601,13 +1635,7 @@ function decorateCodeRowNumbers() {
           newLine()
         }
         if (!part) return
-        let host = line
-        chain.forEach((src) => {
-          const clone = src.cloneNode(false)
-          host.appendChild(clone)
-          host = clone
-        })
-        host.appendChild(document.createTextNode(part))
+        hostFor(chain).appendChild(document.createTextNode(part))
       })
     })
     // 代码结尾的换行会多造出一个空行元素（会多一个号）——去掉它，
