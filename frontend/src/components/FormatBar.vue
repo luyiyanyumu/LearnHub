@@ -55,12 +55,26 @@ function pickBg(c) {
       />
     </el-popover>
 
-    <!-- 背景颜色（语雀式：高亮笔 + 底部色条指示当前色） -->
+    <!-- 背景颜色（高亮笔：笔尖吃当前色 + 一条贴着笔尖的涂抹色条） -->
     <el-popover v-model:visible="bgPop" placement="bottom-start" :width="290" trigger="click">
       <template #reference>
         <button class="fb-btn" type="button" title="背景颜色（行内高亮）">
           <span class="fb-color">
-            <svg class="fb-hl" viewBox="0 0 24 24"><path d="m9 11-4 4v3h3l4-4M13 5l6 6M9.5 15.5 15 4.8c.5-.8 1.5-1 2.2-.5l3.5 2.6c.8.5 1 1.5.5 2.2L15.5 14.5M4 20h16" /></svg>
+            <!--
+              高亮笔图标（自绘，24 网格，stroke 1.6 与工具行其它图标同规格）。
+              画法：**先画竖直的马克笔，再整体旋转 45°** —— 直接手写斜线坐标很难画准，
+              实测第一版画出来像个"带水滴的方盒子"。竖直构造下三件事各自可控：
+              笔身是圆角矩形、笔帽缝是一条横线、笔尖是**宽斜切**（这是高亮笔最好认的特征）。
+              笔尖吃当前背景色，下面那条窄色条是它"划出来的线"，两者同色。
+            -->
+            <svg class="fb-hl" viewBox="0 0 24 24">
+              <g transform="rotate(45 12 12)">
+                <rect x="8.6" y="3.6" width="6.8" height="8.8" rx="1.8" />
+                <path d="M8.6 6.6h6.8" />
+                <path class="fb-nib" d="M8.6 12.4h6.8l-1.1 5.1a1.6 1.6 0 0 1-1.6 1.3h-1.4a1.6 1.6 0 0 1-1.6-1.3Z"
+                  :style="{ fill: lastBgColor }" />
+              </g>
+            </svg>
             <i class="fb-caret" :style="{ background: lastBgColor }" />
           </span>
         </button>
@@ -214,10 +228,15 @@ function pickBg(c) {
   border-radius: 2px;
 }
 
-/* 背景色按钮的高亮笔图标（15px，略小于通用 16px 规格，与 A 视觉重量一致） */
+/* 背景色按钮的高亮笔图标（16px：笔身 + 笔尖两段，笔尖吃当前色） */
 .fb-btn svg.fb-hl {
-  width: 15px;
-  height: 15px;
+  width: 16px;
+  height: 16px;
+}
+/* 笔尖用当前背景色填充；浅色（如 #ffffff）时靠外面那圈描边仍然看得见形状 */
+.fb-btn svg.fb-hl .fb-nib {
+  stroke: currentColor;
+  stroke-width: 1.6;
 }
 
 /* 字号「∨」文字下拉（语雀式） */
@@ -237,13 +256,18 @@ function pickBg(c) {
   opacity: 0.7;
 }
 
-/* 色条：贴着图标下沿的一小段（不再是通宽贴底的绝对定位块） */
+/* 色条：贴着笔尖的一条**窄涂抹线**（不是小胶囊 —— 圆角 1px、宽 14px、高 2.5px） */
 .fb-caret {
-  width: 12px;
-  height: 3px;
-  border-radius: 2px;
+  width: 14px;
+  height: 2.5px;
+  border-radius: 1px;
   /* 极浅色（#ffffff / #f2f2f2）在浅色工具栏上几乎没有边界，加一圈淡内描边兜底 */
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--app-text-1) 16%, transparent);
+}
+
+/* 高亮笔那格：色条紧贴笔尖（gap 0），读起来是"这支笔划出来的颜色" */
+.fb-color {
+  gap: 0;
 }
 
 .fb-sep {
