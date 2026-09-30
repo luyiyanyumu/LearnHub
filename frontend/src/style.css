@@ -1099,3 +1099,14 @@ html.theme-switching *::after {
   user-select: none;
   pointer-events: none;
 }
+
+/* 兜底：如果代码块里的 .code-line 被**嵌套**了一层（md-editor 会对 fence 产物再过一遍渲染，
+   实测 nested=13），只让**外层**画号、内层一律不画 —— 否则就是"两列行号 + 底部重复行"。
+   这是显示层的兜底，不影响 textContent（行号本来就是 ::before 画的）。 */
+.md-editor-preview.md-editor-preview .md-editor-code .code-line .code-line::before {
+  content: none !important;
+}
+
+.md-editor-preview.md-editor-preview .md-editor-code .code-line .code-line .code-br {
+  display: none;
+}
