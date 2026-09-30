@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { MdEditor, MdPreview } from 'md-editor-v3'
@@ -1144,7 +1144,12 @@ const mdBtns = {
   todo: () => mdLinePrefix('- [ ] '),
   hr: () => edInsert(() => ({ targetValue: '\n\n---\n\n', select: 5 })),
   inlineCode: () => mdWrap('`', '`'),
-  codeBlock: () => edInsert(() => ({ targetValue: '\n```java\n\n```\n', select: 9 })),
+  // 语言由「代码块」按钮的语言弹层传入；光标落在围栏内部那行空行上
+  // （位置 = 前导换行 + ``` + 语言名 + 换行 → 4 + 语言长度；原来写死 java 时是 9）
+  codeBlock: (lang = lastCodeLang.value) => {
+    lastCodeLang.value = lang
+    return edInsert(() => ({ targetValue: '\n```' + lang + '\n\n```\n', select: 4 + lang.length }))
+  },
   link: () => mdWrap('[', '](https://)'),
   image: () => edInsert(() => ({ targetValue: '![图片描述](https://)', select: 3 })),
   table: () => edInsert(() => ({ targetValue: '\n| 列A | 列B |\n| --- | --- |\n|  |  |\n', select: 2 })),
@@ -1190,9 +1195,22 @@ function mdLinePrefix(prefix) {
     return { targetValue: prefix + inner, select: selected ? [prefix.length, prefix.length + inner.length] : prefix.length }
   })
 }
-function mdTool(name) {
-  if (previewEditing.value || (readingMode.value && ensurePreviewEditing())) return previewMdTool(name)
-  mdBtns[name]?.()
+function mdTool(name, arg) {
+  if (previewEditing.value || (readingMode.value && ensurePreviewEditing())) return previewMdTool(name, arg)
+  mdBtns[name]?.(arg)
+}
+
+/**
+ * 工具栏「代码块」：先选语言，再插入。
+ *
+ * <p>弹层会夺走焦点，所以**先**跑一次预览取词（它内部会把当前插入点记进
+ * {@code savedPreviewRange}），弹层关闭后再执行插入 —— 否则插入点就丢了。
+ */
+function onCodeBlockClick() {
+  if (previewEditing.value || (readingMode.value && ensurePreviewEditing())) previewSelText()
+  askCodeLang().then((lang) => {
+    if (lang) mdTool('codeBlock', lang)
+  })
 }
 
 // ---- 撤销 / 重做 ----
@@ -1441,6 +1459,91 @@ function previewInsertHtml(html) {
 const DETAILS_PLACEHOLDER = '折叠内容'
 
 /**
+ * 代码块可选的语言（value 必须是 highlight.js 认得的 id，会写进围栏/class）。
+ * 命名与「代码库」页保持一致，避免同一门语言在两个页面叫法不同。
+ */
+const CODE_LANGS = [
+  { value: 'java', label: 'Java' },
+  { value: 'python', label: 'Python' },
+  { value: 'javascript', label: 'JavaScript' },
+  { value: 'typescript', label: 'TypeScript' },
+  { value: 'vue', label: 'Vue' },
+  { value: 'html', label: 'HTML' },
+  { value: 'css', label: 'CSS' },
+  { value: 'json', label: 'JSON' },
+  { value: 'yaml', label: 'YAML' },
+  { value: 'xml', label: 'XML' },
+  { value: 'sql', label: 'SQL' },
+  { value: 'shell', label: 'Shell / Bash' },
+  { value: 'go', label: 'Go' },
+  { value: 'rust', label: 'Rust' },
+  { value: 'c', label: 'C' },
+  { value: 'cpp', label: 'C++' },
+  { value: 'csharp', label: 'C#' },
+  { value: 'kotlin', label: 'Kotlin' },
+  { value: 'php', label: 'PHP' },
+  { value: 'ruby', label: 'Ruby' },
+  { value: 'markdown', label: 'Markdown' },
+  { value: 'diff', label: 'Diff' },
+  { value: 'plaintext', label: '纯文本' },
+]
+
+/** 上次选的代码语言（本次会话内记住，默认 java = 改动前的行为） */
+const lastCodeLang = ref('java')
+
+/**
+ * 选代码语言（方案 A：页内弹层，和链接/图片用的是同一种交互）。
+ *
+ * <p>为什么不做成工具栏下拉：试过 `el-dropdown`（`@command` 与菜单项直接绑 click 都试了），
+ * 菜单能弹出但插入不触发；换成页内弹层这条路径与链接/图片一致，是已验证可用的形态。
+ * 用"语言按钮网格"而不是 `el-select`：弹层里放下拉要处理响应式更新，按钮网格点一下就定，
+ * 少一层不确定性。
+ *
+ * @returns {Promise<string|null>} 选中的语言 id；取消返回 null
+ */
+function askCodeLang() {
+  return new Promise((resolve) => {
+    let done = false
+    const finish = (v) => {
+      if (done) return
+      done = true
+      resolve(v)
+    }
+    const box = ElMessageBox({
+      title: '插入代码块',
+      customClass: 'code-lang-box',
+      message: h(
+        'div',
+        { class: 'clp' },
+        CODE_LANGS.map((l) =>
+          h(
+            'button',
+            {
+              class: ['clp-item', { cur: l.value === lastCodeLang.value }],
+              type: 'button',
+              onClick: () => {
+                lastCodeLang.value = l.value
+                finish(l.value)
+                // 关闭必须用静态方法：ElMessageBox(...) 返回的是 Promise，
+                // 不是实例 —— 原来写 box.close() 会抛
+                // "TypeError: box.close is not a function"，弹层关不掉、盖在正文上，
+                // 用户看到的就是"点了代码块没反应"。
+                ElMessageBox.close()
+              },
+            },
+            l.label,
+          ),
+        ),
+      ),
+      showCancelButton: true,
+      showConfirmButton: false,
+      cancelButtonText: '取消',
+    }).catch(() => finish(null))
+    void box
+  })
+}
+
+/**
  * 让用户填一个地址（链接 / 图片）。
  *
  * <p>为什么不用 `window.prompt`（原来是它）：
@@ -1550,7 +1653,7 @@ function previewWrap(before, after, placeholder = '文本') {
 }
 
 /** Markdown 工具条 → 预览区等价操作（Turndown 可反向还原的标签/命令） */
-function previewMdTool(name) {
+function previewMdTool(name, arg) {
   switch (name) {
     case 'undo': return previewUndoRedo(false)
     case 'redo': return previewUndoRedo(true)
@@ -1600,13 +1703,22 @@ function previewMdTool(name) {
       return
     }
     case 'codeBlock': {
-      const text = previewSelText()
-      const pre = document.createElement('pre')
-      const code = document.createElement('code')
-      code.className = 'language-java'
-      code.textContent = text
-      pre.append(code)
-      return previewInsertBlock(pre, !text)
+      const lang = arg || lastCodeLang.value
+      lastCodeLang.value = lang
+      // 直接改**源码**（form.content 是唯一真源），预览会自动重渲染成正式代码块。
+      //
+      // 为什么不在预览里插 DOM：插进去的是裸 <pre> —— md-editor 不认识它，
+      // 渲染出来就是一个没有语言头/复制/行号的空盒子（用户反馈"无法插入代码块"），
+      // 而且要靠"反推回 Markdown"才能变成正式代码块，实测这条链路带着弹层时并不可靠。
+      // 写源码则一步到位：Vue 重渲染 → .md-editor-code（语言头 + 复制 + 行号）直接出现。
+      //
+      // 位置：追加到文末（先保住"插得进去且样子正确"）。按光标位置插入需要
+      // 把预览块的 data-line 映射回源码偏移，留待下一步。
+      const src = form.value.content || ''
+      form.value.content = src.replace(/\s*$/, '') + '\n\n```' + lang + '\n\n```\n'
+      previewUnsynced.value = false
+      nextTick(() => ElMessage.success(`已插入 ${lang} 代码块（在文末），点击代码块内部即可开始写`))
+      return
     }
     case 'table': {
       const table = document.createElement('table')
@@ -2579,7 +2691,7 @@ onBeforeUnmount(() => {
         <button class="tb" type="button" title="行内代码" @click="mdTool('inlineCode')">
           <svg viewBox="0 0 24 24"><path d="m9 8.5-3.5 3.5L9 15.5M15 8.5l3.5 3.5L15 15.5" /></svg>
         </button>
-        <button class="tb" type="button" title="代码块" @click="mdTool('codeBlock')">
+        <button class="tb" type="button" title="代码块（可选择语言）" @click="onCodeBlockClick">
           <svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2" /><path d="m9 10-1.8 2L9 14M15 10l1.8 2L15 14" /></svg>
         </button>
         <button class="tb" type="button" title="引用" @click="mdTool('quote')">

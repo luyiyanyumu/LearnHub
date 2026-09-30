@@ -528,12 +528,18 @@ html.dark .md-editor-preview.md-editor-preview code:not(.md-editor-code-block) {
   margin: 1.1em 0;
   border: 1px solid var(--app-border-weak);
   border-radius: 10px;
-  background: var(--app-code-bg);
+  /* 代码块底 = 页面底色（白），不再用灰底：灰底与正文块挤在一起显得"脏"，
+     用户明确要求白底（2026-09-30）。深色模式沿用深色面板（见下方 html.dark）。 */
+  background: var(--app-card);
   overflow: hidden;
 }
 
+html.dark .md-editor-preview.md-editor-preview .md-editor-code {
+  background: var(--app-code-bg);
+}
+
 .md-editor-preview.md-editor-preview .md-editor-code-head {
-  background: color-mix(in srgb, var(--app-bg) 55%, transparent);
+  background: transparent;
   border-bottom: 1px solid var(--app-border-weak);
 }
 
@@ -618,111 +624,117 @@ html.dark .md-editor-preview.md-editor-preview code:not(.md-editor-code-block) {
   padding-inline-end: 0.6em;
 }
 
-/* --- 低饱和代码高亮（与品牌同源派生，light/dark 各一份）--- */
+/* --- 代码高亮配色（2026-09-30 改版）---
+   原方案是"低饱和、与品牌同源派生"——关键词/字符串/类型全是青绿一家色，
+   用户反馈"字体颜色不要绿色，改为按语法的不同，颜色不同"。
+   现在换成**按语法分工的常规配色**（照 GitHub Light / Dark 的色相分工）：
+   关键词红、字符串蓝、数字蓝、函数紫、类型橙、标签绿、注释灰 —— 一眼能分出词性。
+   浅色底是白底（见上面的 .md-editor-code 背景），所以色值按白底可读性取。 */
 .md-editor-preview.md-editor-preview .hljs-comment,
 .md-editor-preview.md-editor-preview .hljs-quote,
 .md-editor-preview.md-editor-preview .hljs-meta {
-  color: var(--app-text-3);
+  color: #6e7781;
   font-style: italic;
 }
 
 .md-editor-preview.md-editor-preview .hljs-keyword,
 .md-editor-preview.md-editor-preview .hljs-selector-tag,
 .md-editor-preview.md-editor-preview .hljs-doctag {
-  color: #0b7f72; /* = --app-brand-deep：关键词继承品牌 */
+  color: #cf222e;
   font-weight: 500;
 }
 
 .md-editor-preview.md-editor-preview .hljs-string,
 .md-editor-preview.md-editor-preview .hljs-regexp,
 .md-editor-preview.md-editor-preview .hljs-addition {
-  color: #35774a;
+  color: #0a3069;
 }
 
 .md-editor-preview.md-editor-preview .hljs-number,
 .md-editor-preview.md-editor-preview .hljs-literal {
-  color: #b0632a;
+  color: #0550ae;
 }
 
 .md-editor-preview.md-editor-preview .hljs-title,
 .md-editor-preview.md-editor-preview .hljs-function .hljs-title,
 .md-editor-preview.md-editor-preview .hljs-title.function_ {
-  color: #3567a8;
+  color: #8250df;
 }
 
 .md-editor-preview.md-editor-preview .hljs-attr,
 .md-editor-preview.md-editor-preview .hljs-attribute,
 .md-editor-preview.md-editor-preview .hljs-variable,
 .md-editor-preview.md-editor-preview .hljs-template-variable {
-  color: #7a5bab;
+  color: #0550ae;
 }
 
 .md-editor-preview.md-editor-preview .hljs-type,
 .md-editor-preview.md-editor-preview .hljs-built_in,
 .md-editor-preview.md-editor-preview .hljs-class .hljs-title,
 .md-editor-preview.md-editor-preview .hljs-title.class_ {
-  color: #2a7d83;
+  color: #953800;
 }
 
 .md-editor-preview.md-editor-preview .hljs-section,
 .md-editor-preview.md-editor-preview .hljs-name,
 .md-editor-preview.md-editor-preview .hljs-tag {
-  color: #0b7f72;
+  color: #116329;
 }
 
 .md-editor-preview.md-editor-preview .hljs-deletion {
-  color: #a33b3b;
-  background: rgba(163, 59, 59, 0.1);
+  color: #82071e;
+  background: rgba(255, 129, 130, 0.2);
 }
 
 /* 深色：色相不变、亮度上移，饱和度整体压低避免"霓虹感" */
+/* 深色：同样按词性分工，色相与浅色一致、亮度上移（照 GitHub Dark 的分工） */
 html.dark .md-editor-preview.md-editor-preview .hljs-keyword,
 html.dark .md-editor-preview.md-editor-preview .hljs-selector-tag,
 html.dark .md-editor-preview.md-editor-preview .hljs-section,
 html.dark .md-editor-preview.md-editor-preview .hljs-name,
 html.dark .md-editor-preview.md-editor-preview .hljs-tag,
 html.dark .md-editor-preview.md-editor-preview .hljs-doctag {
-  color: #3dbfa9;
+  color: #ff7b72;
 }
 
 html.dark .md-editor-preview.md-editor-preview .hljs-string,
 html.dark .md-editor-preview.md-editor-preview .hljs-regexp,
 html.dark .md-editor-preview.md-editor-preview .hljs-addition {
-  color: #85c294;
+  color: #a5d6ff;
 }
 
 html.dark .md-editor-preview.md-editor-preview .hljs-number,
 html.dark .md-editor-preview.md-editor-preview .hljs-literal {
-  color: #d9a05e;
+  color: #79c0ff;
 }
 
 html.dark .md-editor-preview.md-editor-preview .hljs-title,
 html.dark .md-editor-preview.md-editor-preview .hljs-title.function_ {
-  color: #82aade;
+  color: #d2a8ff;
 }
 
 html.dark .md-editor-preview.md-editor-preview .hljs-attr,
 html.dark .md-editor-preview.md-editor-preview .hljs-attribute,
 html.dark .md-editor-preview.md-editor-preview .hljs-variable,
 html.dark .md-editor-preview.md-editor-preview .hljs-template-variable {
-  color: #ab8ccc;
+  color: #79c0ff;
 }
 
 html.dark .md-editor-preview.md-editor-preview .hljs-type,
 html.dark .md-editor-preview.md-editor-preview .hljs-built_in,
 html.dark .md-editor-preview.md-editor-preview .hljs-title.class_ {
-  color: #5cbfc6;
+  color: #ffa657;
 }
 
 html.dark .md-editor-preview.md-editor-preview .hljs-comment,
 html.dark .md-editor-preview.md-editor-preview .hljs-quote,
 html.dark .md-editor-preview.md-editor-preview .hljs-meta {
-  color: #5f7370;
+  color: #8b949e;
 }
 
 html.dark .md-editor-preview.md-editor-preview .hljs-deletion {
-  color: #d98a8a;
-  background: rgba(217, 138, 138, 0.12);
+  color: #ffdcd7;
+  background: rgba(255, 129, 130, 0.2);
 }
 
 /* :::名称 … ::: 彩色提示块（语雀等平台粘贴兼容，插件见 utils/mdCallout.js）。
@@ -731,6 +743,43 @@ html.dark .md-editor-preview.md-editor-preview .hljs-deletion {
    （引用是"别人的话"、提示块是"我的提醒"），本就不该长得一样。
    去掉色条后 padding 左右都是 14px，反而比原来（左 18 / 右 14）更对称。
    ⚠️ 导出 HTML 用的是同一套样式的副本，在 utils/mdToHtml.js 的 BODY_CSS 里，改这里必须同步改那边。 */
+/* 「插入代码块」语言选择弹层（Element Plus MessageBox 的 message 里渲染的按钮网格）。
+   弹层被 teleport 到 body，所以样式必须写在全局（不能写进组件的 scoped 块）。
+   为什么用按钮网格而不是下拉：弹层里放下拉要额外处理响应式更新/焦点，
+   按钮一点即定，少一层不确定性（该交互与链接/图片的页内弹层一致）。 */
+.code-lang-box .clp {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin: 2px 0 4px;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+
+.code-lang-box .clp-item {
+  height: 30px;
+  padding: 0 6px;
+  font-size: 12.5px;
+  color: var(--app-text-1);
+  background: var(--app-bg);
+  border: 1px solid var(--app-border-weak);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) ease, border-color var(--dur-fast) ease, color var(--dur-fast) ease;
+}
+
+.code-lang-box .clp-item:hover {
+  border-color: var(--app-brand);
+  color: var(--app-brand-deep);
+}
+
+/* 上次选过的语言：高亮出来，避免每次都从头找 */
+.code-lang-box .clp-item.cur {
+  background: var(--app-brand-soft);
+  border-color: var(--app-brand);
+  color: var(--app-brand-deep);
+}
+
 .md-callout {
   margin: 12px 0;
   padding: 10px 14px;
