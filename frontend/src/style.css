@@ -535,24 +535,34 @@ html.dark .md-editor-preview.md-editor-preview code:not(.md-editor-code-block) {
   position: relative; /* 行号栏 absolute 的定位上下文 */
 }
 
-/* 行号栏（语雀式）：md-editor 把代码按 white-space:pre 排版、**没有一行一个元素**，
-   所以 CSS 计数器画不出来 —— 这里另起一栏，用与代码完全相同的 font-size / line-height，
-   逐行写数字，对齐就自动成立（不需要逐行测量）。
-   由 NoteEdit 的 decorateCodeRowNumbers() 注入，并且已加入 htmlToMd 的 DROP_SELECTOR，
-   反推 Markdown 时会被剔除，不会把数字写进代码里。 */
-.md-editor-preview.md-editor-preview .md-editor-code .code-row-numbers {
+/* 行号：**按行**的元素结构（NoteEdit 的 decorateCodeRowNumbers 把代码拆成 .code-line）。
+   一行一个元素、行号用 CSS 计数器挂在行上 —— 结构上不可能出现重复或错位，
+   也不需要另画一栏去对齐像素。
+   行间换行放在 display:none 的 .code-br 里，保证 code.textContent 与原文一字不差
+   （复制代码 / 反推 Markdown 都读 textContent）。 */
+.md-editor-preview.md-editor-preview .md-editor-code pre code {
+  counter-reset: code-line;
+}
+
+.md-editor-preview.md-editor-preview .md-editor-code .code-line {
+  display: block;
+  position: relative;
+}
+
+.md-editor-preview.md-editor-preview .md-editor-code .code-br {
+  display: none;
+}
+
+/* 行号画在代码左侧那块留白里（主题给 code 留了 47.25px 的 padding-left） */
+.md-editor-preview.md-editor-preview .md-editor-code .code-line::before {
+  counter-increment: code-line;
+  content: counter(code-line);
   position: absolute;
-  left: 0;
-  top: 0;
-  width: 44px;
-  padding-right: 12px;
-  box-sizing: border-box;
+  left: -47.25px;
+  width: 36px;
   text-align: right;
-  white-space: pre;
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 13.5px;
-  line-height: 1.7;
   color: var(--app-text-3);
+  font-variant-numeric: tabular-nums;
   user-select: none;
   pointer-events: none;
 }
