@@ -3166,7 +3166,10 @@ onBeforeUnmount(() => {
               <div class="pv-empty-s">右侧所见即所得：选中文字后用上方工具条加粗 / 改色 / 设字号，写完点别处即自动同步回 Markdown</div>
             </div>
 
-                      <MdPreview
+            <!-- Stage 0/1：块编辑器渲染器（?editor=block 时启用，默认关闭走 md-editor） -->
+            <BlockPreview v-if="useBlockPreview" key="block-preview" :content="form.content" />
+            <MdPreview
+              v-else
               :modelValue="form.content"
               :theme="isDark ? 'dark' : 'light'"
               previewTheme="github"
