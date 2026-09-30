@@ -1559,71 +1559,151 @@ function setCodeFenceLang(index, lang) {
  * 纯装饰节点，已加入 htmlToMd 的 DROP_SELECTOR —— 反推 Markdown 时会剔除，
  * 不会把数字写进代码里。
  */
+/** 代码块编辑弹窗：双击代码块打开（CodeMirror 在弹窗里，不与"预览即编辑"抢焦点） */
+const codeEdit = reactive({ open: false, index: -1, lang: '', text: '' })
+
 /**
- * 给预览里的代码块挂**内嵌 CodeMirror 编辑器**（语雀那种：直接在主文档里写代码）。
- *
- * <p>做法是**覆盖**而不是替换：md-editor 渲染出来的 `<pre><code>` 原样留在 DOM 里
- * （`visibility: hidden`），编辑器绝对定位盖在它上面，编辑后把文本写回 `<code>`。
- * 这样"复制代码"和"预览反推 Markdown"（两条路径都读 `code.textContent`）完全不受影响。
- *
- * <p>为什么必须换成真编辑器：行号此前是"渲染后按行拆 DOM"画出来的，
- * 而**用户打字换行时浏览器在改 DOM** —— 重拆会销毁光标，不重拆就没有新行的号。
- * 这是那条路线的固有矛盾，CodeMirror 的 lineNumbers() 由编辑器自己维护行号，天然没有这个问题。
+ * 双击代码块 → 打开编辑弹窗。
+ * 为什么放弹窗：内嵌在预览里会和"预览即编辑"抢焦点（点预览就 focusin → 重渲染 →
+ * 编辑器实例被重建 → 光标看不见、回车重复插入），弹窗与预览机制零冲突。
  */
-let codeEditors = [] // [{ hostEl, node }] 便于重渲染时清理
+function onPreviewDblClick(e) {
+  const box = e.target?.closest?.('.md-editor-code')
+  if (!box) return
+  const host = previewEl()
+  const index = host ? [...host.querySelectorAll('.md-editor-code')].indexOf(box) : -1
+  if (index < 0) return
+  const code = box.querySelector('pre code')
+  if (!code) return
+  codeEdit.index = index
+  codeEdit.lang = (code.className.match(/language-([\w+#.-]+)/) || [, ''])[1]
+  codeEdit.text = (code.textContent || '').replace(/\n$/, '')
+  codeEdit.open = true
+}
 
-function decorateCodeRowNumbers() {
-  const boxes = [...document.querySelectorAll('.pv-md .md-editor-code')]
-  if (!boxes.length) return
-  // 已经挂好且数量一致 → 零写入返回（本函数由 MutationObserver 调用，写 DOM 会自触发成死循环）
-  const mounted = codeEditors.filter((e) => e.hostEl.isConnected).length
-  if (mounted === boxes.length && mounted > 0) return
-
-  // 重渲染后旧实例的宿主已经脱离文档：销毁它们
-  codeEditors.forEach((e) => {
-    if (!e.hostEl.isConnected) {
-      render(null, e.hostEl)
-      e.hostEl.remove()
+/** 把编辑结果写回源码里第 index 个围栏（index 与预览里 .md-editor-code 的顺序一致） */
+function saveCodeEdit() {
+  const lines = (form.value.content || '').split('\n')
+  let idx = -1
+  let inFence = false
+  let start = -1
+  let end = -1
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^\s*(`{3,}|~{3,})/.test(lines[i])) continue
+    if (!inFence) {
+      idx++
+      if (idx === codeEdit.index) {
+        start = i
+        inFence = true
+      }
+    } else if (start >= 0) {
+      end = i
+      break
     }
-  })
-  codeEditors = codeEditors.filter((e) => e.hostEl.isConnected)
+  }
+  if (start < 0 || end < 0) {
+    ElMessage.warning('这个代码块不是围栏写法（可能是内联 HTML），请在源码模式里改')
+    return
+  }
+  const fenceMatch = lines[start].match(/^(\s*)(`{3,}|~{3,})/)
+  const fence = fenceMatch ? fenceMatch[2] : '```'
+  const body = codeEdit.text.replace(/\n+$/, '').split('\n')
+  lines.splice(start, end - start + 1, fence + (codeEdit.lang || ''), ...body, fence)
+  form.value.content = lines.join('\n')
+  previewUnsynced.value = false
+  codeEdit.open = false
+  nextTick(() => ElMessage.success('代码块已更新'))
+}
 
-  boxes.forEach((box) => {
-    if (box.querySelector('.code-edit-overlay')) return // 这个块已经挂过
-    const pre = box.querySelector('pre')
-    const code = pre && pre.querySelector('code')
-    if (!pre || !code) return
-    const lang = (code.className.match(/language-([\w+#.-]+)/) || [, ''])[1]
-    const text = code.textContent || ''
+/**
+ * 给预览里的代码块画行号：**按行拆成 .code-line，每行一个 .code-num**。
+ *
+ * <p>为什么不是内嵌编辑器（试过，放弃）：CodeMirror 内嵌在预览里会和"预览即编辑"机制
+ * 抢焦点 —— 点一下预览就触发 focusin → 重渲染 → 编辑器实例被重建，
+ * 表现为"光标看不见"+"回车加两行（实例重复挂载）"。
+ * 编辑代码改走另外的入口（不在预览 DOM 里和它抢）。
+ *
+ * <p>行间换行放进 display:none 的 .code-br：视觉换行由 .code-line{display:block} 决定，
+ * 而 code.textContent 与原文一字不差（复制代码 / 反推 Markdown 都读它）。
+ */
+function decorateCodeRowNumbers() {
+  const codes = [...document.querySelectorAll('.pv-md .md-editor-code pre code')]
+  if (!codes.length) return
+  const lineCount = (c) => (c.textContent || '').replace(/\n$/, '').split('\n').length
+  // 已拆好就零写入返回（本函数由 MutationObserver 调用，写 DOM 会自触发成死循环）
+  if (codes.every((c) => c.querySelectorAll(':scope > .code-line').length === lineCount(c))) return
 
-    const hostEl = document.createElement('div')
-    hostEl.className = 'code-edit-overlay'
-    // 关键：**不要**给覆盖层固定高度。原来写的是 height:pre.offsetHeight + overflow:auto，
-    // 于是编辑器内部的滚动条把新行（和它的行号）挡在可视区之外 ——
-    // 用户按回车看到的就是"没有行号"。现在改成：
-    //  · 原 <pre> 移出布局流（position:absolute + hidden）—— textContent 仍供复制/反推使用；
-    //  · 覆盖层在文档流里，**随编辑器内容长高**，代码块整体竖向完全展开，没有内部滚动窗口。
-    hostEl.className = 'code-edit-overlay'
-    pre.style.position = 'absolute'
-    pre.style.visibility = 'hidden'
-    pre.style.pointerEvents = 'none'
-    pre.style.maxHeight = 'none'
-    box.appendChild(hostEl)
+  codes.forEach((code) => {
+    // 1) 按文档顺序摊平文本片段，记住每段各自的祖先链（标签+类名）→ 保住高亮
+    const pieces = []
+    const walk = (node, chain) => {
+      [...node.childNodes].forEach((child) => {
+        if (child.nodeType === 3) {
+          if (child.textContent) pieces.push({ text: child.textContent, chain })
+        } else if (child.nodeType === 1) {
+          walk(child, chain.concat(child))
+        }
+      })
+    }
+    walk(code, [])
 
-    render(
-      h(CodeBlockEditor, {
-        code: text,
-        lang,
-        dark: isDark.value,
-        // 内容变了就写回隐藏的 <code>（复制/反推读它），并标记"未同步"以便失焦/保存时落库
-        onChange: (v) => {
-          code.textContent = v
-          previewUnsynced.value = true
-        },
-      }),
-      hostEl,
-    )
-    codeEditors.push({ hostEl })
+    const frag = document.createDocumentFragment()
+    let line = null
+    let chainEls = []
+    let chainSrc = []
+    let lineNo = 0
+    const newLine = () => {
+      line = document.createElement('span')
+      line.className = 'code-line'
+      // 行号直接写元素（CSS 计数器实测会被加两次 → 2,4,6,8…）
+      const num = document.createElement('span')
+      num.className = 'code-num'
+      num.setAttribute('aria-hidden', 'true')
+      num.textContent = String(++lineNo)
+      line.appendChild(num)
+      frag.appendChild(line)
+      chainEls = []
+      chainSrc = []
+    }
+    // 一行内**复用**同一套祖先元素：每个片段都重克隆一遍祖先链会把一行拆成多个块级元素
+    const hostFor = (chain) => {
+      let host = line
+      for (let i = 0; i < chain.length; i++) {
+        if (chainSrc[i] === chain[i] && chainEls[i] && chainEls[i].parentElement === host) {
+          host = chainEls[i]
+          continue
+        }
+        for (let j = i; j < chain.length; j++) {
+          const clone = chain[j].cloneNode(false)
+          host.appendChild(clone)
+          chainEls[j] = clone
+          chainSrc[j] = chain[j]
+          host = clone
+        }
+        return host
+      }
+      return host
+    }
+    newLine()
+    pieces.forEach(({ text, chain }) => {
+      const parts = text.split('\n')
+      parts.forEach((part, i) => {
+        if (i > 0) {
+          const br = document.createElement('span')
+          br.className = 'code-br'
+          br.textContent = '\n'
+          line.appendChild(br)
+          newLine()
+        }
+        if (!part) return
+        hostFor(chain).appendChild(document.createTextNode(part))
+      })
+    })
+    // 结尾换行会多造一个空行元素（多一个号）——去掉；那个 \n 仍留在上一行的 .code-br 里
+    if (line && !line.textContent && frag.lastChild === line) line.remove()
+
+    code.textContent = ''
+    code.appendChild(frag)
   })
 }
 
@@ -3015,7 +3095,7 @@ onBeforeUnmount(() => {
         @mouseenter="attachPreviewEditable"
         @focusin="onPreviewFocusIn"
         @focusout="onPreviewFocusOut"
-        @click="onPreviewClick"
+        @click="onPreviewClick" @dblclick="onPreviewDblClick"
       >
         <div ref="pvScrollRef" class="pv-scroll" @scroll="onPreviewScroll">
           <div class="pv-inner">
@@ -3034,6 +3114,19 @@ onBeforeUnmount(() => {
               previewTheme="github"
               class="pv-md"
             />
+          <!-- 代码块编辑（双击代码块打开）：CodeMirror 放在弹窗里，不与"预览即编辑"抢焦点 -->
+          <el-dialog v-model="codeEdit.open" title="编辑代码块" width="820px" append-to-body destroy-on-close>
+            <CodeBlockEditor
+              :code="codeEdit.text"
+              :lang="codeEdit.lang"
+              :dark="isDark"
+              @change="(v) => (codeEdit.text = v)"
+            />
+            <template #footer>
+              <el-button @click="codeEdit.open = false">取消</el-button>
+              <el-button type="primary" @click="saveCodeEdit">保存</el-button>
+            </template>
+          </el-dialog>
           </div>
 
           <!-- 预览编辑：块操作手柄（语雀式 ⋮⋮） -->
