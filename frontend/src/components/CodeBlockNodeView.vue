@@ -43,7 +43,16 @@ onBeforeUnmount(() => { view.value?.destroy(); view.value = null })
 
 <style scoped>
 .code-block-cm { border: 1px solid var(--app-border-weak); border-radius: 10px; background: var(--app-card); margin: 1em 0; }
-.code-block-cm-host :deep(.cm-editor) { font-size: 13.5px; }
-.code-block-cm-host :deep(.cm-scroller) { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; line-height: 1.7; }
+/* 行号对齐：**不要**自定义 line-height —— CodeMirror 的 lineNumbers() 在只给字号/字体、
+   不干预行高时是自对齐的；手动加 line-height 反而让 gutter 与 .cm-line 各行高不一致
+   （实测出现 4px 顶部偏移 + 一个多余 gutter 元素）。只设字号与等宽字体。 */
+.code-block-cm-host :deep(.cm-editor),
+.code-block-cm-host :deep(.cm-editor .cm-scroller),
+.code-block-cm-host :deep(.cm-editor .cm-content),
+.code-block-cm-host :deep(.cm-editor .cm-gutters) {
+  font-family: ui-monospace, SFMono-Regular, Consolas, 'Cascadia Code', monospace;
+  font-size: 13.5px;
+}
 .code-block-cm-host :deep(.cm-gutters) { background: transparent; border: none; color: var(--app-text-3); }
+.code-block-cm-host :deep(.cm-editor) { outline: none; }
 </style>
