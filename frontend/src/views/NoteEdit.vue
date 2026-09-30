@@ -3166,19 +3166,13 @@ onBeforeUnmount(() => {
               <div class="pv-empty-s">右侧所见即所得：选中文字后用上方工具条加粗 / 改色 / 设字号，写完点别处即自动同步回 Markdown</div>
             </div>
 
-          <!-- 代码块编辑（双击代码块打开）：CodeMirror 放在弹窗里，不与"预览即编辑"抢焦点 -->
-          <el-dialog v-model="codeEdit.open" title="编辑代码块" width="820px" append-to-body destroy-on-close>
-            <CodeBlockEditor
-              :code="codeEdit.text"
-              :lang="codeEdit.lang"
-              :dark="isDark"
-              @change="(v) => (codeEdit.text = v)"
+                      <MdPreview
+              :modelValue="form.content"
+              :theme="isDark ? 'dark' : 'light'"
+              previewTheme="github"
+              class="pv-md"
             />
-            <template #footer>
-              <el-button @click="codeEdit.open = false">取消</el-button>
-              <el-button type="primary" @click="saveCodeEdit">保存</el-button>
-            </template>
-          </el-dialog>
+
           </div>
 
           <!-- 预览编辑：块操作手柄（语雀式 ⋮⋮） -->
@@ -3310,6 +3304,20 @@ onBeforeUnmount(() => {
       </template>
     </el-dialog>
   </div>
+
+<!-- 代码块编辑（双击代码块打开）：CodeMirror 放在弹窗里，不与"预览即编辑"抢焦点 -->
+          <el-dialog v-model="codeEdit.open" title="编辑代码块" width="820px" append-to-body destroy-on-close>
+            <CodeBlockEditor
+              :code="codeEdit.text"
+              :lang="codeEdit.lang"
+              :dark="isDark"
+              @change="(v) => (codeEdit.text = v)"
+            />
+            <template #footer>
+              <el-button @click="codeEdit.open = false">取消</el-button>
+              <el-button type="primary" @click="saveCodeEdit">保存</el-button>
+            </template>
+          </el-dialog>
 </template>
 
 <style scoped>
