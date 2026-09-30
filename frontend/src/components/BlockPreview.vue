@@ -4,6 +4,7 @@ import { Editor, EditorContent } from '@tiptap/vue-3'
 import StarterKit from '@tiptap/starter-kit'
 import { CodeBlockCm } from '../utils/codeBlockCm'
 import { Callout } from '../utils/calloutNode'
+import { Details, Summary } from '../utils/detailsNode'
 import MarkdownIt from 'markdown-it'
 import mdCallout from '../utils/mdCallout'
 import mdAnchor from '../utils/mdAnchor'
@@ -28,7 +29,7 @@ function syncDown() {
 onMounted(() => {
   editor.value = new Editor({
     editable: true,
-    extensions: [StarterKit.configure({ codeBlock: false }), CodeBlockCm, Callout],
+    extensions: [StarterKit.configure({ codeBlock: false }), CodeBlockCm, Callout, Details, Summary],
     content: md.render(props.content || ''),
     onUpdate: syncDown,
   })
