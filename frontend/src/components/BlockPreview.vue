@@ -61,7 +61,20 @@ watch(
 </template>
 
 <style scoped>
-.block-preview :deep(.tiptap) { outline: none; font-size: 15px; line-height: 1.8; color: var(--app-text-1); }
+/* A4 宽度排版：内容按 A4 纸宽(210mm)居中，所见即所得，方便打印 */
+.block-preview :deep(.tiptap) {
+  outline: none;
+  font-size: 15px;
+  line-height: 1.8;
+  color: var(--app-text-1);
+  max-width: 210mm;
+  margin: 0 auto;
+  padding: 24px 28px;
+}
 .block-preview :deep(.tiptap h1), .block-preview :deep(.tiptap h2), .block-preview :deep(.tiptap h3) { font-weight: 650; margin: 1.2em 0 0.6em; }
 .block-preview :deep(.tiptap blockquote) { margin: 1em 0; padding-left: 14px; border-left: 3px solid var(--app-border); color: var(--app-text-2); }
+/* 表格边框 */
+.block-preview :deep(.tiptap table) { border-collapse: collapse; width: 100%; margin: 1em 0; }
+.block-preview :deep(.tiptap th), .block-preview :deep(.tiptap td) { border: 1px solid var(--app-border); padding: 6px 12px; text-align: left; }
+.block-preview :deep(.tiptap th) { background: color-mix(in srgb, var(--app-text-1) 6%, transparent); font-weight: 600; }
 </style>
