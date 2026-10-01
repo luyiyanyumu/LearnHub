@@ -1496,7 +1496,7 @@ const CODE_LANGS = [
 const lastCodeLang = ref('java')
 
 /** Stage 0 开关：?editor=block 时用 Tiptap 只读渲染器（默认关闭，绝不影响日常使用） */
-const useBlockPreview = new URLSearchParams(window.location.search).get('editor') === 'block'
+const useBlockPreview = new URLSearchParams(window.location.search).get('editor') !== 'md'
 
 /** 块编辑器（?editor=block）编辑回写：Tiptap 反推出的 Markdown 写回源码 */
 function onBlockPreviewUpdate(markdown) {
