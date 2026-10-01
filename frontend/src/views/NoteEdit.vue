@@ -833,7 +833,7 @@ const activeIdx = ref(-1)
 function scrollToHeading(idx) {
   const el = pvScrollRef.value
   if (!el) return
-  const heads = el.querySelectorAll('.md-editor-preview h1, .md-editor-preview h2, .md-editor-preview h3')
+  const heads = el.querySelectorAll('.md-editor-preview h1, .md-editor-preview h2, .md-editor-preview h3, .tiptap h1, .tiptap h2, .tiptap h3')
   const target = heads[idx]
   if (target) el.scrollTo({ top: target.offsetTop - 24, behavior: 'smooth' })
 }
@@ -855,7 +855,7 @@ function onPreviewScroll() {
         scheduleScrollResync()
       }
     }
-    const heads = el.querySelectorAll('.md-editor-preview h1, .md-editor-preview h2, .md-editor-preview h3')
+    const heads = el.querySelectorAll('.md-editor-preview h1, .md-editor-preview h2, .md-editor-preview h3, .tiptap h1, .tiptap h2, .tiptap h3')
     let cur = -1
     for (let i = 0; i < heads.length; i++) {
       if (heads[i].offsetTop - el.scrollTop - 40 <= 0) cur = i
@@ -931,7 +931,7 @@ function editorTopLine(ed) {
 
 /** 预览区 data-line 锚点列表（markdown-it 标注的源码行号，DOM 顺序即升序） */
 function previewAnchors(pv) {
-  const els = pv.querySelectorAll('.md-editor-preview [data-line]')
+  const els = pv.querySelectorAll('.md-editor-preview [data-line], .tiptap [data-line]')
   const list = []
   for (const el of els) {
     const n = parseInt(el.dataset.line, 10)

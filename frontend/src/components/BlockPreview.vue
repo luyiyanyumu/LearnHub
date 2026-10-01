@@ -10,6 +10,8 @@ import { Underline } from '@tiptap/extension-underline'
 import markdownItSup from 'markdown-it-sup'
 import markdownItSub from 'markdown-it-sub'
 import markdownItMark from 'markdown-it-mark'
+import mdDataLine from '../utils/mdDataLine'
+import { DataLineAttr } from '../utils/dataLineAttr'
 import { TableKit } from '@tiptap/extension-table'
 import MarkdownIt from 'markdown-it'
 import mdCallout from '../utils/mdCallout'
@@ -19,7 +21,7 @@ import { previewHtmlToMd } from '../utils/htmlToMd'
 const props = defineProps({ content: { type: String, default: '' } })
 const emit = defineEmits(['update'])
 const editor = shallowRef(null)
-const md = new MarkdownIt({ html: true, linkify: true, breaks: true }).use(mdCallout).use(mdAnchor).use(markdownItSup).use(markdownItSub).use(markdownItMark)
+const md = new MarkdownIt({ html: true, linkify: true, breaks: true }).use(mdCallout).use(mdAnchor).use(markdownItSup).use(markdownItSub).use(markdownItMark).use(mdDataLine)
 
 /** 上次 emit 出去的 Markdown：用于识别"自己的回显"，避免 setContent 把光标重置 */
 let lastEmitted = ''
@@ -35,7 +37,7 @@ function syncDown() {
 onMounted(() => {
   editor.value = new Editor({
     editable: true,
-    extensions: [StarterKit.configure({ codeBlock: false }), CodeBlockCm, Callout, Details, Summary, Underline, Superscript, Subscript, Highlight, FontStyle, TableKit],
+    extensions: [StarterKit.configure({ codeBlock: false }), CodeBlockCm, Callout, Details, Summary, Underline, Superscript, Subscript, Highlight, FontStyle, TableKit, DataLineAttr],
     content: md.render(props.content || ''),
     onUpdate: syncDown,
   })
