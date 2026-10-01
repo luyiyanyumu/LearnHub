@@ -324,6 +324,9 @@ function exitPreviewEdit() {
  * @returns {boolean} 是否成功（失败时已给出提示，且不会改动源码，也不会丢预览里的改动）
  */
 function syncPreviewToSource(silent = false) {
+  // 块编辑器模式（默认）：编辑面就是 Tiptap，改动已由 @update 实时写回 form.content，
+  // 不存在「从预览 DOM 反推」这一步 —— 直接返回成功，避免误报「预览区不存在」。
+  if (useBlockPreview) return true
   const el = previewEl()
   if (!el) {
     // 这是异常状态（预览区都没了就无从反推），无论 silent 都要报出来，
