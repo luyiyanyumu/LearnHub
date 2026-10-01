@@ -909,6 +909,24 @@ function editorTopLine(ed) {
   const v = cmView(ed)
   if (v) {
     try {
+      // ① 首选：用「视口内第一个已渲染行」反查行号。
+      //    大文档下 CodeMirror 虚拟化，未渲染区域的高度是**估算值**，
+      //    lineBlockAtHeight 会算出偏差几十行的位置（实测"完全对不上"的来源）；
+      //    而 DOM 里已渲染的行可用 posAtDOM 拿到**精确**行号。
+      const content0 = ed.querySelector('.cm-content')
+      if (content0) {
+        const top0 = ed.getBoundingClientRect().top
+        for (const el of content0.querySelectorAll('.cm-line')) {
+          const r = el.getBoundingClientRect()
+          if (r.bottom > top0 + 1) {
+            const ln0 = v.state.doc.lineAt(v.posAtDOM(el, 0))
+            const h0 = Math.max(r.height, 1)
+            const f0 = Math.min(Math.max((top0 - r.top) / h0, 0), 1)
+            return ln0.number - 1 + f0
+          }
+        }
+      }
+      // ② 回退：按 CodeMirror 高度图换算
       const docY = Math.max(ed.scrollTop - contentScrollOffset(ed), 0)
       const blk = v.lineBlockAtHeight(docY)
       const ln = v.state.doc.lineAt(blk.from)
