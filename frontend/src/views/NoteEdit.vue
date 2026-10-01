@@ -943,10 +943,9 @@ function previewAnchors(pv) {
   return list
 }
 
-/** 源码行号（带小数）→ 预览滚动位置：≤行号的最大锚点对齐视口顶；
- *  相邻锚点行差 ≤ MAX_INTERP_LINES 时按行差插值（滚动连续），更大跨度直接吸附锚点
- *  （锚点段内的内容分布与行数不成比例，大跨度插值会失真数百像素） */
-const MAX_INTERP_LINES = 8
+/** 源码行号（带小数）→ 预览滚动位置：≤行号的最大锚点对齐视口顶 + 相邻锚点间按行差插值。
+ *  用户诉求是「左右顶部显示同一处内容」，所以**始终插值、不做吸附**：
+ *  吸附会让预览顶部停在更早的锚点上（实测滞后 7~8 行），正是"左右对不上"的来源。 */
 function previewScrollForLine(pv, anchors, line) {
   let lo = 0
   let hi = anchors.length - 1
@@ -958,7 +957,7 @@ function previewScrollForLine(pv, anchors, line) {
   const a = anchors[lo]
   const top = topWithin(a.el, pv)
   const b = anchors[lo + 1]
-  if (!b || b.line <= a.line || b.line - a.line > MAX_INTERP_LINES) return top
+  if (!b || b.line <= a.line) return top
   const frac = Math.min(Math.max((line - a.line) / (b.line - a.line), 0), 1)
   return top + frac * (topWithin(b.el, pv) - top)
 }
@@ -977,7 +976,7 @@ function previewTopLine(pv, anchors) {
   const top = topWithin(a.el, pv)
   const b = anchors[lo + 1]
   if (!b) return a.line
-  if (b.line <= a.line || b.line - a.line > MAX_INTERP_LINES) return a.line
+  if (b.line <= a.line) return a.line
   const h = Math.max(topWithin(b.el, pv) - top, 1)
   const frac = Math.min(Math.max((pv.scrollTop - top) / h, 0), 1)
   return a.line + frac * (b.line - a.line)
