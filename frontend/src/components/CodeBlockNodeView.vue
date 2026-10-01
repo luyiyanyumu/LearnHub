@@ -79,7 +79,7 @@ onBeforeUnmount(() => { view.value?.destroy(); view.value = null })
 </script>
 
 <template>
-  <NodeViewWrapper class="code-block-cm" :class="{ 'is-selected': selected }">
+  <NodeViewWrapper class="code-block-cm" :class="{ 'is-selected': selected }" :data-line="node.attrs.dataLine || null">
     <div class="cm-head" contenteditable="false">
       <select class="cm-lang" :value="node.attrs.language || ''" @change="changeLang" @mousedown.stop @click.stop>
         <option v-for="l in LANGS" :key="l" :value="l">{{ l }}</option>

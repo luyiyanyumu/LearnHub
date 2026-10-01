@@ -39,4 +39,17 @@ export default function mdDataLine(md) {
     if (!token.map) return html
     return injectDataLine(html, token.map[0])
   }
+
+  // ③ 围栏代码块：同样给 <pre> 插入 data-line。
+  //    **这条最关键**：代码块在源码里动辄几十行，预览里也是几十行，
+  //    没有锚点时大片区域只能靠两侧锚点插值/吸附，预览会整块滞后（用户实测"完全对不上"）。
+  const origFence = md.renderer.rules.fence
+  md.renderer.rules.fence = function (tokens, idx, options, env, self) {
+    const token = tokens[idx]
+    const html = origFence
+      ? origFence(tokens, idx, options, env, self)
+      : self.renderToken(tokens, idx, options)
+    if (!token.map) return html
+    return injectDataLine(html, token.map[0])
+  }
 }
