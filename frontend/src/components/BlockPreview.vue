@@ -9,6 +9,7 @@ import { Superscript, Subscript, Highlight, FontStyle } from '../utils/inlineMar
 import { Underline } from '@tiptap/extension-underline'
 import markdownItSup from 'markdown-it-sup'
 import markdownItSub from 'markdown-it-sub'
+import markdownItMark from 'markdown-it-mark'
 import { TableKit } from '@tiptap/extension-table'
 import MarkdownIt from 'markdown-it'
 import mdCallout from '../utils/mdCallout'
@@ -18,7 +19,7 @@ import { previewHtmlToMd } from '../utils/htmlToMd'
 const props = defineProps({ content: { type: String, default: '' } })
 const emit = defineEmits(['update'])
 const editor = shallowRef(null)
-const md = new MarkdownIt({ html: true, linkify: true, breaks: true }).use(mdCallout).use(mdAnchor).use(markdownItSup).use(markdownItSub)
+const md = new MarkdownIt({ html: true, linkify: true, breaks: true }).use(mdCallout).use(mdAnchor).use(markdownItSup).use(markdownItSub).use(markdownItMark)
 
 /** 上次 emit 出去的 Markdown：用于识别"自己的回显"，避免 setContent 把光标重置 */
 let lastEmitted = ''
