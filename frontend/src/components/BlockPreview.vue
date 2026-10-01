@@ -9,6 +9,7 @@ import { Superscript, Subscript, Highlight, FontStyle } from '../utils/inlineMar
 import { Underline } from '@tiptap/extension-underline'
 import markdownItSup from 'markdown-it-sup'
 import markdownItSub from 'markdown-it-sub'
+import { TableKit } from '@tiptap/extension-table'
 import MarkdownIt from 'markdown-it'
 import mdCallout from '../utils/mdCallout'
 import mdAnchor from '../utils/mdAnchor'
@@ -33,7 +34,7 @@ function syncDown() {
 onMounted(() => {
   editor.value = new Editor({
     editable: true,
-    extensions: [StarterKit.configure({ codeBlock: false }), CodeBlockCm, Callout, Details, Summary, Underline, Superscript, Subscript, Highlight, FontStyle],
+    extensions: [StarterKit.configure({ codeBlock: false }), CodeBlockCm, Callout, Details, Summary, Underline, Superscript, Subscript, Highlight, FontStyle, TableKit],
     content: md.render(props.content || ''),
     onUpdate: syncDown,
   })
