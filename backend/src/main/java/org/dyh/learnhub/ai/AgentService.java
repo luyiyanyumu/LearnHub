@@ -19,6 +19,7 @@ import org.dyh.learnhub.service.FileStorageService;
 import org.dyh.learnhub.service.KnowledgeService;
 import org.dyh.learnhub.service.NoteService;
 import org.dyh.learnhub.service.QuickRefService;
+import org.dyh.learnhub.service.RagEvalService;
 import org.dyh.learnhub.service.SettingsService;
 import org.dyh.learnhub.service.SkillService;
 import org.dyh.learnhub.service.WebService;
@@ -2477,6 +2478,86 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
 
     /** 评测时临时关掉重排（对照组需要它，见 retrieveRefs） */
     private boolean suppressRerank = false;
+
+    /**
+     * 答案级评测用：把「这一轮实际会注入给模型的材料」原样拼出来。
+     *
+     * <p>为什么必须复用这里的拼法：答案级评测要评的是**线上行为**。另写一套"评测版证据拼装"
+     * 一定会与线上发散（注入哪几条、截多长、预算怎么分都可能不同），评出来的分数就不再代表线上。
+     * 所以顺序与预算分配都照抄 {@link #chat}：检索块 → wiki 块 → 图谱块，
+     * 三者共用 {@link #RETRIEVAL_BUDGET_CHARS}。
+     *
+     * <p>{@code wiki} / {@code kg} 两个开关用于报告要求的四臂对照
+     * （基础检索 / +Wiki / +图谱 / 三者组合），由调用方按当前设置传入。
+     *
+     * <p>命中列表与证据文本**来自同一次检索**：重排是模型判断、不是纯函数，
+     * 跑两遍既翻倍成本又可能给出不一致的结果。
+     */
+    @Override
+    public RagEvalService.Evidence evidenceFor(String question, int limit, String mode, boolean wiki, boolean kg) {
+        boolean savedVec = suppressVector;
+        boolean savedRerank = suppressRerank;
+        suppressVector = "keyword".equals(mode);
+        suppressRerank = !"fused".equals(mode);
+        int cap = Math.max(1, limit);
+        try {
+            StringBuilder sb = new StringBuilder();
+            int budget = RETRIEVAL_BUDGET_CHARS;
+            List<String> refs;
+
+            if ("vector".equals(mode)) {
+                // 只用语义：与 retrieveRefs 的 vecOnly 分支同一条路，只是这里要正文而不仅是 id
+                List<Hit> vecHits = vectorIndexService.search(question, cap).stream()
+                        .map(v -> new Hit(v.sourceType(), v.sourceId(), v.title(), v.text(), v.category(),
+                                (int) Math.round(v.score() * 100), true))
+                        .toList();
+                refs = vecHits.stream().map(h -> h.type() + ":" + h.id()).distinct().limit(cap).toList();
+                String block = retrievalBlock(vecHits, budget);
+                appendBlock(sb, block);
+                budget -= block.length();
+            } else {
+                List<Hit> hits = autoRetrieve(question);
+                // 命中列表：与 retrieveRefs 完全同口径（去重后取前 limit）
+                refs = hits.stream().map(h -> h.type() + ":" + h.id()).distinct().limit(cap).toList();
+                // 证据：与 chat() 一致，注入前 INJECT_LIMIT 条
+                List<Hit> inject = hits.size() > INJECT_LIMIT ? hits.subList(0, INJECT_LIMIT) : hits;
+                if (!inject.isEmpty()) {
+                    String block = retrievalBlock(inject, budget);
+                    appendBlock(sb, block);
+                    budget -= block.length();
+                }
+            }
+            if (wiki) {
+                String block = wikiService.retrievalBlock(question, Math.max(0, budget));
+                appendBlock(sb, block);
+                if (block != null) {
+                    budget -= block.length();
+                }
+            }
+            if (kg) {
+                appendBlock(sb, kgGraphService.retrievalBlock(question, Math.max(0, budget)));
+            }
+            return new RagEvalService.Evidence(refs, sb.toString());
+        } catch (Exception e) {
+            // 评测不该因为一次检索异常就整轮崩掉：如实记成"这条没检索到东西"
+            log.warn("答案级评测检索失败（{}）：{}", question, e.toString());
+            return RagEvalService.Evidence.empty();
+        } finally {
+            suppressVector = savedVec;
+            suppressRerank = savedRerank;
+        }
+    }
+
+    /** 追加一个证据块（空/null 不追加，也不留下多余分隔） */
+    private static void appendBlock(StringBuilder sb, String block) {
+        if (block == null || block.isBlank()) {
+            return;
+        }
+        if (sb.length() > 0) {
+            sb.append('\n');
+        }
+        sb.append(block);
+    }
 
     private List<Hit> autoRetrieve(String message) {
         List<String> terms = retrievalTerms(message);

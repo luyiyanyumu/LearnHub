@@ -4,6 +4,7 @@ import lombok.RequiredArgsConstructor;
 import org.dyh.learnhub.common.Result;
 import org.dyh.learnhub.service.GroundingService;
 import org.dyh.learnhub.service.KnowledgeService;
+import org.dyh.learnhub.service.RagAnswerEvalService;
 import org.dyh.learnhub.service.RagEvalService;
 import org.dyh.learnhub.service.RerankService;
 import org.dyh.learnhub.service.SettingsService;
@@ -32,6 +33,7 @@ public class VectorController {
     private final VectorIndexService vectorIndexService;
     private final KnowledgeService knowledgeService;
     private final RagEvalService ragEvalService;
+    private final RagAnswerEvalService ragAnswerEvalService;
     private final RerankService rerankService;
     private final SettingsService settingsService;
     private final GroundingService groundingService;
@@ -86,6 +88,58 @@ public class VectorController {
     @GetMapping("/eval/history")
     public Result<Object> evalHistory() {
         return Result.ok(ragEvalService.history());
+    }
+
+    // ---------------- 答案级评测（2026-10-02 新增：从"召回了没有"推进到"答得对不对"） ----------------
+
+    /**
+     * 跑一轮**答案级**评测。
+     *
+     * <p>与检索评测（{@code /eval/run}）的区别：那一轮只跑检索、几秒到几分钟；
+     * 这一轮**每条用例都要真调一次模型生成答案**（还要跑答案核对），所以慢得多也贵得多。
+     * 因此默认只跑 {@code limit} 条（{@link RagAnswerEvalService#DEFAULT_LIMIT}），
+     * 想全量就显式传大 limit，或用 {@code ids} 指定几条。
+     *
+     * @param label 标签（历史里按它对比）
+     * @param topK  检索取前几名，默认 5
+     * @param limit 最多评几条，默认 10
+     * @param mode  fused（默认，线上行为）/ keyword / vector
+     * @param ids   只评这几条（逗号分隔的 id；传了就忽略 enabled，可用来试草稿题）
+     */
+    @PostMapping("/eval/answer/run")
+    public Result<Map<String, Object>> answerEvalRun(@RequestParam(required = false) String label,
+                                                     @RequestParam(required = false) Integer topK,
+                                                     @RequestParam(required = false) Integer limit,
+                                                     @RequestParam(required = false) String mode,
+                                                     @RequestParam(required = false) String ids) {
+        return Result.ok(ragAnswerEvalService.run(label, topK == null ? 5 : topK,
+                limit == null ? RagAnswerEvalService.DEFAULT_LIMIT : limit, mode, parseIds(ids)));
+    }
+
+    /** 答案级评测历史 */
+    @GetMapping("/eval/answer/history")
+    public Result<Object> answerEvalHistory() {
+        return Result.ok(ragAnswerEvalService.history());
+    }
+
+    /** {@code ids=1,2,3} → {@code [1,2,3]}；空/非法项直接忽略 */
+    private static List<Long> parseIds(String ids) {
+        if (ids == null || ids.isBlank()) {
+            return List.of();
+        }
+        List<Long> out = new java.util.ArrayList<>();
+        for (String p : ids.split("[,，\\s]+")) {
+            String t = p.trim();
+            if (t.isEmpty()) {
+                continue;
+            }
+            try {
+                out.add(Long.parseLong(t));
+            } catch (NumberFormatException ignored) {
+                // 单个 id 写错不该让整轮评测失败
+            }
+        }
+        return out;
     }
 
     // ---------------- 重排开关（默认关，用评测决定开不开） ----------------

@@ -342,6 +342,41 @@ CREATE TABLE IF NOT EXISTS rag_eval_run (
   KEY idx_rag_run_label (label, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='检索评测历史（用来对比改动前后）';
 
+-- =====================================================================
+-- 答案级评测历史（2026-10-02 新增）
+--   检索评测（rag_eval_run）只看"期望来源有没有被召回"，它回答不了：
+--   答得对不对？引用有没有依据？库里没有的时候有没有老实说不知道？花了多少时间与 token？
+--   这张表补上这一层。语料指纹 / 模型 / prompt 版本必须一起存 ——
+--   否则两次分数不可比（换了模型或改了语料，分数变化说明不了任何事）。
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS rag_eval_answer_run (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  label VARCHAR(64) NOT NULL COMMENT '本次运行的标签',
+  cases INT NOT NULL DEFAULT 0 COMMENT '实际评测了多少条用例',
+  top_k INT NOT NULL DEFAULT 5,
+  mode VARCHAR(16) NOT NULL DEFAULT 'fused' COMMENT '检索模式：fused/keyword/vector',
+  corpus_hash VARCHAR(64) NULL COMMENT '语料指纹（各来源内容哈希聚合，语料变了分数不可比）',
+  model VARCHAR(120) NULL COMMENT '生成答案所用的模型名',
+  prompt_version VARCHAR(32) NULL COMMENT '生成与评分 prompt 的版本号',
+  wiki_inject TINYINT NOT NULL DEFAULT 0 COMMENT '本轮是否注入 wiki 块（报告要求的四臂对照之一）',
+  kg_inject TINYINT NOT NULL DEFAULT 0 COMMENT '本轮是否注入概念图谱块（四臂对照之一）',
+  answer_accuracy DOUBLE NOT NULL DEFAULT 0 COMMENT '答案正确性：expect_words 覆盖率（只统计有标注的题）',
+  citation_support DOUBLE NOT NULL DEFAULT 0 COMMENT '引用支持：答案被证据支撑的占比（grounding）',
+  citation_coverage DOUBLE NOT NULL DEFAULT 0 COMMENT '引用完整性：必要来源**全部**召回的占比（ALL 而非 ANY）',
+  no_answer_score DOUBLE NOT NULL DEFAULT 0 COMMENT '无答案处理：缺口题正确拒答率（该说不知道时说了的比例）；无缺口题时为 0 表示未测',
+  false_refusals INT NOT NULL DEFAULT 0 COMMENT '有材料却拒答的条数（诊断项，与 no_answer_score 分开记）',
+  elapsed_ms BIGINT NOT NULL DEFAULT 0 COMMENT '整轮墙钟耗时',
+  avg_latency_ms INT NOT NULL DEFAULT 0 COMMENT '单题平均生成耗时',
+  prompt_tokens BIGINT NOT NULL DEFAULT 0,
+  completion_tokens BIGINT NOT NULL DEFAULT 0,
+  total_tokens BIGINT NOT NULL DEFAULT 0,
+  est_cost DOUBLE NOT NULL DEFAULT 0 COMMENT '估算成本；未配置单价时为 0（此时只信 token 数）',
+  detail MEDIUMTEXT NULL COMMENT '逐条结果 JSON（答案、引用、各项判定与耗时）',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY idx_rag_answer_label (label, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='答案级评测历史';
+
 -- 索引状态：记录每个来源已索引内容的指纹，用于**增量索引**
 -- （改一条笔记只重编那一条，而不是全量重建 300 多块）
 CREATE TABLE IF NOT EXISTS kb_index_state (
@@ -534,3 +569,36 @@ INSERT IGNORE INTO learning_activity (source_type, source_id, activity_date)
 SELECT 'file', id, DATE(created_at) FROM file_info WHERE created_at IS NOT NULL;
 INSERT IGNORE INTO learning_activity (source_type, source_id, activity_date)
 SELECT 'agent_event', id, DATE(created_at) FROM agent_event WHERE role = 'user' AND created_at IS NOT NULL;
+
+-- =====================================================================
+-- 13) rag_eval_answer_run.false_refusals（2026-10-02 新增）
+--     为什么单独一列而不是并进 no_answer_score：实测发现两者是**不同的失败模式** ——
+--     "缺口题没老实说不知道"是模型在编；"有材料却拒答"多半是检索把来源召回了、
+--     但注入的证据没带上需要的那段细节（实测 id=139 就是这样）。
+--     把后者并进分数会让一个 0.75 看起来像"模型 25% 的时间在瞎答"，其实是两种问题各占一半。
+--     注意本表是本次新加的，但**已经建过**（先跑过一轮冒烟），所以这里必须走幂等迁移 ——
+--     CREATE TABLE IF NOT EXISTS 对已存在的表什么都不做，直接改上面的建表语句不会生效。
+-- =====================================================================
+SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS
+           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'rag_eval_answer_run'
+             AND COLUMN_NAME = 'false_refusals');
+SET @ddl := IF(@c = 0,
+    'ALTER TABLE rag_eval_answer_run ADD COLUMN false_refusals INT NOT NULL DEFAULT 0 COMMENT ''有材料却拒答的条数（诊断项）'' AFTER no_answer_score',
+    'SELECT 1');
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- =====================================================================
+-- 14) rag_eval.note 加宽 255 → 1000（2026-10-02）
+--     踩到的坑：note 原本 VARCHAR(255)，而人工标注题的 note 要装
+--     "考什么 + 依据来自哪份材料的哪一段 + 原文摘录"，很容易超过 255。
+--     致命的是 **INSERT IGNORE 会把 "Data too long" 这个错误降级成 warning 并静默截断** ——
+--     于是 5 条（id 140/141/142/147/148）的证据摘录被拦腰砍掉，而导入还报成功。
+--     300 条用例里 5 条被截、且没有任何报错，这种损失靠"看导入是否报错"是发现不了的。
+--     加宽到 1000 而不是 TEXT：内容仍是短注记，给个明确上限比放到 TEXT 更不容易被滥用。
+-- =====================================================================
+SET @c := (SELECT IFNULL(MAX(CHARACTER_MAXIMUM_LENGTH), 0) FROM information_schema.COLUMNS
+           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'rag_eval' AND COLUMN_NAME = 'note');
+SET @ddl := IF(@c < 1000,
+    'ALTER TABLE rag_eval MODIFY COLUMN note VARCHAR(1000) NULL COMMENT ''这条用例想验证什么 + 依据来自哪份材料的哪一段''',
+    'SELECT 1');
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;

@@ -456,12 +456,14 @@ public class DeepSeekClient {
      * 才能给用户一句明确提示、并落库备查。
      *
      * @param finishReason      {@code stop} / {@code length}（截断）/ {@code tool_calls}
+     * @param promptTokens      本次输入 token 数（答案级评测要算总成本，必须带上输入侧）
      * @param completionTokens  本次输出 token 总数（**含思考**）
      * @param reasoningTokens   其中被思考用掉的 token —— 它和正文共享 max_tokens，
      *                          所以"正文没写多少却撞上限"通常就是它在吃预算（实测：max_tokens=400 时
      *                          399 个 token 全归思考，正文 0 字）
      */
-    public record ChatResult(JsonNode message, String finishReason, int completionTokens, int reasoningTokens) {
+    public record ChatResult(JsonNode message, String finishReason, int promptTokens,
+                             int completionTokens, int reasoningTokens) {
         /** 是否因为达到 max_tokens 被截断 */
         public boolean truncated() {
             return "length".equals(finishReason);
@@ -502,6 +504,7 @@ public class DeepSeekClient {
         }
         String finish = choice.path("finish_reason").asText("");
         JsonNode usage = root.path("usage");
+        int prompt = usage.path("prompt_tokens").asInt(0);
         int completion = usage.path("completion_tokens").asInt(0);
         int reasoning = usage.path("completion_tokens_details").path("reasoning_tokens").asInt(0);
         if ("length".equals(finish)) {
@@ -512,7 +515,7 @@ public class DeepSeekClient {
         log.info("AI 请求完成 cost={}ms 模型={} 消息数={} 思考={} finish={} tokens={}(思考 {})",
                 cost, model, messages.size(), isThinkingOn(model, thinking) ? "on" : "off",
                 finish, completion, reasoning);
-        return new ChatResult(message, finish, completion, reasoning);
+        return new ChatResult(message, finish, prompt, completion, reasoning);
     }
 
     private String truncate(String s, int max) {
