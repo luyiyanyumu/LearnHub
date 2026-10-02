@@ -651,6 +651,13 @@ public class KgGraphService {
         Set<String> seenLine = new LinkedHashSet<>();
         for (KgNode h : hits) {
             for (KgRelation r : rs) {
+                // 未核对的抽取边不进自动回答：没有原文证据 = 模型编造、或引用被改写后没核对上。
+                // 自动注入把它当事实会直接制造错误前提（评估报告 P0-D：132 条抽取边里 9 条无证据，
+                // 却与其余边同样权重、同样被注入）。推导边另有 origin=derived 与「（推导）」标注，
+                // 不受这条影响。
+                if ("llm".equals(r.getOrigin()) && !StringUtils.hasText(r.getEvidence())) {
+                    continue;
+                }
                 boolean fwd = r.getHeadId().equals(h.getId());
                 boolean back = r.getTailId().equals(h.getId());
                 if (!fwd && !back) {
@@ -811,6 +818,12 @@ public class KgGraphService {
                 .ne(KgRelation::getOrigin, "derived"));
         List<KgReasoner.Edge> edges = new ArrayList<>();
         for (KgRelation r : direct) {
+            // 未核对的边（无原文证据）不参与传递闭包：推理会把错误放大。
+            // 实测 #67 Spring-属于→JVM（证据是"依赖 JVM"）叠加 #14 JVM-属于→JRE
+            // 推出 #289 Spring-属于→JRE，错误从一条变成三条（评估报告 P0-D）。
+            if (!StringUtils.hasText(r.getEvidence())) {
+                continue;
+            }
             edges.add(new KgReasoner.Edge(String.valueOf(r.getId()), r.getHeadId(), r.getRelation(),
                     r.getTailId(), r.getWeight() == null ? 1.0 : r.getWeight()));
         }
