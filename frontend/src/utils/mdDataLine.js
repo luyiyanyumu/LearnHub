@@ -23,7 +23,7 @@ export default function mdDataLine(md) {
   const original = md.renderer.renderToken.bind(md.renderer)
   md.renderer.renderToken = function (tokens, idx, options, env, self) {
     const token = tokens[idx]
-    if (token.map && token.nesting === 1) {
+    if (token.map && (token.nesting === 1 || token.type === 'hr')) {
       token.attrSet('data-line', String(token.map[0]))
     }
     return original(tokens, idx, options, env, self)

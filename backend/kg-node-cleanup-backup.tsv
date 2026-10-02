@@ -1,0 +1,31 @@
+﻿mysql.exe : mysql: [Warning] Using a password on the command line interface can be insecure.
+所在位置 行:6 字符: 1
++ & $mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3307 -uroot  ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (mysql: [Warning...an be insecure.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+id	name	type	wiki_key
+e-0bc7379d2c	--dump-default-config	concept	NULL
+e-11d8a1c09f	docker ps -a	concept	NULL
+e-15636ff312	dsh --profile web --help	concept	NULL
+e-1900eab6c0	--profile	concept	entity-1900eab6c0
+e-19f12d7bc9	docker exec -it 容器名 bash	concept	NULL
+e-230f05058d	docker logs -f 容器名	concept	NULL
+e-3cbb0b802a	--from-default-profile	concept	NULL
+e-4d071c5548	dsh --profile headless	concept	NULL
+e-5ed9c34b23	git reset --hard	concept	NULL
+e-7210925696	git merge --abort	concept	NULL
+e-76df938ef5	dsh --profile <name>	concept	NULL
+e-77d815a8af	git commit --amend -m	concept	NULL
+e-84ffe417bf	git log --oneline --graph --decorate	concept	NULL
+e-9f1591d6c1	git remote -v	concept	NULL
+e-a4895eb44a	--patch	concept	entity-a4895eb44a
+e-b6f7a3f08a	dsh --profile web --port 8080	concept	NULL
+e-c32c704a9e	git commit --amend	concept	NULL
+e-c42aa27ecd	dsh --help	concept	NULL
+e-c43d69f3d7	docker compose up -d	concept	NULL
+e-cd060630ca	git switch -c	concept	NULL
+e-d378c03667	git reset --soft	concept	NULL
+e-e8cf56224d	git restore --staged	concept	NULL
+e-fb032b4181	--dump-config	concept	NULL

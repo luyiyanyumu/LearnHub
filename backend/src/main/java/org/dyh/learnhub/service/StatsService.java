@@ -27,6 +27,7 @@ public class StatsService {
     private final CategoryMapper categoryMapper;
     private final TagMapper tagMapper;
     private final NoteService noteService;
+    private final LearningActivityService learningActivity;
 
     /** 工作台总览数据 */
     public Map<String, Object> dashboard() {
@@ -62,5 +63,10 @@ public class StatsService {
                 "tagTotal", tagMapper.selectCount(Wrappers.<Tag>query()),
                 "categoryStats", categoryStats,
                 "recentNotes", recentNotes);
+    }
+
+    /** 按天统计已保存的学习记录，不读取正文。 */
+    public Map<String, Object> activity(Integer requestedYear) {
+        return learningActivity.activity(requestedYear);
     }
 }

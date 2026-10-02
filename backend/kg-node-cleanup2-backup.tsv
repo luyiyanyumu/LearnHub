@@ -1,0 +1,17 @@
+﻿mysql.exe : mysql: [Warning] Using a password on the command line interface can be insecure.
+所在位置 行:12 字符: 3
++   & $mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3307 -uroo ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (mysql: [Warning...an be insecure.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+id	name	type	wiki_key
+e-10ed04d9cb	生成一个新的反向 commit	concept	NULL
+e-1b36839721	查看所有容器	concept	NULL
+e-2da708de30	打印配置树	concept	NULL
+e-325112921d	创建并切换分支	concept	NULL
+e-47dbb6ff74	修改最近一次 commit 的说明	concept	NULL
+e-6ab458afd2	查看远程仓库地址	concept	NULL
+e-c73a8976e3	打印合成后的配置树	concept	NULL
+e-ec786ba6c4	查看提交历史	concept	NULL
+e-ef90904f37	配置叠加顺序	concept	NULL

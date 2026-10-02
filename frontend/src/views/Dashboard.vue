@@ -1,7 +1,8 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { statsApi } from '../api'
+import ActivityHeatmap from '../components/ActivityHeatmap.vue'
 
 const router = useRouter()
 // 初始即置为 loading，避免首帧先闪一下「空状态」再被数据顶掉
@@ -14,6 +15,12 @@ const stats = ref({
   categoryStats: [],
   recentNotes: [],
 })
+const activityYear = ref(new Date().getFullYear())
+const activityYears = Array.from({ length: 5 }, (_, index) => activityYear.value - index)
+const activityLoading = ref(false)
+const activityError = ref(false)
+const activity = ref({ year: activityYear.value, total: 0, activeDays: 0, max: 0, days: [] })
+let activityRequestId = 0
 
 const cards = [
   {
@@ -47,6 +54,30 @@ async function load() {
   }
 }
 
+async function loadActivity(year = activityYear.value) {
+  const requestId = ++activityRequestId
+  activityLoading.value = true
+  activityError.value = false
+  activity.value = { year, total: 0, activeDays: 0, max: 0, days: [] }
+  try {
+    const result = await statsApi.activity(year)
+    if (requestId === activityRequestId) activity.value = result
+  } catch {
+    if (requestId === activityRequestId) activityError.value = true
+  } finally {
+    if (requestId === activityRequestId) activityLoading.value = false
+  }
+}
+
+function changeActivityYear(year) {
+  activityYear.value = year
+  loadActivity(year)
+}
+
+function refreshActivity() {
+  loadActivity()
+}
+
 /** 统计卡跳转目标：笔记/分类/标签都落到笔记列表页（可在那里继续筛选），速查卡去速查卡页 */
 const STAT_TARGET = { noteTotal: '/notes', refTotal: '/refs', categoryTotal: '/notes', tagTotal: '/notes' }
 function openStat(key) {
@@ -62,7 +93,18 @@ const greeting = computed(() => {
   return `${greet}。${now.getMonth() + 1} 月 ${now.getDate()} 日 · 周${week}，今天也积累一点点。`
 })
 
-onMounted(load)
+onMounted(() => {
+  load()
+  loadActivity()
+  window.addEventListener('lh-learning-activity-changed', refreshActivity)
+  window.addEventListener('focus', refreshActivity)
+})
+
+onBeforeUnmount(() => {
+  activityRequestId += 1
+  window.removeEventListener('lh-learning-activity-changed', refreshActivity)
+  window.removeEventListener('focus', refreshActivity)
+})
 </script>
 
 <template>
@@ -99,6 +141,16 @@ onMounted(load)
         <div class="stat-glow"></div>
       </el-card>
     </div>
+
+    <ActivityHeatmap
+      :activity="activity"
+      :year="activityYear"
+      :years="activityYears"
+      :loading="activityLoading"
+      :error="activityError"
+      @year-change="changeActivityYear"
+      @retry="loadActivity()"
+    />
 
     <div class="lower">
       <el-card shadow="never" class="lower-card">

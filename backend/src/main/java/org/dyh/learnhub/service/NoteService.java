@@ -35,6 +35,7 @@ public class NoteService {
     private final NoteMapper noteMapper;
     private final CategoryMapper categoryMapper;
     private final TagMapper tagMapper;
+    private final LearningActivityService learningActivity;
     /** 内容变更广播：页面保存、智能体写入都会发；wiki 的自动增量更新订阅它 */
     private final ApplicationEventPublisher events;
 
@@ -134,6 +135,7 @@ public class NoteService {
         note.setCategoryId(dto.getCategoryId());
         noteMapper.insert(note);
         saveTags(note.getId(), dto.getTagIds());
+        learningActivity.record("note", note.getId());
         // 通知 wiki：该分类的主题页已过期，按需在后台增量重生成
         publishChanged(dto.getCategoryId());
         return detail(note.getId());
@@ -168,6 +170,7 @@ public class NoteService {
             saveTags(id, dto.getTagIds());
         }
         // 新旧分类都要通知：改分类后，旧分类的主题页也少了一条素材
+        learningActivity.record("note", id);
         publishChanged(exist.getCategoryId(), dto.getCategoryId());
         return detail(id);
     }

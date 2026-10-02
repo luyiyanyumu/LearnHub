@@ -1,0 +1,326 @@
+{
+  "auditedAt": "2026-10-02T14:25:10+08:00",
+  "method": "Readonly API and UI audit; local embedding probe; historical evaluation; no new answer generation",
+  "kb": {
+    "chunks": 1518,
+    "indexedChars": 966671,
+    "indexedModel": "bge-m3",
+    "indexedSources": 21,
+    "currentSources": 21,
+    "model": "bge-m3",
+    "baseUrl": "http://localhost:11434",
+    "enabled": true,
+    "sourceLatestChange": "2026-09-30 09:49:01",
+    "indexedAt": "2026-09-30 17:49:29",
+    "stale": false,
+    "vectorBackend": "milvus",
+    "rerank": {
+      "enabled": true,
+      "backend": "llm",
+      "active": "llm",
+      "llm": {
+        "backend": "llm",
+        "batch": 20,
+        "maxWindow": 60,
+        "snippet": 120,
+        "model": "deepseek-flash"
+      },
+      "cross": {
+        "backend": "cross",
+        "url": "http://127.0.0.1:8091/rerank",
+        "healthy": false,
+        "lastError": "java.net.ConnectException"
+      }
+    },
+    "contextualEmbed": true
+  },
+  "vector": {
+    "configured": "milvus",
+    "active": "mysql",
+    "mysql": {
+      "backend": "mysql",
+      "chunks": 1518,
+      "note": "全量扫描（float32 余弦），无外部依赖"
+    },
+    "mysqlChunks": 1518,
+    "milvus": {
+      "uri": "http://127.0.0.1:19530",
+      "healthy": false,
+      "vectors": -1,
+      "lastError": "Milvus 调用失败 /v2/vectordb/collections/list：java.net.ConnectException"
+    },
+    "consistent": null,
+    "hint": "Milvus 不可达：检索会自动降级为 MySQL 全扫"
+  },
+  "documentGraph": {
+    "nodes": 33,
+    "edges": 34,
+    "semanticEdges": 9,
+    "structureEdges": 25,
+    "orphanEdges": 0
+  },
+  "conceptGraph": {
+    "nodes": 135,
+    "edges": 194,
+    "derived": 62,
+    "embedded": 119,
+    "relations": 6
+  },
+  "wiki": {
+    "visibleTopics": 48,
+    "generatedVisible": 38,
+    "entityPages": 32,
+    "warnPages": 12,
+    "displayedEvidenceCountOne": 27,
+    "countCaveat": "Entity itemCount is extraction-batch count, not distinct source count",
+    "index": {
+      "title": "知识索引",
+      "itemCount": 10,
+      "generatedAt": "2026-09-28 20:55:56"
+    },
+    "qualityWarnings": [
+      {
+        "topicKey": "entity-55512bf72c",
+        "title": "dsh",
+        "qualityNote": "引用了不存在的素材：速查卡#8；没有任何有效的来源标注（[笔记#N] / [速查卡#N] / [资料#N]）"
+      },
+      {
+        "topicKey": "entity-9a881b9b9f",
+        "title": "git",
+        "qualityNote": "引用了不存在的素材：速查卡#7；没有任何有效的来源标注（[笔记#N] / [速查卡#N] / [资料#N]）"
+      },
+      {
+        "topicKey": "entity-1900eab6c0",
+        "title": "profile",
+        "qualityNote": "引用了不存在的素材：速查卡#8；没有任何有效的来源标注（[笔记#N] / [速查卡#N] / [资料#N]）"
+      },
+      {
+        "topicKey": "entity-3bdf0a9fe3",
+        "title": "Java核心三大特性",
+        "qualityNote": "引用了不存在的素材：资料#4、资料#5；没有任何有效的来源标注（[笔记#N] / [速查卡#N] / [资料#N]）"
+      },
+      {
+        "topicKey": "entity-ca04248e5b",
+        "title": "MQTT协议",
+        "qualityNote": "引用了不存在的素材：资料#8、速查卡#5、笔记#3；没有任何有效的来源标注（[笔记#N] / [速查卡#N] / [资料#N]）"
+      },
+      {
+        "topicKey": "entity-88ccba0aaa",
+        "title": "Maven坐标三要素",
+        "qualityNote": "引用了不存在的素材：资料#8、笔记#3、速查卡#5；没有任何有效的来源标注（[笔记#N] / [速查卡#N] / [资料#N]）"
+      },
+      {
+        "topicKey": "entity-a4895eb44a",
+        "title": "patch",
+        "qualityNote": "引用了不存在的素材：速查卡#8；没有任何有效的来源标注（[笔记#N] / [速查卡#N] / [资料#N]）"
+      },
+      {
+        "topicKey": "entity-51a81e9bc1",
+        "title": "@GetMapping",
+        "qualityNote": "引用了不存在的素材：速查卡#3；没有任何有效的来源标注（[笔记#N] / [速查卡#N] / [资料#N]）"
+      },
+      {
+        "topicKey": "entity-ae1e50ed88",
+        "title": "@PostMapping",
+        "qualityNote": "引用了不存在的素材：速查卡#3；没有任何有效的来源标注（[笔记#N] / [速查卡#N] / [资料#N]）"
+      },
+      {
+        "topicKey": "entity-e562a9c52c",
+        "title": "DeepSeek Harness",
+        "qualityNote": "引用了不存在的素材：速查卡#8；没有任何有效的来源标注（[笔记#N] / [速查卡#N] / [资料#N]）"
+      },
+      {
+        "topicKey": "entity-e6169e958b",
+        "title": "Docker",
+        "qualityNote": "引用了不存在的素材：速查卡#2"
+      },
+      {
+        "topicKey": "entity-7fab5fd4d0",
+        "title": "REST 动词映射",
+        "qualityNote": "没有任何有效的来源标注（[笔记#N] / [速查卡#N] / [资料#N]）"
+      }
+    ]
+  },
+  "historicalRetrievalRun": {
+    "id": 20,
+    "label": "精排A-llm(deepseek-flash)",
+    "cases": 97,
+    "topK": 5,
+    "recallAtK": 0.938,
+    "mrr": 0.902,
+    "keywordRecall": 0.68,
+    "vectorRecall": 0.866,
+    "createdAt": "2026-09-29T15:14:26"
+  },
+  "semanticProbe": {
+    "query": "大量字符串拼接用哪个类性能更好",
+    "keyword": [],
+    "vector": [
+      {
+        "type": "note",
+        "id": 52,
+        "title": "Milvus 入门笔记",
+        "category": "RAG",
+        "score": 0.536,
+        "text": "**`FLOAT_VECTOR`** 是最常用的稠密向量，`dim` 必须与 embedding 模型输出维度严格一致（如 768、1024、1536）。维度写错不会在插入时报错得很早，而是在检索时结果异常或直接失败，属于高频坑。\n\n**`BINARY_VECTOR`** 存二值向量（每个维度 1 bit），`dim`"
+      },
+      {
+        "type": "note",
+        "id": 51,
+        "title": "AI Agent 讲义",
+        "category": "AI Agent",
+        "score": 0.532,
+        "text": "- **静态链 vs 动态链**：静态链适合稳定 SOP；动态链适合开放域任务，但要防循环与成本失控。\n- **条件工具调用**：根据中间结果分支，例如仅当 `risk_score > 0.8` 才调用 `human_review`。可用规则引擎、小模型分类，或让主模型输出结构化\"分支字段\"（需校验）。\n- **依赖 "
+      },
+      {
+        "type": "file",
+        "id": 19,
+        "title": "ai-agent-interview-guide-zh.pdf",
+        "category": "AI Agent",
+        "score": 0.531,
+        "text": "⻆⾊交互 的快速组合；LangGraph 偏 显式图状态机 与 检查点/分\n⽀。若强调 ⽣产可恢复与审计，LangGraph 往往更易 形式化；若强调 探索式对话与⼈机混合，\nAutoGen 叙事更⾃然。\n**追问应对：**若问「能混⽤吗？」——答：可以，例如 LangGraph 节点内嵌 AutoGen 会话，\n但要"
+      },
+      {
+        "type": "quick_ref",
+        "id": 1,
+        "title": "String / StringBuilder / StringBuffer 区别",
+        "category": "Java",
+        "score": 0.53,
+        "text": "| 类型 | 可变 | 线程安全 | 性能 |\n|------|------|---------|------|\n| String | 不可变 | 安全(本身不可变) | 拼接慢 |\n| StringBuilder | 可变 | 不安全 | 最快 |\n| StringBuffer | 可变 | 安全(synchroni"
+      },
+      {
+        "type": "file",
+        "id": 19,
+        "title": "ai-agent-interview-guide-zh.pdf",
+        "category": "AI Agent",
+        "score": 0.53,
+        "text": "废弃或⾃⼰只复制过 Demo 的版本号（如乱写 Python 2.7）。\n3. JD ⾥强调的词，往前放、写全拼（如对⽅写 LangGraph，你就别只写 LC）。\n2.1 Python 版本的技术栈写法\n分组模板（复制后改词）：\ntext语⾔与运⾏时：Python 3.11+（类型注解 / asyncio）\nWeb "
+      }
+    ],
+    "keywordCount": 0,
+    "vectorCount": 5
+  },
+  "wikiProbe": {
+    "question": "关于 MQTT，我的知识库里还缺哪些关键点？",
+    "block": "【知识库 wiki 索引】同一主题的记录已被整理成页面 —— 这里**只给目录与缺口**，正文请用 get_note / get_file 取原文，不要把这当成素材内容。若回答涉及下面「待补充」里的点，请明确说明「你的知识库里没有记这一点」，再考虑是否另说标准知识。本次命中的 2 页（知识库共 39 页）；**没列出的主题不代表知识库里没有**，完整清单见知识库页。\n\n· 知识索引（来源 10 条；质量 ok）\n  小节：概念 / API / 框架\n\n· 知识自检（来源 16 条；质量 ok）\n  小节：代码检查（确定性，不会漏） / 语义检查（模型，只报跨页问题）\n",
+    "chars": 287,
+    "totalPages": 39,
+    "hits": [
+      {
+        "title": "知识索引",
+        "score": 5,
+        "titleHit": true,
+        "quality": "ok",
+        "itemCount": 10,
+        "gaps": []
+      },
+      {
+        "title": "知识自检",
+        "score": 4,
+        "titleHit": true,
+        "quality": "ok",
+        "itemCount": 16,
+        "gaps": []
+      },
+      {
+        "title": "MQTT协议",
+        "score": 3,
+        "titleHit": true,
+        "quality": "warn",
+        "itemCount": 1,
+        "gaps": []
+      },
+      {
+        "title": "MQTT",
+        "score": 3,
+        "titleHit": true,
+        "quality": "ok",
+        "itemCount": 1,
+        "gaps": [
+          "QoS 的具体等级与各自语义",
+          "Broker / 客户端在架构中的位置",
+          "Topic 的命名规则与通配符",
+          "与其它协议的取舍依据"
+        ]
+      },
+      {
+        "title": "AI Agent",
+        "score": 7,
+        "titleHit": false,
+        "quality": "ok",
+        "itemCount": 1,
+        "gaps": [
+          "素材源文档约 14272 字，本次仅提供约 1723 字采样。笔记中的 §2 R…",
+          "上下文压缩的具体机制（Compaction、大输出落盘、Skills 按需加载）…",
+          "Ralph Loop 的判定逻辑（\"到轮数上限不硬退，先判断任务做完没\"）只有一…",
+          "ReAct 在采样中仅出现一次（§2），未达独立成页标准。"
+        ]
+      },
+      {
+        "title": "Docker",
+        "score": 7,
+        "titleHit": false,
+        "quality": "ok",
+        "itemCount": 1,
+        "gaps": [
+          "[速查卡#2] 的源文档约 139 字，本次只采到 114 字，未提供的那部分内…",
+          "本主题目前只有一条素材，还不足以判断 Docker 的哪些下层概念会在知识库里反…"
+        ]
+      },
+      {
+        "title": "Docker",
+        "score": 5,
+        "titleHit": false,
+        "quality": "warn",
+        "itemCount": 1,
+        "gaps": [
+          "镜像如何构建与固化依赖。",
+          "沙箱的网络、文件系统与资源限制配置。"
+        ]
+      },
+      {
+        "title": "Java",
+        "score": 4,
+        "titleHit": false,
+        "quality": "ok",
+        "itemCount": 5,
+        "gaps": [
+          "开发环境搭建一节在素材中被截断，JDK / JRE / JVM 的区分未完整给出…",
+          "[[Maven]] 的坐标示例被截断，只有三要素定义 [笔记#1]",
+          "Spring 与 Spring Cloud 的关系在素材中仅一句带过（图 1.2…",
+          "--"
+        ]
+      },
+      {
+        "title": "AutoGen",
+        "score": 3,
+        "titleHit": false,
+        "quality": "ok",
+        "itemCount": 1,
+        "gaps": [
+          "素材只在目录条目中提及 AutoGen，以下均未涉及：",
+          "具体的多 Agent 协作机制与对话调度方式",
+          "API、代码示例、配置参数",
+          "与 CrewAI 的区别、与 [[AgentFlow]] 的关系"
+        ]
+      }
+    ]
+  },
+  "graphProbe": {
+    "question": "Spring 和 JVM 是什么关系",
+    "exact": [
+      {
+        "id": "e-622a494d3e",
+        "name": "Spring",
+        "type": "concept"
+      },
+      {
+        "id": "e-729d78e34a",
+        "name": "JVM",
+        "type": "concept"
+      }
+    ],
+    "byVector": [],
+    "block": "【知识图谱里的概念关联】从你的问题里识别到这些概念：Spring、JVM。三元组格式是「头实体 -关系→ 尾实体」，标着「推导」的是按本体规则推出来的（不是直接写着的）。\n1. Spring -属于→ JVM\n   证据：Spring 是基于 Java 的，自然依赖于 JVM　来源：资料#2\n2. Spring -属于→ Java\n   证据：Spring 是基于 Java 的，自然依赖于 JVM。　来源：资料#2\n3. Spring -是一种→ Java 生态\n   证据：这个 Java 生态中有一个不容忽视的名字，那便是 Spring　来源：资料#2\n4. JVM -属于→ JRE\n   证据：JRE（Java 运行环境）：包含 JVM 与运行 Java 程序所需的核心类库　来源：笔记#5\n5. JVM -用于→ 跨平台\n   证据：JVM（Java 虚拟机）：运行 Java 字节码文件的核心，是跨平台的基础。　来源：笔记#5\n6. Spring -属于→ JRE（推导）\n以上只是该实体的**一跳邻域**。要按关系精确查用 graph_query，要展开更多跳用 graph_neighbors。\n"
+  }
+}

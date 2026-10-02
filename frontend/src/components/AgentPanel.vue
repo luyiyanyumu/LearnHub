@@ -79,6 +79,7 @@ const EMBEDDED_ROOT_STYLE = {
 const configured = ref(true)
 const busy = ref(false)
 const input = ref('')
+const inputRef = ref(null)
 const listRef = ref(null)
 const messages = ref([])
 
@@ -253,11 +254,16 @@ function newChat() {
  */
 const pending = ref([])
 
+function notifyLearningActivity() {
+  window.dispatchEvent(new CustomEvent('lh-learning-activity-changed'))
+}
+
 async function resolveAction(a, approve) {
   try {
     let hint
     if (approve) {
       const r = await aiApi.approveAction(a.id)
+      notifyLearningActivity()
       hint = r?.hint || '已执行'
       ElMessage.success(hint)
     } else {
@@ -392,6 +398,7 @@ async function send(text, ctx) {
   } finally {
     busy.value = false
     scrollBottom()
+    notifyLearningActivity()
   }
 }
 
@@ -518,6 +525,7 @@ async function doSaveNote() {
       categoryId: saveForm.value.categoryId || null,
       tagIds: [],
     })
+    notifyLearningActivity()
     saveVisible.value = false
     const holder = messages.value.find((m) => m.id === saveForm.value.sourceId)
     if (holder) holder.saved = true
@@ -568,6 +576,7 @@ onMounted(() => {
   }
   // 支持从笔记编辑器等页面唤起（window 事件，避免组件强耦合）
   window.addEventListener('lh-agent-open', openFromEvent)
+  window.addEventListener('lh-agent-compose', composeFromEvent)
   // 知识图谱 / wiki 里的「问智能体」：不仅打开面板，还直接把问题发出去
   window.addEventListener('lh-ask-agent', askFromEvent)
   // 智能体页请求展开会话列表
@@ -584,6 +593,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('lh-agent-open', openFromEvent)
+  window.removeEventListener('lh-agent-compose', composeFromEvent)
   window.removeEventListener('lh-ask-agent', askFromEvent)
   window.removeEventListener('lh-agent-sessions-open', openSessionsFromEvent)
   window.removeEventListener('lh-agent-switch', switchFromEvent)
@@ -618,6 +628,15 @@ function openSessionsFromEvent() {
 
 function openFromEvent() {
   open.value = true
+}
+
+/** Block writing requests become editable drafts; sending remains the user's action. */
+function composeFromEvent(e) {
+  const message = typeof e?.detail?.message === 'string' ? e.detail.message.trim() : ''
+  if (!message) return
+  input.value = input.value.trim() ? `${input.value}\n\n${message}` : message
+  open.value = true
+  nextTick(() => inputRef.value?.focus())
 }
 
 /**
@@ -845,12 +864,14 @@ function askFromEvent(e) {
               <span>联网</span>
               <span class="web-state">{{ webEnabled ? '开' : '关' }}</span>
             </button>
-            <input
+            <textarea
+              ref="inputRef"
               v-model="input"
               class="chat-input"
+              rows="2"
               placeholder="问我代码问题，或说「把 xxx 记成笔记」…"
               :disabled="busy"
-              @keydown.enter.prevent="send()"
+              @keydown.enter.exact.prevent="send()"
             />
             <button class="send-btn" type="button" :disabled="busy || !input.trim()" @click="send()">
               <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1564,12 +1585,17 @@ html.dark .cfg-tip {
 }
 .chat-input {
   flex: 1;
-  height: 38px;
+  min-width: 0;
+  height: 64px;
+  min-height: 38px;
+  max-height: 180px;
+  resize: vertical;
+  line-height: 1.55;
   border: 1px solid var(--app-border);
   border-radius: 10px;
   background: var(--app-bg);
   color: var(--app-text-1);
-  padding: 0 12px;
+  padding: 9px 12px;
   font-size: 13.5px;
   font-family: inherit;
   outline: none;

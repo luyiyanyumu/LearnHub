@@ -44,6 +44,7 @@ public class AgentSessionService {
     private final AgentSessionMapper sessionMapper;
     private final AgentEventMapper eventMapper;
     private final AgentPendingActionMapper actionMapper;
+    private final LearningActivityService learningActivity;
 
     /** 投影给模型的最近轮数（一轮 = 一问一答），再早的靠摘要兜 */
     public static final int PROJECTION_ROUNDS = 8;
@@ -212,6 +213,7 @@ public class AgentSessionService {
         e.setTokens(tokens);
         e.setFinishReason(finishReason);
         eventMapper.insert(e);
+        if (ROLE_USER.equals(role)) learningActivity.record("agent_event", e.getId());
         sessionMapper.touch(sessionId);
     }
 

@@ -5,6 +5,7 @@ import org.dyh.learnhub.common.Result;
 import org.dyh.learnhub.service.StatsService;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.Map;
@@ -20,5 +21,11 @@ public class StatsController {
     @GetMapping
     public Result<Map<String, Object>> dashboard() {
         return Result.ok(statsService.dashboard());
+    }
+
+    /** 首页年度学习活动热力图 */
+    @GetMapping("/activity")
+    public Result<Map<String, Object>> activity(@RequestParam(required = false) Integer year) {
+        return Result.ok(statsService.activity(year));
     }
 }

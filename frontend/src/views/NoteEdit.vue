@@ -3,6 +3,7 @@ import { computed, h, nextTick, render, onBeforeUnmount, onMounted, reactive, re
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { MdEditor, MdPreview } from 'md-editor-v3'
+import MarkdownIt from 'markdown-it'
 // 编辑器全局初始化 + 样式（原来在 main.js，为了不占首屏挪到这里；
 // 本页是路由懒加载的，静态 import 不会影响首屏）
 import '../utils/mdEditorSetup'
@@ -22,6 +23,8 @@ import CodeBlockEditor from '../components/CodeBlockEditor.vue'
 import BlockPreview from '../components/BlockPreview.vue'
 import { findTable, addRow, deleteRow, addCol, deleteCol, setHeaderRow, alignColumn, deleteTable } from '../utils/mdTable'
 import { ensureColgroup, findColgroup } from '../utils/tableResize'
+import { boundScrollAnchors, mapScrollPosition, normalizeScrollAnchors } from '../utils/scrollAnchors'
+import { createSourceInsert } from '../utils/sourceToolbar'
 
 const route = useRoute()
 const router = useRouter()
@@ -31,11 +34,14 @@ const isNew = computed(() => !id.value)
 const loading = ref(false)
 const saving = ref(false)
 const editorRef = ref(null)
+const blockPreviewRef = ref(null)
 const editorWrapRef = ref(null)
 const categories = ref([])
 const tags = ref([])
 const form = ref({ title: '', content: '', categoryId: undefined, tagIds: [] })
 const titleInputRef = ref(null)
+// Tool popovers can take focus; retain the editor that last held the caret.
+let toolbarSide = 'preview'
 
 /**
  * 表单指纹：用来判断「有没有未保存的改动」。
@@ -111,9 +117,11 @@ ${FENCE}
 // ---- 格式条（RGB 颜色 / 语雀风格内联格式）----
 /** 把选中文字包进对应标签；md-editor 的 insert() 会自动保留撤销历史 */
 function applyFormat({ kind, value }) {
-  if (previewEditing.value || (readingMode.value && ensurePreviewEditing())) {
-    return previewApplyFormat({ kind, value })
-  }
+  return captureToolbarContext().applyFormat({ kind, value })
+}
+
+function applySourceFormat({ kind, value }) {
+  if (['details', 'callout'].includes(kind)) return runSourceTool(kind, value)
   const ed = editorRef.value
   if (!ed || typeof ed.insert !== 'function') {
     ElMessage.warning('编辑器尚未就绪，请稍后再试')
@@ -222,6 +230,9 @@ function onPreviewPaste(e) {
  * 可编辑性由 @mouseenter / @click 提前挂好，这里只负责切状态。
  */
 function onPreviewFocusIn() {
+  toolbarSide = 'preview'
+  scrollSyncSource = 'preview'
+  if (useBlockPreview) return
   if (previewEditing.value) return
   if (!attachPreviewEditable()) return
   pvResetHistory()
@@ -815,289 +826,198 @@ function startDrag(e) {
 }
 
 // ---- 大纲：解析标题 / 平滑滚动 / 滚动同步 ----
+const outlineMarkdown = new MarkdownIt({ html: true, breaks: true })
 const outline = computed(() => {
   const items = []
-  let inFence = false
-  const lines = (form.value.content || '').split('\n')
-  for (const line of lines) {
-    if (/^\s*(```|~~~)/.test(line)) {
-      inFence = !inFence
-      continue
+  const tokens = outlineMarkdown.parse(form.value.content || '', {})
+  const container = document.createElement('div')
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]
+    if (token.type === 'heading_open' && /^h[1-3]$/.test(token.tag)) {
+      const inline = tokens[i + 1]
+      container.innerHTML = inline?.type === 'inline'
+        ? outlineMarkdown.renderer.renderInline(inline.children || [], outlineMarkdown.options, {})
+        : ''
+      items.push({ level: Number(token.tag[1]), text: container.textContent.trim() })
+    } else if (token.type === 'html_block') {
+      // Linked or indented headings are saved as HTML to retain their metadata.
+      container.innerHTML = token.content
+      for (const heading of container.querySelectorAll('h1, h2, h3')) {
+        items.push({ level: Number(heading.tagName[1]), text: heading.textContent.trim() })
+      }
     }
-    if (inFence) continue
-    const m = line.match(/^(#{1,3})\s+(.+?)\s*#*$/)
-    if (m) items.push({ level: m[1].length, text: m[2].replace(/<[^<>]{0,200}>/g, '').replace(/[*`~]/g, '').trim() })
   }
   return items
 })
 
 const activeIdx = ref(-1)
+let outlineScrollTarget = null
 
 function scrollToHeading(idx) {
-  const el = pvScrollRef.value
-  if (!el) return
-  const heads = el.querySelectorAll('.md-editor-preview h1, .md-editor-preview h2, .md-editor-preview h3, .tiptap h1, .tiptap h2, .tiptap h3')
-  const target = heads[idx]
-  if (target) el.scrollTo({ top: target.offsetTop - 24, behavior: 'smooth' })
+  const pv = pvScrollRef.value
+  if (!pv) return
+  const target = pv.querySelectorAll('.md-editor-preview h1, .md-editor-preview h2, .md-editor-preview h3, .tiptap h1, .tiptap h2, .tiptap h3')[idx]
+  if (target) {
+    onScrollIntent('preview')
+    outlineScrollTarget = target
+    pv.scrollTo({ top: topWithin(target, pv) - 24, behavior: 'smooth' })
+  }
 }
 
 let scrollRaf = 0
 function onPreviewScroll() {
+  const pv = pvScrollRef.value
+  if (pv && scrollSyncSource === 'preview') {
+    queueScrollSync()
+  }
   if (scrollRaf) return
   scrollRaf = requestAnimationFrame(() => {
     scrollRaf = 0
     const el = pvScrollRef.value
     if (!el) return
-    // 反向联动：预览滚 → 源码跟（互锁窗口内的是程序触发的滚动，跳过；锚点对齐）
-    if (Date.now() - scrollSyncLock >= SCROLL_SYNC_LOCK_MS) {
-      const ed = editorScrollEl()
-      if (ed && bothScrollable(el, ed)) {
-        scrollSyncLock = Date.now()
-        scrollSyncSource = 'preview'
-        syncFromPreview(el, ed)
-        scheduleScrollResync()
-      }
-    }
     const heads = el.querySelectorAll('.md-editor-preview h1, .md-editor-preview h2, .md-editor-preview h3, .tiptap h1, .tiptap h2, .tiptap h3')
     let cur = -1
     for (let i = 0; i < heads.length; i++) {
-      if (heads[i].offsetTop - el.scrollTop - 40 <= 0) cur = i
+      if (topWithin(heads[i], el) - el.scrollTop - 40 <= 0) cur = i
       else break
     }
     activeIdx.value = cur
   })
 }
 
-// ---- 源码区 ↔ 预览区 滚动联动（data-line 锚点对齐） ----
-// 三栏重构弃用了 md-editor 内部分屏，它自带的编辑/预览滚动同步随之失效。
-// 按比例同步在代码块多/行高差异大时会错位（两侧内容"长度分布"不一致），
-// 改用锚点对齐：markdown-it 渲染时给预览块级元素标注 data-line=源码行号，
-// CodeMirror 每个逻辑行是一个 .cm-line（DOM 顺序即行号），
-// 双向把"滚动位置"翻译成"源码行号（带小数）"，再映射到对方的对应元素位置。
-const SCROLL_SYNC_LOCK_MS = 120
-/** 互锁时间戳：程序设置 scrollTop 会触发对方的 scroll 事件，窗口期内忽略，防来回抖动 */
-let scrollSyncLock = 0
-
-/** 源码编辑器（CodeMirror）的滚动容器 */
+// ---- 源码区 ↔ 预览区：按相同内容块在两侧的实际像素位置联动 ----
+// 逻辑行号只用于配对。长段落软换行、代码块、表格的高度不同，不能按行数插值。
 function editorScrollEl() {
-  return editorWrapRef.value?.querySelector('.pane-editor .cm-scroller') || null
+  return editorRef.value?.getEditorView?.()?.scrollDOM
+    || editorWrapRef.value?.querySelector('.pane-editor .cm-scroller') || null
 }
 
-/** 元素顶部相对滚动容器视口的偏移（rect 差值法，不依赖 offsetParent 链） */
-function topWithin(el, scroller) {
-  return el.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop
-}
-
-/** CodeMirror 内部 EditorView（.cm-content 上挂有非公开的 cmTile.view）。
- *  CodeMirror 虚拟化渲染（DOM 只有视口附近的行，未渲染区域用 .cm-gap 占位），
- *  DOM 行元素的 index 不等于行号；行高也因软换行不均（20/40/260px…）。
- *  lineBlockAtHeight/lineBlockAt 是官方 API，能精确做「滚动位置 ↔ 行号」换算。 */
+/** 格式工具条与滚动同步共用编辑器公开 API。 */
 function cmView(ed) {
-  const v = ed.querySelector('.cm-content')?.cmTile?.view
-  return v && typeof v.lineBlockAtHeight === 'function' && v.state?.doc ? v : null
+  const view = editorRef.value?.getEditorView?.()
+  return view && (!ed || view.scrollDOM === ed) ? view : null
 }
 
-/** content 顶在滚动坐标系中的偏移（rect 差值法实时测量） */
-function contentScrollOffset(ed) {
-  const content = ed.querySelector('.cm-content')
-  if (!content) return 0
-  return content.getBoundingClientRect().top - ed.getBoundingClientRect().top + ed.scrollTop
+/** 同一滚动坐标系，避免 offsetTop 受嵌套 offsetParent 影响。 */
+function topWithin(el, scroller) {
+  return el.getBoundingClientRect().top - scroller.getBoundingClientRect().top
+    - scroller.clientTop + scroller.scrollTop
 }
 
-/** 源码区顶部行号（带小数 = 行内滚动比例）。优先 CM 内部 view（精确），失败回退固定行高换算 */
-function editorTopLine(ed) {
-  const v = cmView(ed)
-  if (v) {
-    try {
-      // ① 首选：用「视口内第一个已渲染行」反查行号。
-      //    大文档下 CodeMirror 虚拟化，未渲染区域的高度是**估算值**，
-      //    lineBlockAtHeight 会算出偏差几十行的位置（实测"完全对不上"的来源）；
-      //    而 DOM 里已渲染的行可用 posAtDOM 拿到**精确**行号。
-      const content0 = ed.querySelector('.cm-content')
-      if (content0) {
-        const top0 = ed.getBoundingClientRect().top
-        for (const el of content0.querySelectorAll('.cm-line')) {
-          const r = el.getBoundingClientRect()
-          if (r.bottom > top0 + 1) {
-            const ln0 = v.state.doc.lineAt(v.posAtDOM(el, 0))
-            const h0 = Math.max(r.height, 1)
-            const f0 = Math.min(Math.max((top0 - r.top) / h0, 0), 1)
-            return ln0.number - 1 + f0
-          }
-        }
-      }
-      // ② 回退：按 CodeMirror 高度图换算
-      const docY = Math.max(ed.scrollTop - contentScrollOffset(ed), 0)
-      const blk = v.lineBlockAtHeight(docY)
-      const ln = v.state.doc.lineAt(blk.from)
-      let n = ln.number - 1
-      let frac = (docY - blk.top) / Math.max(blk.height, 1)
-      // 行边界归属：视口顶恰在行 n+1 顶部时 lineBlockAtHeight 返回行 n 且 frac=1，进位
-      if (frac >= 0.999) {
-        n += 1
-        frac = 0
-      }
-      return n + Math.min(Math.max(frac, 0), 1)
-    } catch {
-      /* 回退到几何换算 */
-    }
+function scrollAnchors(ed, pv) {
+  const view = editorRef.value?.getEditorView?.()
+  if (!view || view.scrollDOM !== ed) return []
+  // 已渲染行的几何位置精确；远处的行由 CodeMirror 高度图估计，滚入后再校正。
+  const rendered = new Map()
+  for (const el of view.contentDOM.querySelectorAll('.cm-line')) {
+    const line = view.state.doc.lineAt(view.posAtDOM(el, 0)).number - 1
+    rendered.set(line, topWithin(el, ed))
   }
-  const content = ed.querySelector('.cm-content')
-  const lineEl = ed.querySelector('.cm-line')
-  if (!content || !lineEl) return null
-  const h = parseFloat(getComputedStyle(lineEl).lineHeight) || 20
-  const padTop = contentScrollOffset(ed) + (parseFloat(getComputedStyle(content).paddingTop) || 0)
-  return Math.max(ed.scrollTop - padTop, 0) / h
-}
-
-/** 预览区 data-line 锚点列表（markdown-it 标注的源码行号，DOM 顺序即升序） */
-function previewAnchors(pv) {
-  const els = pv.querySelectorAll('.md-editor-preview [data-line], .tiptap [data-line]')
-  const list = []
-  for (const el of els) {
-    const n = parseInt(el.dataset.line, 10)
-    if (Number.isFinite(n)) list.push({ line: n, el })
+  // documentTop 指向第一行，包含内容顶部 padding；.cm-content 的 rect 不包含这部分。
+  const sourceOffset = view.documentTop - ed.getBoundingClientRect().top
+    - ed.clientTop + ed.scrollTop
+  const points = []
+  for (const el of pv.querySelectorAll('.md-editor-preview [data-line], .tiptap [data-line]')) {
+    const line = Number(el.dataset.line)
+    if (!Number.isInteger(line) || line < 0 || line >= view.state.doc.lines) continue
+    if (!el.getClientRects().length || el.getBoundingClientRect().height <= 0) continue
+    const source = rendered.get(line)
+      ?? view.lineBlockAt(view.state.doc.line(line + 1).from).top + sourceOffset
+    points.push({ line, source, preview: topWithin(el, pv) })
   }
-  return list
+  return normalizeScrollAnchors(points)
 }
 
-/** 源码行号（带小数）→ 预览滚动位置：≤行号的最大锚点对齐视口顶 + 相邻锚点间按行差插值。
- *  用户诉求是「左右顶部显示同一处内容」，所以**始终插值、不做吸附**：
- *  吸附会让预览顶部停在更早的锚点上（实测滞后 7~8 行），正是"左右对不上"的来源。 */
-function previewScrollForLine(pv, anchors, line) {
-  let lo = 0
-  let hi = anchors.length - 1
-  while (lo < hi) {
-    const mid = (lo + hi + 1) >> 1
-    if (anchors[mid].line <= line) lo = mid
-    else hi = mid - 1
-  }
-  const a = anchors[lo]
-  const top = topWithin(a.el, pv)
-  const b = anchors[lo + 1]
-  if (!b || b.line <= a.line) return top
-  const frac = Math.min(Math.max((line - a.line) / (b.line - a.line), 0), 1)
-  return top + frac * (topWithin(b.el, pv) - top)
-}
-
-/** 预览顶部 → 源码行号（带小数）：可见顶部锚点的行号 + 相邻锚点间的位置插值 */
-function previewTopLine(pv, anchors) {
-  if (!anchors.length) return null
-  let lo = 0
-  let hi = anchors.length - 1
-  while (lo < hi) {
-    const mid = (lo + hi + 1) >> 1
-    if (topWithin(anchors[mid].el, pv) <= pv.scrollTop + 1) lo = mid
-    else hi = mid - 1
-  }
-  const a = anchors[lo]
-  const top = topWithin(a.el, pv)
-  const b = anchors[lo + 1]
-  if (!b) return a.line
-  if (b.line <= a.line) return a.line
-  const h = Math.max(topWithin(b.el, pv) - top, 1)
-  const frac = Math.min(Math.max((pv.scrollTop - top) / h, 0), 1)
-  return a.line + frac * (b.line - a.line)
-}
-
-/** 源码行号（带小数）→ 源码区滚动位置（与 editorTopLine 互逆；优先 CM 内部 view） */
-function editorScrollForLine(ed, line) {
-  const v = cmView(ed)
-  if (v) {
-    try {
-      const off = contentScrollOffset(ed)
-      const total = v.state.doc.lines
-      const i = Math.max(Math.min(Math.floor(line), total - 1), 0)
-      const ln = v.state.doc.line(i + 1) // doc.line 是 1-based
-      const blk = v.lineBlockAt(ln.from)
-      if (i === total - 1) return blk.top + blk.height + off
-      const frac = Math.min(Math.max(line - i, 0), 1)
-      return blk.top + frac * blk.height + off
-    } catch {
-      /* 回退到几何换算 */
-    }
-  }
-  const content = ed.querySelector('.cm-content')
-  const lineEl = ed.querySelector('.cm-line')
-  if (!content || !lineEl) return line * 20
-  const h = parseFloat(getComputedStyle(lineEl).lineHeight) || 20
-  const padTop = contentScrollOffset(ed) + (parseFloat(getComputedStyle(content).paddingTop) || 0)
-  return padTop + line * h
-}
-
-/** 任一方不可滚动/被隐藏（阅读模式、Tab 单栏）时不联动 */
+/** 隐藏或没有滚动空间的单栏不联动。 */
 function bothScrollable(a, b) {
-  return a.scrollHeight - a.clientHeight > 1 && b.scrollHeight - b.clientHeight > 1
+  return a.clientHeight > 0 && b.clientHeight > 0
+    && a.scrollHeight - a.clientHeight > 1 && b.scrollHeight - b.clientHeight > 1
 }
 
-/** 按比例同步（兜底：预览无锚点时使用） */
-function syncScrollRatio(fromEl, toEl) {
-  const fromMax = fromEl.scrollHeight - fromEl.clientHeight
-  const toMax = toEl.scrollHeight - toEl.clientHeight
-  if (fromMax <= 1 || toMax <= 1) return
-  toEl.scrollTop = (fromEl.scrollTop / fromMax) * toMax
+// 方向由用户输入或大纲跳转决定，目标侧的滚动（含虚拟行高校正）不会夺走方向。
+function onScrollIntent(side) {
+  scrollSyncSource = side
+  outlineScrollTarget = null
+  clearTimeout(scrollSyncTimer)
+}
+function setSyncedScroll(el, top) {
+  if (Math.abs(el.scrollTop - top) <= 0.5) return
+  el.scrollTop = top
 }
 
-/** 源码区顶部行号 → 预览（锚点对齐；无锚点退回比例兜底） */
-function syncFromEditor(ed, pv) {
-  const anchors = previewAnchors(pv)
-  const line = editorTopLine(ed)
-  if (line == null || !anchors.length) {
-    syncScrollRatio(ed, pv)
-    return
-  }
-  pv.scrollTop = previewScrollForLine(pv, anchors, line)
+function syncPanes(ed, pv, from) {
+  const source = from === 'editor' ? ed : pv
+  const target = from === 'editor' ? pv : ed
+  const sourceMax = source.scrollHeight - source.clientHeight
+  const targetMax = target.scrollHeight - target.clientHeight
+  const points = scrollAnchors(ed, pv)
+  const ranged = points.length ? boundScrollAnchors(points,
+    ed.scrollHeight - ed.clientHeight, pv.scrollHeight - pv.clientHeight) : []
+  const mapped = mapScrollPosition(ranged, source.scrollTop, from === 'editor' ? 'source' : 'preview')
+  setSyncedScroll(target, Math.max(0, Math.min(targetMax,
+    mapped ?? source.scrollTop / sourceMax * targetMax)))
 }
 
-/** 预览顶部 → 源码区（锚点对齐；无锚点退回比例兜底） */
-function syncFromPreview(pv, ed) {
-  const anchors = previewAnchors(pv)
-  const line = previewTopLine(pv, anchors)
-  if (line == null) {
-    syncScrollRatio(pv, ed)
-    return
-  }
-  ed.scrollTop = editorScrollForLine(ed, line)
-}
-
-/** 最近一次用户滚动的来源侧（决定尾随重同步的方向） */
 let scrollSyncSource = 'editor'
 let scrollSyncTimer = 0
-/**
- * 尾随重同步：跳滚到未渲染区域时，CodeMirror 的高度图是估算值（行渲染后实际位置会偏移），
- * 初次联动可能落在估算位置上；锁窗口过期后再按原方向校正一次，用渲染后的精确高度收敛。
- */
+let scrollSyncRaf = 0
+let scrollResizeObserver = null
+function queueScrollSync() {
+  clearTimeout(scrollSyncTimer)
+  if (scrollSyncRaf) return
+  scrollSyncRaf = requestAnimationFrame(() => {
+    scrollSyncRaf = 0
+    const ed = editorScrollEl()
+    const pv = pvScrollRef.value
+    if (!ed || !pv || !bothScrollable(ed, pv)) return
+    syncPanes(ed, pv, scrollSyncSource)
+    scheduleScrollResync()
+  })
+}
+
+/** 跳到虚拟化区域后，等 CodeMirror 实际测量行高，再按原方向校正。 */
 function scheduleScrollResync() {
   clearTimeout(scrollSyncTimer)
   scrollSyncTimer = setTimeout(() => {
     const ed = editorScrollEl()
     const pv = pvScrollRef.value
-    if (!ed || !pv || !bothScrollable(ed, pv)) return
-    scrollSyncLock = Date.now() // 程序触发的滚动不吃回对方的 scroll 事件
-    if (scrollSyncSource === 'editor') syncFromEditor(ed, pv)
-    else syncFromPreview(pv, ed)
-  }, SCROLL_SYNC_LOCK_MS + 60)
+    // 大纲跳转期间，内嵌代码编辑器可能重新测量换行高度；以标题的新位置收尾。
+    if (pv && outlineScrollTarget?.isConnected) {
+      const target = outlineScrollTarget
+      outlineScrollTarget = null
+      setSyncedScroll(pv, topWithin(target, pv) - 24)
+    }
+    if (ed && pv && bothScrollable(ed, pv)) syncPanes(ed, pv, scrollSyncSource)
+  }, 180)
 }
 
-/** 源码区滚动 → 预览区跟随（锚点对齐） */
 function onEditorScroll() {
-  if (Date.now() - scrollSyncLock < SCROLL_SYNC_LOCK_MS) return
   const ed = editorScrollEl()
-  const pv = pvScrollRef.value
-  if (!ed || !pv || !bothScrollable(ed, pv)) return
-  scrollSyncLock = Date.now()
-  scrollSyncSource = 'editor'
-  syncFromEditor(ed, pv)
-  scheduleScrollResync()
+  if (!ed) return
+  if (scrollSyncSource !== 'editor') {
+    // 远距离反向跳转可能经历多轮虚拟行高测量；保持预览为来源，继续校正目标。
+    scheduleScrollResync()
+    return
+  }
+  queueScrollSync()
 }
 
-/** CodeMirror 滚动容器可能比页面晚一帧才出现，绑定失败返回 false 供重试 */
+/** CodeMirror 初始化晚于页面时，供挂载过程重试。 */
 function bindEditorScroll() {
   const el = editorScrollEl()
   if (!el) return false
   el.addEventListener('scroll', onEditorScroll, { passive: true })
   return true
 }
+
+// 切回双栏、拖动分隔条或编辑正文后，使用新的排版位置重新对齐。
+watch([showEditorPane, showPreviewPane], () => {
+  if (showEditorPane.value && showPreviewPane.value) {
+    scrollSyncSource = 'preview'
+    nextTick(queueScrollSync)
+  }
+})
+watch(() => form.value.content, () => nextTick(queueScrollSync))
 
 // ---- 模式切换 ----
 function toggleFocus() {
@@ -1137,8 +1057,7 @@ function moreCommand(cmd) {
 
 /** 在光标处插入笔记骨架模板（走 md-editor insert，保留撤销历史） */
 function insertTemplate() {
-  edInsert(() => ({ targetValue: `\n\n${NEW_NOTE_TEMPLATE}\n\n`, select: false }))
-  ElMessage.success('已插入模板，按需删改')
+  if (captureToolbarContext().runTool('markdown', NEW_NOTE_TEMPLATE)) ElMessage.success('已插入模板，按需删改')
 }
 
 // ---- Markdown 插入（第二行工具条；走 md-editor insert 保留撤销历史）----
@@ -1165,18 +1084,6 @@ const mdBtns = {
   quote: () => mdLinePrefix('> '),
   ul: () => mdLinePrefix('- '),
   ol: () => mdLinePrefix('1. '),
-  todo: () => mdLinePrefix('- [ ] '),
-  hr: () => edInsert(() => ({ targetValue: '\n\n---\n\n', select: 5 })),
-  inlineCode: () => mdWrap('`', '`'),
-  // 语言由「代码块」按钮的语言弹层传入；光标落在围栏内部那行空行上
-  // （位置 = 前导换行 + ``` + 语言名 + 换行 → 4 + 语言长度；原来写死 java 时是 9）
-  codeBlock: (lang = lastCodeLang.value) => {
-    lastCodeLang.value = lang
-    return edInsert(() => ({ targetValue: '\n```' + lang + '\n\n```\n', select: 4 + lang.length }))
-  },
-  link: () => mdWrap('[', '](https://)'),
-  image: () => edInsert(() => ({ targetValue: '![图片描述](https://)', select: 3 })),
-  table: () => edInsert(() => ({ targetValue: '\n| 列A | 列B |\n| --- | --- |\n|  |  |\n', select: 2 })),
 }
 /** 行内包裹：有选中时包住选中文字并保持其选中，无选中时插入「文本」占位 */
 function mdWrap(before, after) {
@@ -1184,7 +1091,8 @@ function mdWrap(before, after) {
     const inner = selected || '文本'
     return {
       targetValue: before + inner + after,
-      select: selected ? [before.length, before.length + inner.length] : before.length,
+      deviationStart: before.length,
+      deviationEnd: -after.length,
     }
   })
 }
@@ -1216,12 +1124,83 @@ function mdLinePrefix(prefix) {
   }
   edInsert((selected) => {
     const inner = selected || ''
-    return { targetValue: prefix + inner, select: selected ? [prefix.length, prefix.length + inner.length] : prefix.length }
+    return { targetValue: prefix + inner, deviationStart: prefix.length, deviationEnd: 0 }
   })
 }
 function mdTool(name, arg) {
-  if (previewEditing.value || (readingMode.value && ensurePreviewEditing())) return previewMdTool(name, arg)
-  mdBtns[name]?.(arg)
+  if (name === 'undo' || name === 'redo') return mdUndoRedo(name === 'redo')
+  const target = captureToolbarContext()
+  if (['link', 'image'].includes(name) && arg === undefined) {
+    askUrl(name === 'link' ? '链接地址' : '图片地址', 'https://').then(url => {
+      if (url) target.runTool(name, url)
+    }).finally(() => target.release?.())
+    return
+  }
+  return target.runTool(name, arg)
+}
+
+function usesPreviewToolbar() {
+  return readingMode.value || (!showEditorPane.value && showPreviewPane.value)
+    || (showPreviewPane.value && toolbarSide === 'preview')
+}
+
+function runSourceTool(name, arg) {
+  const view = cmView(editorScrollEl())
+  if (!view) return false
+  const plan = createSourceInsert(view.state.doc.toString(), view.state.selection.main, name, arg)
+  if (plan) {
+    view.dispatch({ ...plan, scrollIntoView: true })
+    view.focus()
+    return true
+  }
+  if (!mdBtns[name]) return false
+  mdBtns[name](arg)
+  return true
+}
+
+/** Freeze the target before opening a language/URL dialog; never use a hidden pane's caret. */
+function captureToolbarContext() {
+  if (usesPreviewToolbar()) {
+    if (useBlockPreview) {
+      const target = blockPreviewRef.value?.captureToolbarTarget?.()
+      if (target) {
+        const apply = operation => {
+          const result = operation()
+          if (result === false) ElMessage.info('当前位置不支持此操作，请在正文中放置光标后重试')
+          return result
+        }
+        return {
+          release: () => target.release(),
+          runTool: (name, arg) => apply(() => target.runTool(name, arg)),
+          applyFormat: format => apply(() => target.applyFormat(format)),
+        }
+      }
+      return { runTool: () => false, applyFormat: () => false }
+    }
+    ensurePreviewEditing()
+    previewSelText()
+    const range = savedPreviewRange?.cloneRange()
+    const restore = () => { if (range) savedPreviewRange = range.cloneRange() }
+    return {
+      runTool(name, arg) { restore(); return previewMdTool(name, arg) },
+      applyFormat(format) { restore(); return previewApplyFormat(format) },
+    }
+  }
+  const view = cmView(editorScrollEl())
+  const doc = view?.state.doc
+  const selection = view?.state.selection
+  const restore = () => {
+    if (!view || view.state.doc !== doc) {
+      ElMessage.info('正文已改变，请重新选择插入位置')
+      return false
+    }
+    view.dispatch({ selection })
+    return true
+  }
+  return {
+    runTool(name, arg) { return restore() && runSourceTool(name, arg) },
+    applyFormat(format) { return restore() && applySourceFormat(format) },
+  }
 }
 
 /**
@@ -1231,16 +1210,22 @@ function mdTool(name, arg) {
  * {@code savedPreviewRange}），弹层关闭后再执行插入 —— 否则插入点就丢了。
  */
 function onCodeBlockClick() {
-  if (previewEditing.value || (readingMode.value && ensurePreviewEditing())) previewSelText()
+  const target = captureToolbarContext()
   askCodeLang().then((lang) => {
-    if (lang) mdTool('codeBlock', lang)
-  })
+    if (lang) { lastCodeLang.value = lang; target.runTool('codeBlock', lang) }
+  }).finally(() => target.release?.())
 }
 
 // ---- 撤销 / 重做 ----
 /** 源码模式：CodeMirror 用自己的 history（execCommand 无效），
  *  合成 Ctrl+Z / Ctrl+Shift+Z 键盘事件交给 CM 的 keymap 处理 */
 function mdUndoRedo(redo) {
+  if (useBlockPreview && usesPreviewToolbar()) {
+    return redo ? blockPreviewRef.value?.redo() : blockPreviewRef.value?.undo()
+  }
+  if (!useBlockPreview && (previewEditing.value || (readingMode.value && ensurePreviewEditing()))) {
+    return previewUndoRedo(redo)
+  }
   const content = editorScrollEl()?.querySelector('.cm-content')
   if (!content) return
   content.focus()
@@ -1517,11 +1502,21 @@ const lastCodeLang = ref('java')
 
 /** Stage 0 开关：?editor=block 时用 Tiptap 只读渲染器（默认关闭，绝不影响日常使用） */
 const useBlockPreview = new URLSearchParams(window.location.search).get('editor') !== 'md'
+const blockLinkBase = computed(() => id.value
+  ? new URL(router.resolve({ name: 'noteEdit', params: { id: id.value } }).href, window.location.origin).href
+  : '')
 
 /** 块编辑器（?editor=block）编辑回写：Tiptap 反推出的 Markdown 写回源码 */
 function onBlockPreviewUpdate(markdown) {
   form.value.content = markdown
   previewUnsynced.value = true
+}
+
+function onBlockOutline(text) {
+  const paragraph = typeof text === 'string' ? text.trim() : ''
+  if (!paragraph) return
+  const message = `请用大纲写作法整理并扩写以下目标段落：先列出层级清晰的提纲，再补充各项要点、示例与待核实信息。保持原意和当前笔记的语言风格，输出 Markdown，仅处理目标段落。\n\n当前笔记：${form.value.title.trim() || '无标题笔记'}\n\n目标段落：\n${paragraph}`
+  window.dispatchEvent(new CustomEvent('lh-agent-compose', { detail: { message } }))
 }
 
 /**
@@ -2828,6 +2823,11 @@ onMounted(async () => {
   for (let i = 0; i < 10 && !bindEditorScroll(); i++) {
     await new Promise((r) => requestAnimationFrame(r))
   }
+  scrollResizeObserver = new ResizeObserver(queueScrollSync)
+  const sourceScroller = editorScrollEl()
+  const previewBody = pvScrollRef.value?.querySelector('.pv-inner')
+  if (sourceScroller) scrollResizeObserver.observe(sourceScroller)
+  if (previewBody) scrollResizeObserver.observe(previewBody)
   // 表格操作栏：跟随光标位置（键盘/鼠标移动后刷新是否处于表格内）
   editorWrapRef.value?.addEventListener('keyup', updateTableState)
   editorWrapRef.value?.addEventListener('mouseup', updateTableState)
@@ -2855,7 +2855,9 @@ onBeforeUnmount(() => {
   window.removeEventListener('mousemove', onTableResizeDrag)
   window.removeEventListener('mouseup', onTableResizeUp)
   clearTimeout(scrollSyncTimer)
+  scrollResizeObserver?.disconnect()
   if (scrollRaf) cancelAnimationFrame(scrollRaf)
+  if (scrollSyncRaf) cancelAnimationFrame(scrollSyncRaf)
   // AI 处理：清掉进度计时器并中断流式请求，避免离开页面后请求与定时器继续跑
   stopAiProgress()
   if (aiAbort) {
@@ -3150,7 +3152,14 @@ onBeforeUnmount(() => {
       @paste.capture="onPasteCapture"
     >
       <!-- 源码栏 -->
-      <section v-show="showEditorPane" class="pane pane-editor" :style="editorStyle">
+      <section
+        v-show="showEditorPane" class="pane pane-editor" :style="editorStyle"
+        @focusin="scrollSyncSource = 'editor'; toolbarSide = 'editor'"
+        @wheel.capture.passive="onScrollIntent('editor')"
+        @pointerdown.capture="onScrollIntent('editor')"
+        @touchstart.capture.passive="onScrollIntent('editor')"
+        @keydown.capture="onScrollIntent('editor')"
+      >
         <MdEditor
           ref="editorRef"
           v-model="form.content"
@@ -3175,6 +3184,10 @@ onBeforeUnmount(() => {
       <section
         v-show="showPreviewPane"
         class="pane pane-preview"
+        @wheel.capture.passive="onScrollIntent('preview')"
+        @pointerdown.capture="onScrollIntent('preview')"
+        @touchstart.capture.passive="onScrollIntent('preview')"
+        @keydown.capture="onScrollIntent('preview')"
         @mouseenter="attachPreviewEditable"
         @focusin="onPreviewFocusIn"
         @focusout="onPreviewFocusOut"
@@ -3193,7 +3206,15 @@ onBeforeUnmount(() => {
             </div>
 
             <!-- Stage 0/1：块编辑器渲染器（?editor=block 时启用，默认关闭走 md-editor） -->
-            <BlockPreview v-if="useBlockPreview" key="block-preview" :content="form.content" @update="onBlockPreviewUpdate" />
+            <BlockPreview
+              v-if="useBlockPreview"
+              ref="blockPreviewRef"
+              key="block-preview"
+              :content="form.content"
+              :link-base="blockLinkBase"
+              @update="onBlockPreviewUpdate"
+              @outline="onBlockOutline"
+            />
             <MdPreview
               v-else
               :modelValue="form.content"

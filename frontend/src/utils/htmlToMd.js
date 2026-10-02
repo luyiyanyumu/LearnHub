@@ -14,7 +14,32 @@
  */
 import TurndownService from 'turndown'
 import { gfm } from 'turndown-plugin-gfm'
-import { hasExplicitSize } from './tableResize'
+import { hasExplicitSize } from './tableResize.js'
+import { isBlockId, parseBlockIndent } from './blockMeta.js'
+
+function hasBlockMetadata(node) {
+  return /^(P|H[1-6])$/.test(node.nodeName) && (
+    isBlockId(node.getAttribute('id'))
+    || parseBlockIndent(node) > 0
+    || /text-align|margin-left/i.test(node.getAttribute('style') || '')
+  )
+}
+
+/** Raw HTML blocks need HTML children: Markdown emphasis inside <p> is not parsed. */
+export function metadataBlockHtml(node) {
+  const tag = node.nodeName.toLowerCase()
+  const id = node.getAttribute('id') || ''
+  let style = node.getAttribute('style') || ''
+  const indent = parseBlockIndent(node)
+  if (indent && !/margin-left\s*:/i.test(style)) style += `${style ? '; ' : ''}margin-left: ${indent * 2}em`
+  const escapeAttr = (value) => value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const attrs = [
+    isBlockId(id) ? `id="${id}"` : '',
+    indent ? `data-block-indent="${indent}"` : '',
+    style ? `style="${escapeAttr(style)}"` : '',
+  ].filter(Boolean).join(' ')
+  return `<${tag}${attrs ? ` ${attrs}` : ''}>${node.innerHTML}</${tag}>`
+}
 
 /** 预览区里的“装饰性”节点：不属于用户内容，反推前必须剔除 */
 const DROP_SELECTOR = [
@@ -53,6 +78,9 @@ function getService() {
     // turndown 实际写入的是 `options.br + '\n'`，所以这里给两个空格 → "  \n"（硬换行），
     // 再由下方统一去掉行尾空格变成 "\n"；因为 breaks:true，单个 \n 依然渲染成 <br>，往返一致。
     br: '  ',
+    blankReplacement: (_content, node) => hasBlockMetadata(node)
+      ? `\n\n${metadataBlockHtml(node)}\n\n`
+      : node.isBlock ? '\n\n' : '',
   })
 
   t.use(gfm)
@@ -103,12 +131,17 @@ function getService() {
     replacement: (content) => `\n\n<details>\n${content.trim()}\n</details>\n\n`,
   })
 
-  // 居中段落等带对齐样式的块：保留 <p style="…">
-  t.addRule('styledParagraph', {
-    filter: (node) =>
-      node.nodeName === 'P' && /text-align/i.test(node.getAttribute('style') || ''),
-    replacement: (content, node) =>
-      `\n\n<p style="${node.getAttribute('style')}">${content}</p>\n\n`,
+  // The normalized task prefix is syntax, rather than escaped literal brackets.
+  t.addRule('taskParagraph', {
+    filter: (node) => node.nodeName === 'P' && node.hasAttribute('data-task-marker') && !hasBlockMetadata(node),
+    replacement: (content) => `\n\n${content.replace(/^\\\[([ xX])\\\]/, '[$1]')}\n\n`,
+  })
+
+  // 块链接和缩进没有等价 Markdown 语法，保留 HTML。内联格式也必须保留为 HTML，
+  // 否则 <p> 内的 **强调** 会在下次渲染时显示为字面文本。
+  t.addRule('metadataBlock', {
+    filter: hasBlockMetadata,
+    replacement: (_content, node) => `\n\n${metadataBlockHtml(node)}\n\n`,
   })
 
   service = t
@@ -123,6 +156,28 @@ function normalize(html) {
   // 1) 剥掉装饰节点与 data-line 定位属性
   box.querySelectorAll(DROP_SELECTOR).forEach((n) => n.remove())
   box.querySelectorAll('[data-line]').forEach((n) => n.removeAttribute('data-line'))
+
+  // Tiptap task items wrap their checkbox in a label and their paragraphs in a
+  // div. Write the marker into the first paragraph before Turndown runs; otherwise
+  // the checkbox and its text become two separate Markdown paragraphs.
+  box.querySelectorAll('li[data-type="taskItem"]').forEach((item) => {
+    const children = Array.from(item.children)
+    const label = children.find((child) => child.nodeName === 'LABEL')
+    const input = children.find((child) => child.nodeName === 'INPUT' && child.type === 'checkbox')
+      || label?.querySelector('input[type="checkbox"]')
+    const checkedAttr = item.getAttribute('data-checked')
+    const checked = checkedAttr == null ? Boolean(input?.checked) : checkedAttr === 'true'
+    if (label) label.remove()
+    else input?.remove()
+    const content = children.find((child) => child.nodeName === 'DIV') || item
+    let firstParagraph = Array.from(content.children).find((child) => child.nodeName === 'P')
+    if (!firstParagraph) {
+      firstParagraph = document.createElement('p')
+      content.insertBefore(firstParagraph, content.firstChild)
+    }
+    firstParagraph.setAttribute('data-task-marker', '')
+    firstParagraph.insertBefore(document.createTextNode(checked ? '[x] ' : '[ ] '), firstParagraph.firstChild)
+  })
 
   // 2) 代码块：<details class="md-editor-code"> → <pre><code class="language-x">
   box.querySelectorAll('details.md-editor-code').forEach((d) => {

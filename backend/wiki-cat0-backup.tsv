@@ -1,0 +1,9 @@
+﻿mysql.exe : mysql: [Warning] Using a password on the command line interface can be insecure.
+所在位置 行:5 字符: 1
++ & $mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3307 -uroot  ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (mysql: [Warning...an be insecure.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+topic_key	topic_type	title	content_md	quality
+cat-0	entity	@GetMapping	本页记录 **@GetMapping**。在当前已提供的素材中，它**没有被直接定义、举例或提及**，唯一相关的上下文是 Spring 生态（[笔记#2]）。因此本页只写"素材覆盖情况"，不补写素材之外的技术事实。\n\n## 素材覆盖情况\n\n- [笔记#2]《Spring Boot 启动流程（高频面试题）》给出的一句话版流程为：`main` 方法启动 → 创建 `SpringApplication` → 推断应用类型 → 加载启动类上的注解（`@SpringBootApplication`）→ 自动装配 → 内嵌 Tomcat 启动。该素材的采样部分出现的是**启动类注解 `@SpringBootApplication`**，未出现 `@GetMapping`。\n- [笔记#5]《Java学习笔记》覆盖的是 Java 语言基础（面向对象、跨平台、GC、字节码等），采样部分未涉及 Spring 的 Web 注解。\n- 其余素材（AI Agent、RAG、Milvus、code agent、Git、Docker、MQTT、DeepSeek Harness 等）与本主题无关联。\n\n## 与其他概念的关系\n\n- [[Spring Boot]]：唯一相关素材（[笔记#2]）所属的主题页。若 `@GetMapping` 属于该注解体系，应挂在此主题下——**这是推断，素材未提供依据**。\n- 粒度提示（推断）：若后续素材同时出现 `@PostMapping`、`@RequestMapping` 等同族映射注解，按"工具的同类属性归并"原则，它们更适合收在**上一层的映射注解概念页**里分小节写，而不是各建一页。当前素材不足，暂不建该页。\n\n## 待补充\n\n- `@GetMapping` 的定义、所属框架与模块/包名。\n- 它对应的 HTTP 方法、请求路径与参数的声明写法。\n- 与 `@PostMapping`（及可能的 `@RequestMapping`）之间的区别与选型。\n- 可运行的最小示例（现有素材未给任何代码）。\n- 它在 Spring Boot 启动与请求处理链中处于哪一环（[笔记#2] 只讲到启动流程，未讲请求映射）。	ok

@@ -12,6 +12,8 @@ const view = shallowRef(null)
 const collapsed = ref(false)
 const copied = ref(false)
 const langComp = new Compartment()
+let disposed = false
+let languageVersion = 0
 
 const LANGS = ['python', 'java', 'javascript', 'typescript', 'vue', 'html', 'css', 'json', 'yaml', 'xml', 'sql', 'go', 'rust', 'c', 'cpp', 'csharp', 'php', 'ruby', 'kotlin', 'markdown', 'plaintext']
 
@@ -52,6 +54,8 @@ async function copyCode() {
 }
 
 onMounted(async () => {
+  const language = await langExt(props.node.attrs.language)
+  if (disposed || !host.value || props.editor.isDestroyed) return
   // 去掉结尾换行：markdown 围栏内容的 <code> 带一个尾 \n，会让 CodeMirror 多渲染一个空行
   const doc = (props.node.attrs.code || '').replace(/\n$/, '')
   const state = EditorState.create({
@@ -63,19 +67,31 @@ onMounted(async () => {
       bracketMatching(),
       keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
       EditorView.lineWrapping,
-      langComp.of(await langExt(props.node.attrs.language)),
+      langComp.of(language),
       EditorView.updateListener.of((u) => { if (u.docChanged) props.updateAttributes({ code: u.state.doc.toString() }) }),
     ],
   })
   view.value = new EditorView({ state, parent: host.value })
+  // The language import can finish after the outer editor's insertion callback.
+  // Move focus only while this exact code block is still the active selection.
+  let pos = null
+  try { pos = props.getPos() } catch { return }
+  if (props.selected && props.editor.view.hasFocus() && props.editor.state.selection.from === pos) {
+    view.value.focus()
+  }
 })
 
 watch(
   () => props.node.attrs.language,
-  async (lang) => { view.value?.dispatch({ effects: langComp.reconfigure(await langExt(lang)) }) },
+  async (lang) => {
+    const version = ++languageVersion
+    const language = await langExt(lang)
+    if (disposed || props.editor.isDestroyed || version !== languageVersion) return
+    view.value?.dispatch({ effects: langComp.reconfigure(language) })
+  },
 )
 
-onBeforeUnmount(() => { view.value?.destroy(); view.value = null })
+onBeforeUnmount(() => { disposed = true; view.value?.destroy(); view.value = null })
 </script>
 
 <template>

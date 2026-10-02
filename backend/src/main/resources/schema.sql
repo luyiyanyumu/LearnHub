@@ -507,3 +507,30 @@ SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS
            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'file_info' AND COLUMN_NAME = 'read_mode');
 SET @ddl := IF(@c = 0, 'ALTER TABLE file_info ADD COLUMN read_mode VARCHAR(16) NULL COMMENT ''single/double/continuous'' AFTER read_scale', 'SELECT 1');
 PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- =====================================================================
+-- 12) 首页年度学习记录（2026-10 新增）
+-- 每个来源每天一条；不关联外键，删除内容后仍保留当天的学习足迹。
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS learning_activity (
+    source_type   VARCHAR(16) NOT NULL COMMENT 'note/quick_ref/file/agent_event',
+    source_id     BIGINT      NOT NULL,
+    activity_date DATE        NOT NULL,
+    created_at    DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (source_type, source_id, activity_date),
+    KEY idx_learning_activity_date (activity_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='每日学习记录';
+
+-- 老数据只能恢复创建日和最后更新日；INSERT IGNORE 保证重复启动不增加计数。
+INSERT IGNORE INTO learning_activity (source_type, source_id, activity_date)
+SELECT 'note', id, DATE(created_at) FROM note WHERE created_at IS NOT NULL;
+INSERT IGNORE INTO learning_activity (source_type, source_id, activity_date)
+SELECT 'note', id, DATE(updated_at) FROM note WHERE updated_at IS NOT NULL;
+INSERT IGNORE INTO learning_activity (source_type, source_id, activity_date)
+SELECT 'quick_ref', id, DATE(created_at) FROM quick_ref WHERE created_at IS NOT NULL;
+INSERT IGNORE INTO learning_activity (source_type, source_id, activity_date)
+SELECT 'quick_ref', id, DATE(updated_at) FROM quick_ref WHERE updated_at IS NOT NULL;
+INSERT IGNORE INTO learning_activity (source_type, source_id, activity_date)
+SELECT 'file', id, DATE(created_at) FROM file_info WHERE created_at IS NOT NULL;
+INSERT IGNORE INTO learning_activity (source_type, source_id, activity_date)
+SELECT 'agent_event', id, DATE(created_at) FROM agent_event WHERE role = 'user' AND created_at IS NOT NULL;

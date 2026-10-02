@@ -1,0 +1,41 @@
+﻿mysql.exe : mysql: [Warning] Using a password on the command line interface can be insecure.
+所在位置 行:7 字符: 1
++ & $mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3307 -uroot  ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (mysql: [Warning...an be insecure.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+id	head_id	relation	tail_id	evidence	sources	weight	origin	derived_from	model	created_at
+35	e-fb032b4181	used_for	e-c73a8976e3	打印合成后的配置树并退出	速查卡#8	0.9	llm	NULL	deepseek-flash	2026-09-21 08:55:03
+77	e-0bc7379d2c	used_for	e-c73a8976e3	打印不含用户层与 `--patch` 的配置树	速查卡#8	0.9	llm	NULL	deepseek-flash	2026-09-21 10:11:20
+179	e-0bc7379d2c	used_for	e-2da708de30	`--dump-default-config` | 打印不含用户层与 `--patch` 的配置树	速查卡#8	0.9	llm	NULL	deepseek-flash	2026-09-23 02:34:33
+36	e-3cbb0b802a	used_for	e-3c99ff3bb5	用随附模板初始化一个自定义 profile	速查卡#8	0.9	llm	NULL	deepseek-flash	2026-09-21 08:55:03
+76	e-a4895eb44a	part_of	e-ef90904f37	NULL	速查卡#8	0.9	llm	NULL	deepseek-flash	2026-09-21 10:11:20
+181	e-1900eab6c0	part_of	e-27b5554bff	启动器只解析自己的 flag，遇到不认识的第一个 token 就停	速查卡#8	0.9	llm	NULL	deepseek-flash	2026-09-23 02:34:33
+96	e-c43d69f3d7	used_for	e-a6dedc2291	`docker compose up -d`      # 启动编排	速查卡#2	0.9	llm	NULL	deepseek-flash	2026-09-21 10:11:22
+94	e-19f12d7bc9	used_for	e-4da1826e2f	`docker exec -it 容器名 bash`  # 进入容器	速查卡#2	0.9	llm	NULL	deepseek-flash	2026-09-21 10:11:22
+95	e-230f05058d	used_for	e-a13132594c	`docker logs -f 容器名`      # 看日志	速查卡#2	0.9	llm	NULL	deepseek-flash	2026-09-21 10:11:22
+93	e-11d8a1c09f	used_for	e-1b36839721	`docker ps -a`              # 查看所有容器	速查卡#2	0.9	llm	NULL	deepseek-flash	2026-09-21 10:11:22
+79	e-15636ff312	contrast_with	e-c42aa27ecd	`dsh --profile web --help` 打印的是 **web 应用**的 flag，`dsh --help` 才是启动器的	速查卡#8	0.9	llm	NULL	deepseek-flash	2026-09-21 10:11:20
+321	e-c42aa27ecd	contrast_with	e-15636ff312	NULL	NULL	0.9	derived	sym:79	rule	2026-10-02 06:49:24
+75	e-76df938ef5	used_for	e-30ee3c88ce	要启动的 profile	速查卡#8	0.9	llm	NULL	deepseek-flash	2026-09-21 10:11:20
+33	e-4d071c5548	used_for	e-ee00afe87c	跑一个全新会话、打印最终答案并退出（脚本化）	速查卡#8	0.9	llm	NULL	deepseek-flash	2026-09-21 08:55:03
+74	e-4d071c5548	used_for	e-2c389cee08	跑一个全新会话、打印最终答案并退出（脚本化）	速查卡#8	0.9	llm	NULL	deepseek-flash	2026-09-21 10:11:20
+79	e-15636ff312	contrast_with	e-c42aa27ecd	`dsh --profile web --help` 打印的是 **web 应用**的 flag，`dsh --help` 才是启动器的	速查卡#8	0.9	llm	NULL	deepseek-flash	2026-09-21 10:11:20
+180	e-15636ff312	contrast_with	e-27b5554bff	`dsh --profile web --help` 打印的是 **web 应用**的 flag，`dsh --help` 才是启动器的	速查卡#8	0.9	llm	NULL	deepseek-flash	2026-09-23 02:34:33
+321	e-c42aa27ecd	contrast_with	e-15636ff312	NULL	NULL	0.9	derived	sym:79	rule	2026-10-02 06:49:24
+330	e-27b5554bff	contrast_with	e-15636ff312	NULL	NULL	0.9	derived	sym:180	rule	2026-10-02 06:49:25
+78	e-b6f7a3f08a	related_to	e-7db9fb99bf	NULL	速查卡#8	0.9	llm	NULL	deepseek-flash	2026-09-21 10:11:20
+45	e-c32c704a9e	used_for	e-47dbb6ff74	git commit --amend -m "新说明"  # 修改最近一次 commit 的说明	素材#5	0.9	llm	NULL	deepseek-flash	2026-09-21 08:55:04
+82	e-47dbb6ff74	used_for	e-c32c704a9e	git commit --amend -m "新说明"  # 修改最近一次 commit 的说明	速查卡#7	0.9	llm	NULL	deepseek-flash	2026-09-21 10:11:21
+183	e-77d815a8af	used_for	e-47dbb6ff74	git commit --amend -m "新说明" # 修改最近一次 commit 的说明	速查卡#7	0.9	llm	NULL	deepseek-flash	2026-09-23 02:34:33
+41	e-84ffe417bf	used_for	e-ec786ba6c4	git log --oneline --graph --decorate   # 一行一条、带分支图的提交历史	速查卡#7	0.9	llm	NULL	deepseek-flash	2026-09-21 08:55:04
+40	e-7210925696	used_for	e-e1b68ceaca	git merge --abort         # 冲突搞不定，取消本次合并，回到合并前	速查卡#7	0.9	llm	NULL	deepseek-flash	2026-09-21 08:55:04
+42	e-9f1591d6c1	used_for	e-6ab458afd2	git remote -v             # 查看远程仓库地址	速查卡#7	0.9	llm	NULL	deepseek-flash	2026-09-21 08:55:04
+47	e-5ed9c34b23	used_for	e-6523195825	git reset --hard HEAD~1      # ⚠️ 撤销 commit 且删掉改动，不可恢复	素材#5|速查卡#7	0.9	llm	NULL	deepseek-flash	2026-09-21 08:55:04
+248	e-5ed9c34b23	contrast_with	e-420d9f2e23	远程已经推过的提交回退用 revert 更安全	速查卡#7	0.9	llm	NULL	deepseek-flash	2026-09-23 03:43:27
+335	e-420d9f2e23	contrast_with	e-5ed9c34b23	NULL	NULL	0.9	derived	sym:248	rule	2026-10-02 06:49:25
+46	e-d378c03667	used_for	e-faa92cffbb	git reset --soft HEAD~1      # 撤销最近一次 commit，改动保留在暂存区	素材#5	0.9	llm	NULL	deepseek-flash	2026-09-21 08:55:04
+44	e-e8cf56224d	used_for	e-bbb395cc6f	git restore --staged 文件名   # 从暂存区撤出（已 add、还没 commit）	素材#5	0.9	llm	NULL	deepseek-flash	2026-09-21 08:55:04
+39	e-cd060630ca	used_for	e-325112921d	git switch -c feature/login       # 创建并立即切换（新版推荐）	速查卡#7	0.9	llm	NULL	deepseek-flash	2026-09-21 08:55:03
+83	e-325112921d	used_for	e-cd060630ca	git switch -c feature/login       # 创建并立即切换（新版推荐）	速查卡#7	0.9	llm	NULL	deepseek-flash	2026-09-21 10:11:21

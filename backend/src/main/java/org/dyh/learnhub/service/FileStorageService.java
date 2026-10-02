@@ -64,6 +64,7 @@ public class FileStorageService {
     private final DocumentTextService documentTextService;
     private final PdfLayoutExtractor pdfLayoutExtractor;
     private final ApplicationEventPublisher events;
+    private final LearningActivityService learningActivity;
 
     /** 文件存放目录：后端工作目录下的 uploads/ */
     private Path storageDir() {
@@ -138,6 +139,7 @@ public class FileStorageService {
         info.setCategoryId(categoryId);
         info.setTextStatus("pending");
         fileInfoMapper.insert(info);
+        learningActivity.record("file", info.getId());
         // 抽取放在入库之后：即使抽取失败/超时，资料本身也已经存在（可重试），不会出现"文件丢了但记录在"
         extractInto(info, target);
         publishChanged(categoryId);

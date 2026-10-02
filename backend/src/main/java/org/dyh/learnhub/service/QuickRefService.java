@@ -26,6 +26,7 @@ public class QuickRefService {
 
     private final QuickRefMapper quickRefMapper;
     private final CategoryMapper categoryMapper;
+    private final LearningActivityService learningActivity;
     /** 内容变更广播：页面保存、智能体写入都会发；wiki 的自动增量更新订阅它 */
     private final ApplicationEventPublisher events;
 
@@ -68,6 +69,7 @@ public class QuickRefService {
         QuickRef ref = new QuickRef();
         apply(ref, dto);
         quickRefMapper.insert(ref);
+        learningActivity.record("quick_ref", ref.getId());
         publishChanged(dto.getCategoryId());
         return detail(ref.getId());
     }
@@ -85,6 +87,7 @@ public class QuickRefService {
                 .set(QuickRef::getTitle, dto.getTitle().trim())
                 .set(QuickRef::getContent, dto.getContent())
                 .set(QuickRef::getCategoryId, dto.getCategoryId()));
+        learningActivity.record("quick_ref", id);
         publishChanged(exist.getCategoryId(), dto.getCategoryId());
         return detail(id);
     }

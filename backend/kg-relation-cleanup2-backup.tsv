@@ -1,0 +1,9 @@
+﻿mysql.exe : mysql: [Warning] Using a password on the command line interface can be insecure.
+所在位置 行:13 字符: 3
++   & $mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3307 -uroo ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (mysql: [Warning...an be insecure.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+id	head_id	relation	tail_id	evidence	sources	weight	origin	derived_from	model	created_at
+48	e-420d9f2e23	used_for	e-10ed04d9cb	git revert <commit-id>        # 生成一个新的反向 commit（已推送分支上回退，安全）	素材#5|速查卡#7	0.9	llm	NULL	deepseek-flash	2026-09-21 08:55:04
