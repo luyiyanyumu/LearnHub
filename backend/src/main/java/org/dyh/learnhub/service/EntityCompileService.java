@@ -582,7 +582,7 @@ public class EntityCompileService {
         page.setTopicId(0L);
         page.setTitle("知识索引");
         page.setContentMd(md.toString());
-        page.setSourceHash("index-" + all.size());
+        page.setSourceHash(indexFingerprint(all));
         page.setItemCount(all.size());
         page.setModel(null);
         page.setQuality("ok");
@@ -593,6 +593,43 @@ public class EntityCompileService {
             wikiMapper.insert(page);
         } else {
             wikiMapper.updateById(page);
+        }
+    }
+
+    /**
+     * 索引页的内容指纹。
+     *
+     * <p>索引页**唯一的输入就是实体页清单** —— 增页、删页、改名、重生成都会改变这个指纹。
+     * 以前存的是 {@code "index-" + 页数}：素材变了但页数没变时就看不出来，
+     * 属于报告点名的"弱指纹"（评估报告 P1-2）。
+     *
+     * <p>用 SHA-256 截成 16 位十六进制，避免 {@code String#hashCode} 的碰撞
+     * 把"内容变了"误判成"没变"。
+     */
+    public static String indexFingerprint(List<org.dyh.learnhub.entity.WikiPage> pages) {
+        // 只取「清单本身」：topicKey + 标题。**不含生成时间**——
+        // 重生成某页的正文并不会改变索引页的内容，不该把它标成过期。
+        // 内部排序，使指纹与传入顺序无关（调用方一个按标题查、一个按主键查）。
+        List<String> rows = new ArrayList<>();
+        for (org.dyh.learnhub.entity.WikiPage p : pages) {
+            rows.add(p.getTopicKey() + "\u0001" + p.getTitle());
+        }
+        java.util.Collections.sort(rows);
+        StringBuilder sb = new StringBuilder();
+        for (String r : rows) {
+            sb.append(r).append('\u0002');
+        }
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] d = md.digest(sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder("index-");
+            for (int i = 0; i < 8; i++) {
+                hex.append(String.format("%02x", d[i]));
+            }
+            return hex.toString();
+        } catch (Exception e) {
+            // 理论上不会发生（JDK 必带 SHA-256）；退化成内容哈希，仍比"页数"强
+            return "index-" + Integer.toHexString(sb.toString().hashCode());
         }
     }
 

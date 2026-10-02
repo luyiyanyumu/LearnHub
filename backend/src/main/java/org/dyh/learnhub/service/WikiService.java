@@ -188,8 +188,18 @@ public class WikiService {
         }
 
         // 实体页与索引页（编译产物）：作为伪主题一起列出，让它们在同一个界面里可点可读
-        for (WikiPage p : mapper.selectList(Wrappers.<WikiPage>lambdaQuery()
-                .in(WikiPage::getTopicType, List.of("entity", "index", "lint")))) {
+        List<WikiPage> compiled = mapper.selectList(Wrappers.<WikiPage>lambdaQuery()
+                .in(WikiPage::getTopicType, List.of("entity", "index", "lint")));
+        // 索引页的输入就是**实体页清单**，可以用同一套指纹算法重算来判断它是否过期。
+        // 以前这里一律 stale=false —— 编译页永远不提示"待更新"（评估报告 P1-2）。
+        List<WikiPage> entityPages = new ArrayList<>();
+        for (WikiPage p : compiled) {
+            if ("entity".equals(p.getTopicType())) {
+                entityPages.add(p);
+            }
+        }
+        String currentIndexFp = EntityCompileService.indexFingerprint(entityPages);
+        for (WikiPage p : compiled) {
             Map<String, Object> o = new LinkedHashMap<>();
             o.put("topicKey", p.getTopicKey());
             o.put("topicType", p.getTopicType());
@@ -198,7 +208,13 @@ public class WikiService {
             o.put("itemCount", p.getItemCount() == null ? 0 : p.getItemCount());
             o.put("sentItems", p.getItemCount() == null ? 0 : p.getItemCount());
             o.put("generated", StringUtils.hasText(p.getContentMd()));
-            o.put("stale", false);
+            // 索引页按指纹比对（增/删/改名才过期；重生成正文不影响索引内容，不算过期）。
+            // 实体/自检页目前没有可重算的输入指纹，保持 false —— 不谎报"新鲜"，
+            // 但也不再是"永远都新鲜"的假象：旧数据（sourceHash 是 index-<页数>）会
+            // 指纹对不上而正确标成待更新，重编一次即恢复一致。
+            o.put("stale", "index".equals(p.getTopicType())
+                    && StringUtils.hasText(p.getSourceHash())
+                    && !p.getSourceHash().equals(currentIndexFp));
             o.put("chars", p.getContentMd() == null ? 0 : p.getContentMd().length());
             o.put("quality", p.getQuality() == null ? "" : p.getQuality());
             o.put("generatedAt", p.getGeneratedAt() == null ? null
