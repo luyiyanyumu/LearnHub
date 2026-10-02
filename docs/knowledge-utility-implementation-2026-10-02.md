@@ -225,3 +225,71 @@ $idx.stale     # True —— 实体页数从 35 变 36 后，索引立刻正确�
 | P1-2 | 实体页自身的来源指纹与依赖映射（把"这一页用了哪些来源"落库，才能精确标脏） |
 | P1-3 | 多跑几轮实体编译把别名铺开；近重复主题整理（`GET /concept/duplicates` + `POST /concept/merge`） |
 | 小修 | `/pages/{key}` 不存在时返回 404；`/refs`、`/files` 支持定位到单条（搜索结果点击目前只到列表页） |
+
+---
+
+## 五、P1-4 评测题起草：素材清单与配方
+
+30 条人工标注题里，已落库 **6 条草稿（`enabled=0`，不进 99 题基线）**：
+
+| id | 类型 | 问题 | 期望来源 | 依据 |
+| --- | --- | --- | --- | --- |
+| 126 | 关系/对比 | String、StringBuilder、StringBuffer 有什么区别，该用哪个？ | `quick_ref:1` | 速查卡标题本身即该对比 |
+| 127 | 关系/对比 | Java 里 `==` 和 `equals` 有什么区别？ | `quick_ref:4` | 速查卡《Java == 与 equals 区别》 |
+| 128 | 关系/对比 | `@GetMapping` 和 `@PostMapping` 有什么区别？ | `quick_ref:3` | 速查卡《@GetMapping / @PostMapping 速记》 |
+| 129 | 缺口 | Kubernetes 的 Operator 模式怎么用？ | `none` | 词面检索命中 0 条 |
+| 130 | 缺口 | Rust 的所有权机制怎么理解？ | `none` | 词面检索命中 0 条 |
+| 131 | 缺口 | Go 的 goroutine 调度是怎么实现的？ | `none` | 词面检索命中 0 条 |
+
+**只写"标题即可证实来源"的题**（速查卡标题就是那个对比）和**先用检索确认不存在**的缺口题 ——
+不编造无依据的期望来源，否则会污染基线。
+
+### 素材清单（起草时直接引用，id 都经过实测存在）
+
+速查卡（`GET /api/quick-refs`）：
+```
+quick_ref:1  String / StringBuilder / StringBuffer 区别
+quick_ref:2  Docker 常用命令
+quick_ref:3  @GetMapping / @PostMapping 速记
+quick_ref:4  Java == 与 equals 区别
+quick_ref:7  Git 常用指令速查
+quick_ref:8  DeepSeek Harness（dsh）常用命令
+```
+笔记（`GET /api/notes`，返回的是首页列表）：
+```
+note:51 AI Agent 讲义        note:52 Milvus 入门笔记     note:50 code agent 项目分析
+note:44 AI Agent 学习笔记     note:2  Spring Boot 启动流程（高频面试题）
+note:47 RAG 两篇奠基论文（Lewis 2020 / Karpukhin 2020）
+note:3  MQTT 三句话入门       note:5  Java学习笔记        note:1  Maven 坐标三要素
+```
+
+### 剩余 24 条的配方
+
+- **跨资料综合题 10 条**（最难，**必须读正文**才能确定"需要哪两个来源"）：天然的候选组合是
+  `note:2`(Spring Boot 启动流程) + `file:2`(Spring boot.pdf)、
+  `note:47`(RAG 论文) + `note:52`(Milvus)、
+  `note:44`/`note:51`(AI Agent 讲义) + `note:50`(code agent 项目分析)。
+  写法：问题要**同时**需要两侧信息；`expect_refs` 用 `|` 连接**全部**必要来源；`note` 写明两侧各提供什么。
+- **关系题再补 7 条**：从实体页清单挑（库里已有 Spring / JVM / IoC / DI / RAG / DPR / ReAct / Reflexion 等实体页，
+  见 `GET /api/wiki/topics`）；先确认"哪份材料写了这层关系"，再写 `expect_refs`。
+- **缺口题再补 7 条**：照 129–131 的做法 —— 先
+  `GET /api/knowledge/search?kw=<关键词>`（或 `/api/kb/search?q=`）确认**命中 0 条**，再写题。
+
+### 落库与验收
+
+```sql
+-- 草稿一律 enabled=0；RagEvalService.cases() 只取 enabled=1，所以不影响现有基线
+INSERT IGNORE INTO rag_eval (question, expect_refs, expect_words, note, enabled)
+VALUES ('问题', 'note:2|file:2', '关键词1;关键词2', '考什么 + 依据来自哪一份材料的哪一段', 0);
+```
+库：`learn_hub` @ `127.0.0.1:3307`，用户 `root`。用临时 .sql 文件 + `Get-Content file -Raw | & mysql ...`
+执行（命令行内联中文容易踩引号坑）。
+
+审改通过后逐条 `UPDATE rag_eval SET enabled=1 WHERE id=...`，再跑：
+```
+POST /api/kb/eval/run?label=加30题后&topK=5&mode=fused
+```
+与「修复后基线」「来源去重后」对比（`GET /api/kb/eval/history`）。
+
+**答案级评分维度仍未做**：`RagEvalService` 目前只评"来源命中"，
+报告要求补上答案正确性、引用支持与完整性、无答案处理、耗时与 token 成本。
