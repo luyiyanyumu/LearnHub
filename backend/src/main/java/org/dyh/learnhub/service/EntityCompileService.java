@@ -259,8 +259,26 @@ public class EntityCompileService {
             }
             candidates = normalized;
 
+            // 页面上还没有别名注释的实体，本批**优先**编 —— 否则 chosen 每次都是
+            // "出现次数最高的同一批 10 个"，其余页永远拿不到别名：实测 36 个实体页里
+            // 只有 6 个有别名，概念↔Wiki 关联率卡在 14/135（评估报告 P1-3）。
+            // 这些页一旦写上别名就自动退出优先集合，所以是一个自排空的轮转。
+            Set<String> needAlias = new LinkedHashSet<>();
+            for (org.dyh.learnhub.entity.WikiPage wp : wikiMapper.selectList(
+                    com.baomidou.mybatisplus.core.toolkit.Wrappers.<org.dyh.learnhub.entity.WikiPage>lambdaQuery()
+                            .select(org.dyh.learnhub.entity.WikiPage::getTitle,
+                                    org.dyh.learnhub.entity.WikiPage::getContentMd)
+                            .eq(org.dyh.learnhub.entity.WikiPage::getTopicType, "entity"))) {
+                String t = wp.getTitle() == null ? "" : wp.getTitle().trim().toLowerCase();
+                String md = wp.getContentMd();
+                if (!t.isEmpty() && (md == null || !md.startsWith("<!-- entity-aliases:"))) {
+                    needAlias.add(t);
+                }
+            }
             List<Entity> chosen = candidates.stream()
-                    .sorted(Comparator.comparingInt(Entity::count).reversed()
+                    .sorted(Comparator
+                            .comparingInt((Entity e) -> needAlias.contains(e.name().trim().toLowerCase()) ? 0 : 1)
+                            .thenComparing(Comparator.comparingInt(Entity::count).reversed())
                             .thenComparing(Entity::name))
                     .limit(MAX_ENTITY_PAGES)
                     .toList();
