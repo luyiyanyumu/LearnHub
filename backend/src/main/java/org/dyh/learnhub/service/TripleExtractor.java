@@ -141,8 +141,11 @@ public class TripleExtractor {
                     rejectedShape++;
                     continue;
                 }
-                // 证据句必须真的在素材里出现过（防编造）：只做宽松包含判断，标点差异不算
-                if (StringUtils.hasText(evidence) && !containsLoose(parts.get(i), evidence)) {
+                // 证据句必须真的在素材里出现过（防编造）：只做宽松包含判断，标点差异不算。
+                // 未核对的三元组**不丢**（模型常改写证据而非原样抄，实测 #97 的原话在素材里但引用被改写），
+                // 但必须降权：以前一律给 0.9，"有没有原文支持"在数据上完全不可区分（评估报告 P0-D）。
+                boolean verified = StringUtils.hasText(evidence) && containsLoose(parts.get(i), evidence);
+                if (!verified) {
                     evidence = null;
                 }
                 String key = EntityLinker.normalize(head) + "|" + canon + "|" + EntityLinker.normalize(tail);
@@ -151,7 +154,7 @@ public class TripleExtractor {
                     continue;
                 }
                 accepted.add(new Triple(EntityLinker.display(head), canon, EntityLinker.display(tail),
-                        evidence, cite, 0.9));
+                        evidence, cite, verified ? 0.9 : 0.4));
                 taken++;
             }
         }

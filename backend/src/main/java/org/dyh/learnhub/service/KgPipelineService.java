@@ -197,8 +197,10 @@ public class KgPipelineService {
             job.stage = "实体链接与入库";
             int added = 0;
             for (TripleExtractor.Triple t : r.triples()) {
+                // 用抽取层给出的权重（有原文证据 0.9 / 未核对 0.4），
+                // 不要在这里再硬编码 —— 否则 TripleExtractor 的"已核对/未核对"区分到不了库里
                 if (graph.upsertTriple(t.head(), t.relation(), t.tail(), t.evidence(), t.cite(),
-                        0.9, "llm", null, r.model())) {
+                        t.weight(), "llm", null, r.model())) {
                     added++;
                 }
             }
