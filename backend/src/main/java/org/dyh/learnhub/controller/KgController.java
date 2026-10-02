@@ -132,7 +132,7 @@ public class KgController {
         return Result.ok(Map.of(
                 "linked", linked,
                 "total", conceptGraph.nodes().size(),
-                "note", "只按归一化标题精确匹配；改名的概念请用「疑似重复/合并」处理"));
+                "note", "按归一化标题 + 实体页别名（<!-- entity-aliases: -->）匹配；改名的概念请用「疑似重复/合并」处理"));
     }
 
     /** 疑似重复实体（消歧助手：只列出来，合并要人点） */
