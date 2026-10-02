@@ -199,9 +199,15 @@ public class VectorController {
      * @param topK 返回条数，默认 10
      */
     @GetMapping("/search")
-    public Result<Object> search(@RequestParam String q,
+    public Result<Object> search(@RequestParam(required = false) String q,
                                  @RequestParam(required = false) Integer topK) {
-        return Result.ok(vectorIndexService.search(q, topK == null ? 10 : topK));
+        // 空查询直接返回空列表：检索链路对空串会抛异常，前端不该看到一个 500
+        // （前端在融合模式下留空时会回落到词面"最近知识"，这里是后端侧的兜底）。
+        String query = q == null ? "" : q.trim();
+        if (query.isEmpty()) {
+            return Result.ok(List.of());
+        }
+        return Result.ok(vectorIndexService.search(query, topK == null ? 10 : topK));
     }
 
     // ---------------- 向量后端（2026-09-29：可切 Milvus，默认仍是 MySQL 全扫） ----------------

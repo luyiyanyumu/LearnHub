@@ -55,6 +55,7 @@ export const quickRefApi = {
 
 export const statsApi = {
   dashboard: () => request.get('/stats'),
+  activity: (year) => request.get('/stats/activity', { params: { year } }),
 }
 
 export const knowledgeApi = {
@@ -355,6 +356,17 @@ export const kbApi = {
   job: (jobId) => request.get(`/kb/jobs/${jobId}`),
   /** 同一问题对比「词面 vs 语义」的命中差异 —— 这是"资料进去了没有"的可验证方式 */
   probe: (q) => request.get('/kb/probe', { params: { q }, timeout: 60000 }),
+  /**
+   * 融合检索（词面 + 语义合并排序）：知识库「检索」页的默认检索方式。
+   *
+   * 为什么需要：词面 SQL LIKE 要求用词与资料完全一致 —— 搜「大量字符串拼接用哪个类性能更好」
+   * 词面 0 命中，融合检索能找回《String / StringBuilder / StringBuffer 区别》。
+   *
+   * 返回数组，元素字段（后端实测）：`{ sourceType:'note'|'quick_ref'|'file', sourceId, title, category, text, score, seq }`
+   * —— **没有 snippet 字段**，命中片段要用 text 自己截；也没有 updatedAt。
+   * 注意：q 不能为空（后端空 q 直接 500），空查询要的是"最近知识"时走 knowledgeApi.search。
+   */
+  search: (q, topK = 10) => request.get('/kb/search', { params: { q, topK }, timeout: 60000 }),
 }
 
 /** 触发浏览器保存文件 */

@@ -14,7 +14,7 @@ import KnowledgeGraph from '../components/KnowledgeGraph.vue'
  * <ul>
  *   <li><b>知识图谱</b>：结构关系（分类/标签）实时现算 + 模型推断的语义关联；按版本号轮询，变了才重画</li>
  *   <li><b>LLM Wiki</b>：按主题（分类/标签）由模型整理成结构化长文，落库缓存，素材变了自动增量重生成</li>
- *   <li><b>检索</b>：原有的跨「笔记 + 速查卡」词面检索，保留不动</li>
+ *   <li><b>检索</b>：默认走**融合检索**（词面 + 语义，跨笔记/速查卡/资料），可切回词面精确匹配</li>
  * </ul>
  */
 const router = useRouter()
@@ -22,46 +22,130 @@ const router = useRouter()
 const tab = ref('graph')
 
 // ------------------------------------------------------------------
-// 一、检索（原有逻辑，保持行为不变）
+// 一、检索：默认「融合检索」（词面 + 语义，后端 /api/kb/search），可切回「词面检索」
+//
+// 为什么默认融合：词面走的是 SQL LIKE，要求你用的词和资料里的字面完全一致。
+// 实测搜「大量字符串拼接用哪个类性能更好」词面 0 命中，而融合检索能找回
+// 《String / StringBuilder / StringBuffer 区别》速查卡 —— 语义能力不该只服务智能体和"检索体检"。
+// 但精确找一个类名/关键字时词面更利落（且不依赖向量索引是否重建过），所以保留为可切换项。
 // ------------------------------------------------------------------
+const MODE_KEY = 'lh-kb-search-mode'
+/** 检索方式：fusion=融合（默认，词面+语义） / keyword=词面（精确匹配） */
+const searchMode = ref(localStorage.getItem(MODE_KEY) === 'keyword' ? 'keyword' : 'fusion')
 const kw = ref('')
 const loading = ref(false)
 const searched = ref(false)
 const items = ref([])
 const keyword = ref('')
+/** 上面这批结果**实际**来自哪种检索（融合模式下输入为空时会回落到词面的"最近知识"） */
+const lastMode = ref('fusion')
+/** 检索失败的可见原因（为空表示没出错） */
+const searchError = ref('')
+
+/** 命中片段截断长度：后端不返回 snippet，只给整段 text，太长会把列表撑成一屏一条 */
+const SNIPPET_MAX = 120
+const SOURCE_LABEL = { note: '笔记', quick_ref: '速查卡', file: '资料' }
+const sourceLabel = (t) => SOURCE_LABEL[t] || t
+const modeLabel = (m) => (m === 'fusion' ? '融合检索' : '词面检索')
+const modeDesc = (m) =>
+  m === 'fusion' ? '用一句话描述也能找回（词面 + 语义合并排序）' : '按字符串精确匹配，适合搜类名 / 关键字'
+
+/** 融合模式下输入为空 → 已回落到词面的「最近知识」（后端拒绝空 q，直接 500） */
+const emptyFallback = computed(() => searchMode.value === 'fusion' && lastMode.value === 'keyword' && !kw.value.trim())
+
+/**
+ * 结果分组：融合是一张**排序好的混合列表**（保持后端的相关度排名，不能再按类型分组），
+ * 词面模式沿用原来的「笔记 / 资料 / 速查卡」三组。
+ */
+const resultGroups = computed(() => {
+  if (lastMode.value === 'fusion') {
+    return items.value.length ? [{ key: 'fusion', label: '融合检索', items: items.value }] : []
+  }
+  return [
+    { key: 'note', label: '笔记', items: items.value.filter((i) => i.type === 'note') },
+    { key: 'file', label: '资料', items: items.value.filter((i) => i.type === 'file') },
+    { key: 'quick_ref', label: '速查卡', items: items.value.filter((i) => i.type === 'quick_ref') },
+  ].filter((g) => g.items.length)
+})
+
+/**
+ * 命中片段：后端融合检索只回整段 `text`（无 snippet 字段），这里截到 ~120 字；
+ * 顺手把换行/连续空白压平 —— PDF 抽出来的正文满屏换行，不压平两行只显示得下几个字。
+ */
+function hitSnippet(r) {
+  const flat = String(r?.snippet ?? r?.text ?? '').replace(/\s+/g, ' ').trim()
+  return flat.length > SNIPPET_MAX ? flat.slice(0, SNIPPET_MAX) + '…' : flat
+}
+
+/** 切换检索方式：记住选择，并**立刻按新方式重搜一次**，避免"切了没反应" */
+function switchMode(m) {
+  if (searchMode.value === m) return
+  searchMode.value = m
+  try {
+    localStorage.setItem(MODE_KEY, m)
+  } catch (e) {
+    /* 隐私模式写不了，忽略：不影响本次会话的切换 */
+  }
+  doSearch()
+}
 
 async function doSearch() {
+  const q = kw.value.trim()
   loading.value = true
+  searchError.value = ''
+  searched.value = true
   try {
-    const res = await knowledgeApi.search(kw.value)
-    items.value = res.items || []
-    keyword.value = res.keyword || ''
-    searched.value = true
+    if (searchMode.value === 'fusion' && q) {
+      lastMode.value = 'fusion'
+      // 字段名按后端实测：sourceType / sourceId / title / category / text / score（没有 snippet、updatedAt）
+      const list = await kbApi.search(q, 10)
+      items.value = (list || []).map((r) => ({
+        type: r.sourceType,
+        id: r.sourceId,
+        title: r.title,
+        snippet: hitSnippet(r),
+        categoryName: r.category,
+        score: typeof r.score === 'number' ? r.score : null,
+      }))
+      keyword.value = q
+    } else {
+      // 词面检索：用户选了词面，或融合模式下查询为空（空 q 后端会 500，这里回落到"最近知识"）
+      lastMode.value = 'keyword'
+      const res = await knowledgeApi.search(kw.value)
+      items.value = res.items || []
+      keyword.value = res.keyword || ''
+    }
+  } catch (e) {
+    // 不静默失败：页面上留一条错误说明，同时弹一次可见提示
+    items.value = []
+    keyword.value = q
+    lastMode.value = searchMode.value === 'fusion' && q ? 'fusion' : 'keyword'
+    searchError.value = e?.response?.data?.msg || e?.message || '未知错误'
+    ElMessage.error(
+      `${modeLabel(lastMode.value)}失败：${searchError.value}` +
+        (searchMode.value === 'fusion' ? ' —— 可切到「词面」再试' : ''),
+    )
   } finally {
     loading.value = false
   }
 }
 
-const noteItems = () => items.value.filter((i) => i.type === 'note')
-const refItems = () => items.value.filter((i) => i.type === 'quick_ref')
-const fileItems = () => items.value.filter((i) => i.type === 'file')
-
-async function open(item) {
+/**
+ * 打开一条结果：跳回原文。
+ * 项目现有路由只有列表页（速查卡 /refs、资料 /files，都不带"打开某一条"的参数），
+ * 所以能精确定位的只有笔记（/notes/:id）。
+ */
+function open(item) {
   if (item.type === 'note') {
     router.push(`/notes/${item.id}`)
     return
   }
-  if (item.type === 'file') {
-    // 资料没有在线预览：直接下载，让用户用本机程序打开
-    try {
-      const resp = await fileApi.download(item.id)
-      saveBlob(resp.data, item.title)
-    } catch (e) {
-      ElMessage.error('下载失败')
-    }
+  if (item.type === 'quick_ref') {
+    router.push('/refs')
     return
   }
-  router.push('/refs')
+  // 资料：跳到资料库（原来的行为是直接下载，现在统一"跳回来源"；行尾仍保留「下载」）
+  router.push('/files')
 }
 
 /** 把关键词高亮成 <mark>：先整体转义再替换，避免用户输入被当 HTML 执行 */
@@ -1303,7 +1387,9 @@ onBeforeUnmount(() => {
         <el-input
           v-model="kw"
           class="search-input"
-          placeholder="搜索笔记、速查卡、资料…（留空看最近知识）"
+          :placeholder="searchMode === 'fusion'
+            ? '用一句话描述你要找什么，例如 大量字符串拼接用哪个类性能更好（留空看最近知识）'
+            : '搜字符串，例如 StringBuilder（留空看最近知识）'"
           clearable
           @keyup.enter="doSearch"
           @clear="clearSearch"
@@ -1316,61 +1402,35 @@ onBeforeUnmount(() => {
           </template>
         </el-input>
         <el-button type="primary" @click="doSearch">检索</el-button>
+        <!-- 融合 / 词面 切换：默认融合（语义能找回词面 0 命中的内容）；要精确搜字符串时切词面 -->
+        <div class="mode" role="group" aria-label="检索方式">
+          <button type="button" :class="{ on: searchMode === 'fusion' }" @click="switchMode('fusion')">融合</button>
+          <button type="button" :class="{ on: searchMode === 'keyword' }" @click="switchMode('keyword')">词面</button>
+        </div>
       </div>
 
-      <template v-if="noteItems().length || refItems().length || fileItems().length">
-        <section v-if="noteItems().length" class="group">
-          <h3 class="group-title">笔记<span class="count">{{ noteItems().length }}</span></h3>
-          <div
-            v-for="it in noteItems()"
-            :key="'n' + it.id"
-            class="kitem"
-            role="button"
-            tabindex="0"
-            @click="open(it)"
-            @keydown.enter.prevent="open(it)"
-            @keydown.space.prevent="open(it)"
-          >
-            <div class="kitem-main">
-              <div class="kitem-title" v-html="hl(it.title)"></div>
-              <div class="kitem-snippet" v-html="hl(it.snippet)"></div>
-            </div>
-            <div class="kitem-meta">
-              <span v-if="it.categoryName" class="ktag">{{ it.categoryName }}</span>
-              <span class="ktime">{{ it.updatedAt }}</span>
-            </div>
-          </div>
-        </section>
+      <!-- 状态必须可见：现在用的是哪种方式、上面这批结果是谁出的 -->
+      <div class="search-status">
+        <span class="hint">当前：<b>{{ modeLabel(searchMode) }}</b> · {{ modeDesc(searchMode) }}</span>
+        <span v-if="searched && !loading" class="hint">
+          本次结果来自「{{ modeLabel(lastMode) }}」，共 {{ items.length }} 条<template v-if="lastMode === 'fusion' && items.length"> · 按相关度从高到低</template>
+        </span>
+        <span v-if="emptyFallback" class="hint">输入为空：融合检索需要一句话，已回落到词面的「最近知识」</span>
+      </div>
 
-        <section v-if="fileItems().length" class="group">
-          <h3 class="group-title">资料<span class="count">{{ fileItems().length }}</span></h3>
-          <div
-            v-for="it in fileItems()"
-            :key="'f' + it.id"
-            class="kitem"
-            role="button"
-            tabindex="0"
-            @click="open(it)"
-            @keydown.enter.prevent="open(it)"
-            @keydown.space.prevent="open(it)"
-          >
-            <div class="kitem-main">
-              <div class="kitem-title" v-html="hl(it.title)"></div>
-              <div class="kitem-snippet" v-html="hl(it.snippet)"></div>
-            </div>
-            <div class="kitem-meta">
-              <span v-if="it.categoryName" class="ktag">{{ it.categoryName }}</span>
-              <span class="ktag">{{ it.ext || '文件' }}<template v-if="it.textChars"> · {{ it.textChars }} 字</template></span>
-              <span class="ktime">{{ it.updatedAt }}</span>
-            </div>
-          </div>
-        </section>
+      <div v-if="searchError" class="search-error">
+        <b>{{ modeLabel(lastMode) }}失败</b>
+        <span class="hint">
+          {{ searchError }} —— 可切到「{{ searchMode === 'fusion' ? '词面' : '融合' }}」，或点「检索」重试
+        </span>
+      </div>
 
-        <section v-if="refItems().length" class="group">
-          <h3 class="group-title">速查卡<span class="count">{{ refItems().length }}</span></h3>
+      <template v-if="resultGroups.length">
+        <section v-for="g in resultGroups" :key="g.key" class="group">
+          <h3 class="group-title">{{ g.label }}<span class="count">{{ g.items.length }}</span></h3>
           <div
-            v-for="it in refItems()"
-            :key="'r' + it.id"
+            v-for="it in g.items"
+            :key="g.key + '-' + it.type + '-' + it.id"
             class="kitem"
             role="button"
             tabindex="0"
@@ -1379,19 +1439,26 @@ onBeforeUnmount(() => {
             @keydown.space.prevent="open(it)"
           >
             <div class="kitem-main">
-              <div class="kitem-title" v-html="hl(it.title)"></div>
+              <div class="kitem-title">
+                <!-- 融合是一张混合列表，来源类型必须每条都标出来 -->
+                <span v-if="lastMode === 'fusion'" class="ktag ktag-type" :class="'kt-' + it.type">{{ sourceLabel(it.type) }}</span>
+                <span v-html="hl(it.title)"></span>
+              </div>
               <div class="kitem-snippet" v-html="hl(it.snippet)"></div>
             </div>
             <div class="kitem-meta">
               <span v-if="it.categoryName" class="ktag">{{ it.categoryName }}</span>
-              <span class="ktime">{{ it.updatedAt }}</span>
+              <span v-if="it.type === 'file' && it.ext" class="ktag">{{ it.ext }}<template v-if="it.textChars"> · {{ it.textChars }} 字</template></span>
+              <span v-if="it.score != null" class="ktag" title="融合得分：词面与向量两路合并后的相关度">相关度 {{ it.score.toFixed(3) }}</span>
+              <span v-if="it.updatedAt" class="ktime">{{ it.updatedAt }}</span>
+              <span v-if="it.type === 'file'" class="klink" title="下载到本机打开" @click.stop="downloadFile(it.id, it.title)">下载</span>
             </div>
           </div>
         </section>
       </template>
 
       <el-empty
-        v-else-if="searched && !loading"
+        v-else-if="searched && !loading && !searchError"
         :description="keyword ? `没有与「${keyword}」相关的知识` : '工作台还是空的，先写一篇笔记吧'"
       />
     </template>
@@ -2074,8 +2141,70 @@ onBeforeUnmount(() => {
 }
 .search-card {
   display: flex;
+  align-items: center;
   gap: 10px;
-  margin-bottom: 26px;
+  margin-bottom: 14px;
+}
+/* 融合 / 词面 切换：沿用图谱"层切换"的分段控件观感，让当前方式一眼可见 */
+.mode {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--app-bg);
+  border: 1px solid var(--app-border-weak);
+  flex-shrink: 0;
+}
+.mode button {
+  border: 0;
+  background: transparent;
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--app-text-2);
+  cursor: pointer;
+  transition: all var(--dur-fast) ease;
+}
+.mode button:hover {
+  color: var(--app-text-1);
+}
+.mode button.on {
+  background: var(--app-card);
+  color: var(--app-brand-deep);
+  font-weight: 600;
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--app-text-1) 10%, transparent);
+}
+/* 检索方式状态行：说明"现在用的是哪种、上面的结果是谁出的" */
+.search-status {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin: 0 0 20px;
+}
+.search-status b {
+  color: var(--app-text-2);
+}
+/* 出错时不静默：列表位置留一条可见说明（同时还会弹 ElMessage） */
+.search-error {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  margin-bottom: 18px;
+  border: 1px solid color-mix(in srgb, #b45309 38%, transparent);
+  background: color-mix(in srgb, #b45309 7%, transparent);
+  border-radius: var(--radius);
+  font-size: 12.5px;
+  color: var(--app-text-1);
+}
+/* 行尾的次要动作（资料下载） */
+.klink {
+  font-size: 12px;
+  color: var(--app-brand-deep);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 .search-input {
   flex: 1;
@@ -2151,6 +2280,32 @@ onBeforeUnmount(() => {
   font-weight: 600;
   color: var(--app-text-1);
   letter-spacing: -0.01em;
+}
+/* 来源类型标签（融合列表每条都要有）：与图谱图例同一套配色，笔记/速查卡/资料一眼分开。
+   .ktag.ktag-type 提高一级特异性：.ktag 的 padding/font-size 在样式表更靠后，不然会被压回去 */
+.ktag.ktag-type {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 8px;
+  vertical-align: 1px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px 7px;
+}
+.kt-note {
+  color: var(--app-brand-deep);
+  background: var(--app-brand-soft);
+  border-color: color-mix(in srgb, var(--app-brand) 30%, transparent);
+}
+.kt-quick_ref {
+  color: var(--app-text-1);
+  background: color-mix(in srgb, var(--app-brand) 13%, transparent);
+  border-color: transparent;
+}
+.kt-file {
+  color: var(--app-text-2);
+  background: var(--app-bg);
+  border-color: var(--app-border-weak);
 }
 .kitem-snippet {
   margin-top: 4px;
