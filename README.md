@@ -29,7 +29,7 @@
 
 ## 界面
 
-> 下面都是**本机真实运行时的截图**（笔记、资料库、知识图谱里都是实际内容），不是示意图。
+> 下面都是**真实运行界面**的截图（笔记、资料库、知识图谱里都是实际内容），不是示意图。
 
 | 总览 | 笔记编辑 |
 | --- | --- |
@@ -43,7 +43,7 @@
 
 | 抽取正文 · 插图贴回原位 | 抽取正文 · 代码与列表不"识别" |
 | --- | --- |
-| ![插图贴回原位](docs-shots/feat-07-reader-figure.png) | ![代码与列表](docs-shots/feat-08-reader-code.png) |
+| ![插图贴回原位](docs-shots/feat-07-reader-figure.png) | ![脚注与单位](docs-shots/feat-08-reader-footnote.png) |
 | PDF 里的位图按**原位置裁出来**贴进正文（上例是论文的 teaser 图，紧跟它的图注）：图里的刻度/流程框不硬"识别"，看图比认字准 | 代码、JSON、参数列表这类内容按行保留原样，不参与翻译；脚注/单位变成小字灰色，不再黏进正文段落 |
 
 | 知识图谱 | 技能（提示词即文件） |
@@ -65,7 +65,7 @@
 
 ```
 learn-hub/
-├── backend/     # Spring Boot 后端 (端口 18080)
+├── backend/     # Spring Boot 后端（REST 接口）
 │   ├── src/main/java/org/dyh/learnhub/
 │   │   ├── controller/   # REST 接口
 │   │   ├── service/      # 业务逻辑（含 DeepSeekClient / AgentService）
@@ -77,7 +77,7 @@ learn-hub/
 │   └── src/main/resources/
 │       ├── schema.sql    # 建表(幂等，启动自动执行)
 │       └── data.sql      # 种子数据(INSERT IGNORE 幂等)
-├── frontend/    # Vue3 前端 (dev 端口 5174, /api 代理到 18080)
+├── frontend/    # Vue3 前端（开发服务器会把接口请求代理到后端）
 ├── skills/      # 技能目录：润色 / 整理格式的提示词（每个技能一个目录，见 skills/README.md）
 ├── docs/        # 设计文档（记忆与检索、PDF 版面还原、排版与润色的设计论证）
 └── mcp/         # MCP server：把 REST 接口暴露给 DeepSeek Harness 等 MCP 客户端（零依赖，见 mcp/README.md）
@@ -91,14 +91,15 @@ JDK 21、Maven 3.9+、Node 18+、Docker（含 MySQL 8 镜像）。
 
 ### 1. 数据库（首次自行安装mysql）
 
-> `reimb-mysql-local` 容器占用，两者 root 密码不同
-> `Access denied for user 'root'@'172.17.0.1'` 启动失败。
-> 对应 `backend/src/main/resources/application.yml` 里的 `localhost:3307`。
+> **端口要自己挑一个没人占的**：宿主机上常常已经跑着别的 MySQL 容器，多个项目共用会互相干扰
+> （典型表现是启动直接报 `Access denied for user 'root'@'...'` —— 其实连到的是另一个项目的库，
+> 而不是这个容器）。下面的 `<宿主机端口>` 换成你实际可用（未被占用）的端口即可，
+> 容器内的 `3306` 不用改；后端的数据源地址要与这个端口保持一致。
 
 ```bash
 docker run -d --name learn-hub-mysql \
   -e MYSQL_ROOT_PASSWORD=root123456 -e MYSQL_DATABASE=learn_hub \
-  -p 3307:3306 mysql:8 \
+  -p <宿主机端口>:3306 mysql:8 \
   --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
 ```
 
@@ -108,11 +109,11 @@ docker run -d --name learn-hub-mysql \
 > 无法追加映射，需要重建容器并复用原数据卷（**不要加 `-v`**，否则会删卷）：
 >
 > ```bash
-> docker volume ls | findstr /i ""            # 找到 learn-hub-mysql 的数据卷
+> docker volume ls                            # 从中找到属于 learn-hub-mysql 的那个卷名
 > docker rm -f learn-hub-mysql
 > docker run -d --name learn-hub-mysql \
 >   -e MYSQL_ROOT_PASSWORD=root123456 -e MYSQL_DATABASE=learn_hub \
->   -p 3307:3306 -v <上面的卷名>:/var/lib/mysql mysql:8 \
+>   -p <宿主机端口>:3306 -v <上面的卷名>:/var/lib/mysql mysql:8 \
 >   --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
 > ```
 
@@ -142,44 +143,8 @@ java -jar target/learn-hub-backend-0.0.1-SNAPSHOT.jar
 ```bash
 cd frontend
 npm install      # 首次
-npm run dev      # http://localhost:5174（端口固定，被占用会直接报错）
+npm run dev      # 启动开发服务器，地址以终端打印的为准
 ```
-
-## 主要接口
-
-| 方法                  | 路径                     | 说明                                   |
-| ------------------- | ---------------------- | ------------------------------------ |
-| GET                 | /api/stats             | 工作台总览统计                              |
-| GET/POST/PUT/DELETE | /api/categories[/{id}] | 分类树管理                                |
-| GET/POST            | /api/tags              | 标签列表 / 新增                            |
-| GET/POST/PUT/DELETE | /api/notes[/{id}]      | 笔记 CRUD（支持 categoryId/tagId/kw 过滤分页） |
-| GET/POST/PUT/DELETE | /api/quick-refs[/{id}] | 速查卡 CRUD                             |
-| GET                 | /api/ai/status         | AI 配置状态（不回传密钥）                       |
-| POST                | /api/ai/polish         | 笔记全文润色（分块 + 超时保护）                    |
-| POST                | /api/ai/polish-stream  | 同上，SSE 逐段回报进度（事件：progress / done / failed，**不套统一返回体**） |
-| POST                | /api/ai/chat           | 智能体对话（工具循环 ≤8 轮；带 `sessionId` 即续聊，上下文由服务端投影） |
-| GET                 | /api/ai/sessions/{id}  | 会话回看（事件日志投影成气泡列表，刷新页面靠它恢复；同时带回未处理的待确认操作） |
-| DELETE              | /api/ai/sessions/{id}  | 清空一个会话（含其事件） |
-| POST                | /api/ai/actions/{id}/approve | 确认执行一个待确认的写操作（返回 ok / hint / result） |
-| POST                | /api/ai/actions/{id}/reject  | 取消一个待确认的写操作（数据零改动）；已处理过的操作会报错，不允许重复执行 |
-| POST                | /api/ai/test           | 连通性测试                                |
-| GET                 | /api/ai/skills         | 技能清单（润色/整理格式的提示词来自 `skills/<id>/SKILL.md`，只读） |
-| GET                 | /api/kg/graph          | 知识图谱：节点 + 边（结构边现算，语义边来自 `kg_edge`） |
-| GET                 | /api/kg/version        | 图谱版本指纹（前端按 5 秒轮询，变了才重画图 —— "实时"的实现方式） |
-| POST                | /api/kg/rebuild        | 调模型重建语义关联（整批替换，**这是唯一按次花 token 的图谱接口**） |
-| GET                 | /api/wiki/topics       | wiki 主题清单 + 生成状态（是否已生成 / 是否过期） |
-| GET                 | /api/wiki/pages/{key}  | 读一页（`key` 形如 `cat-3` / `tag-2` / `entity-<hash>` / `index` / `lint`） |
-| DELETE              | /api/wiki/pages/{key}  | 删除一页编译产物（原始素材不动；主题页/索引页/自检页下次生成会回来，实体页要再次被抽到） |
-| POST                | /api/wiki/pages/{key}/generate | 生成 / 重新生成（同步等模型，几秒到几十秒） |
-| POST                | /api/wiki/entities/compile | 知识页整批编译：抽取实体 → 归并 → 写实体页 → 生成索引（`useMain` 选云端/本地） |
-| GET                 | /api/wiki/entities/jobs/{id} | 上述编译的任务进度 |
-| POST                | /api/wiki/impact       | 影响分析探针：给一段素材，返回候选页清单 + 模型选择（含 `raw` 原始输出） |
-| POST                | /api/wiki/recompile    | ③ 局部重编译：最近变更 → 影响分析 → 重生主题页 → 知识页整批重编 |
-| POST                | /api/wiki/lint         | ④ 语义自检：代码检查（红链/质量/过短/无效引用）+ 模型检查（矛盾/过时/缺口）→ 写入 lint 页 |
-| GET                 | /api/wiki/model-routing | 7 个任务的模型分工表（当前目标 + 默认值 + 理由） |
-| GET                 | /api/wiki/jobs/{jobId} | 统一进度端点（含重编译派生的知识页任务，内部回落） |
-| GET/PUT             | /api/wiki/auto-refresh | 自动增量更新开关（默认开；关掉就不再自动花 token） |
-| GET/PUT             | /api/settings          | AI 设置（模型/温度/思考模式/对话提示词；**不含**润色与格式提示词） |
 
 ## 知识图谱与 LLM Wiki
 
@@ -195,7 +160,7 @@ npm run dev      # http://localhost:5174（端口固定，被占用会直接报�
 结构边不落库是刻意的：它是事实，不是推断；落库只会带来一致性问题（改一次分类要同步删边，忘了就连错）。
 语义边则必须落库 —— 模型每次给的关联都不同，重建时**整批替换**而不是增量合并，否则旧关联会越积越多、逐渐失真。
 
-**实时**的实现方式是版本指纹轮询：`GET /api/kg/version` 一次只做 6 个 `COUNT/MAX`（走索引），
+**实时**的实现方式是版本指纹轮询：后端暴露一个"版本指纹"查询，一次只做 6 个 `COUNT/MAX`（走索引），
 前端每 5 秒问一次，指纹变了才重新拉图。选轮询而不是 SSE：代价更低，也不必担心代理/休眠掐掉长连接。
 
 图上自己写的部分：**零依赖 SVG 力导向**（`components/KnowledgeGraph.vue`，不引 echarts/d3）。
@@ -366,7 +331,7 @@ TCP 连到【已校验的 IP】 → HTTPS 在其上做 TLS，SNI 与证书校验
 **1119 → 695**、平均段长 **39 → 63 字**，一页 JSON 从 17 个段落变成 1 个代码块。
 
 **图不硬"识别"**：图表、流程图、公式截图里的字抽出来只会是散落的碎片（柱状图刻度曾变成 `[heading1] 60 68.8 72.3`），
-所以按 CTM 包围盒把原 PDF 里那块图**裁出来贴回它在正文里的位置**（`GET /api/files/{id}/page-image`，
+所以按 CTM 包围盒把原 PDF 里那块图**裁出来贴回它在正文里的位置**（由后端按页现裁，
 150dpi 裁剪并缓存）；扫描页（整页没字只有图）直接整页贴图，而不是回一句"需要 OCR"。
 代码/表格/插图/脚注都不进翻译链路，只有正文段落和列表项显示「译」按钮。
 
@@ -460,9 +425,9 @@ TCP 连到【已校验的 IP】 → HTTPS 在其上做 TLS，SNI 与证书校验
 主题 wiki 是「批量 + 长输出 + 可在后台跑」的任务，最适合交给本地小模型；对话仍走主模型，
 保证质量与工具调用能力。设置面板新增一组可选覆写（**留空 = 跟随主模型**）：
 
-| 设置 | 键 | 示例（本机 Ollama） |
+| 设置 | 键 | 示例 |
 | --- | --- | --- |
-| 接口地址 | `ai.wiki_base_url` | `http://localhost:11434/v1` |
+| 接口地址 | `ai.wiki_base_url` | 本地模型服务的 OpenAI 兼容基址（如 `http://<主机>:<端口>/v1`） |
 | 模型名 | `ai.wiki_model` | `qwen3:8b` |
 | API Key | `ai.wiki_api_key` | 留空（本地模型不需要） |
 
@@ -474,7 +439,7 @@ TCP 连到【已校验的 IP】 → HTTPS 在其上做 TLS，SNI 与证书校验
 - 前端对来源标记的正则**刻意宽容**：本地小模型实测写出过 `[速查、卡#8]`（词里多一个顿号），
   严格正则会让那条引用静默变成纯文本；现在 `[^\]]{1,8}` 兜住这类噪声再按包含关系判断类型。
 
-实测（本机 RTX 级消费卡 + Ollama `qwen3:8b` Q4_K_M）：
+实测（消费级显卡 + Ollama `qwen3:8b` Q4_K_M）：
 
 | 主题 | 素材 | 耗时 | 正文 | 标记 |
 | --- | --- | --- | --- | --- |
@@ -489,11 +454,11 @@ TCP 连到【已校验的 IP】 → HTTPS 在其上做 TLS，SNI 与证书校验
 
 ### 生成 wiki：选模型、看进度、自动校验质量
 
-**① 选模型**：wiki 工具栏上有下拉（`GET /api/wiki/models`），列出
+**① 选模型**：wiki 工具栏上有下拉（可选模型由后端下发），列出
 「主模型（云端）」与「本地/自建模型（如 `qwen3:8b`）」；选择会记住（`wiki.target`），
 **自动增量更新沿用同一个选择** —— 避免"手动用本地、后台偷偷烧云端 token"。
 
-**② 看进度**：生成改成**异步任务**（`POST …/generate` 立刻返回 `jobId`，前端轮询 `GET /api/wiki/jobs/{id}`）。
+**② 看进度**：生成改成**异步任务**（发起生成的请求立刻返回 `jobId`，前端按这个 `jobId` 轮询进度）。
 进度是**真的**，不是假动画：
 
 | 上报项 | 来源 |
@@ -564,7 +529,8 @@ TCP 连到【已校验的 IP】 → HTTPS 在其上做 TLS，SNI 与证书校验
 
 - 内置预设一键新增：DeepSeek / Kimi / 火山方舟 / OpenAI / 本地 Ollama / 本地 LM Studio / 本地 vLLM / 自定义；
 - 每个档案有「编辑 / 测试 / 启用 / 删除」——**「测试」会真实发一次最小请求**，
-  失败时直接给出原因与提示（404 多为缺 `/v1`、401 查密钥、连不上查端口与 `host.docker.internal`）；
+  失败时直接给出原因与提示（404 多为缺 `/v1`、401 查密钥、连不上则查地址与端口是否可达，
+  以及后端跑在容器里时容器能否访问到宿主机上的模型服务）；
 - **密钥只进不出**：接口只返回 `hasKey` 与尾号（`sk-****4810`），明文永不回传；
 - 升级自动迁移：首次启动把原有 `ai.*` 配置转成档案（含从 `application.yml` 取的密钥），
   已有档案时跳过 —— 不会让用户的密钥"消失"。
@@ -592,9 +558,8 @@ TCP 连到【已校验的 IP】 → HTTPS 在其上做 TLS，SNI 与证书校验
 一个会话固定用便宜模型问杂事、另一个用强模型做分析，不必每次去改全局分工。
 选「跟随分工表」则回到按任务分工的默认行为。
 
-接口：`GET /api/model/profiles`、`POST/PUT/DELETE /api/model/profiles[/{id}]`、
-`POST /api/model/profiles/{id}/test|activate|migrate`、`GET /api/model/routing`、
-`GET/POST /api/model/sessions`、`DELETE /api/model/sessions/{id}`、`PUT /api/model/sessions/{id}/model`。
+档案与会话模型都通过后端接口管理：档案的**增删改查 + 测试 / 启用 / 迁移**、**任务分工表**的读写、
+以及**会话列表与「给某个会话指定档案」**，界面上对应的按钮都在设置面板与智能体面板里。
 
 > 旧的「API 接入」表单还留在设置里，但已标注为**旧配置（兼容保留）**：
 > 只在"一个档案都没有"时作为兜底，已有档案时改它没有任何效果。
@@ -756,21 +721,21 @@ Raw 不可变、Wiki 是派生层），缺 Schema 层、实体/概念页网络�
 
 ### ③ 局部重编译：只重建真正受影响的页
 
-新增素材后不必整库重编。`POST /api/wiki/recompile`：
+新增素材后不必整库重编。界面上的「重建受影响页」做四步：
 
 1. **取最近变更**：笔记 + 速查卡 + 资料按更新时间倒序取 5 条（`KbChunkMapper.recentSources`）；
 2. **影响分析**：把页面清单（topicKey + 标题）和这段素材交给模型，问"该更新哪些页"。
-   `POST /api/wiki/impact` 是公开探针，同时返回 `pages`（候选清单）与 `targets`（模型的选择），一眼能看出它选得准不准；
+   影响分析也留了一个公开探针，同时返回 `pages`（候选清单）与 `targets`（模型的选择），一眼能看出它选得准不准；
 3. **重生主题页**：命中 `cat-*` / `tag-*` 的页走与手动生成**完全相同**的流水线（生成 → 质量校验 → 必要时带反馈重生成 → 落库）；
 4. **知识页整批重编**：实体是**跨页**的，单页重生成拿不到"它在哪些素材里出现过"的证据（证据在抽取阶段收集），
    所以按批重编，而不是逐页重生成。
 
 实测（本次）：素材 5697 字 → 影响分析 2 秒选出 6 个目标（5 个实体页 + Java 主题页）→ 重建主题页 1 页 →
-知识页 10 页 / 63 秒。进度统一查 **`GET /api/wiki/jobs/{jobId}`**：重编译派生的知识页任务也从这里查（内部回落到实体编译器的任务表）。
+知识页 10 页 / 63 秒。进度统一查同一个任务进度接口（按 `jobId`）：重编译派生的知识页任务也从这里查（内部回落到实体编译器的任务表）。
 
 ### ④ 语义自检：代码检查 + 模型检查
 
-`POST /api/wiki/lint`，两层都用：
+「语义自检」两层都用：
 
 - **确定性检查**（不花 token、不会漏）：`[[双链]]` 指向不存在页面的**红链**、质量标记 warn 的页、正文过短的页、
   引用了不存在的素材（写了 `[速查卡#7]` 但库里没有 #7）、以及"没有任何有效来源标注"；
@@ -798,11 +763,11 @@ Raw 不可变、Wiki 是派生层），缺 Schema 层、实体/概念页网络�
 | 检索词扩展（兜底） | **本地** | 只在词面 0 命中时触发，便宜、可以慢 |
 
 嵌入向量**固定用本地** `bge-m3`：换模型必须重建整个索引，所以不做成可切换项。
-任务→目标的映射在 `ai/ModelRouting.java`，`GET /api/wiki/model-routing` 返回当前表。
+任务→目标的映射在 `ai/ModelRouting.java`，设置面板里展示的就是这张表。
 
 ### 删除知识页 + 编译改为"只增不删"
 
-界面上每页都能删（侧栏行悬浮出现 ✕，详情页头也有「删除」按钮），`DELETE /api/wiki/pages/{topicKey}`。
+界面上每页都能删（侧栏行悬浮出现 ✕，详情页头也有「删除」按钮）。
 确认框会把后果写清楚，因为这三件事**很容易误会**：
 
 - 删掉的只是**编译结果**，原始笔记 / 速查卡 / 资料一行都不动；
@@ -926,7 +891,7 @@ INFO  AI 请求完成 cost=3468ms 模型=deepseek-flash 思考=on finish=length
 - 刷新页面后由事件流还原（`messagesForDisplay` 把 `reasoning` 挂到当轮回答上），与实时显示同一套渲染。
 - 服务端返回 413 时给出了可行动的提示（开新对话 / 关掉思考减少回传 / 自建网关调 `client_max_body_size`），见 `DeepSeekClient.authHint`。
 
-> 实测：用 `deepseek-v4-pro` 档案提问，响应里 `reasoning` 909 字、`reply` 372 字；`GET /api/ai/sessions/{id}` 回看时
+> 实测：用 `deepseek-v4-pro` 档案提问，响应里 `reasoning` 909 字、`reply` 372 字；刷新后从会话事件流回看时
 > 助手气泡上仍带着这 909 字思考，而模型投影里没有它。
 
 ### 在笔记里问：回答**按结构融入**当前笔记
@@ -940,7 +905,7 @@ INFO  AI 请求完成 cost=3468ms 模型=deepseek-flash 思考=on finish=length
 
 1. 面板把「问题 + 回答」交给编辑页（事件 `lh-agent-note-merge`）——面板手里只有问答，
    而"这篇笔记现在长什么样（含未保存改动）"只有编辑页知道，所以活由编辑页干。
-2. 编辑页调 `POST /api/ai/note-merge-stream`（SSE，整篇一次），进度显示在它自己的 AI 弹窗里。
+2. 编辑页把「整篇 + 新内容」交给模型（流式回报，整篇一次出结果），进度显示在它自己的 AI 弹窗里。
 3. 模型返回**完整的新正文** → 弹窗里给预览；用户点「替换正文」才写进编辑器。
 4. 用户点「保存」才落库。**数据库在确认前一字不动**。
 
@@ -1018,14 +983,14 @@ DeepSeek Harness 接入后即可用 `mcp__learnhub__*` 直接读写知识库，�
 
 ## 常见问题
 
-- **MySQL 连接失败**：确认容器在跑 `docker ps`，账号 root / root123456，库 learn_hub，**端口 3307**（不是 3306）。若报 `Access denied for user 'root'@'172.17.0.1'`，说明连到了 3306 上另一个项目的 MySQL。
-- **端口被占用**：后端换端口用 `SERVER__PORT=18080 java -jar ...` 指定；前端端口固定 5174（strictPort，被占会报错而不是静默换端口）。
+- **MySQL 连接失败**：确认容器在跑 `docker ps`，并核对账号、库名与**映射出来的宿主机端口**（不是容器内的 `3306`）。若报 `Access denied for user 'root'@'<某个 IP>'`，多半是宿主机上另一个 MySQL 已经占用了同一个端口 —— 换一个未被占用的宿主机端口重建容器，并让后端的数据源地址与之对齐。
+- **端口被占用**：后端端口可通过环境变量 `SERVER__PORT` 覆盖（不改代码）；前端开发服务器用的是 strictPort —— 端口被占会**直接报错**而不是静默换一个，所以按终端提示释放端口或改配置即可。
 - **重新构建后端前必须先停后端**：Windows 下运行中的 JVM 会锁住 `target/*.jar`，`mvn package` 的 repackage 阶段无法重命名文件 →
   构建失败，并在 target 留下一个 **0.12 MB 的 plain jar（不含依赖、不可运行）**。先跑 `stop-all.bat`（或结束 java 进程）再打包。
   正常产物体积约 **28.9 MB / 53 个依赖 jar**，可用「jar 大小 + 是否含 BOOT-INF」快速判断有没有踩到。
 - **AI 请求超时**：思考型模型单次响应可能 3 分钟+，前端已对齐 300s 超时，请耐心等待或换 `deepseek-flash`（默认，最快）。
 - **依赖下载慢**：Maven 已配阿里云镜像。
-- **沙箱/容器内启动报 `Port 50449 in use`**：WorkBuddy 沙箱注入了 `SERVER__PORT` 环境变量，显式覆盖即可。
+- **换个环境启动时提示端口已被占用**：如果运行环境预置了 `SERVER__PORT` 之类的端口变量，显式覆盖成你要用的端口即可。
 
 ## License
 
