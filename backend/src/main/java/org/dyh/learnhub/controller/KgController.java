@@ -118,6 +118,23 @@ public class KgController {
         return Result.ok(conceptGraph.reason());
     }
 
+    /**
+     * 重新把概念节点关联到 wiki 实体页（不调模型、免费，可反复点）。
+     *
+     * <p>关联原先只随图谱重建一起跑，编译出新实体页后若不重建图谱，
+     * 页面上"点概念跳 wiki"就一直连不上（评估报告 P1-3）。
+     *
+     * @return 本次新关联上的节点数
+     */
+    @PostMapping("/concept/link-wiki")
+    public Result<Map<String, Object>> linkWiki() {
+        int linked = pipeline.relinkWikiPages();
+        return Result.ok(Map.of(
+                "linked", linked,
+                "total", conceptGraph.nodes().size(),
+                "note", "只按归一化标题精确匹配；改名的概念请用「疑似重复/合并」处理"));
+    }
+
     /** 疑似重复实体（消歧助手：只列出来，合并要人点） */
     @GetMapping("/concept/duplicates")
     public Result<Object> duplicates(@RequestParam(required = false, defaultValue = "0.6") double minScore) {

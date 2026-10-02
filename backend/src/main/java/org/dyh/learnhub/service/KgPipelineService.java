@@ -272,6 +272,17 @@ public class KgPipelineService {
         return out.size() > MAX_SOURCES ? new ArrayList<>(out.subList(0, MAX_SOURCES)) : out;
     }
 
+    /**
+     * 重新把图节点关联到 wiki 实体页。
+     *
+     * <p>关联逻辑原先只在**图谱重建**时跑，所以"先编译出新的实体页、但没重建图谱"
+     * 会让新页一直挂不上（评估报告 P1-3：135 个概念里只有 11 个有 Wiki 跳转）。
+     * 这个入口让关联可以单独触发，不必重建整张图（不调模型、免费）。
+     */
+    public int relinkWikiPages() {
+        return linkWikiPages();
+    }
+
     /** 把图节点关联到 wiki 实体页（按归一化标题匹配），返回关联上的个数 */
     private int linkWikiPages() {
         List<WikiPage> pages = wikiMapper.selectList(Wrappers.<WikiPage>lambdaQuery()
