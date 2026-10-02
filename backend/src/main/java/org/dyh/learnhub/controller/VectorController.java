@@ -187,6 +187,23 @@ public class VectorController {
         return Result.ok(out);
     }
 
+    /**
+     * 知识库主搜索（融合检索）。
+     *
+     * <p>评估报告 P1：知识库页面此前把整段输入交给 SQL LIKE，口语化的问句
+     * （如"大量字符串拼接用哪个类性能更好"）会 0 命中，而语义检索其实能找回
+     * 《String / StringBuilder / StringBuffer 区别》速查卡。语义能力此前只服务
+     * 智能体与"检索体检"，这里把它开放给知识库主搜索。
+     *
+     * @param q    查询（整句口语化问句也可以）
+     * @param topK 返回条数，默认 10
+     */
+    @GetMapping("/search")
+    public Result<Object> search(@RequestParam String q,
+                                 @RequestParam(required = false) Integer topK) {
+        return Result.ok(vectorIndexService.search(q, topK == null ? 10 : topK));
+    }
+
     // ---------------- 向量后端（2026-09-29：可切 Milvus，默认仍是 MySQL 全扫） ----------------
 
     /**
