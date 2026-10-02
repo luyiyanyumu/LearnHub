@@ -323,33 +323,82 @@ public class FileStorageService {
      * 翻页来回滚动时不会再渲染一遍（渲染一页 150dpi 要几十毫秒，滚动时很显眼）。
      */
     public byte[] pageImage(Long id, int pageNo, int idx) {
+        int[] rect = rectOf(id, pageNo, idx);
+        return cropPng(id, pageNo, "f" + idx, rect);
+    }
+
+    /**
+     * 按**任意区域**裁一页（pt，左上角原点、y 向下）：公式块用这个。
+     *
+     * <p>为什么公式要走"裁原图"：PDF 里没有公式对象，符号还是散落的字形（上下标字号都不一样），
+     * 抽出来的文本必然是碎片（见 docs/pdf-layout-design.md §5.3）。原图里的排版与上下标是准的，
+     * 所以 {@code formula} 块把原 PDF 那块渲染出来贴上去 —— 与插图同一套做法、同一套缓存。
+     */
+    public byte[] pageImageRect(Long id, int pageNo, double x0, double y0, double x1, double y1) {
+        if (!Double.isFinite(x0) || !Double.isFinite(y0) || !Double.isFinite(x1) || !Double.isFinite(y1)
+                || x1 <= x0 || y1 <= y0 || pageNo < 1) {
+            throw new IllegalArgumentException("裁剪区域不合法");
+        }
+        double s = FIGURE_DPI / 72.0;
+        int left = (int) Math.floor(x0 * s), top = (int) Math.floor(y0 * s);
+        int right = (int) Math.ceil(x1 * s), bottom = (int) Math.ceil(y1 * s);
+        int[] rect = {left, top, right - left, bottom - top};
+        // 使用实际像素边界，避免两个不同小数坐标共享缓存；v2 不复用旧的裁剪图。
+        String key = "v2-r" + left + "_" + top + "_" + right + "_" + bottom;
+        return cropPng(id, pageNo, key, rect);
+    }
+
+    /** 插图：位置来自 {@link PdfLayoutExtractor#figureRect} */
+    private int[] rectOf(Long id, int pageNo, int idx) {
+        FileInfo info = require(id);
+        Path src = storageDir().resolve(info.getStoreName());
+        if (!Files.exists(src)) {
+            throw new IllegalStateException("文件已丢失: " + info.getStoreName());
+        }
+        int[] rect = pdfLayoutExtractor.figureRect(src, pageNo, idx, FIGURE_DPI);
+        if (rect == null) {
+            throw new IllegalArgumentException("第 " + pageNo + " 页没有第 " + idx + " 张插图");
+        }
+        return rect;
+    }
+
+    /**
+     * 渲染该页 → 按 {@code rect}（px）裁一刀 → PNG（带缓存）。
+     * <p>缓存到 {@code uploads/.derived/<fileId>/p<页>-<key>.png}：公式与插图共用这一套，
+     * 翻页来回滚动时不会再渲染一遍（渲染一页 150dpi 要几十毫秒，滚动时很显眼）。
+     */
+    private byte[] cropPng(Long id, int pageNo, String key, int[] rect) {
         FileInfo info = require(id);
         String ext = info.getExt() == null ? "" : info.getExt().toLowerCase(Locale.ROOT);
         if (!"pdf".equals(ext)) {
-            throw new IllegalArgumentException("只有 PDF 才有可裁剪的插图");
+            throw new IllegalArgumentException("只有 PDF 才能按区域裁剪");
         }
         Path src = storageDir().resolve(info.getStoreName());
         if (!Files.exists(src)) {
             throw new IllegalStateException("文件已丢失: " + info.getStoreName());
         }
         Path cache = storageDir().resolve(".derived").resolve(String.valueOf(id))
-                .resolve("p" + pageNo + "-" + idx + ".png");
+                .resolve("p" + pageNo + "-" + key + ".png");
         try {
             if (Files.exists(cache)) {
                 return Files.readAllBytes(cache);
             }
-            int[] rect = pdfLayoutExtractor.figureRect(src, pageNo, idx, FIGURE_DPI);
-            if (rect == null) {
-                throw new IllegalArgumentException("第 " + pageNo + " 页没有第 " + idx + " 张插图");
-            }
             byte[] png;
             try (PDDocument doc = Loader.loadPDF(src.toFile())) {
+                if (pageNo < 1 || pageNo > doc.getNumberOfPages()) {
+                    throw new IllegalArgumentException("页码超出原文范围");
+                }
                 BufferedImage full = new PDFRenderer(doc)
                         .renderImageWithDPI(pageNo - 1, FIGURE_DPI, ImageType.RGB);
-                int x = Math.max(0, Math.min(rect[0], full.getWidth() - 1));
-                int y = Math.max(0, Math.min(rect[1], full.getHeight() - 1));
-                int w = Math.max(1, Math.min(rect[2], full.getWidth() - x));
-                int h = Math.max(1, Math.min(rect[3], full.getHeight() - y));
+                int x = Math.max(0, rect[0]);
+                int y = Math.max(0, rect[1]);
+                int right = (int) Math.min((long) rect[0] + rect[2], full.getWidth());
+                int bottom = (int) Math.min((long) rect[1] + rect[3], full.getHeight());
+                int w = right - x;
+                int h = bottom - y;
+                if (w <= 0 || h <= 0) {
+                    throw new IllegalArgumentException("裁剪区域位于页面之外");
+                }
                 ByteArrayOutputStream out = new ByteArrayOutputStream();
                 ImageIO.write(full.getSubimage(x, y, w, h), "png", out);
                 png = out.toByteArray();
@@ -360,7 +409,7 @@ public class FileStorageService {
         } catch (IllegalArgumentException e) {
             throw e;
         } catch (Exception e) {
-            throw new IllegalStateException("插图渲染失败: " + e.getMessage(), e);
+            throw new IllegalStateException("区域渲染失败: " + e.getMessage(), e);
         }
     }
 

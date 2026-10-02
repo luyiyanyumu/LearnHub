@@ -10,6 +10,7 @@ import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.common.PDRectangle;
+import org.apache.pdfbox.pdmodel.font.encoding.GlyphList;
 import org.apache.pdfbox.pdmodel.graphics.PDXObject;
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.apache.pdfbox.text.PDFTextStripper;
@@ -26,6 +27,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -92,6 +94,30 @@ public class PdfLayoutExtractor {
     private static final Pattern CN_HEADING =
             Pattern.compile("^(第[一二三四五六七八九十百]+[章节部分]|[一二三四五六七八九十]+[、.]|（[一二三四五六七八九十]+）)\\s*\\S.*");
     private static final Pattern SENTENCE_END = Pattern.compile("[.!?。！？…][\"'’”）)]?$");
+
+    /**
+     * 脚注标记（"∗These authors contributed equally."、"†Corresponding author."、"1The code…"）。
+     *
+     * <p><b>只匹配标记本身</b>，正文一律留给调用方（见 {@link #stripNoteMarker}）：
+     * 早先这里写成 {@code ^\s*(标记)\s*\S.*} —— 末尾那个 {@code \S.*} 会把正文一起吃掉，
+     * {@code replaceFirst("")} 之后脚注整条变成空串（实测踩过：
+     * {@code ∗These authors contributed equally.} 去标记后什么都不剩，脚注再也落不了块）。
+     *
+     * <p>编号兼容紧贴和空格分隔（{@code 1The}、{@code 1 The}）；是否为脚注仍由
+     * {@link #noteLine} 的页脚位置、字号与正文边界共同判断，不能仅凭行首数字分类。
+     */
+    private static final Pattern NOTE_MARKER = Pattern.compile(
+            "^\\s*(?:[*∗†‡§¶]+|\\d{1,2}[∗†‡]|\\d{1,2}\\s*(?=[A-Za-z\\u4e00-\\u9fa5]))");
+
+    /**
+     * 符号型脚注标记（{@code ∗} {@code †} {@code ‡}）：只有它们是"一定是脚注"的强证据。
+     *
+     * <p><b>不能带"后面还要有字"的尾巴</b>：这里曾经写成 {@code ^\s*[*∗†‡§¶]+\s*\S}，
+     * 而 {@link #stripNoteMarker} 用 {@code matcher.end()} 截断 —— 那个 {@code \S} 正好是
+     * 正文的第一个字母，于是 {@code ∗These authors…} 被削成 {@code hese authors…}
+     * （实测踩过：脚注首字母消失）。判定"是不是标记"和"标记到哪结束"必须用同一个正则。
+     */
+    private static final Pattern NOTE_SYMBOL = Pattern.compile("^\\s*[*∗†‡§¶]+");
     private static final Pattern PAGE_NUMBER = Pattern.compile("^[0-9IVXLCDMivxlcdm]{1,5}$");
     private static final Pattern SPACE_BEFORE_PUNCT = Pattern.compile("\\s+([,.;:!?%)])");
 
@@ -124,19 +150,129 @@ public class PdfLayoutExtractor {
             "摘要", "引言", "相关工作", "参考文献", "结论");
 
     // ------------------------------------------------------------------
+    // 数学字形恢复（公式里的 "?" 有一类来自字体缺 ToUnicode 映射）
+    // ------------------------------------------------------------------
+
+    /**
+     * Adobe 数学字体的子集名（CMMI=数学斜体、CMSY=数学符号、CMEX=大符号、MSAM/MSBM=AMS 符号）。
+     * <p>只在**这些字体**里做字形名恢复：它们是标准化的 TeX 字体，字形名与 Unicode 一一对应；
+     * 别的字体（尤其是 CID 子集）恢复不可靠，宁可保留 "?"。
+     */
+    private static final Pattern MATH_FONT =
+            Pattern.compile("(?:^|[+|])(?:CM(?:MI|SY|EX|R|BX|TI|SS)|MS[AB]M|EUSM|RSFS)", Pattern.CASE_INSENSITIVE);
+
+    /**
+     * 字形名 → Unicode（只为数学字体准备；名字取 Adobe Glyph List 的标准写法）。
+     * <p>实测依据：在 uploads 的 6 份 PDF（594 页）里，PDFBox 报出的"缺映射"字形只有 5 种
+     * （{@code star} / {@code latticetop} / {@code lessmuch} + 两个 Dingbats），
+     * 所以这张表的收益主要在**同类论文/讲义**上；表里其余条目是数学字体里最常被用到的符号，
+     * 宁可多几条也不让常见符号漏成 "?"。
+     */
+    private static final Map<String, String> MATH_GLYPH_UNICODE = Map.ofEntries(
+            // 希腊字母（小写）
+            Map.entry("alpha", "α"), Map.entry("beta", "β"), Map.entry("gamma", "γ"),
+            Map.entry("delta", "δ"), Map.entry("epsilon", "ε"), Map.entry("varepsilon", "ε"),
+            Map.entry("zeta", "ζ"), Map.entry("eta", "η"), Map.entry("theta", "θ"),
+            Map.entry("vartheta", "ϑ"), Map.entry("iota", "ι"), Map.entry("kappa", "κ"),
+            Map.entry("lambda", "λ"), Map.entry("mu", "μ"), Map.entry("nu", "ν"),
+            Map.entry("xi", "ξ"), Map.entry("pi", "π"), Map.entry("varpi", "ϖ"),
+            Map.entry("rho", "ρ"), Map.entry("varrho", "ϱ"), Map.entry("sigma", "σ"),
+            Map.entry("varsigma", "ς"), Map.entry("tau", "τ"), Map.entry("upsilon", "υ"),
+            Map.entry("phi", "φ"), Map.entry("varphi", "φ"), Map.entry("chi", "χ"),
+            Map.entry("psi", "ψ"), Map.entry("omega", "ω"),
+            // 希腊字母（大写）
+            Map.entry("Gamma", "Γ"), Map.entry("Delta", "Δ"), Map.entry("Theta", "Θ"),
+            Map.entry("Lambda", "Λ"), Map.entry("Xi", "Ξ"), Map.entry("Pi", "Π"),
+            Map.entry("Sigma", "Σ"), Map.entry("Upsilon", "Υ"), Map.entry("Phi", "Φ"),
+            Map.entry("Psi", "Ψ"), Map.entry("Omega", "Ω"),
+            // 关系与运算
+            Map.entry("star", "⋆"), Map.entry("asteriskmath", "∗"),
+            Map.entry("plusminus", "±"), Map.entry("minus", "−"), Map.entry("minusplus", "∓"),
+            Map.entry("multiply", "×"), Map.entry("divide", "÷"), Map.entry("circlemultiply", "⊗"),
+            Map.entry("circleplus", "⊕"), Map.entry("circledot", "⊙"), Map.entry("bullet", "•"),
+            Map.entry("periodcentered", "·"), Map.entry("dotmath", "⋅"),
+            Map.entry("lessmuch", "≪"), Map.entry("greatermuch", "≫"),
+            Map.entry("lessequal", "≤"), Map.entry("greaterequal", "≥"),
+            Map.entry("notequal", "≠"), Map.entry("approxequal", "≈"),
+            Map.entry("equivalence", "≡"), Map.entry("similar", "∼"), Map.entry("congruent", "≅"),
+            Map.entry("proportional", "∝"), Map.entry("reflexsubset", "⊆"), Map.entry("reflexsuperset", "⊇"),
+            Map.entry("propersubset", "⊂"), Map.entry("propersuperset", "⊃"),
+            Map.entry("element", "∈"), Map.entry("notelement", "∉"),
+            Map.entry("union", "∪"), Map.entry("intersection", "∩"), Map.entry("emptyset", "∅"),
+            Map.entry("infinity", "∞"), Map.entry("partialdiff", "∂"), Map.entry("gradient", "∇"),
+            Map.entry("summation", "∑"), Map.entry("product", "∏"), Map.entry("integral", "∫"),
+            Map.entry("radical", "√"),
+            Map.entry("forall", "∀"), Map.entry("existential", "∃"), Map.entry("therefore", "∴"),
+            Map.entry("angle", "∠"), Map.entry("perpendicular", "⊥"), Map.entry("parallel", "∥"),
+            Map.entry("logicalnot", "¬"), Map.entry("logicaland", "∧"), Map.entry("logicalor", "∨"),
+            Map.entry("arrowright", "→"), Map.entry("arrowleft", "←"),
+            Map.entry("arrowboth", "↔"), Map.entry("arrowdblright", "⇒"),
+            Map.entry("arrowdblleft", "⇐"), Map.entry("arrowdblboth", "⇔"),
+            Map.entry("latticetop", "⊤"),
+            Map.entry("prime", "′"), Map.entry("second", "″"),
+            Map.entry("ellipsis", "…"), Map.entry("summationdisplay", "∑"),
+            Map.entry("floorleft", "⌊"), Map.entry("floorright", "⌋"),
+            Map.entry("ceilingleft", "⌈"), Map.entry("ceilingright", "⌉"),
+            Map.entry("angleleft", "⟨"), Map.entry("angleright", "⟩"),
+            Map.entry("bardbl", "‖"), Map.entry("dagger", "†"), Map.entry("daggerdbl", "‡"));
+
+    /** 未映射的占位字符：PDFBox 在字体缺 cmap/ToUnicode 时给的就是这些 */
+    private static boolean placeholder(String u) {
+        return u == null || u.isEmpty() || u.charAt(0) == '?' || u.charAt(0) == '\uFFFD';
+    }
+
+    /**
+     * 有字形名就用字形名换真符号（限已知数学字体与 Dingbats 的标准映射）。
+     * <p>为什么不用 PDFBox 的 {@code toUnicode}：它给出的就是 {@code ?} —— 缺映射时无从下手，
+     * 而**字形名是好的**（PDFBox 自己的警告里写着 {@code No Unicode mapping for lessmuch (28)}），
+     * 所以拿编码去问 {@code PDFont} 要字形名，再查表。
+     */
+    private static String recoverGlyph(TextPosition p) {
+        try {
+            if (p.getFont() == null) {
+                return null;
+            }
+            String name = glyphName(p);
+            String fontName = String.valueOf(p.getFont().getName());
+            if (fontName.toLowerCase(Locale.ROOT).contains("dingbats")) {
+                return name == null ? null : GlyphList.getZapfDingbats().toUnicode(name);
+            }
+            if (!MATH_FONT.matcher(fontName).find()) {
+                return null;
+            }
+            return name == null ? null : MATH_GLYPH_UNICODE.get(name);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 取字形名：PDFont → 编码表 → 码位对应的名字，拿不到就返回 null（不猜） */
+    private static String glyphName(TextPosition p) {
+        return GlyphNames.nameOf(p.getFont(), GlyphNames.codeOf(p));
+    }
+
+    // ------------------------------------------------------------------
     // 对外结构（前端按 type 排版）
     // ------------------------------------------------------------------
 
     /**
-     * type: title / authors / heading / para / bullet / meta / note / code / table / figure；heading 用 level 表示层级（1 最高）。
+     * type: title / authors / heading / para / bullet / meta / note / code / table / figure / formula；
+     * heading 用 level 表示层级（1 最高）。
      * <p>{@code src} 只有 {@code figure} 用得上：值形如 {@code "12-0"}（第 12 页的第 0 张图），
      * 前端据此拼出取图地址 —— 抽取这一层拿不到 file_id（它只认识文件路径）。
-     * <p>{@code meta} 是居中元信息（作者单位、邮箱），{@code note} 是页面底部的脚注小字（左对齐）。
+     * <p>{@code page} 与 {@code rect}（pt，左上角原点、y 向下）是**可选几何**：`formula` 块带它，
+     * 界面就能把这块按原 PDF 渲染出来贴上去（公式的排版、上下标只有原图是准的，见 §5.3）。
+     * <p>{@code meta} 是居中元信息（作者单位、邮箱），{@code note} 是页面底部的脚注小字（左对齐），
+     * {@code formula} 是"像公式"的行（见 {@link #mergeFormulaRuns}：不做 LaTeX 化，只单独成块、不与正文混排）。
      */
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    public record Block(String type, String text, int level, String src) {
+    public record Block(String type, String text, int level, String src, Integer page, double[] rect) {
         public Block(String type, String text, int level) {
-            this(type, text, level, null);
+            this(type, text, level, null, null, null);
+        }
+
+        public Block(String type, String text, int level, String src) {
+            this(type, text, level, src, null, null);
         }
     }
 
@@ -152,15 +288,87 @@ public class PdfLayoutExtractor {
 
     /** 一个词（PDFBox 的一次调用）：左上角 + 右边界 + 字号 + "前面有没有空格" + 是不是等宽字体 */
     private record Word(double x0, double x1, double y, double size, boolean bold, boolean spaceBefore,
-                        boolean mono, String text) {
+                        boolean mono, String text, double top, double bottom) {
     }
 
-    /** 一栏内的一行 */
-    private record Line(double x0, double x1, double y, double size, boolean bold, boolean mono, String text) {
+    /** 一栏内的一行：{@code monoRatio} 是等宽字符占比（代码块的字体级证据，脚注判定要用它排除代码） */
+    record Line(double x0, double x1, double y, double size, double domSize, boolean bold, boolean mono,
+                double monoRatio, String text, double top, double bottom) {
+        Line(double x0, double x1, double y, double size, double domSize, boolean bold, boolean mono,
+             double monoRatio, String text) {
+            this(x0, x1, y, size, domSize, bold, mono, monoRatio, text, y - size, y + size * 0.3);
+        }
     }
 
     /** 带纵向位置的块：用来把"跨栏通栏块"按 y 插回栏内阅读顺序 */
     private record Placed(Block block, double y) {
+    }
+
+    /** 段落累加器：文本 + 几何（几何给"公式块按原图渲染"用，见 {@link #mergeFormulaRuns}） */
+    private static final class Para {
+        private final StringBuilder text = new StringBuilder();
+        private double y;
+        private double x0 = Double.MAX_VALUE;
+        private double x1 = -Double.MAX_VALUE;
+        private double y0 = Double.MAX_VALUE;
+        private double y1 = -Double.MAX_VALUE;
+        private double size;
+        private boolean bullet;
+
+        void add(Line ln, String t, boolean asBullet) {
+            if (text.length() == 0) {
+                y = ln.y();
+            }
+            text.append(t);
+            x0 = Math.min(x0, ln.x0());
+            x1 = Math.max(x1, ln.x1());
+            y0 = Math.min(y0, ln.top());
+            y1 = Math.max(y1, ln.bottom());
+            size = Math.max(size, ln.size());
+            bullet = asBullet;
+        }
+
+        /** 续接一行（空格/连字符的规则由调用方处理），只更新几何 */
+        void extend(Line ln, String t) {
+            text.append(t);
+            x0 = Math.min(x0, ln.x0());
+            x1 = Math.max(x1, ln.x1());
+            y0 = Math.min(y0, ln.top());
+            y1 = Math.max(y1, ln.bottom());
+            size = Math.max(size, ln.size());
+        }
+
+        boolean isEmpty() {
+            return text.length() == 0;
+        }
+
+        int length() {
+            return text.length();
+        }
+
+        /**
+         * 当前几何（pt，左上角原点、y 向下）。
+         *
+         * <p>取所有字形边界的并集并留少量边距；上下标和大运算符不能只用第一字的基线推算。
+         */
+        double[] rect() {
+            if (text.length() == 0) {
+                return null;
+            }
+            double padding = Math.max(2, size * 0.18);
+            return new double[]{Math.max(0, x0 - padding), Math.max(0, y0 - padding),
+                    x1 + padding, y1 + padding};
+        }
+
+        void clear() {
+            text.setLength(0);
+            x0 = Double.MAX_VALUE;
+            x1 = -Double.MAX_VALUE;
+            y0 = Double.MAX_VALUE;
+            y1 = -Double.MAX_VALUE;
+            size = 0;
+            bullet = false;
+        }
     }
 
     /** 一栏：几何 + 行 */
@@ -220,6 +428,7 @@ public class PdfLayoutExtractor {
         collector.setStartPage(pageNo);
         collector.setEndPage(pageNo);
         collector.getText(doc);                      // 只为触发回调，返回值不用
+        collector.flushLine();                      // PDFBox 的页尾不保证回调 writeLineSeparator
 
         List<List<Word>> rows = collector.rows;
         List<Figure> figures = scanFigures(page, pageNo, width, height, rotation);
@@ -239,16 +448,30 @@ public class PdfLayoutExtractor {
         double rightFlush = flushOf(rows, bodySize, width, false);
         double bodyStartY = bodyStartY(rows, bodySize, leftFlush, rightFlush, gutter, twoColumn, width, height);
 
-        // 分流：行内先按中缝切，再决定这一段属于哪一栏（居中块整行当通栏，不切）
+        // 分流：行内先按中缝切，再决定这一段属于哪一栏（居中块整行当通栏，不切）。
+        // 首页底部还多一刀"按字号切"：论文的脚注常常与正文**同一条基线**（PDFBox 于是把它们并进
+        // 同一行），实测某篇论文首页第 87% 行是
+        // "∗These authors contributed equally. real-world engineering resources, to evaluate task com-" ——
+        // 左边是 5/8pt 的脚注、右边是 9pt 正文。不切的话脚注会被并进正文段落（用户报的就是这个）。
         List<List<Word>> wide = new ArrayList<>();
         List<List<Word>> left = new ArrayList<>();
         List<List<Word>> right = new ArrayList<>();
         for (List<Word> row : rows) {
             double rowSize = row.stream().mapToDouble(Word::size).max().orElse(bodySize);
-            boolean aboveBody = row.get(0).y() < bodyStartY - 0.6 * rowSize;
+            boolean aboveBody = pageNo == 1 && row.get(0).y() < bodyStartY - 0.6 * rowSize;
             boolean centeredRow = aboveBody && row.stream().anyMatch(w -> !nearFlush(w, leftFlush, rightFlush, gutter));
-            for (List<Word> part : splitByGutter(row, twoColumn && !centeredRow, gutter)) {
-                if (!twoColumn || centeredRow) {
+            boolean headZone = pageNo == 1 && row.get(0).y() < bodyStartY - 0.6 * rowSize;
+            // 脚注切分门槛按"这一行自己"的形态定（行首文本 + y）：<0 表示这一行不切
+            double noteBoundary = noteSplitBoundary(toLine(row), bodySize, height);
+            List<List<Word>> parts = new ArrayList<>();
+            for (List<Word> head : splitBySize(row, noteBoundary)) {
+                parts.addAll(splitByGutter(head, twoColumn && !centeredRow, gutter));
+            }
+            for (List<Word> part : parts) {
+                double partSize = part.stream().mapToDouble(Word::size).max().orElse(bodySize);
+                if (headZone && part.get(0).y() < bodyStartY - 0.6 * partSize) {
+                    wide.add(part);                  // 标题区：不按栏分，交给 headBlocks（脚注在里面按字号切开了）
+                } else if (!twoColumn || centeredRow) {
                     wide.add(part);
                 } else if (crossesGutter(part, gutter)) {
                     wide.add(part);
@@ -277,8 +500,9 @@ public class PdfLayoutExtractor {
                 // 而 head 里的行是**逐行**落块的，一块 JSON 会被切成十几行 `[para]`（实测 p94）。
                 body.addAll(lines);
             }
-            List<Block> blocks = new ArrayList<>(headBlocks(head, bodySize, pageNo, width));
-            blocks.addAll(plain(columnPlaced(columnOf(body), bodySize, pageNo, height, figures)));
+            List<Block> blocks = new ArrayList<>(
+                    headBlocks(head, bodySize, pageNo, width, height, bodyBottomOf(head, bodySize, height)));
+            blocks.addAll(mergeFormulaRuns(columnPlaced(columnOf(body), bodySize, pageNo, height, figures), pageNo));
             return new PageLayout(pageNo, 1, blocks);
         }
 
@@ -306,9 +530,10 @@ public class PdfLayoutExtractor {
             }
         }
         List<Placed> spanning = columnPlaced(columnOf(spanningLines), bodySize, pageNo, height, wideFigures);
-        List<Block> blocks = new ArrayList<>(headBlocks(head, bodySize, pageNo, width));
-        blocks.addAll(plain(interleave(leftBlocks, spanning)));
-        blocks.addAll(plain(rightBlocks));
+        List<Block> blocks = new ArrayList<>(
+                headBlocks(head, bodySize, pageNo, width, height, bodyBottomOf(head, bodySize, height)));
+        blocks.addAll(mergeFormulaRuns(interleave(leftBlocks, spanning), pageNo));
+        blocks.addAll(mergeFormulaRuns(rightBlocks, pageNo));
         return new PageLayout(pageNo, 2, blocks);
     }
 
@@ -329,17 +554,93 @@ public class PdfLayoutExtractor {
                 Word prev = cur.get(cur.size() - 1);
                 double gap = w.x0() - prev.x1();
                 double mid = (prev.x1() + w.x0()) / 2;
-                // 只在"中缝附近"切：正文里的宽空格（表格、公式）不该被当成栏缝
-                if (gap >= MIN_GUTTER && Math.abs(mid - gutter) <= gap / 2 + 8) {
+                // 只在"中缝附近"切：正文里的宽空格（表格、公式）不该被当成栏缝。
+                // 容差取 gap/2 + 12：实测两栏论文的**公式行**投票太少（整行只投一票），中缝估计会偏
+                // 十来点，容差太小就漏切 —— 左右两栏的公式被拼成一行（"J(θ) := E … GTi |at| j , 1 ≤ t ≤ T"）。
+                // 中缝已由整页投票确认时，允许较窄但确实跨过中缝的间隔（DPR 的正文栏距约 11pt）。
+                boolean confirmedNarrowGap = gap >= 6 && prev.x1() <= gutter && w.x0() >= gutter;
+                if ((gap >= MIN_GUTTER || confirmedNarrowGap) && Math.abs(mid - gutter) <= gap / 2 + 12) {
                     parts.add(cur);
                     cur = new ArrayList<>();
-                    w = new Word(w.x0(), w.x1(), w.y(), w.size(), w.bold(), false, w.mono(), w.text());
+                    w = new Word(w.x0(), w.x1(), w.y(), w.size(), w.bold(), false, w.mono(), w.text(),
+                            w.top(), w.bottom());
                 }
             }
             cur.add(w);
         }
         parts.add(cur);
         return parts;
+    }
+
+    /**
+     * 行内按**字号**切：论文的脚注与正文在同一条基线上时，PDFBox 会把它们并进同一行，
+     * 不切就分不出"哪几个词是脚注"（实测某篇论文首页：
+     * {@code ∗These authors contributed equally. real-world engineering resources, to evaluate task com-}，
+     * 5/8pt 的脚注和 9pt 的正文被拼成了一行）。
+     *
+     * <p>{@code boundary} 是"脚注字号上限"（{@link #noteSplitBoundary}，&le;0 表示这一行不切）。
+     * 切点要求：两边的字号差 &gt;0.4、空隙 &gt;1.6 倍小字号、双方都在门槛之下；
+     * **而且切开后每一段至少两个词** —— 单字符的碎段一定是误切（实测把
+     * {@code ∗These authors…} 的 "T" 单独切了出去，脚注正文变成 "hese authors…"）。
+     */
+    private List<List<Word>> splitBySize(List<Word> row, double boundary) {
+        if (row.size() < 2 || boundary <= 0) {
+            return List.of(row);
+        }
+        List<Word> sorted = new ArrayList<>(row);
+        sorted.sort(Comparator.comparingDouble(Word::x0));
+        if (sorted.stream().mapToDouble(Word::size).max().orElse(0) <= boundary) {
+            return List.of(row);                     // 整行都在门槛之下：没有"正文/脚注"两种字号
+        }
+        int[] starts = splitPoints(sorted, boundary);
+        if (starts.length == 0) {
+            return List.of(row);
+        }
+        List<List<Word>> parts = new ArrayList<>();
+        int from = 0;
+        for (int s : starts) {
+            parts.add(new ArrayList<>(sorted.subList(from, s)));
+            from = s;
+        }
+        parts.add(new ArrayList<>(sorted.subList(from, sorted.size())));
+        return parts;
+    }
+
+    /** 候选切点（下标）；相邻候选之间至少两个词，否则整组作废（宁可整行不切） */
+    private static int[] splitPoints(List<Word> sorted, double boundary) {
+        List<Integer> cuts = new ArrayList<>();
+        for (int i = 1; i < sorted.size(); i++) {
+            Word prev = sorted.get(i - 1);
+            Word w = sorted.get(i);
+            double gap = w.x0() - prev.x1();
+            if (Math.abs(w.size() - prev.size()) > 0.4
+                    && gap > 1.6 * Math.min(w.size(), prev.size())
+                    && Math.max(w.size(), prev.size()) <= boundary
+                    && (cuts.isEmpty() || i - cuts.get(cuts.size() - 1) >= 2)
+                    && sorted.size() - i >= 2) {
+                cuts.add(i);
+            }
+        }
+        return cuts.stream().mapToInt(Integer::intValue).toArray();
+    }
+
+    /**
+     * 脚注门槛只关心"行首文本 + 行的 y + 字号"，这里做一份轻量 Line 给它用
+     * （真正的 Line 要等分流之后才成形，而切分必须发生在分流之前）。
+     */
+    private static Line toLine(List<Word> words) {
+        List<Word> sorted = new ArrayList<>(words);
+        sorted.sort(Comparator.comparingDouble(Word::x0));
+        StringBuilder sb = new StringBuilder();
+        for (Word w : sorted) {
+            if (w.spaceBefore() && sb.length() > 0) {
+                sb.append(' ');
+            }
+            sb.append(w.text());
+        }
+        return new Line(sorted.get(0).x0(), sorted.get(sorted.size() - 1).x1(), sorted.get(0).y(),
+                sorted.stream().mapToDouble(Word::size).max().orElse(0), dominantSize(sorted), false, false, 0,
+                sb.toString());
     }
 
     /** 中缝检测：给"同一行里的大空隙"投票，票数最多、且落在页面中部的那条就是中缝 */
@@ -493,8 +794,11 @@ public class PdfLayoutExtractor {
             double x0 = Double.MAX_VALUE;
             double x1 = -Double.MAX_VALUE;
             double size = 0;
+            double top = Double.MAX_VALUE;
+            double bottom = -Double.MAX_VALUE;
+            Word prevWord = null;
             for (Word w : sorted) {
-                if (w.spaceBefore() && sb.length() > 0) {
+                if (sb.length() > 0 && (w.spaceBefore() || wideGap(prevWord, w))) {
                     char last = sb.charAt(sb.length() - 1);
                     char next = w.text().isEmpty() ? ' ' : w.text().charAt(0);
                     if (!(isCjk(last) && isCjk(next))) {
@@ -513,9 +817,13 @@ public class PdfLayoutExtractor {
                 x0 = Math.min(x0, w.x0());
                 x1 = Math.max(x1, w.x1());
                 size = Math.max(size, w.size());
+                top = Math.min(top, w.top());
+                bottom = Math.max(bottom, w.bottom());
+                prevWord = w;
             }
-            out.add(new Line(x0, x1, sorted.get(0).y(), size, boldChars * 2 > total,
-                    monoChars * 2 > total, tidyInline(sb.toString())));
+            String lineText = tidyInline(sb.toString());
+            out.add(new Line(x0, x1, baseline(sorted), size, dominantSize(sorted), boldChars * 2 > total,
+                    monoChars * 2 > total, total == 0 ? 0 : (double) monoChars / total, lineText, top, bottom));
         }
         out.sort(Comparator.comparingDouble(Line::y));
         return out;
@@ -532,6 +840,36 @@ public class PdfLayoutExtractor {
             sb.append(w.text());
         }
         return sb.toString();
+    }
+
+    /**
+     * 一行的**主导字号**：按字符数加权的众数（0.5pt 一档）。
+     * <p>为什么不用"最大字号"：脚注行里常混着上标（{@code 1The code…}），最大字号会被上标或
+     * 混进来的正文词抬到正文字号，于是"小字 = 脚注"这条判据失效（实测踩过）。
+     */
+    private static double dominantSize(List<Word> words) {
+        Map<Integer, Integer> weight = new HashMap<>();
+        for (Word w : words) {
+            weight.merge((int) Math.round(w.size() * 2), Math.max(1, w.text().length()), Integer::sum);
+        }
+        return weight.entrySet().stream().max(Map.Entry.comparingByValue())
+                .map(e -> e.getKey() / 2.0).orElse(0.0);
+    }
+
+    /**
+     * 词与词之间"该有空格却丢了"的宽空隙。
+     * <p>PDFBox 的 {@code writeWordSeparator} 只在**有空格字形**时回调；公式/带字距排版的文字没有，
+     * 于是抽出来是 {@code R(q o ? KL o | q)} 这样挤在一起的式子。这里用几何空隙补一刀：
+     * 空隙超过 0.2 倍字号（正常词距只有 0.05~0.3 倍字号，但**缺空格**时通常 ≥0.4 倍）才补，
+     * 避免中文按字分词时被塞进空格（中文词间本来就没有空隙）。
+     */
+    private static boolean wideGap(Word prev, Word cur) {
+        if (prev == null || cur == null) {
+            return false;
+        }
+        double gap = cur.x0() - prev.x1();
+        double size = Math.max(prev.size(), cur.size());
+        return gap > 0.25 * size && gap > 0.4;
     }
 
     /** 行首 x 的众数就是段落 flush-left 位置（缩进行不影响它） */
@@ -578,7 +916,8 @@ public class PdfLayoutExtractor {
      * <p>标题还要求"够宽"：论文页边常有一条**竖排的 arXiv 水印**（"arXiv:2608.14380v1 [cs.AI] 14 Aug 2026"），
      * 它的字号是整页最大的、宽度却只有一个字高 —— 不加这条会被它抢走标题位（实测踩过）。
      */
-    private List<Block> headBlocks(List<Line> lines, double bodySize, int pageNo, double pageWidth) {
+    private List<Block> headBlocks(List<Line> lines, double bodySize, int pageNo, double pageWidth,
+                                   double pageHeight, double bodyBottom) {
         List<Block> out = new ArrayList<>();
         StringBuilder title = new StringBuilder();
         StringBuilder authors = new StringBuilder();
@@ -614,6 +953,14 @@ public class PdfLayoutExtractor {
                 append(authors, text);
                 continue;
             }
+            // 脚注：首页标题区里混着的**小字**（作者单位的上标、邮箱、脚注）——
+            // 只有真正的脚注该单独成块（作者单位/邮箱要走 meta，标题区里它们更常见）。
+            // 判据取"主导字号明显小一档 + 页面下半部"，见 columnPlaced 的同一判据。
+            if (noteLine(ln, bodySize, pageHeight, bodyBottom)) {
+                flushHead(out, title, authors);
+                out.add(new Block("note", text, 0));
+                continue;
+            }
             int level = headingLevel(text, ln, bodySize);
             if (level > 0) {
                 flushHead(out, title, authors);
@@ -626,15 +973,150 @@ public class PdfLayoutExtractor {
             // （作者单位会挤进摘要首段）。判据按"像不像句子"来定。
             boolean prose = text.length() >= 120
                     || (text.length() >= 60 && SENTENCE_END.matcher(text).find());
-            double center = (ln.x0() + ln.x1()) / 2;
-            boolean centered = center > pageWidth * 0.40 && center < pageWidth * 0.60;
-            boolean metaFragment = (centered && ln.size() < bodySize * 1.02)
-                    || (text.length() < 60 && text.split("\\s+").length <= 6
-                        && !SENTENCE_END.matcher(text).find());
-            out.add(new Block(prose || !metaFragment ? "para" : "meta", text, 0));
+            out.add(new Block(prose || !isMetaFragment(ln, text, bodySize, pageWidth) ? "para" : "meta", text, 0));
         }
         flushHead(out, title, authors);
         return out;
+    }
+
+    /** 短碎片 + 居中：作者单位、邮箱、日期这类元信息（不是正文，但不该当脚注） */
+    private static boolean isMetaFragment(Line ln, String text, double bodySize, double pageWidth) {
+        double center = (ln.x0() + ln.x1()) / 2;
+        boolean centered = center > pageWidth * 0.40 && center < pageWidth * 0.60;
+        return (centered && ln.size() < bodySize * 1.02)
+                || (text.length() < 60 && text.split("\\s+").length <= 6
+                    && !SENTENCE_END.matcher(text).find());
+    }
+
+    /**
+     * 这一行是不是**脚注**。
+     *
+     * <p>判据一：主导字号比正文小一档（&lt;0.9 倍）**且**落在页面最下面 18%。
+     * 用主导字号而不是最大字号：脚注行里常混着上标（{@code 1The code…}），最大字号会被抬到正文字号，
+     * 判据直接失效（实测 DPR 论文的 {@code 1The code and trained models…}）。
+     *
+     * <p>判据二：行首带脚注标记（{@code ∗ / † / 1These}）—— 有些排版的脚注与正文**同号**，
+     * 光看字号分不出来（用户截图里的 {@code *These authors contributed equally.} 就是这样）。
+     *
+     * <p>位置这一刀必须同时用，而且不能松：正文的摘要/正文也可能比"全书正文字号"小一档
+     * （实测某篇论文摘要区 8pt、正文 9pt），只按字号判会把摘要整段误判成脚注。
+     */
+    /**
+     * 这一行是不是**脚注**。
+     *
+     * <p>两条判据，各自的"位置门槛"不同：
+     * <ul>
+     *   <li><b>小字</b>（见 {@link #smallLine}）且落在页面最下面 15% —— 论文脚注的主流形态；</li>
+     *   <li><b>带脚注标记</b>（{@code ∗ / † / ‡}）且落在下半页 —— 有些排版的脚注与正文**同号**
+     *       （用户截图里的 {@code *These authors contributed equally.} 就是这样），字号分不出来。</li>
+     * </ul>
+     *
+     * <p>标记那条可以放到 0.82：标记本身是强证据，而 87% 处的脚注
+     * （实测某篇论文首页的 {@code ∗These authors contributed equally.}）靠它才抓得住。
+     */
+    /**
+     * 这一行是不是**脚注**。
+     *
+     * <p>先定"页脚区"：{@code bodyBottom} 是这一栏**最后一行正文字号**的 y —— 脚注必然在它下面。
+     * 这一刀挡掉的是"正文中途的小字"：技术书里的代码示例/提示框字号比正文小一档，
+     * 排版上却夹在正文中间（实测某本中文讲义：正文 16pt，代码 12pt 却排在正文**下方**之后）。
+     *
+     * <p>然后再分两条：
+     * <ul>
+     *   <li><b>小字</b>（见 {@link #smallLine}）且落在页面最下面 15%；</li>
+     *   <li><b>带脚注标记</b>（{@code ∗ / † / ‡}）—— 有些排版的脚注与正文同号
+     *       （用户截图里的 {@code *These authors contributed equally.} 就是这样），字号分不出来。</li>
+     * </ul>
+     */
+    static boolean noteLine(Line ln, double bodySize, double pageHeight, double bodyBottom) {
+        if (ln.text().length() >= 400 || ln.y() <= bodyBottom + 0.5) {
+            return false;
+        }
+        double pct = ln.y() / pageHeight;
+        // 代码行**永远不是脚注**：实测某本中文技术书的代码示例字号比正文小一档，
+        // 而 looksLikeCode 认不出 Python 片段（"best_idx, best_score = None, -1e9"），
+        // 于是整段代码被当脚注收走。等宽字体占比是这里最可靠的证据。
+        if (monoish(ln) && !NOTE_MARKER.matcher(ln.text()).find()) {
+            return false;
+        }
+        return (smallLine(ln, bodySize) && pct > 0.85)
+                || (pct > 0.82 && (NOTE_SYMBOL.matcher(ln.text()).find()
+                    || (noteSizedLine(ln, bodySize) && NOTE_MARKER.matcher(ln.text()).find())));
+    }
+
+    /** 这一栏里**最后一行正文字号**的 y（脚注必然在它下面；找不到就是页脚区从页底开始） */
+    private static double bodyBottomOf(List<Line> lines, double bodySize, double pageHeight) {
+        double bottom = 0;
+        for (Line ln : lines) {
+            if (ln.domSize() > bodySize * 0.94
+                    && !(ln.y() > pageHeight * 0.82 && NOTE_SYMBOL.matcher(ln.text()).find())) {
+                bottom = Math.max(bottom, ln.y());
+            }
+        }
+        return bottom;
+    }
+
+    /**
+     * 行内的脚注部分从哪个字号算起（&le;0 表示这一行整行都不是脚注）。
+     *
+     * <p>论文的脚注常与正文**同一条基线**（PDFBox 于是把它们并进同一行），实测某篇论文首页第 87% 行是
+     * {@code ∗These authors contributed equally. real-world engineering resources, to evaluate task com-}：
+     * 左边 5/8pt 的脚注、右边 9pt 的正文。切不切开，脚注就会并进正文段落（用户报的就是这个）。
+     * 门槛取"小字判据的 0.9"（{@code 0.9 × 0.9 = 0.81} 倍正文），与 {@link #noteLine} 同一套口径。
+     */
+    private static double noteSplitBoundary(Line ln, double bodySize, double pageHeight) {
+        if (ln.text().length() >= 400) {
+            return 0;
+        }
+        double pct = ln.y() / pageHeight;
+        boolean note = (smallLine(ln, bodySize) && pct > 0.85)
+                || (pct > 0.82 && NOTE_SYMBOL.matcher(ln.text()).find());
+        return note ? 0.9 * bodySize : 0;
+    }
+
+    /**
+     * 去掉行首脚注标记："∗These authors contributed equally." → "These authors contributed equally."。
+     * <p>{@code numberedOk} 表示这一行已经确认是"小字脚注"（见 {@link #noteLine}）：
+     * 只有这时才允许把行首数字当标记（"1The code…"）；正文 "3D printing is amazing." 不能被吃掉 "3"。
+     */
+    static String stripNoteMarker(String text, boolean numberedOk) {
+        if (numberedOk) {
+            return stripNoteMarker(text);              // 小字脚注：编号标记（"1The code…"）也去掉
+        }
+        Matcher symbol = NOTE_SYMBOL.matcher(text.trim());
+        return symbol.find() ? text.trim().substring(symbol.end()).trim() : text;
+    }
+
+    /** 去掉行首脚注标记："∗These authors contributed equally." → "These authors contributed equally." */
+    static String stripNoteMarker(String text) {
+        String t = text.trim();
+        Matcher m = NOTE_MARKER.matcher(t);
+        return m.find() ? t.substring(m.end()).trim() : t;
+    }
+
+    /** 这一行是不是"小字"（比正文字号小一档）：数字型脚注标记要靠它才敢认 */
+    private static boolean monoish(Line ln) {
+        return ln.monoRatio() >= 0.4;
+    }
+
+    /**
+     * 这一行是不是"整行都小一档"。
+     *
+     * <p>门槛取 0.85 而不是 0.9：技术书/讲义里"正文 16pt + 提示框/代码 14pt"很常见，
+     * 0.9 会把整页提示框都判成脚注（实测某本 300 页的中文讲义）。0.85 仍然接得住论文脚注
+     * （实测 8pt 对 9pt、8pt 对 10pt 都在门槛之下）。
+     *
+     * <p>还要求最大字号也不超过正文：只按主导字号判会把"底部的正文行"拉进来
+     * （行里混着上标引用时主导字号被拉到 8pt、最大字号仍是正文的 10pt）。
+     */
+    private static boolean smallLine(Line ln, double bodySize) {
+        return ln.domSize() > 0 && ln.domSize() < bodySize * 0.85 && ln.size() <= bodySize * 1.02;
+    }
+
+    /** 带编号或已确认脚注的续行允许只小一档，仍排除正文大小与等宽代码。 */
+    private static boolean noteSizedLine(Line ln, double bodySize) {
+        return ln.domSize() > 0 && ln.domSize() < bodySize * 0.95
+                && ln.size() <= bodySize * 1.02 && !monoish(ln);
     }
 
     private static void append(StringBuilder sb, String text) {
@@ -662,13 +1144,12 @@ public class PdfLayoutExtractor {
      */
     private List<Placed> columnPlaced(Column column, double bodySize, int pageNo, double pageHeight,
                                       List<Figure> figures) {
+        double bodyBottom = column == null ? 0 : bodyBottomOf(column.lines(), bodySize, pageHeight);
         List<Placed> out = new ArrayList<>();
         if (column == null) {
             return out;
         }
-        StringBuilder para = new StringBuilder();
-        double paraY = 0;
-        boolean bullet = false;
+        Para para = new Para();
         double pitch = linePitch(column.lines());
         // 代码/数据段：连续的"代码样"行攒成**一个** code 块（不这样，一页 JSON 会变成二十个段落）
         StringBuilder code = new StringBuilder();
@@ -678,10 +1159,16 @@ public class PdfLayoutExtractor {
         StringBuilder rows = new StringBuilder();
         int rowLines = 0;
         double rowY = 0;
+        // 脚注：连续的小字/带标记行攒成**一个** note 块 —— 实测某篇论文首页的脚注折成两行
+        // （"1The code and trained models have been released at" + "https://github.com/…"），
+        // 一行一块会读成两条互不相干的注。
+        NoteBuffer note = new NoteBuffer();
+        boolean[] formulaLines = formulaLines(column.lines());
         Line prev = null;
         int figureAt = 0;
 
-        for (Line ln : column.lines()) {
+        for (int lineAt = 0; lineAt < column.lines().size(); lineAt++) {
+            Line ln = column.lines().get(lineAt);
             String text = ln.text();
             if (text.isEmpty()) {
                 continue;
@@ -689,13 +1176,48 @@ public class PdfLayoutExtractor {
             // 这一行之前的图：先落地（图也要按 y 排进阅读顺序）
             while (figureAt < figures.size() && figures.get(figureAt).y0() < ln.y()) {
                 Figure f = figures.get(figureAt++);
-                flushPlaced(out, para, bullet, paraY);
-                bullet = false;
+                flushAll(out, para, note);
                 flushCode(out, code, codeLines, codeY);
                 codeLines = 0;
                 flushRows(out, rows, rowLines, rowY);
                 rowLines = 0;
                 out.add(new Placed(figureBlock(pageNo, f), f.y0()));
+            }
+            // 脚注先于标题、列表和代码："* text" 与 "1 The ..." 也会命中那些形态规则。
+            boolean markerOnly = text.matches("\\d{1,2}");
+            Line next = lineAt + 1 < column.lines().size() ? column.lines().get(lineAt + 1) : null;
+            boolean separateMarker = markerOnly && next != null && ln.y() > bodyBottom + 0.5
+                    && ln.y() > pageHeight * 0.82 && noteSizedLine(ln, bodySize) && noteSizedLine(next, bodySize)
+                    && next.y() >= ln.y() - 0.5 && next.y() - ln.y() <= next.size() * 1.5
+                    && Math.abs(next.x0() - ln.x0()) <= next.size() * 2;
+            boolean noteContinuation = !markerOnly && noteSizedLine(ln, bodySize) && note.continues(ln);
+            if (((!markerOnly && noteLine(ln, bodySize, pageHeight, bodyBottom))
+                    || separateMarker || noteContinuation) && !formulaLines[lineAt]) {
+                flushPlaced(out, para, para.y);
+                flushCode(out, code, codeLines, codeY);
+                codeLines = 0;
+                flushRows(out, rows, rowLines, rowY);
+                rowLines = 0;
+                if (!note.continues(ln)) {
+                    flushNote(out, note);
+                }
+                note.add(ln);
+                prev = ln;
+                continue;
+            }
+            flushNote(out, note);
+            // 在正文拼接之前单独落公式，保留周围说明文字的段落边界。
+            if (formulaLines[lineAt]) {
+                flushPlaced(out, para, para.y);
+                flushCode(out, code, codeLines, codeY);
+                codeLines = 0;
+                flushRows(out, rows, rowLines, rowY);
+                rowLines = 0;
+                Para equation = new Para();
+                equation.add(ln, text, false);
+                out.add(new Placed(new Block("formula", text, 0, null, pageNo, equation.rect()), ln.y()));
+                prev = ln;
+                continue;
             }
             boolean rowishLine = rowish(text, ln, column);
             // 表格行结束：只要遇到一行"不像表格"的，就先把攒着的表格落地（这样下面所有分支都不用管它）
@@ -705,8 +1227,7 @@ public class PdfLayoutExtractor {
             }
             int level = headingLevel(text, ln, bodySize);
             if (level > 0) {
-                flushPlaced(out, para, bullet, paraY);
-                bullet = false;
+                flushAll(out, para, note);
                 flushCode(out, code, codeLines, codeY);
                 codeLines = 0;
                 out.add(new Placed(new Block("heading", text, level), ln.y()));
@@ -715,8 +1236,7 @@ public class PdfLayoutExtractor {
             }
             // 代码/数据行：等宽字体是字体级证据；不是等宽也能靠形态认（键值对、括号、注解、命令）
             if (ln.mono() || looksLikeCode(text)) {
-                flushPlaced(out, para, bullet, paraY);
-                bullet = false;
+                flushAll(out, para, note);
                 // 与原代码段隔了明显空行 → 当作另一段。判据同样要看**实际行距**：
                 // 代码区行距本来就比正文松，只按字号比会把每行都当成新的一段（一块 JSON 又碎成十几段）
                 double codeGap = Math.max(2.2 * Math.max(ln.size(), bodySize), 2.5 * pitch);
@@ -744,8 +1264,7 @@ public class PdfLayoutExtractor {
             // 表格行：短、无句末标点、不含汉字、以大写/数字/符号开头（"Model NQ TQA"、"Gold 44.9"）。
             // 先攒着，结束或成段时再决定是"一张表"还是"几个短段落"。
             if (rowishLine) {
-                flushPlaced(out, para, bullet, paraY);
-                bullet = false;
+                flushAll(out, para, note);
                 double rowGap = Math.max(2.2 * Math.max(ln.size(), bodySize), 2.5 * pitch);
                 if (rowLines > 0 && prev != null && ln.y() - prev.y() > rowGap) {
                     flushRows(out, rows, rowLines, rowY);
@@ -763,38 +1282,25 @@ public class PdfLayoutExtractor {
                 continue;
             }
             if (BULLET.matcher(text).find()) {
-                flushPlaced(out, para, bullet, paraY);
-                bullet = true;
-                paraY = ln.y();
-                para.append(BULLET.matcher(text).replaceFirst(""));
+                flushAll(out, para, note);
+                para.add(ln, BULLET.matcher(text).replaceFirst(""), true);
                 prev = ln;
                 continue;
             }
-            // 页脚/脚注：字号**明显**小一档（<0.88 倍正文）+ 挨着页面底部。**不管段落是否正在拼**都要切一刀 ——
-            // 论文底部的脚注常被当成上一段正文的续行，两三条脚注黏成一段（实测某篇论文首页：
-            // "∗Equal contribution 1The code and trained models have been released at …"）。
-            // 字号这一刀要够狠：正文最后几行也在页面底部，0.92 那种松阈值会把它们误判成脚注（实测踩过）。
+            // 页脚/脚注：主导字号**明显**小一档（<0.9 倍正文）+ 页面下半部，或行首带脚注标记（∗/†/1）。
+            // **不管段落是否正在拼**都要切一刀 —— 论文底部的脚注常被当成上一段正文的续行。
             // 类型单独给 `note`（而不是 meta）：脚注**左对齐**、作者单位**居中**，两者排版不是一回事。
-            if (ln.size() < bodySize * 0.88 && text.length() < 300 && ln.y() > pageHeight * 0.84) {
-                flushPlaced(out, para, bullet, paraY);
-                bullet = false;
-                out.add(new Placed(new Block("note", text, 0), ln.y()));
-                prev = ln;
-                continue;
+            if (!para.isEmpty() && prev != null && paragraphBreak(column, prev, ln, bodySize, pitch)) {
+                flushAll(out, para, note);
             }
-            if (para.length() > 0 && prev != null && paragraphBreak(column, prev, ln, bodySize, pitch)) {
-                flushPlaced(out, para, bullet, paraY);
-                bullet = false;
-            }
-            if (para.length() > 0) {
-                joinLine(para, prev, text);
+            if (!para.isEmpty()) {
+                joinLine(para, prev, ln, text);
             } else {
-                paraY = ln.y();
-                para.append(text);
+                para.add(ln, text, false);
             }
             prev = ln;
         }
-        flushPlaced(out, para, bullet, paraY);
+        flushAll(out, para, note);
         flushCode(out, code, codeLines, codeY);
         flushRows(out, rows, rowLines, rowY);
         // 栏目末尾剩下的图（正文比图短时会出现）
@@ -1014,6 +1520,193 @@ public class PdfLayoutExtractor {
     }
 
     /**
+     * 数学符号（公式行的形态证据）。
+     * <p>PDF 里没有"公式对象"：公式是散落在坐标上的一堆字形（上下标字号还不一样），
+     * 抽出来必然是 {@code (θ|q) R(q o … KL …)} 这种粘连的碎片。这里做不了 LaTeX 化，
+     * 能做的只有两件事：把公式行单独成块（不与正文段落混排）、按原样保留换行。
+     */
+    private static final Pattern MATH_GLYPH = Pattern.compile("[=+−±×÷∑∫√≤≥≈≠∈∀∃∂∇^_{}|<>]|[\\u0370-\\u03FF]");
+
+    /**
+     * **真公式才有的**符号：希腊字母、数学运算符、比较符、集合/微积分符号。
+     * <p>花括号不算数学证据；等号等运算符还须结合变量词与密度判断，模板另行排除。
+     */
+    private static final Pattern REAL_MATH =
+            Pattern.compile("[=+−±×÷∑∫√≤≥≈≠∈∀∃∂∇∞∅∼∝→←↔≪≫]|[\\u0370-\\u03FF]");
+
+    /** 模板/HTML 片段（{@code {{x}}}、{@code <END_EMAIL>}）：它们不是公式 */
+    private static final Pattern TEMPLATEISH = Pattern.compile("\\{\\{|\\}\\}|<[A-Za-z_/][A-Za-z0-9_]*>");
+    private static final Pattern LATIN_WORD = Pattern.compile("[A-Za-z]+");
+    private static final List<String> MATH_WORDS = List.of(
+            "argmax", "argmin", "sin", "cos", "tan", "log", "exp", "lim", "max", "min", "det", "mod", "sum", "sim");
+
+    /**
+     * 这一行像不像公式：短、不以句末标点结尾，而且**数学符号够密**。
+     * <p>紧凑的变量等式单独识别；其他行要求符号密度至少 13%，避免把带等号的说明句截走。
+     *
+     * <p>两条排除：**至少一个真数学符号**（{@link #REAL_MATH}，光靠花括号凑密度的模板不算），
+     * 以及**不是模板/HTML 片段**（{@link #TEMPLATEISH}）。
+     */
+    static boolean mathish(String text) {
+        String t = text.trim();
+        if (t.isEmpty() || t.length() > 120 || t.indexOf('\n') >= 0) {
+            return false;
+        }
+        if (t.split("\\s+").length > 14) {
+            return false;
+        }
+        if (TEMPLATEISH.matcher(t).find() || !REAL_MATH.matcher(t).find()) {
+            return false;
+        }
+        int math = (int) MATH_GLYPH.matcher(t).results().count();
+        boolean relation = t.matches(".*[=≤≥≈≠].*");
+        boolean compact = t.length() <= 55 && relation
+                && LATIN_WORD.matcher(t).results()
+                    .allMatch(m -> m.group().length() <= 2 || MATH_WORDS.contains(m.group().toLowerCase(Locale.ROOT)))
+                && t.codePoints().noneMatch(c -> c >= 0x2E80);
+        // 短的 ASCII 等式（x+y=z、E=mc^2）也需要保留；有正文词的句子仍走保守判据。
+        if (compact && math >= 1) {
+            return true;
+        }
+        return !SENTENCE_END.matcher(t).find() && math >= 3 && math * 100 >= t.length() * 13;
+    }
+
+    /** 上标脚注号不是整行的基线，按文字数量取中位数，避免续行间距被放大。 */
+    private static double baseline(List<Word> words) {
+        List<Word> sorted = new ArrayList<>(words);
+        sorted.sort(Comparator.comparingDouble(Word::y));
+        int half = (sorted.stream().mapToInt(w -> Math.max(1, w.text().length())).sum() + 1) / 2;
+        int accumulated = 0;
+        for (Word w : sorted) {
+            accumulated += Math.max(1, w.text().length());
+            if (accumulated >= half) {
+                return w.y();
+            }
+        }
+        return sorted.get(0).y();
+    }
+
+    /** 标记公式主行及紧邻的独立上下标碎行；按位置约束，避免把说明文字收进公式。 */
+    private static boolean[] formulaLines(List<Line> lines) {
+        boolean[] result = new boolean[lines.size()];
+        for (int i = 0; i < lines.size(); i++) {
+            Line main = lines.get(i);
+            if (main.mono() || !mathish(main.text())) {
+                continue;
+            }
+            result[i] = true;
+            Line anchor = main;
+            for (int direction : new int[]{-1, 1}) {
+                for (int step = 1; step <= 3; step++) {
+                    int j = i + step * direction;
+                    if (j < 0 || j >= lines.size() || !scriptFragment(lines.get(j), anchor)) {
+                        break; // 不能越过正文/表格，把远处的单字符收成一张公式图。
+                    }
+                    result[j] = true;
+                    Line fragment = lines.get(j);
+                    anchor = new Line(Math.min(anchor.x0(), fragment.x0()), Math.max(anchor.x1(), fragment.x1()),
+                            main.y(), main.size(), main.domSize(), false, false, 0, main.text());
+                }
+            }
+        }
+        return result;
+    }
+
+    private static boolean scriptFragment(Line fragment, Line main) {
+        String t = fragment.text();
+        boolean notation = REAL_MATH.matcher(t).find()
+                || LATIN_WORD.matcher(t).results().anyMatch(m -> MATH_WORDS.contains(m.group().toLowerCase(Locale.ROOT)))
+                || t.matches(".*\\(\\d{1,3}\\)$");
+        return !fragment.mono() && fragment.size() <= main.size() * 1.2
+                && (fragment.size() <= main.size() * 0.8 || notation)
+                && t.length() <= 60 && t.split("\\s+").length <= 12
+                && !SENTENCE_END.matcher(t).find() && !TEMPLATEISH.matcher(t).find()
+                && !CODE_LINE.matcher(t).find() && t.codePoints().noneMatch(c -> c >= 0x2E80)
+                && LATIN_WORD.matcher(t).results().allMatch(m -> m.group().length() <= 2
+                    || MATH_WORDS.contains(m.group().toLowerCase(Locale.ROOT)))
+                && Math.abs(fragment.y() - main.y()) <= main.size() * 1.8
+                && fragment.x0() <= main.x1() + main.size()
+                && fragment.x1() >= main.x0() - main.size();
+    }
+
+    /**
+     * "像公式"的段落 → `formula` 块（与 code/table 一样按行保留、不进翻译链路）。
+     *
+     * <p>**连续 ≥2 行**的公式行会合成一块（多行公式、公式组），单独一行的公式行也**单独成块** ——
+     * 它带着自己的几何，界面就能把原 PDF 那块渲染出来贴上去（公式的排版与上下标只有原图是准的，
+     * 见 docs/pdf-layout-design.md §5.3）。单行**不成块**的只有一种情况：它本来就在正文段落里
+     * （{@code isMath} 只认整段都像公式的段落，所以不会把正文里带公式的半句话割出来）。
+     */
+    private static List<Block> mergeFormulaRuns(List<Placed> placed, int pageNo) {
+        List<Block> out = new ArrayList<>();
+        int i = 0;
+        while (i < placed.size()) {
+            if (!isMath(placed.get(i).block())) {
+                out.add(placed.get(i).block());
+                i++;
+                continue;
+            }
+            int j = i;
+            double[] runRect = placed.get(i).block().rect();
+            while (j < placed.size() && isMath(placed.get(j).block())
+                    && (j == i || nearbyFormula(runRect, placed.get(j).block().rect())
+                        || connectedByFollowingFormula(placed, j, runRect))) {
+                runRect = unionRect(runRect, placed.get(j).block().rect());
+                j++;
+            }
+            StringBuilder sb = new StringBuilder();
+            double[] union = null;
+            for (int k = i; k < j; k++) {
+                if (sb.length() > 0) {
+                    sb.append('\n');
+                }
+                Block b = placed.get(k).block();
+                sb.append(b.text().trim());
+                union = unionRect(union, b.rect());
+            }
+            out.add(new Block("formula", sb.toString(), 0, null, pageNo, union));
+            i = j;
+        }
+        return out;
+    }
+
+    /** 已识别的公式块，或整段文本都像公式的段落。 */
+    private static boolean isMath(Block b) {
+        return "formula".equals(b.type()) || ("para".equals(b.type()) && mathish(b.text()));
+    }
+
+    /** 两个上标可能横向分离，但紧接的公式主行同时连接它们，不能提前截断其中一个。 */
+    private static boolean connectedByFollowingFormula(List<Placed> placed, int at, double[] runRect) {
+        if (at + 1 >= placed.size() || !isMath(placed.get(at + 1).block())) {
+            return false;
+        }
+        double[] main = placed.get(at + 1).block().rect();
+        return nearbyFormula(runRect, main) && nearbyFormula(placed.get(at).block().rect(), main);
+    }
+
+    /** 只合并版面上相邻且水平重叠的公式；隔很远的两式不能裁成一张包含正文的大图。 */
+    private static boolean nearbyFormula(double[] x, double[] y) {
+        if (x == null || y == null) {
+            return false;
+        }
+        double height = Math.max(x[3] - x[1], y[3] - y[1]);
+        return y[1] >= x[1] - height && y[1] - x[3] <= height * 1.2
+                && Math.min(x[2], y[2]) > Math.max(x[0], y[0]);
+    }
+
+    /** 两个矩形（x0,y0,x1,y1）的并集；任一为空就返回另一个 */
+    private static double[] unionRect(double[] a, double[] b) {
+        if (b == null) {
+            return a;
+        }
+        if (a == null) {
+            return new double[]{b[0], b[1], b[2], b[3]};
+        }
+        return new double[]{Math.min(a[0], b[0]), Math.min(a[1], b[1]),
+                Math.max(a[2], b[2]), Math.max(a[3], b[3])};
+    }
+
+    /**
      * 表格 / 图表区域合并。
      * <p>判据：连续 ≥3 个"短、且不像完整句子"的段落块。这类块在真实文档里几乎只有两种来源 ——
      * 表格单元格（"Doc 3"、"Task Input"）与图里的刻度/图例（"0"、"60 68.8 72.3"）。
@@ -1060,6 +1753,10 @@ public class PdfLayoutExtractor {
         }
         // 完整句子（有句末标点）或列表项不算单元格
         if (SENTENCE_END.matcher(t).find() || BULLET.matcher(t).find()) {
+            return false;
+        }
+        // 含数学符号的短行是公式/符号说明，不是表格单元格（公式另有 formula 块，见 mergeFormulaRuns）
+        if (MATH_GLYPH.matcher(t).find()) {
             return false;
         }
         // 纯刻度数字，或很短的标签（表格单元格/图例）
@@ -1118,17 +1815,52 @@ public class PdfLayoutExtractor {
     }
 
     /** 行与行拼接：连字符续行要吃掉连字符，否则满篇 "exe-cution" */
-    private void joinLine(StringBuilder para, Line prev, String next) {
-        if (prev != null && para.length() > 1 && para.charAt(para.length() - 1) == '-'
-                && Character.isLetter(para.charAt(para.length() - 2)) && isWordChar(next)) {
-            para.setLength(para.length() - 1);
-            para.append(next);
+    private void joinLine(Para para, Line prev, Line cur, String next) {
+        StringBuilder sb = para.text;
+        if (prev != null && sb.length() > 1 && sb.charAt(sb.length() - 1) == '-'
+                && Character.isLetter(sb.charAt(sb.length() - 2)) && isWordChar(next)) {
+            sb.setLength(sb.length() - 1);
+            para.extend(cur, next);
             return;
         }
         if (prev != null && needsSpace(prev.text(), next)) {
-            para.append(' ');
+            sb.append(' ');
         }
-        para.append(next);
+        para.extend(cur, next);
+    }
+
+    /** 用标记、行间距和悬挂缩进区分脚注续行与另一条脚注。 */
+    private static final class NoteBuffer {
+        private final StringBuilder text = new StringBuilder();
+        private Line first;
+        private Line tail;
+
+        boolean continues(Line ln) {
+            return tail != null && !NOTE_MARKER.matcher(ln.text()).find()
+                    && ln.y() - tail.y() >= -0.5
+                    && ln.y() - tail.y() <= Math.max(ln.size(), tail.size()) * 2
+                    && Math.abs(ln.x0() - first.x0()) <= Math.max(ln.size(), tail.size()) * 2;
+        }
+
+        void add(Line ln) {
+            if (text.length() == 0) {
+                first = ln;
+            } else if (text.length() > 1 && text.charAt(text.length() - 1) == '-'
+                    && Character.isLetter(text.charAt(text.length() - 2)) && isWordChar(ln.text())) {
+                text.setLength(text.length() - 1);
+            } else if (needsSpace(text.toString(), ln.text())) {
+                text.append(' ');
+            }
+            // 保留标记：读者需要区分脚注编号，并与原文中的上标对应。
+            text.append(ln.text());
+            tail = ln;
+        }
+
+        void clear() {
+            text.setLength(0);
+            first = null;
+            tail = null;
+        }
     }
 
     private static boolean needsSpace(String prevText, String next) {
@@ -1145,11 +1877,31 @@ public class PdfLayoutExtractor {
         return !s.isEmpty() && Character.isLetter(s.charAt(0));
     }
 
-    private static void flushPlaced(List<Placed> out, StringBuilder para, boolean bullet, double y) {
-        String text = para.toString().trim();
-        para.setLength(0);
+    /** 段落落地（不含脚注累加器：表格/行内清洗这些地方用得到） */
+    private static void flushPlaced(List<Placed> out, Para para, double y) {
+        String text = para.text.toString().trim();
+        double[] rect = para.rect();
+        boolean bullet = para.bullet;
+        para.clear();
         if (!text.isEmpty()) {
-            out.add(new Placed(new Block(bullet ? "bullet" : "para", tidyInline(text), 0), y));
+            out.add(new Placed(new Block(bullet ? "bullet" : "para", tidyInline(text), 0, null, null, rect), y));
+        }
+    }
+
+    /**
+     * 段落落地，顺带清空脚注累加器 —— 段落与脚注是互相打断的两种流，
+     * 每个分支都要把攒着的脚注先落地（否则最后一条脚注会被后一行带跑）。
+     */
+    private static void flushAll(List<Placed> out, Para para, NoteBuffer note) {
+        flushNote(out, note);
+        flushPlaced(out, para, para.y);
+    }
+
+    /** 攒着的脚注落地（清空累加器） */
+    private static void flushNote(List<Placed> out, NoteBuffer note) {
+        if (note.text.length() > 0) {
+            out.add(new Placed(new Block("note", tidyInline(note.text.toString()), 0), note.first.y()));
+            note.clear();
         }
     }
 
@@ -1297,6 +2049,9 @@ public class PdfLayoutExtractor {
         Map<String, Integer> freq = new HashMap<>();
         for (PageLayout p : pages) {
             for (Block b : p.blocks()) {
+                if ("formula".equals(b.type()) || "note".equals(b.type())) {
+                    continue;
+                }
                 String key = furnitureKey(b.text());
                 if (key != null) {
                     freq.merge(key, 1, Integer::sum);
@@ -1310,6 +2065,10 @@ public class PdfLayoutExtractor {
             List<Block> keep = new ArrayList<>();
             for (int i = 0; i < all.size(); i++) {
                 Block b = all.get(i);
+                if ("formula".equals(b.type()) || "note".equals(b.type())) {
+                    keep.add(b);
+                    continue;
+                }
                 if (ARXIV_STAMP.matcher(b.text().trim()).find()) {
                     continue;                                    // arXiv 页边标记（每页都有，且常与页码粘连）
                 }
@@ -1387,6 +2146,12 @@ public class PdfLayoutExtractor {
             StringBuilder sb = new StringBuilder();
             for (TextPosition p : positions) {
                 String u = p.getUnicode();
+                if (placeholder(u)) {
+                    String fixed = recoverGlyph(p);          // 数学字体：用字形名换回真符号
+                    if (fixed != null) {
+                        u = fixed;
+                    }
+                }
                 if (u != null) {
                     sb.append(u);
                 }
@@ -1397,9 +2162,18 @@ public class PdfLayoutExtractor {
                 return;
             }
             TextPosition first = positions.get(0);
-            TextPosition last = positions.get(positions.size() - 1);
-            cur.add(new Word(first.getXDirAdj(), last.getXDirAdj() + last.getWidthDirAdj(),
-                    first.getYDirAdj(), fontSize(first), isBold(first), spacePending, isMono(first), word));
+            double x0 = Double.MAX_VALUE, x1 = -Double.MAX_VALUE;
+            double top = Double.MAX_VALUE, bottom = -Double.MAX_VALUE, size = 0;
+            for (TextPosition p : positions) {
+                double s = Math.max(1, fontSize(p));
+                x0 = Math.min(x0, p.getXDirAdj());
+                x1 = Math.max(x1, p.getXDirAdj() + p.getWidthDirAdj());
+                top = Math.min(top, p.getYDirAdj() - Math.max(p.getHeightDir(), s * 0.9));
+                bottom = Math.max(bottom, p.getYDirAdj() + s * 0.3);
+                size = Math.max(size, s);
+            }
+            cur.add(new Word(x0, x1, first.getYDirAdj(), size, isBold(first), spacePending,
+                    isMono(first), word, top, bottom));
             spacePending = false;
         }
 

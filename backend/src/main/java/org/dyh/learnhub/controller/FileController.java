@@ -142,8 +142,15 @@ public class FileController {
     @GetMapping("/{id}/page-image")
     public ResponseEntity<byte[]> pageImage(@PathVariable Long id,
                                             @RequestParam int page,
-                                            @RequestParam int idx) {
-        byte[] png = fileStorageService.pageImage(id, page, idx);
+                                            @RequestParam(required = false) Integer idx,
+                                            @RequestParam(required = false) Double x0,
+                                            @RequestParam(required = false) Double y0,
+                                            @RequestParam(required = false) Double x1,
+                                            @RequestParam(required = false) Double y1) {
+        // 两种取法：idx（插图，按 CTM 包围盒）与 x0/y0/x1/y1（公式块，按还原出的几何）
+        byte[] png = (x0 != null && y0 != null && x1 != null && y1 != null)
+                ? fileStorageService.pageImageRect(id, page, x0, y0, x1, y1)
+                : fileStorageService.pageImage(id, page, idx == null ? 0 : idx);
         return ResponseEntity.ok()
                 .contentType(MediaType.IMAGE_PNG)
                 .header(HttpHeaders.CACHE_CONTROL, "public, max-age=86400")
