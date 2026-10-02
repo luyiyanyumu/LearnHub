@@ -134,6 +134,14 @@ public class KgGraphService {
         if (!EntityLinker.plausible(headName) || !EntityLinker.plausible(tailName)) {
             return false;
         }
+        // 图谱节点准入规则：命令行片段/选项名/句子碎片不是概念，整条三元组丢弃，
+        // 否则它们会以节点的形式留在图里（清理前 135 个节点里有 23 个是
+        // docker ps -a / --profile 这类垃圾）。
+        // 注意：只管**抽取路径**；人工手动加的概念不走这里，不该被拦。
+        if (!admissibleConceptName(headName) || !admissibleConceptName(tailName)) {
+            log.debug("丢弃非概念节点：{} -{}-> {}", headName, relationRaw, tailName);
+            return false;
+        }
         // 头尾归一化后相同 = 自环，多半是模型抽错了
         if (EntityLinker.same(headName, tailName)) {
             return false;
@@ -145,6 +153,52 @@ public class KgGraphService {
             return false;
         }
         return upsertTripleById(headId, rel, tailId, evidence, sources, weight, origin, derivedFrom, model);
+    }
+
+    /**
+     * 图谱节点准入规则（评估报告"重新设定规则"，用户已确认）。
+     *
+     * <p>概念 = 可被独立命名、可被再次提及、可被追问"它是什么"的实体（技术/框架/协议/
+     * 工具/语言特性/模式/算法/指标/项目名）。反面：一次具体操作、一段命令行、一句陈述、
+     * 一个文档标题。
+     *
+     * <p>规则先拿清理前的 135 个存量节点验证过误伤率：R1（选项/参数）23 条**零误杀**；
+     * R3 最初用裸的「的/了」会误杀 `IoC 的实现方式`、`JDBC 的封装` 这类合法的
+     * "X 的 Y"概念名，已收窄为"动词开头 + 一个/怎么/如何/重新"；
+     * R5 的长度上限对**不含空格的纯 ASCII 标识符豁免**
+     * （`AutoConfigurationImportSelector` 是真实类名，30 字符）。
+     *
+     * <p>⚠️ R1 与清理时用的 SQL 相比**收紧了**：清理脚本用的是裸的 `-[A-Za-z]`，
+     * 那会误杀 `Flow-GRPO` 这类合法的连字符概念名（当前图里恰好没有这种节点，
+     * 属于侥幸）。这里改成"以 - 开头 / 含 ` --` / **空格后跟 -**"，
+     * 连字符两侧都是词字符的名字（Flow-GRPO）可以存活。
+     */
+    static boolean admissibleConceptName(String name) {
+        if (name == null) {
+            return false;
+        }
+        String n = name.trim();
+        if (n.isEmpty()) {
+            return false;
+        }
+        // R6：至少含一个字母或汉字（排除纯符号、纯数字）
+        if (!n.matches("(?s).*[A-Za-z\\u4e00-\\u9fa5].*")) {
+            return false;
+        }
+        // R1：选项 / 开关 / 带参数的命令行
+        if (n.startsWith("-") || n.contains("--") || n.matches("(?s).*\\s-[A-Za-z].*")) {
+            return false;
+        }
+        // R3（收窄）：动词开头，或口语化描述
+        if (n.matches("^(修改|打印|生成|删除|查看|运行|添加|获取|设置|创建|安装|配置|使用|执行).*")
+                || n.contains("一个") || n.contains("怎么") || n.contains("如何") || n.contains("重新")) {
+            return false;
+        }
+        // R5：长度上限 24；不含空格的纯 ASCII 标识符（类名/API 名）豁免
+        if (!n.matches("[A-Za-z0-9_$.]+") && n.length() > 24) {
+            return false;
+        }
+        return true;
     }
 
     /** 按 id 写三元组（推导结果走这里，不会顺带创建节点） */
