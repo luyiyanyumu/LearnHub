@@ -141,6 +141,16 @@ public class TripleExtractor {
                     rejectedShape++;
                     continue;
                 }
+                // 实测最常见的关系类型错误：把"依赖 / 基于"抽成"属于"。
+                // 证据原话「Spring 是基于 Java 的，自然依赖于 JVM」被抽成 Spring-属于→JVM，
+                // 再经传递闭包放大成 Spring-属于→JRE（评估报告 P0-D）。
+                // 这是**词面启发式**，只在"证据里有依赖词、且没有组成词"时才改判，避免误伤。
+                if (("part_of".equals(canon) || "is_a".equals(canon))
+                        && StringUtils.hasText(evidence)
+                        && KgOntology.looksLikeDependency(evidence)
+                        && !KgOntology.looksLikeComposition(evidence)) {
+                    canon = "prerequisite";
+                }
                 // 证据句必须真的在素材里出现过（防编造）：只做宽松包含判断，标点差异不算。
                 // 未核对的三元组**不丢**（模型常改写证据而非原样抄，实测 #97 的原话在素材里但引用被改写），
                 // 但必须降权：以前一律给 0.9，"有没有原文支持"在数据上完全不可区分（评估报告 P0-D）。

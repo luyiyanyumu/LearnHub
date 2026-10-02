@@ -152,4 +152,31 @@ public final class KgOntology {
         }
         return sb.toString();
     }
+
+    /**
+     * 证据读起来像"依赖 / 基于 / 运行在"（而不是"属于 / 组成部分"）。
+     *
+     * <p>用途：实测最常见的关系类型错误是把"依赖"抽成"属于"——
+     * 证据原话「Spring 是基于 Java 的，自然依赖于 JVM」被抽成 {@code Spring -属于→ JVM}，
+     * 再经传递闭包放大成 {@code Spring -属于→ JRE}（评估报告 P0-D）。
+     *
+     * <p><b>这是词面启发式，不是语义判定</b>：证据里同时出现"依赖…的一部分"时可能误伤，
+     * 所以调用方必须配合 {@link #looksLikeComposition} 一起判断（有依赖词且**无**组成词才改判）。
+     */
+    public static boolean looksLikeDependency(String text) {
+        String t = text == null ? "" : text;
+        return t.contains("依赖") || t.contains("基于") || t.contains("运行在")
+                || t.contains("需要") || t.contains("才能");
+    }
+
+    /**
+     * 证据读起来像"组成 / 归属"（才配得上 {@code part_of} / {@code is_a}）。
+     *
+     * @see #looksLikeDependency
+     */
+    public static boolean looksLikeComposition(String text) {
+        String t = text == null ? "" : text;
+        return t.contains("属于") || t.contains("一部分") || t.contains("组成部分")
+                || t.contains("包含") || t.contains("一种") || t.contains("环节") || t.contains("子类");
+    }
 }
