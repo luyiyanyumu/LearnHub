@@ -189,8 +189,12 @@ public class KgGraphService {
         if (n.startsWith("-") || n.contains("--") || n.matches("(?s).*\\s-[A-Za-z].*")) {
             return false;
         }
-        // R3（收窄）：动词开头，或口语化描述
-        if (n.matches("^(修改|打印|生成|删除|查看|运行|添加|获取|设置|创建|安装|配置|使用|执行).*")
+        // R3（收窄）：动词开头，或口语化描述。
+        // ⚠️ 只列**名动不同形**的动词 —— 「配置/设置/运行/安装」是名动同形词
+        // （to configure / configuration），会把「配置叠加顺序」这种名词性概念误杀
+        // （实测：这条确实在清理中被误删过，已从备份恢复回图）。
+        // 宁可漏收一点垃圾，也不能误杀真实概念。
+        if (n.matches("^(修改|打印|生成|删除|查看|添加|获取|创建|使用|执行).*")
                 || n.contains("一个") || n.contains("怎么") || n.contains("如何") || n.contains("重新")) {
             return false;
         }
