@@ -37,6 +37,8 @@ const props = defineProps({
   /** 单段翻译上限（与后端一致，超了按钮直接禁用，免得点了没反应） */
   maxChars: { type: Number, default: 4000 },
 })
+const emit = defineEmits(['open-original'])
+const failedFormulaImages = ref(new Set())
 
 const translateError = ref('')
 /** 译文缓存：key = 页码:块序号（跨页唯一，翻回来不用重翻） */
@@ -60,6 +62,19 @@ function keyOf(page, index) {
   return `${page}:${index}`
 }
 
+function contentBlocks(page) {
+  return (page.blocks || []).map((block, index) => ({ block, index }))
+    .filter(({ block }) => block.type !== 'note')
+}
+
+function pageNotes(page) {
+  return (page.blocks || []).filter((block) => block.type === 'note')
+}
+
+function formulaImageFailed(page, index) {
+  failedFormulaImages.value = new Set([...failedFormulaImages.value, keyOf(page, index)])
+}
+
 function tooLong(block) {
   return (block.text || '').length > props.maxChars
 }
@@ -71,6 +86,19 @@ function tooLong(block) {
 function figureUrl(block) {
   const [page, idx] = String(block.src || '').split('-')
   return `/api/files/${props.fileId}/page-image?page=${page}&idx=${idx}`
+}
+
+/**
+ * 公式块的图：按**几何**裁原 PDF 那一块（pt，左上角原点、y 向下）。
+ * 后端渲染一页 150dpi 再裁一刀，并按坐标缓存，滚动不会重复渲染。
+ */
+function formulaUrl(block) {
+  const [x0, y0, x1, y1] = block.rect
+  const q = new URLSearchParams({
+    page: String(block.page),
+    x0: String(x0), y0: String(y0), x1: String(x1), y1: String(y1),
+  })
+  return `/api/files/${props.fileId}/page-image?${q}`
 }
 
 /** 前 n 个可翻译段（"翻译前 5 段"用） */
@@ -138,6 +166,10 @@ async function copyAll() {
 watch(() => props.targetLang, () => {
   translations.value = {}
 })
+watch([() => props.fileId, () => props.pages], () => {
+  failedFormulaImages.value = new Set()
+  translations.value = {}
+})
 </script>
 
 <template>
@@ -168,18 +200,38 @@ watch(() => props.targetLang, () => {
         <div class="doc-page-sep">
           <span>第 {{ pg.page }} 页<template v-if="pg.columns > 1"> · {{ pg.columns }} 栏</template></span>
         </div>
-        <template v-for="(b, i) in pg.blocks" :key="i">
+        <template v-for="{ block: b, index: i } in contentBlocks(pg)" :key="i">
           <h2 v-if="b.type === 'title'" class="doc-title">{{ b.text }}</h2>
           <p v-else-if="b.type === 'authors'" class="doc-authors">{{ b.text }}</p>
           <p v-else-if="b.type === 'meta'" class="doc-meta">{{ b.text }}</p>
-          <!-- 脚注：小字、左对齐。**不并进正文段落**，也不给「译」按钮（一条脚注半句话，翻了没意义） -->
-          <p v-else-if="b.type === 'note'" class="doc-note">{{ b.text }}</p>
           <h3 v-else-if="b.type === 'heading'" class="doc-heading" :class="'doc-lv' + (b.level || 1)">
             {{ b.text }}
           </h3>
           <!-- 代码 / 表格：按"一行一行"原样渲染，不参与翻译（翻代码没有意义，还会把缩进搅乱） -->
           <pre v-else-if="b.type === 'code'" class="doc-code">{{ b.text }}</pre>
           <pre v-else-if="b.type === 'table'" class="doc-table">{{ b.text }}</pre>
+          <!-- 公式：PDF 里公式是散落在坐标上的字形（上下标字号都不一样），抽出来必然是碎片。
+               这里**不做 LaTeX 还原**：把原 PDF 那块按几何渲染出来贴上去 —— 排版与上下标只有原图是准的。
+               下面再附一行抽出来的文本（读不出公式时至少能复制/搜索）。图裁不出来就只有文本 -->
+          <figure v-else-if="b.type === 'formula'" class="doc-formula-block">
+            <img
+              v-if="b.rect && b.page && !failedFormulaImages.has(keyOf(pg.page, i))"
+              class="doc-formula-img"
+              :src="formulaUrl(b)"
+              alt="公式（原 PDF 渲染）"
+              loading="lazy"
+              decoding="async"
+              @error="formulaImageFailed(pg.page, i)"
+            />
+            <div class="doc-formula-actions">
+              <span v-if="!b.rect || failedFormulaImages.has(keyOf(pg.page, i))" class="reader-hint">公式预览不可用</span>
+              <button type="button" class="reader-btn" @click="emit('open-original', b.page || pg.page)">查看原文</button>
+            </div>
+            <details class="doc-formula-source" :open="!b.rect || failedFormulaImages.has(keyOf(pg.page, i))">
+              <summary>抽取文本（可复制）</summary>
+              <pre class="doc-formula">{{ b.text }}</pre>
+            </details>
+          </figure>
           <!-- 插图：直接把原 PDF 的那块图裁出来贴在这里。**不识别**图里的文字 ——
                图表里的刻度/流程框抽成文字只会变成一堆散落的碎片，看图反而准 -->
           <figure v-else-if="b.type === 'figure' && b.src" class="doc-figure">
@@ -206,6 +258,13 @@ watch(() => props.targetLang, () => {
             </div>
           </div>
         </template>
+        <aside v-if="pageNotes(pg).length" class="doc-notes" aria-label="本页脚注">
+          <div class="doc-notes-head">
+            <span>本页脚注</span>
+            <button type="button" class="reader-btn" @click="emit('open-original', pg.page)">查看原文</button>
+          </div>
+          <p v-for="(note, index) in pageNotes(pg)" :key="index" class="doc-note">{{ note.text }}</p>
+        </aside>
       </article>
       <p v-if="!pages.length" class="reader-hint doc-empty">（这份资料没有还原出正文）</p>
     </div>
@@ -299,10 +358,36 @@ watch(() => props.targetLang, () => {
 .doc-note {
   margin: 4px 0 2px;
   padding-top: 6px;
-  border-top: 1px solid var(--app-border-weak);
   font-size: 12px;
   line-height: 1.75;
   color: var(--app-text-3);
+}
+
+.doc-notes {
+  margin-top: 24px;
+  padding-top: 10px;
+  border-top: 1px solid var(--app-border);
+}
+
+.doc-notes-head,
+.doc-formula-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--app-text-3);
+}
+
+.doc-formula-actions {
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+.doc-formula-source > summary {
+  cursor: pointer;
+  color: var(--app-text-3);
+  font-size: 12px;
 }
 
 .doc-heading {
@@ -396,6 +481,36 @@ watch(() => props.targetLang, () => {
 .doc-table {
   font-size: 13px;
   letter-spacing: 0.02em;
+}
+
+/* 公式块：把原 PDF 那块渲染出来贴上去（排版与上下标只有原图是准的），
+   下面附一行抽出来的文本（可复制/可搜索）。**不进翻译链路** —— 公式翻译没有意义 */
+.doc-formula-block {
+  margin: 12px 0;
+}
+
+.doc-formula-img {
+  display: block;
+  max-width: 100%;
+  margin: 0 auto;
+  border: 1px solid var(--app-border-weak);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.doc-formula {
+  margin: 6px 0 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--app-border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--app-text-1) 3%, transparent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+  color: var(--app-text-3);
 }
 
 /* 插图：居中、限宽，点开原尺寸（读者想看清细节时不会因为缩略而看不清） */

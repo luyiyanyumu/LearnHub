@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { categoryApi, fileApi, saveBlob } from '../api'
 import PdfReader from '../components/PdfReader.vue'
@@ -88,6 +88,7 @@ async function onFileChosen(e) {
  */
 const reader = ref(null)
 const readerTab = ref('doc')
+const pdfReader = ref(null)
 const readerText = ref('')
 const readerStatus = ref('')
 const readerError = ref('')
@@ -124,6 +125,12 @@ async function ensureLayout() {
 function switchReaderTab(tab) {
   readerTab.value = tab
   if (tab === 'text') ensureLayout()
+}
+
+async function openOriginalPage(page) {
+  readerTab.value = 'doc'
+  await nextTick()
+  pdfReader.value?.jump(page)
 }
 
 /** 能交给浏览器原生渲染的类型（iframe/img/video） */
@@ -475,6 +482,7 @@ onBeforeUnmount(() => {
           <!-- 自己渲染（pdf.js 画到 canvas）：页码/缩放/翻页/适宽都由我们控制，
                不用浏览器内置查看器 —— 那个工具栏拿不到、样式进不去、一压缩就没法看 -->
           <PdfReader
+            ref="pdfReader"
             v-if="docKind === 'pdf'"
             :key="reader.id"
             :file-id="reader.id"
@@ -512,6 +520,7 @@ onBeforeUnmount(() => {
             :page-count="readerLayout.pageCount"
             :target-lang="targetLang"
             :max-chars="transCaps.maxChars"
+            @open-original="openOriginalPage"
           />
 
           <!-- 兜底：检索层那份纯文本，按段落读、逐段翻译 -->

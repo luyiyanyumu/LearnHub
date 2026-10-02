@@ -60,6 +60,7 @@ let renderTask = null
 let resizeObserver = null
 let io = null
 let saveTimer = null
+let pendingJump = null
 
 const displayScale = computed(() => scale.value)
 const pageLabel = computed(() => `${pageNo.value} / ${totalPages.value || '–'}`)
@@ -77,7 +78,8 @@ async function open() {
     doc = await pdfjsLib.getDocument({ url: props.src, withCredentials: false }).promise
     totalPages.value = doc.numPages
     // 恢复上次位置（页码越界就落回第 1 页）
-    const initPage = Number(props.initial?.readPage || 1)
+    const initPage = Number(pendingJump ?? props.initial?.readPage ?? 1)
+    pendingJump = null
     const initScale = Number(props.initial?.readScale || 0)
     const initMode = props.initial?.readMode
     pageNo.value = Math.min(Math.max(1, initPage), totalPages.value || 1)
@@ -96,6 +98,11 @@ async function open() {
     error.value = 'PDF 加载失败：' + (e?.message || e)
   } finally {
     loading.value = false
+    if (pendingJump !== null && doc && !error.value) {
+      const requestedPage = pendingJump
+      pendingJump = null
+      jump(requestedPage)
+    }
   }
 }
 
@@ -269,6 +276,10 @@ function go(delta) {
 function jump(p) {
   const n = Number(p)
   if (!Number.isFinite(n)) return
+  if (loading.value) {
+    pendingJump = n
+    return
+  }
   pageNo.value = Math.min(Math.max(1, Math.round(n)), totalPages.value || 1)
   render()
 }
@@ -395,6 +406,7 @@ function onKey(e) {
 }
 
 watch(() => props.src, open)
+defineExpose({ jump })
 onBeforeUnmount(() => {
   if (renderTask) { try { renderTask.cancel() } catch (e) { /* ignore */ } }
   if (resizeObserver) resizeObserver.disconnect()
