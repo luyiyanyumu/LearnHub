@@ -46,6 +46,30 @@ public interface KbChunkMapper extends BaseMapper<KbChunk> {
     String indexedAt();
 
     /**
+     * 全部来源的"最后修改时间"，用于**实体页的过期判定**（评估报告 P1-2）。
+     *
+     * <p>刻意一次查回三类来源：实体页有几十个，读侧在内存里比对即可，
+     * 不会变成"每页一次查询"。
+     *
+     * <p>口径与实体编译的取材范围（{@code EntityCompileService.sourceDocs()}）保持一致：
+     * 笔记/速查卡要求正文非空、资料要求 {@code text_status='ok'} —— 不再满足这个条件的来源
+     * 等于"已经不能作为素材"，查不到就会被判成来源不存在 → 相关页标脏。
+     *
+     * <p>资料的"修改时间"沿用 {@link #sourceLatestChange} 的写法
+     * {@code GREATEST(created_at, extracted_at)}：file_info 的 created_at 在重新抽取正文时不变，
+     * 只比它会把"重新抽过正文"漏掉。
+     *
+     * @return 每行 {t=note/quick_ref/file, id=来源 id, ts=最后修改时间}
+     */
+    @Select("SELECT 'note' AS t, id AS id, updated_at AS ts FROM note "
+            + "WHERE content IS NOT NULL AND content <> '' "
+            + "UNION ALL SELECT 'quick_ref', id, updated_at FROM quick_ref "
+            + "WHERE content IS NOT NULL AND content <> '' "
+            + "UNION ALL SELECT 'file', id, GREATEST(created_at, IFNULL(extracted_at, created_at)) FROM file_info "
+            + "WHERE text_status = 'ok' AND text_content IS NOT NULL")
+    List<Map<String, Object>> allSourceTimes();
+
+    /**
      * 最近更新的素材（三类合并）。
      * <p>用于"摄入后局部重编译"：拿最近改动的内容去做影响分析，判断该更新哪些页面。
      */

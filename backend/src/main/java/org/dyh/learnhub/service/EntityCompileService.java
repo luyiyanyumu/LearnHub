@@ -547,7 +547,13 @@ public class EntityCompileService {
         // 据此把「MQTT / MQTT协议」这类同概念不同名也连起来（评估报告 P1-3）。
         // 注释在渲染时不显示；不改表结构（schema 是 sql.init=always 且无 ALTER，加列会有启动风险）。
         page.setContentMd(aliasesComment(e) + content);
-        page.setSourceHash(e.kind() + "|" + e.count());
+        // 这一页"用了哪些来源"落进 source_hash（评估报告 P1-2）：
+        // 读取时（WikiService.topics）据此重算是否过期 —— 来源被删 / 被改都要能准确标脏。
+        // 为什么用 source_hash 而不是新加列：schema.sql 是 spring.sql.init.mode=always 且没有
+        // 针对它的 ALTER，加列会在第二次启动时 duplicate column 而启动失败；
+        // 这一列的注释本来就是「生成时素材的指纹，用于判断过期」，语义完全对得上
+        // （以前实体页在这里存 kind|count，既不完整也无法重算，属于报告点名的"弱指纹"）。
+        page.setSourceHash(sourcesFingerprint(e.validIds()));
         page.setItemCount(e.count());
         page.setModel(modelName);
         page.setQuality(quality);
@@ -668,6 +674,200 @@ public class EntityCompileService {
             // 理论上不会发生（JDK 必带 SHA-256）；退化成内容哈希，仍比"页数"强
             return "index-" + Integer.toHexString(sb.toString().hashCode());
         }
+    }
+
+    // ------------------------------------------------------------------
+    // 实体页的来源指纹与依赖映射（评估报告 P1-2）
+    // ------------------------------------------------------------------
+
+    /**
+     * source_hash 里"来源清单"的格式版本前缀。
+     *
+     * <p>加前缀是为了把三种写法区分开：主题页存的是素材指纹哈希（见 {@code WikiService.sourceHash}）、
+     * 自检报告存的是 {@code lint-N}、实体页以前存的是 {@code kind|count}。只有带这个前缀的行
+     * 才按"来源清单"解析，否则读取侧退回正文引用（见 {@link #sourceIdsOf}）。
+     */
+    public static final String SOURCE_HASH_PREFIX = "src1|";
+
+    /**
+     * source_hash 的列宽（VARCHAR(64)，见 schema.sql）。
+     *
+     * <p>写库前必须按**完整 id 的边界**截断：MySQL 开着 STRICT_TRANS_TABLES，
+     * 超长直接报 "Data too long for column"，会把整次编译打成失败。
+     * 截断只是少记几个来源（漏检），绝不会写出半个 id 造成"永远标脏"的假阳性。
+     */
+    public static final int SOURCE_HASH_MAX = 64;
+
+    /** 来源类型的简写：省下的字符用来多记几个来源（note-3 → n3） */
+    private static final String[][] TYPE_CODES = {{"note", "n"}, {"quick_ref", "r"}, {"ref", "r"}, {"file", "f"}};
+
+    /** 正文里的来源标注（{@link WikiQuality} 已经把写坏的形式规范化过，所以这里只认标准写法） */
+    private static final java.util.regex.Pattern CITATION =
+            java.util.regex.Pattern.compile("\\[(笔记|速查卡|资料)#(\\d+)\\]");
+
+    /**
+     * 把"这一页用了哪些来源"编成一个可落进 {@code wiki_page.source_hash} 的字符串。
+     *
+     * <p>格式：{@code src1|<类型简写><id>,…}，例如 {@code src1|n3,r8,f5}
+     * （n=note、r=quick_ref、f=file）。内部排序，所以指纹与传入顺序无关。
+     *
+     * @param sourceIds 形如 {@code note-3} / {@code quick_ref-8} / {@code file-5}
+     * @return 空集合时返回 {@code null}（不写：读取侧退化成"按正文引用推断"）
+     */
+    public static String sourcesFingerprint(java.util.Collection<String> sourceIds) {
+        if (sourceIds == null || sourceIds.isEmpty()) {
+            return null;
+        }
+        java.util.TreeSet<String> sorted = new java.util.TreeSet<>();
+        for (String id : sourceIds) {
+            String code = compactSourceId(id);
+            if (code != null) {
+                sorted.add(code);
+            }
+        }
+        StringBuilder sb = new StringBuilder(SOURCE_HASH_PREFIX);
+        for (String code : sorted) {
+            int add = code.length() + (sb.length() > SOURCE_HASH_PREFIX.length() ? 1 : 0);
+            if (sb.length() + add > SOURCE_HASH_MAX) {
+                break; // 只在完整 id 边界截断
+            }
+            if (sb.length() > SOURCE_HASH_PREFIX.length()) {
+                sb.append(',');
+            }
+            sb.append(code);
+        }
+        return sb.length() > SOURCE_HASH_PREFIX.length() ? sb.toString() : null;
+    }
+
+    /**
+     * 读回"这一页用了哪些来源"（依赖映射）。
+     *
+     * <p>两级来源：
+     * <ol>
+     *   <li>优先用 {@code source_hash} 里的来源清单（本次改动之后编译的页都有）；</li>
+     *   <li>没有清单（旧数据 / 别的写入方）时，退回**正文里的来源标注**（{@code [笔记#3]} 这类，
+     *       由 {@link WikiQuality} 校验过、一定是真实存在的引用）。这样 36 个存量实体页
+     *       不用重编译也能立刻参与标脏。</li>
+     * </ol>
+     *
+     * @return 统一成 {@code note-3} / {@code quick_ref-8} / {@code file-5} 形式的来源 id（去重、有序）
+     */
+    public static List<String> sourceIdsOf(String sourceHash, String contentMd) {
+        List<String> out = new ArrayList<>();
+        if (sourceHash != null && sourceHash.startsWith(SOURCE_HASH_PREFIX)) {
+            for (String part : sourceHash.substring(SOURCE_HASH_PREFIX.length()).split(",")) {
+                String id = expandSourceId(part.trim());
+                if (id != null) {
+                    out.add(id);
+                }
+            }
+        }
+        return out.isEmpty() ? citationsOf(contentMd) : out;
+    }
+
+    /** 正文里的来源标注 → 来源 id（找不到引用就返回空表） */
+    public static List<String> citationsOf(String contentMd) {
+        Set<String> uniq = new LinkedHashSet<>();
+        if (contentMd != null && !contentMd.isEmpty()) {
+            java.util.regex.Matcher m = CITATION.matcher(contentMd);
+            while (m.find()) {
+                uniq.add(citationType(m.group(1)) + "-" + m.group(2));
+            }
+        }
+        return new ArrayList<>(uniq);
+    }
+
+    /**
+     * 实体页是否过期（评估报告 P1-2 的判定规则，纯函数）。
+     *
+     * <p>逐条：
+     * <ol>
+     *   <li>没有任何来源信息 → <b>不算过期</b>（判断不了就不谎报，避免把好页刷成"待更新"）；</li>
+     *   <li>引用的来源已不存在（被删、或已不再作为素材：笔记/速查卡正文为空、资料 text_status≠ok）
+     *       → <b>过期</b>；</li>
+     *   <li>来源的 updated_at <b>晚于</b>该页 generated_at（被改）→ <b>过期</b>；</li>
+     *   <li>其余情况 → 不过期。无关页因此**不会**被标脏。</li>
+     * </ol>
+     *
+     * @param sourceIds   该页用到的来源 id（{@link #sourceIdsOf}）
+     * @param sourceTimes 来源最后修改时间，键同 sourceIds（一次批量查出来，见 KbChunkMapper.allSourceTimes）
+     * @param generatedAt 该页的成页时间；为 null 时只做"来源是否还存在"的检查
+     */
+    public static boolean staleBySources(List<String> sourceIds, Map<String, java.time.LocalDateTime> sourceTimes,
+                                        java.time.LocalDateTime generatedAt) {
+        if (sourceIds == null || sourceIds.isEmpty()) {
+            return false;
+        }
+        Map<String, java.time.LocalDateTime> times = sourceTimes == null ? Map.of() : sourceTimes;
+        for (String id : sourceIds) {
+            java.time.LocalDateTime t = times.get(id);
+            if (t == null) {
+                return true; // 来源已不存在 → 页里的内容没有出处了
+            }
+            if (generatedAt != null && t.isAfter(generatedAt)) {
+                return true; // 来源在成页之后被改过 → 页里的说法可能已经过时
+            }
+        }
+        return false;
+    }
+
+    /** {@code note-3} → {@code n3}（认不出类型或不是数字 id 时返回 null） */
+    private static String compactSourceId(String id) {
+        if (id == null) {
+            return null;
+        }
+        String t = id.trim();
+        int dash = t.lastIndexOf('-');
+        if (dash <= 0 || dash == t.length() - 1) {
+            return null;
+        }
+        String num = t.substring(dash + 1);
+        for (int i = 0; i < num.length(); i++) {
+            if (!Character.isDigit(num.charAt(i))) {
+                return null;
+            }
+        }
+        String code = typeCode(t.substring(0, dash).toLowerCase(java.util.Locale.ROOT));
+        return code == null ? null : code + num;
+    }
+
+    /** {@code n3} → {@code note-3}（认不出的片段返回 null，直接跳过） */
+    private static String expandSourceId(String code) {
+        if (code.length() < 2) {
+            return null;
+        }
+        String num = code.substring(1);
+        for (int i = 0; i < num.length(); i++) {
+            if (!Character.isDigit(num.charAt(i))) {
+                return null;
+            }
+        }
+        String type = switch (code.charAt(0)) {
+            case 'n' -> "note";
+            case 'r' -> "quick_ref";
+            case 'f' -> "file";
+            default -> null;
+        };
+        return type == null ? null : type + "-" + num;
+    }
+
+    /** 来源类型 → 简写 */
+    private static String typeCode(String type) {
+        for (String[] pair : TYPE_CODES) {
+            if (pair[0].equals(type)) {
+                return pair[1];
+            }
+        }
+        return null;
+    }
+
+    /** 正文标注里的中文标签 → 来源类型（与 WikiQuality.kindLabel 的写法对齐） */
+    private static String citationType(String label) {
+        return switch (label) {
+            case "速查卡" -> "quick_ref";
+            case "资料" -> "file";
+            default -> "note";
+        };
     }
 
     // ------------------------------------------------------------------

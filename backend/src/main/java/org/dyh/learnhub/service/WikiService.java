@@ -191,7 +191,8 @@ public class WikiService {
         List<WikiPage> compiled = mapper.selectList(Wrappers.<WikiPage>lambdaQuery()
                 .in(WikiPage::getTopicType, List.of("entity", "index", "lint")));
         // 索引页的输入就是**实体页清单**，可以用同一套指纹算法重算来判断它是否过期。
-        // 以前这里一律 stale=false —— 编译页永远不提示"待更新"（评估报告 P1-2）。
+        // 实体页的输入是"它用到的来源"，同样在读取时重算（评估报告 P1-2）：
+        // 以前这里一律 stale=false —— 编译页永远不提示"待更新"。
         List<WikiPage> entityPages = new ArrayList<>();
         for (WikiPage p : compiled) {
             if ("entity".equals(p.getTopicType())) {
@@ -199,6 +200,8 @@ public class WikiService {
             }
         }
         String currentIndexFp = EntityCompileService.indexFingerprint(entityPages);
+        // 三类来源的最后修改时间：**一次批量查全**（36 个实体页只在内存里比对，不逐页查库）
+        Map<String, LocalDateTime> sourceTimes = entityPages.isEmpty() ? Map.of() : sourceTimes();
         for (WikiPage p : compiled) {
             Map<String, Object> o = new LinkedHashMap<>();
             o.put("topicKey", p.getTopicKey());
@@ -208,13 +211,10 @@ public class WikiService {
             o.put("itemCount", p.getItemCount() == null ? 0 : p.getItemCount());
             o.put("sentItems", p.getItemCount() == null ? 0 : p.getItemCount());
             o.put("generated", StringUtils.hasText(p.getContentMd()));
-            // 索引页按指纹比对（增/删/改名才过期；重生成正文不影响索引内容，不算过期）。
-            // 实体/自检页目前没有可重算的输入指纹，保持 false —— 不谎报"新鲜"，
-            // 但也不再是"永远都新鲜"的假象：旧数据（sourceHash 是 index-<页数>）会
-            // 指纹对不上而正确标成待更新，重编一次即恢复一致。
-            o.put("stale", "index".equals(p.getTopicType())
-                    && StringUtils.hasText(p.getSourceHash())
-                    && !p.getSourceHash().equals(currentIndexFp));
+            // 索引页按"实体页清单"指纹比对（增/删/改名才过期；重生成正文不影响索引内容，不算过期）；
+            // 实体页按"来源指纹 + 依赖映射"重算（来源被删 / 被改才过期，无关页不受影响）；
+            // 自检页（lint）的输入是"全库扫描结果"，没有稳定的来源清单，保持 false。
+            o.put("stale", compiledStale(p.getTopicType(), p, currentIndexFp, sourceTimes));
             o.put("chars", p.getContentMd() == null ? 0 : p.getContentMd().length());
             o.put("quality", p.getQuality() == null ? "" : p.getQuality());
             o.put("generatedAt", p.getGeneratedAt() == null ? null
@@ -235,6 +235,89 @@ public class WikiService {
                 })
                 .thenComparing(o -> -((Integer) o.get("itemCount"))));
         return out;
+    }
+
+    /**
+     * 编译产物页（实体页 / 索引页 / 自检页）是否过期 —— 清单页用**预算好的**输入判断，不再查库。
+     *
+     * @param currentIndexFp 当前实体页清单的指纹（{@link EntityCompileService#indexFingerprint}）
+     * @param sourceTimes    三类来源的最后修改时间（{@link #sourceTimes()}）
+     */
+    private boolean compiledStale(String type, WikiPage page, String currentIndexFp,
+                                  Map<String, LocalDateTime> sourceTimes) {
+        if (page == null) {
+            return false;
+        }
+        if ("index".equals(type)) {
+            // 索引的内容只由"实体页清单"决定，所以指纹对不上才是真的过期
+            return StringUtils.hasText(page.getSourceHash()) && !page.getSourceHash().equals(currentIndexFp);
+        }
+        if ("entity".equals(type)) {
+            // 实体页：按落库的来源清单重算（来源被删 / 被改 → 过期；无关页不受影响）
+            return EntityCompileService.staleBySources(
+                    EntityCompileService.sourceIdsOf(page.getSourceHash(), page.getContentMd()),
+                    sourceTimes, page.getGeneratedAt());
+        }
+        // 自检报告（lint）：输入是"全库扫描结果"，没有稳定的来源清单可重算，保持不过期
+        return false;
+    }
+
+    /** 单页读取（{@link #page}）用的版本：按需查一次库，不为了没用到的类型白查 */
+    private boolean compiledStale(String type, WikiPage page) {
+        if (page == null) {
+            return false;
+        }
+        String fp = "index".equals(type) ? currentIndexFingerprint() : null;
+        Map<String, LocalDateTime> times = "entity".equals(type) ? sourceTimes() : Map.of();
+        return compiledStale(type, page, fp, times);
+    }
+
+    /** 当前实体页清单的指纹（索引页"是否过期"的比对基准） */
+    private String currentIndexFingerprint() {
+        // 只取 topicKey + 标题：与 indexFingerprint 真正用到的那两个字段一致
+        return EntityCompileService.indexFingerprint(mapper.selectList(Wrappers.<WikiPage>lambdaQuery()
+                .select(WikiPage::getTopicKey, WikiPage::getTitle)
+                .eq(WikiPage::getTopicType, "entity")));
+    }
+
+    /**
+     * 三类来源的最后修改时间，键形如 {@code note-3} / {@code quick_ref-8} / {@code file-5}。
+     * <p>**一次批量查全**：实体页有几十个，逐页查库会把一个列表接口变成几十次往返。
+     */
+    private Map<String, LocalDateTime> sourceTimes() {
+        Map<String, LocalDateTime> out = new LinkedHashMap<>();
+        for (Map<String, Object> r : kbChunkMapper.allSourceTimes()) {
+            String type = r.get("t") == null ? "" : String.valueOf(r.get("t"));
+            Object id = r.get("id");
+            LocalDateTime ts = asTime(r.get("ts"));
+            if (type.isEmpty() || id == null || ts == null) {
+                continue;
+            }
+            out.put(type + "-" + (id instanceof Number n ? n.longValue() : String.valueOf(id)), ts);
+        }
+        return out;
+    }
+
+    /** 结果集里的时间列 → LocalDateTime（驱动一般直接给 LocalDateTime，这里兼容 Timestamp / 字符串） */
+    private static LocalDateTime asTime(Object v) {
+        if (v instanceof LocalDateTime t) {
+            return t;
+        }
+        if (v instanceof java.sql.Timestamp ts) {
+            return ts.toLocalDateTime();
+        }
+        if (v == null) {
+            return null;
+        }
+        String s = String.valueOf(v).trim();
+        if (s.isEmpty()) {
+            return null;
+        }
+        try {
+            return LocalDateTime.parse(s.replace(' ', 'T'));
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private Map<String, Object> topicInfo(String key, String type, Long id, String title, Material m) {
@@ -276,7 +359,8 @@ public class WikiService {
             o.put("itemCount", page == null || page.getItemCount() == null ? 0 : page.getItemCount());
             o.put("sentItems", 0);
             o.put("generated", page != null && StringUtils.hasText(page.getContentMd()));
-            o.put("stale", false);
+            // 与清单接口同一套判定：实体页按来源清单重算、索引页按实体页清单指纹比对
+            o.put("stale", compiledStale(topic.type(), page));
             o.put("contentMd", page == null || page.getContentMd() == null ? "" : page.getContentMd());
             o.put("generatedAt", page == null || page.getGeneratedAt() == null ? null
                     : String.valueOf(page.getGeneratedAt()).replace('T', ' '));
