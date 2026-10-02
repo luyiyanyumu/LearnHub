@@ -85,7 +85,7 @@ public final class WikiQuality {
                 sb.append(m.group());
             } else {
                 String ref = kind + "-" + id;
-                if (validIds.contains(ref)) {
+                if (validIds.contains(ref) || validIds.contains(altRef(ref))) {
                     validCitations++;
                     sb.append('[').append(kindLabel(kind)).append('#').append(id).append(']');
                 } else {
@@ -142,7 +142,7 @@ public final class WikiQuality {
             return "file";
         }
         if (k.contains("速查")) {
-            return "ref";
+            return "quick_ref";
         }
         if (k.contains("笔记")) {
             return "note";
@@ -153,9 +153,28 @@ public final class WikiQuality {
     private static String kindLabel(String kind) {
         return switch (kind) {
             case "file" -> "资料";
-            case "ref" -> "速查卡";
+            case "quick_ref", "ref" -> "速查卡";
             default -> "笔记";
         };
+    }
+
+    /**
+     * 来源类型的另一套写法。
+     *
+     * <p>类型在代码里有**两套命名**：KbChunk / EntityCompileService 用 {@code quick_ref}，
+     * 而 KgService / WikiService 用 {@code ref}。校验"合法引用"时必须两种都认，
+     * 否则真实存在的速查卡引用会被误判成"引用不存在的素材"，
+     * 标记被剥掉方括号降级成纯文本 —— 正是评估报告里 {@code @GetMapping}、dsh、git 等页
+     * 出现"引用不存在"告警且失去出处链接的原因。
+     */
+    private static String altRef(String ref) {
+        if (ref.startsWith("quick_ref-")) {
+            return "ref-" + ref.substring("quick_ref-".length());
+        }
+        if (ref.startsWith("ref-")) {
+            return "quick_ref-" + ref.substring("ref-".length());
+        }
+        return ref;
     }
 
     private static long parseLong(String s) {
