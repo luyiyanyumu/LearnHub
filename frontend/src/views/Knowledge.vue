@@ -767,6 +767,13 @@ const wikiCountLabel = computed(() => {
 })
 
 /**
+ * 主题总数 ≠ 已生成页数。以前工具条直接把 `topics.length` 写成「N 页编译产物」，
+ * 把**还没生成页的主题**也算进去了（实测：48 个主题里只有 38 个有页）。
+ * 后端 topics 接口返回 `generated` 字段，这里据此分开显示。
+ */
+const generatedTopicCount = computed(() => topics.value.filter((t) => t.generated).length)
+
+/**
  * 侧栏按**类型分组**：以前是一锅平铺的列表，`cat-0`（早期版本写歪的索引页）和真正的索引页
  * 会以同样的"知识索引"标题并排出现，根本分不清谁是谁。分组后类型一眼可见。
  */
@@ -1075,7 +1082,7 @@ onBeforeUnmount(() => {
       <div class="wiki-bar">
         <span class="wiki-bar-title">知识页</span>
         <span class="hint">
-          {{ topics.length }} 页编译产物 · 删除只清这一页，原始笔记/速查卡/资料一行不动
+          共 {{ topics.length }} 个主题，已生成 {{ generatedTopicCount }} 页 · 删除只清这一页，原始笔记/速查卡/资料一行不动
         </span>
         <span class="wiki-bar-gap" />
         <el-button size="small" :loading="entBusy" @click="compileEntities">编译知识页</el-button>
