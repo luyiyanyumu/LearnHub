@@ -496,6 +496,22 @@ public class EntityCompileService {
         return chat(system, user, 3000);
     }
 
+    /**
+     * 实体页正文首行的别名注释（没有别名时返回空串）。
+     *
+     * <p>格式固定为 {@code <!-- entity-aliases: a, b -->}，供
+     * {@code KgPipelineService.linkWikiPages()} 解析。用注释而不是新增列：
+     * schema.sql 是 {@code spring.sql.init.mode=always} 且没有任何 ALTER，
+     * 直接加列会在第二次启动时报 duplicate column 并导致启动失败。
+     */
+    private static String aliasesComment(Entity e) {
+        if (e.aliases() == null || e.aliases().isEmpty()) {
+            return "";
+        }
+        String joined = String.join(", ", e.aliases());
+        return "<!-- entity-aliases: " + joined.replace("-->", "") + " -->\n";
+    }
+
     private void upsertEntityPage(Entity e, String content, String quality, String note) {
         String key = entityKey(e.name());
         org.dyh.learnhub.entity.WikiPage page = wikiMapper.selectOne(
@@ -509,7 +525,10 @@ public class EntityCompileService {
         page.setTopicType("entity");
         page.setTopicId(0L);
         page.setTitle(e.name());
-        page.setContentMd(content);
+        // 别名落到正文首行的 HTML 注释里：图谱关联（KgPipelineService.linkWikiPages）
+        // 据此把「MQTT / MQTT协议」这类同概念不同名也连起来（评估报告 P1-3）。
+        // 注释在渲染时不显示；不改表结构（schema 是 sql.init=always 且无 ALTER，加列会有启动风险）。
+        page.setContentMd(aliasesComment(e) + content);
         page.setSourceHash(e.kind() + "|" + e.count());
         page.setItemCount(e.count());
         page.setModel(modelName);

@@ -283,7 +283,35 @@ public class KgPipelineService {
         return linkWikiPages();
     }
 
-    /** 把图节点关联到 wiki 实体页（按归一化标题匹配），返回关联上的个数 */
+    /**
+     * 从实体页正文首行取别名（{@code <!-- entity-aliases: a, b -->}）。
+     *
+     * <p>别名由 {@code EntityCompileService.aliasesComment()} 写入。以前 aliases
+     * 只在抽取阶段用于匹配、**没有落库**，所以「MQTT 与 MQTT协议」这类同概念
+     * 不同名无法关联（评估报告 P1-3）。
+     */
+    private static List<String> aliasesOf(WikiPage p) {
+        String md = p.getContentMd();
+        if (md == null) {
+            return List.of();
+        }
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("<!--\\s*entity-aliases:\\s*([^>]*?)-->")
+                .matcher(md);
+        if (!m.find()) {
+            return List.of();
+        }
+        List<String> out = new ArrayList<>();
+        for (String part : m.group(1).split("[,，]")) {
+            String t = part.trim();
+            if (!t.isEmpty()) {
+                out.add(t);
+            }
+        }
+        return out;
+    }
+
+    /** 把图节点关联到 wiki 实体页（按归一化标题 + 别名匹配），返回关联上的个数 */
     private int linkWikiPages() {
         List<WikiPage> pages = wikiMapper.selectList(Wrappers.<WikiPage>lambdaQuery()
                 .eq(WikiPage::getTopicType, "entity"));
@@ -291,6 +319,10 @@ public class KgPipelineService {
         for (WikiPage p : pages) {
             if (p.getTitle() != null) {
                 byNorm.put(EntityLinker.normalize(p.getTitle()), p);
+            }
+            // 别名也进索引：标题优先（别名不覆盖已存在的正式名）。
+            for (String alias : aliasesOf(p)) {
+                byNorm.putIfAbsent(EntityLinker.normalize(alias), p);
             }
         }
         int linked = 0;
