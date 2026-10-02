@@ -894,13 +894,16 @@ public class WikiService {
         if (hits.isEmpty()) {
             return null;
         }
-        // 排序：**标题命中优先** → 分数 → 短的在前。
-        // 为什么标题优先不能少：长页靠词频就能压过对症的短页。实测问"关于 MQTT，我的知识库里还缺
-        // 哪些关键点？"，注入的是 AI Agent / Docker 两个长页（各 7 分），**MQTT 页根本没进去**，
+        // 排序：**标题"具体度"优先**（明确主题词 > 通用词）→ 分数 → 短的在前。
+        // 为什么不能用布尔命中：问句切词后的通用 2-gram（"知识"）能同时命中《知识索引》
+        // 《知识自检》的标题，与明确主题词（MQTT）落进同一档，通用页于是靠总分把主题页
+        // 挤出注入 —— 实测 RAG_MAX_PAGES=2 时 MQTT 页完全不注入。
+        // 为什么仍需"标题优先"：长页靠词频就能压过对症的短页，实测问"关于 MQTT，我的知识库里
+        // 还缺哪些关键点？"，注入的是 AI Agent / Docker 两个长页（各 7 分），MQTT 页根本没进去，
         // 模型于是声称"索引里没有 MQTT 页"——其实有（517 字、还带着待补充清单）。
         // 排序失当会直接制造幻觉，这已经不是排序好不好看的问题。
         hits.sort(Comparator
-                .comparing((Scored h) -> !titleHit(terms, h.page().getTitle()))
+                .comparingInt((Scored h) -> -titleScore(terms, h.page().getTitle()))
                 .thenComparing(Comparator.comparingInt(Scored::score).reversed())
                 .thenComparingInt(h -> h.page().getContentMd().length()));
 
@@ -924,7 +927,9 @@ public class WikiService {
         StringBuilder sb = new StringBuilder();
         sb.append("【知识库 wiki 索引】同一主题的记录已被整理成页面 —— 这里**只给目录与缺口**，")
           .append("正文请用 get_note / get_file 取原文，不要把这当成素材内容。")
-          .append("若回答涉及下面「待补充」里的点，请明确说明「你的知识库里没有记这一点」，再考虑是否另说标准知识。");
+          .append("下面「待补充」只说明**该页生成时素材没写到、或没被采样覆盖**，不等于全库没有：")
+          .append("遇到这些点先用 get_note / get_file / 知识索引页核对原文，核对后确实找不到才说「全库未找到」，")
+          .append("原文里有而该页没展开则说「该页未展开」。");
         // **必须给分母**：只列命中的前几页，不等于知识库只有这几页。少了这句，模型会把
         // 局部目录当全集（实测就这么编出过"没有 MQTT 页"）。
         sb.append("本次命中的 ").append(entries.size()).append(" 页（知识库共 ").append(totalPages)
@@ -933,30 +938,35 @@ public class WikiService {
         return sb.toString();
     }
 
-    /** 问题里的检索词有没有出现在页标题上（最可靠的相关性信号） */
-    private static boolean titleHit(List<String> terms, String title) {
+    /**
+     * 标题命中的"具体度"。
+     *
+     * <p>布尔命中不够用：问句里的通用 2-gram（"知识"）能命中《知识索引》《知识自检》的标题，
+     * 与明确主题词（MQTT / Git / JVM）被算成同一档，通用页于是靠总分把主题页挤出注入
+     * （实测 RAG_MAX_PAGES=2 时 MQTT 页完全不注入）。ASCII 术语是问题里的明确主题，权重最高；
+     * 中文 gram 给 1（2 字）/10（3 字及以上）分。阈值是启发式的，可按实测调整。
+     */
+    private static int titleScore(List<String> terms, String title) {
         String t = title == null ? "" : title.toLowerCase();
+        int s = 0;
         for (String term : terms) {
-            if (term.length() >= 2 && t.contains(term.toLowerCase())) {
-                return true;
+            String w = term.toLowerCase();
+            if (w.length() < 2 || !t.contains(w)) {
+                continue;
             }
+            s += w.charAt(0) < 128 ? 100 : (w.length() >= 3 ? 10 : 1);
         }
-        return false;
+        return s;
+    }
+
+    /** 问题里的检索词有没有出现在页标题上（保留布尔口径，供探针等处使用） */
+    private static boolean titleHit(List<String> terms, String title) {
+        return titleScore(terms, title) > 0;
     }
 
     /**
      * 把一页 wiki 压成"目录 + 缺口"条目（约 100~200 字）。
-            if (sb.length() + entry.length() > maxChars) {
-                break;
-            }
-            n++;
-            sb.append(entry);
-        }
-        if (n == 0) {
-            return null;   // 一页都放不下 = 预算已耗尽，不注入空块
-        }
-        return sb.toString();
-    }
+     */
 
     /**
      * 注入探针：返回"这个问题会注入什么 wiki 块"（不调模型）。
@@ -995,7 +1005,7 @@ public class WikiService {
         }
         // 与真实注入**同一套排序**，否则探针显示的"会注入什么"和行为不一致
         hits.sort(Comparator
-                .comparing((Map<String, Object> m) -> !Boolean.TRUE.equals(m.get("titleHit")))
+                .comparingInt((Map<String, Object> m) -> -titleScore(terms, String.valueOf(m.get("title"))))
                 .thenComparing(m -> -(int) m.get("score")));
         out.put("totalPages", totalPages);
         out.put("hits", hits);
@@ -1046,9 +1056,24 @@ public class WikiService {
         }
         List<String> gaps = gapItems(body);
         if (!gaps.isEmpty()) {
-            sb.append("  待补充（素材里明确没记）：").append(String.join("；", gaps)).append('\n');
+            List<String> open = new ArrayList<>();
+            List<String> sampled = new ArrayList<>();
+            for (String g : gaps) {
+                (isSamplingGap(g) ? sampled : open).add(g);
+            }
+            if (!open.isEmpty()) {
+                sb.append("  待补充（该页未展开，原文里可能有）：").append(String.join("；", open)).append('\n');
+            }
+            if (!sampled.isEmpty()) {
+                sb.append("  采样未覆盖（原文里可能有）：").append(String.join("；", sampled)).append('\n');
+            }
         }
         return sb.toString();
+    }
+
+    /** 缺口文本是否自述"采样/截断"造成的（模型在待补充里会写"本次仅提供…字采样"） */
+    private static boolean isSamplingGap(String g) {
+        return g.contains("采样") || g.contains("未提供") || g.contains("截断") || g.contains("篇幅");
     }
 
     /** 取 {@code ## 待补充} 一节里的条目（`-` 开头的行），最多 {@link #RAG_GAP_ITEMS} 条 */
