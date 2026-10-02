@@ -617,13 +617,29 @@ public class VectorIndexService {
         }
         // 相对带：离最高分太远的尾巴丢掉（同领域相似度被压扁，绝对阈值筛不干净）
         double best = hits.get(0).score();
-        List<Hit> kept = new ArrayList<>();
+        List<Hit> band = new ArrayList<>();
         for (Hit h : hits) {
             if (h.score() >= best - RELATIVE_BAND) {
-                kept.add(h);
+                band.add(h);
             }
         }
-        return kept.size() > topK ? kept.subList(0, topK) : kept;
+        // **来源优先**：先给每个来源留最高分的那一块，让更多**不同来源**进入前 K。
+        // 以前同一篇长文档靠块数就能占满前 K（实测 file#19 占 4 行、note#51 占 2 行），
+        // 把对症的短资料（如一张速查卡）挤出榜单 —— 这正是评估报告里"一篇长笔记
+        // 主导总分"的现象。去重后若仍不足 topK，再用同来源的其余块按原顺序补齐，
+        // 所以"来源少、块多"时行为与以前一致。
+        List<Hit> distinct = new ArrayList<>();
+        List<Hit> extra = new ArrayList<>();
+        java.util.Set<String> seenSrc = new java.util.LinkedHashSet<>();
+        for (Hit h : band) {
+            if (seenSrc.add(key(h.sourceType(), h.sourceId()))) {
+                distinct.add(h);
+            } else {
+                extra.add(h);
+            }
+        }
+        distinct.addAll(extra);
+        return distinct.size() > topK ? distinct.subList(0, topK) : distinct;
     }
 
     // ------------------------------------------------------------------
