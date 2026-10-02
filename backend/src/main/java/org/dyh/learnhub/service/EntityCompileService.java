@@ -273,6 +273,9 @@ public class EntityCompileService {
             if (chosen.isEmpty()) {
                 job.stage = "素材里没有可成页的概念";
                 job.detail = fixedSub > 0 ? "本次没抽到概念；顺带清理了 " + fixedSub + " 个子条目重复页" : "";
+                // 索引仍要刷新：上面 pruneSubEntryPages() 可能刚删过页，
+                // 不刷新的话索引里会留着已经不存在的页（列表与库不一致）。
+                upsertIndexPage(chosen);
                 job.status = "done";
                 job.finishedAt = System.currentTimeMillis();
                 return;
@@ -521,14 +524,26 @@ public class EntityCompileService {
         }
     }
 
-    /** 索引页：确定性生成（按类别分组，列出可点链接与一句话说明） */
+    /** 索引页：确定性生成（按类别分组，列出可点链接与一句话说明）。
+     *
+     * <p><b>必须覆盖库里全部实体页，不能只用本批 chosen</b>：实体页只增不删
+     * （见 compile() ③.5 的说明），所以库内累积的实体页会多于本批的 {@code MAX_ENTITY_PAGES} 个。
+     * 以前只列本批 ≤10 个，页脚却写「所以不会漏项」—— 实测 32 个实体页、索引只列 10 个，
+     * 与侧栏「实体 32」自相矛盾（评估报告 P0）。 */
     private void upsertIndexPage(List<Entity> entities) {
+        // 库里全部实体页（历史批次 + 本批），topicKey 即 entityKey(name)
+        List<org.dyh.learnhub.entity.WikiPage> all = wikiMapper.selectList(
+                com.baomidou.mybatisplus.core.toolkit.Wrappers.<org.dyh.learnhub.entity.WikiPage>lambdaQuery()
+                        .eq(org.dyh.learnhub.entity.WikiPage::getTopicType, "entity")
+                        .orderByAsc(org.dyh.learnhub.entity.WikiPage::getTitle));
+        Set<String> listed = new LinkedHashSet<>();
         Map<String, List<Entity>> byKind = new LinkedHashMap<>();
         for (Entity e : entities) {
             byKind.computeIfAbsent(e.kind(), k -> new ArrayList<>()).add(e);
+            listed.add(entityKey(e.name()));
         }
         StringBuilder md = new StringBuilder();
-        md.append("知识库共编译出 **").append(entities.size()).append("** 个概念/实体页。\n\n");
+        md.append("知识库共编译出 **").append(all.size()).append("** 个概念/实体页。\n\n");
         for (Map.Entry<String, List<Entity>> en : byKind.entrySet()) {
             md.append("## ").append(kindLabel(en.getKey())).append('\n');
             for (Entity e : en.getValue()) {
@@ -537,7 +552,23 @@ public class EntityCompileService {
             }
             md.append('\n');
         }
-        md.append("> 这张索引由代码生成（不经过模型），所以不会漏项；页面之间的关联写在各自正文里（双方括号写法）。\n");
+        // 历史批次留下的实体页：本次没重编，但同样在库里，必须一并列出，否则索引与库不一致
+        List<org.dyh.learnhub.entity.WikiPage> rest = new ArrayList<>();
+        for (org.dyh.learnhub.entity.WikiPage p : all) {
+            if (!listed.contains(p.getTopicKey())) {
+                rest.add(p);
+            }
+        }
+        if (!rest.isEmpty()) {
+            md.append("## 其他实体页（历史编译保留，本次未重编）\n");
+            for (org.dyh.learnhub.entity.WikiPage p : rest) {
+                md.append("- [").append(p.getTitle()).append("](#").append(p.getTopicKey()).append(")\n");
+            }
+            md.append('\n');
+        }
+        md.append("> 这张索引由代码生成（不经过模型），列出库里**全部**实体页（共 ")
+          .append(all.size())
+          .append(" 页）；页面之间的关联写在各自正文里（双方括号写法）。\n");
         String key = "index";
         org.dyh.learnhub.entity.WikiPage page = wikiMapper.selectOne(
                 com.baomidou.mybatisplus.core.toolkit.Wrappers.<org.dyh.learnhub.entity.WikiPage>lambdaQuery()
@@ -551,8 +582,8 @@ public class EntityCompileService {
         page.setTopicId(0L);
         page.setTitle("知识索引");
         page.setContentMd(md.toString());
-        page.setSourceHash("index-" + entities.size());
-        page.setItemCount(entities.size());
+        page.setSourceHash("index-" + all.size());
+        page.setItemCount(all.size());
         page.setModel(null);
         page.setQuality("ok");
         page.setQualityNote(null);
