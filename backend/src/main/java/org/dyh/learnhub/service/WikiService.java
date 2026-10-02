@@ -717,7 +717,17 @@ public class WikiService {
     }
 
     private void savePage(Topic topic, Material m, Target t, WikiQuality.Result q) {
-        String key = topic.type().equals("tag") ? "tag-" + topic.id() : "cat-" + topic.id();
+        // 编译产物页（实体/索引/自检）必须用它**自己的 topicKey**。
+        // 这里曾经只有 "tag -> tag-<id>，其余 -> cat-<id>" 两个分支，
+        // 于是对 entity 主题（id 恒为 0）会拼出 "cat-0" —— 单页重编实体页时，
+        // 结果被写进一个历史垃圾键，页面上看不到任何变化，还凭空多出一个同名入口。
+        // 实测证据：cat-0 的 topic_type=entity、title=@GetMapping、
+        // generated_at 恰好等于一次 entity-51a81e9bc1 的重编时刻。
+        String key = switch (topic.type() == null ? "" : topic.type()) {
+            case "tag" -> "tag-" + topic.id();
+            case "entity", "index", "lint" -> topic.key();
+            default -> "cat-" + topic.id();
+        };
         WikiPage page = byKey(key);
         boolean create = page == null;
         if (create) {
