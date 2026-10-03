@@ -40,7 +40,8 @@ class PdfFormulaCropTest {
         info.setStoreName("source.pdf");
         FileInfoMapper mapper = mock(FileInfoMapper.class);
         when(mapper.selectById(1L)).thenReturn(info);
-        service = new FileStorageService(mapper, null, null, new PdfLayoutExtractor(), null, null);
+        // 最后一个参数是 KbChunkMapper（改名时同步知识块标题用），本测试不涉及 → null
+        service = new FileStorageService(mapper, null, null, new PdfLayoutExtractor(), null, null, null);
     }
 
     @AfterEach

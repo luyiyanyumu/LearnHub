@@ -303,6 +303,29 @@ async function onEditSummary(row) {
   load()
 }
 
+/** 改文件名：只改基名（扩展名不许改 —— 抽正文按扩展名选解析器，改了会解析错） */
+async function onRename(row) {
+  const ext = row.ext ? `.${row.ext}` : ''
+  const base = ext && String(row.originName || '').toLowerCase().endsWith(ext.toLowerCase())
+    ? row.originName.slice(0, -ext.length)
+    : (row.originName || '')
+  const { value } = await ElMessageBox.prompt(
+    `改个名字（扩展名 ${ext || '（无）'} 不能改：抽正文是按扩展名选解析器的）。`,
+    '重命名资料',
+    {
+      inputValue: base,
+      inputPlaceholder: '新的文件名（不含扩展名）',
+      confirmButtonText: '保存',
+      inputValidator: (v) => (String(v || '').trim() ? true : '文件名不能为空'),
+    },
+  )
+  const next = `${String(value).trim()}${ext}`
+  if (next === row.originName) return
+  await fileApi.rename(row.id, next)
+  ElMessage.success(`已改名为「${next}」`)
+  load()
+}
+
 async function onReextract(row) {
   const r = await fileApi.reextract(row.id)
   ElMessage.success(`已重新抽取：${textLabel(r)}`)
@@ -399,11 +422,12 @@ onBeforeUnmount(() => {
         <el-table-column label="上传时间" width="165">
           <template #default="{ row }">{{ time(row.createdAt) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="220" fixed="right">
+        <el-table-column label="操作" width="270" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="openReader(row)">阅读</el-button>
           <el-button link type="primary" @click="onDownload(row)">下载</el-button>
             <el-button link type="primary" @click="onEditSummary(row)">说明</el-button>
+            <el-button link type="primary" @click="onRename(row)">重命名</el-button>
             <el-button
               v-if="row.textStatus !== 'ok'"
               link

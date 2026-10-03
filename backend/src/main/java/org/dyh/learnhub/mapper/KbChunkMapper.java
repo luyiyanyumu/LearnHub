@@ -31,6 +31,21 @@ public interface KbChunkMapper extends BaseMapper<KbChunk> {
     void deleteBySource(@Param("sourceType") String sourceType, @Param("sourceId") Long sourceId);
 
     /**
+     * 刷新某个来源的**冗余标题**（kb_chunk.title）。
+     *
+     * <p>用途：资料改名后，检索结果里展示的标题要跟着变 —— 它是冗余列，不同步的话
+     * 改了名检索命中的还是旧标题，用户会以为没生效。只需改这一列，**不必重建向量**
+     * （向量只跟 chunk_text 有关）。
+     *
+     * @return 受影响行数
+     */
+    @org.apache.ibatis.annotations.Update("UPDATE kb_chunk SET title = #{title} "
+            + "WHERE source_type = #{sourceType} AND source_id = #{sourceId}")
+    int refreshTitleBySource(@Param("sourceType") String sourceType,
+                             @Param("sourceId") Long sourceId,
+                             @Param("title") String title);
+
+    /**
      * 内容侧"最后修改时间"：判断索引是否过期。
      * <p>只比来源**数量**是不够的 —— 改一篇笔记的内容数量没变，但索引里的向量已经过时了。
      */

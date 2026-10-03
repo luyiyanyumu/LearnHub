@@ -343,6 +343,8 @@ export const fileApi = {
   detail: (id) => request.get(`/files/${id}`),
   /** 更新手填说明 —— 抽不出正文的资料（图片/压缩包）靠它进检索 */
   updateSummary: (id, summary) => request.put(`/files/${id}/summary`, { summary }),
+  /** 改文件名（**只改基名，扩展名不可改**：抽正文按扩展名选解析器，改了会解析错） */
+  rename: (id, name) => request.put(`/files/${id}/name`, { name }),
   /** 换分类（资料按分类进知识图谱） */
   updateCategory: (id, categoryId) => request.put(`/files/${id}/category`, { categoryId }),
   /** 重新抽取正文 */

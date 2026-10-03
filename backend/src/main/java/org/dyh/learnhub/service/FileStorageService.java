@@ -65,6 +65,8 @@ public class FileStorageService {
     private final PdfLayoutExtractor pdfLayoutExtractor;
     private final ApplicationEventPublisher events;
     private final LearningActivityService learningActivity;
+    /** 改名时要同步 kb_chunk 里的冗余标题（检索结果展示用） */
+    private final org.dyh.learnhub.mapper.KbChunkMapper kbChunkMapper;
 
     /** 文件存放目录：后端工作目录下的 uploads/ */
     private Path storageDir() {
@@ -216,6 +218,67 @@ public class FileStorageService {
         FileInfo info = require(id);
         info.setSummary(summary == null ? null : summary.trim());
         fileInfoMapper.updateById(info);
+        publishChanged(info.getCategoryId());
+        return detailMap(id);
+    }
+
+    /**
+     * 改显示文件名（**只改基名，不允许改扩展名**）。
+     *
+     * <h3>为什么不允许改扩展名</h3>
+     * 磁盘上的真实文件用 {@code storeName}（随机名）保存，改名只动 {@code originName}；
+     * 而抽正文时 {@code extractInto} 是按 {@code info.getExt()} **选解析器**的
+     * （pdf→PDFBox、docx→POI…）。若允许把 {@code 报告.pdf} 改成 {@code 报告.docx}，
+     * 库里的 ext 就与磁盘内容的真实格式不一致 → 下次重抽会用 Word 解析器去读 PDF，
+     * 报出莫名的错。所以这里明确拒绝，并把原因告诉用户（而不是静默接受）。
+     *
+     * <h3>为什么顺带改知识块里的标题</h3>
+     * {@code kb_chunk.title} 是资料标题的**冗余列**（检索结果展示用）。不改的话，
+     * 改了名之后检索命中的还是旧标题，用户会以为没生效。
+     */
+    public Map<String, Object> rename(Long id, String newName) {
+        FileInfo info = require(id);
+        String raw = newName == null ? "" : newName.trim();
+        if (!StringUtils.hasText(raw)) {
+            throw new IllegalArgumentException("文件名不能为空");
+        }
+        // 去掉路径分隔符：浏览器传入或用户粘贴可能带上目录（防目录穿越）
+        String cleaned = StringUtils.cleanPath(raw).replace('\\', '/');
+        int slash = cleaned.lastIndexOf('/');
+        if (slash >= 0) {
+            cleaned = cleaned.substring(slash + 1);
+        }
+        if (!StringUtils.hasText(cleaned) || cleaned.startsWith(".")) {
+            throw new IllegalArgumentException("文件名不合法（不能只有扩展名或隐藏文件）");
+        }
+        String newExt = extOf(cleaned);
+        String oldExt = info.getExt() == null ? "" : info.getExt();
+        if (!newExt.equalsIgnoreCase(oldExt)) {
+            throw new IllegalArgumentException("不能改扩展名（现在 ." + oldExt + "）；"
+                    + "抽正文是按扩展名选解析器的，改了会出现「按 Word 解析 PDF」这类错。"
+                    + "只改名字部分即可，例如把「旧名." + oldExt + "」改成「新名." + oldExt + "」。");
+        }
+        // 去掉结尾的 ".ext" 就是新基名；基名不能为空
+        String base = cleaned.substring(0, cleaned.length() - (oldExt.isEmpty() ? 0 : oldExt.length() + 1)).trim();
+        if (!StringUtils.hasText(base)) {
+            throw new IllegalArgumentException("文件名不能为空");
+        }
+        if (cleaned.length() > 200) {
+            throw new IllegalArgumentException("文件名太长（≤200 字符）");
+        }
+
+        info.setOriginName(base + (oldExt.isEmpty() ? "" : "." + oldExt));
+        fileInfoMapper.updateById(info);
+
+        // 同步知识块里的冗余标题（仅 file 来源）
+        try {
+            int changed = kbChunkMapper.refreshTitleBySource("file", info.getId(), info.getOriginName());
+            if (changed > 0) {
+                log.info("资料 #{} 改名后同步了 {} 个知识块的标题", id, changed);
+            }
+        } catch (Exception e) {
+            log.warn("改名后同步知识块标题失败（检索展示可能仍是旧标题）：{}", e.getMessage());
+        }
         publishChanged(info.getCategoryId());
         return detailMap(id);
     }

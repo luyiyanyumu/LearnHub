@@ -46,8 +46,9 @@ class FileTrashTest {
         FileInfoMapper mapper = mock(FileInfoMapper.class);
         // 参数顺序与字段声明一致：mapper, categoryMapper, documentTextService, pdfLayoutExtractor, events, learningActivity
         // delete() 会 publishChanged（通知知识库索引刷新），所以 events 要给个 mock，其余用不到
+        // 最后一个是 KbChunkMapper（改名时同步知识块标题用），本测试不涉及改名 → null
         service = new FileStorageService(mapper, null, null, null,
-                mock(org.springframework.context.ApplicationEventPublisher.class), null);
+                mock(org.springframework.context.ApplicationEventPublisher.class), null, null);
     }
 
     @AfterEach

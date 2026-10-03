@@ -57,6 +57,19 @@ public class FileController {
         return Result.ok(fileStorageService.updateSummary(id, body.get("summary")));
     }
 
+    /**
+     * 改资料的文件名（**只改基名，扩展名不可改**）。
+     *
+     * <p>为什么不许改扩展名：抽正文是按扩展名选解析器的（pdf→PDFBox、docx→POI…），
+     * 改了就会出现「按 Word 解析 PDF」这类静默错误 —— 宁可明确拒绝，并告诉用户原因。
+     * 磁盘上的真实文件（随机 storeName）不动，所以改名不会造成文件重写或丢失。
+     */
+    @PutMapping("/{id}/name")
+    public Result<Map<String, Object>> rename(@PathVariable Long id,
+                                              @RequestBody Map<String, String> body) {
+        return Result.ok(fileStorageService.rename(id, body.get("name")));
+    }
+
     /** 换分类（资料按分类进知识图谱） */
     @PutMapping("/{id}/category")
     public Result<Map<String, Object>> updateCategory(@PathVariable Long id,
