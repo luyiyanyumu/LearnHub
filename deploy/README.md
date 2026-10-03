@@ -114,6 +114,42 @@ location /api/ {
 好处有两个：后端暂时没起来只是该请求 502（nginx 本身健康、页面照常打开），
 后端重启换了 IP 也会立刻跟上（写死 upstream 的话 nginx 会一直打到旧 IP）。
 
+#### 从本机迁过来后必查：**库/档案里所有 `localhost` 都会失效**（翻译、本地档案、嵌入、Milvus…）
+
+本机那套里写 `localhost` 是对的（后端就在宿主机上）；**后端进容器后 `localhost` 指的是容器自己**，
+于是凡是"指向本机某个服务"的配置全部连不上。实测踩过两次，症状还完全不同：
+
+| 功能 | 症状 | 原因 |
+| --- | --- | --- |
+| 翻译（"本地 Ollama" 档案） | 弹「翻译调用失败（档案：本地 Ollama / qwen3:8b）：**null**」 | `model_profile.base_url = http://localhost:11434/v1` |
+| 语义检索 | 词面正常、**语义 0 命中**（不报错） | `ai.embed_base_url = http://localhost:11434` |
+
+**排查这条 SQL，把结果里每一个都改成 `host.docker.internal`**（或改成容器服务名）：
+
+```bash
+docker exec learn-hub-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -e "
+SELECT 'setting', setting_key, setting_value FROM learn_hub.app_setting
+  WHERE setting_value LIKE '%localhost%' OR setting_value LIKE '%127.0.0.1%'
+UNION ALL
+SELECT 'profile', CONCAT('#', id, ' ', name), base_url FROM learn_hub.model_profile
+  WHERE base_url LIKE '%localhost%' OR base_url LIKE '%127.0.0.1%';"
+```
+
+改法（两处都要，否则 UI 看到的和实际用的会不一致）：
+
+```bash
+# ① 库/档案（界面「设置 → 外观与 AI」里也能改，效果相同）
+docker exec learn-hub-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "
+UPDATE learn_hub.model_profile SET base_url='http://host.docker.internal:11434/v1'
+  WHERE base_url LIKE '%localhost:11434%';"
+
+# ② 嵌入服务走环境变量（见下节），compose 已默认给 host.docker.internal:11434
+```
+
+> `host.docker.internal` 由 compose 里的 `extra_hosts` 提供（Docker Desktop 自带，Linux 原生
+> Docker 靠这一行才有）。要改成容器版 Ollama 就统一换成 `http://ollama:11434`（不带 `/v1` ——
+> 嵌入走 Ollama 原生 API，本地档案走 OpenAI 兼容的 `/v1`）。
+
 ### 从本机部署迁移数据到本栈（含"向量必须重建"这个坑）
 
 把本机那套（自己起的 MySQL + `java -jar`）搬到 compose 时，**要搬两样东西**，
