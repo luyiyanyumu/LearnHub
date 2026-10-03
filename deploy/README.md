@@ -20,6 +20,51 @@ docker compose up -d --build
 | 网页（nginx） | http://localhost:8888 | `.env` 的 `WEB_HOST_PORT` |
 | 后端接口 | http://localhost:18080 | `.env` 的 `BACKEND_HOST_PORT`（MCP server 默认连 18080，改了就同步改 MCP 配置） |
 | MySQL | localhost:3307 | `.env` 的 `MYSQL_HOST_PORT` |
+| 本地嵌入模型（可选） | http://localhost:11434 | `.env` 的 `OLLAMA_HOST_PORT` |
+
+---
+
+## 本地嵌入模型（语义检索要用，默认不开）
+
+**默认三件套里没有 Ollama** —— 它镜像加模型约 2GB 起，而**不启用也能正常用**：
+不启用时嵌入服务不可达，检索会退化成关键词检索（不报错，但"问什么都知道"的语义召回没有了）。
+
+要语义检索就加上这个 profile：
+
+```bash
+docker compose --profile ollama up -d
+docker compose exec ollama ollama pull bge-m3     # 约 1.2GB，只需一次（存在卷 ollama-models 里）
+curl http://localhost:18080/api/settings/effective?keys=ai.embed_base_url,ai.embed_model
+```
+
+最后那条会把**生效值来自哪里**打印出来（`fromDb` / `fromExternal` / `effective`），确认嵌入地址是
+`http://ollama:11434` 而不是默认的 `localhost:11434`：
+
+```json
+[{"key":"ai.embed_base_url","fromExternal":"http://ollama:11434","effective":"http://ollama:11434"}]
+```
+
+### 为什么嵌入地址必须由部署时给（而不是界面里选）
+
+`EmbeddingClient` 走的是 **Ollama 的 `/api/embed`**（不是 OpenAI 兼容的 `/v1/embeddings`），
+默认 `http://localhost:11434` + `bge-m3`；换嵌入模型必须**重建整个索引**，所以设置面板里
+刻意没有这个入口（面板那行写着"嵌入向量固定用本地"）。容器里 `localhost` 指的是容器自己，
+因此必须由 compose 注入服务名。三个可覆盖的键：
+
+| 环境变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `KB_EMBED_BASE_URL`（或 `AI_EMBED_BASE_URL`） | `http://ollama:11434` | 嵌入服务地址；两个前缀都认（代码里的键叫 `ai.embed_base_url`，但语义属知识库，容易写混） |
+| `KB_EMBED_MODEL`（或 `AI_EMBED_MODEL`） | `bge-m3` | 嵌入模型名，改它要重建索引 |
+| `KB_VECTOR_ENABLED` | `1` | 置 `0` 关掉语义检索（只走关键词） |
+
+> **用宿主机上已有的 Ollama**（不想再起一个容器）：把地址改成
+> `KB_EMBED_BASE_URL=http://host.docker.internal:11434` 即可 —— compose 已给 backend 配了
+> `host.docker.internal` 映射。
+>
+> **注意**：这些键要么在 `.env` 里给（compose 会注入），要么作为容器环境变量给。
+> 早期版本只有"数据库 + 代码默认值"两条来源，**外部环境变量会被忽略** —— 现在
+> `SettingsService.effective()` 的顺序是 **数据库 > 外部配置 > 代码默认值**，
+> 上面那个 `/api/settings/effective` 接口就是用来一眼确认这件事的。
 
 ---
 

@@ -243,17 +243,64 @@ public class SettingsService {
 
     private final AppSettingMapper mapper;
 
+    /** 外部配置来源（环境变量 / 命令行 / yml），见 {@link #external} */
+    private final org.springframework.core.env.Environment environment;
+
     /** 读原始值（可能为 null） */
     public String raw(String key) {
         AppSetting s = mapper.selectById(key);
         return s == null ? null : s.getSettingValue();
     }
 
-    /** 生效值：数据库覆盖优先，默认兜底 */
+    /**
+     * 外部配置里的同名覆盖值（没有则 null）。
+     *
+     * <h3>为什么必须有这一层</h3>
+     * 部署到容器时，"嵌入服务地址"这类设置**只能在启动时给**（镜像里没有 Ollama，地址必须指向
+     * 服务名；界面里又刻意没做这个入口，因为换嵌入模型要重建索引）。而 {@link #effective} 原来
+     * 只查数据库 + 代码默认值 —— 实测：容器里设了 {@code KB_EMBED_BASE_URL}，变量确实进了进程，
+     * 但后端仍报默认的 {@code localhost:11434}，语义检索于是连不上（同一现象在
+     * {@code KB_EMBED_MODEL}、{@code KB_VECTOR_ENABLED} 上都复现过）。
+     *
+     * <h3>键名怎么换算</h3>
+     * 内部键是 {@code ai.embed_base_url}（settings 表里的原始键名），而 Spring 把
+     * {@code KB_EMBED_BASE_URL} 规范化成 {@code kb.embed-base-url} —— **下划线要变连字符**，
+     * 否则查不到。顺序：数据库 > 外部配置 > 代码默认值（与 spring.datasource 的既有习惯一致）。
+     */
+    private String external(String key) {
+        return externalValue(key);
+    }
+
+    /** 外部配置值（给"生效值来自哪里"这个排错接口用；语义同 {@link #external}） */
+    public String externalValue(String key) {
+        if (key == null || !StringUtils.hasText(key)) {
+            return null;
+        }
+        try {
+            String v = environment.getProperty(key.replace('_', '-'));
+            if (StringUtils.hasText(v)) {
+                return v;
+            }
+            // 别名兜底：嵌入相关的键在代码里叫 ai.embed_*，但语义上属于知识库（kb）——
+            // 实测部署时很容易写成 KB_EMBED_BASE_URL。两边都认，省得"照着文档设了却不生效"。
+            if (key.startsWith("ai.embed_")) {
+                return environment.getProperty(key.replace("ai.embed_", "kb.embed-"));
+            }
+            return null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 生效值：数据库覆盖优先，其次外部配置（环境变量/命令行），最后默认兜底 */
     public String effective(String key) {
         String v = raw(key);
         if (StringUtils.hasText(v)) {
             return v;
+        }
+        String ext = external(key);
+        if (StringUtils.hasText(ext)) {
+            return ext;
         }
         return switch (key) {
             case KEY_MODEL -> DEFAULT_MODEL;

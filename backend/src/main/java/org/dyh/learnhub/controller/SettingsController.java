@@ -7,9 +7,13 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -29,6 +33,38 @@ public class SettingsController {
     @GetMapping
     public Result<Map<String, Object>> get() {
         return Result.ok(settingsService.snapshot());
+    }
+
+    /**
+     * 生效值**从哪来**：数据库 / 外部配置（环境变量、命令行）/ 代码默认值。
+     *
+     * <p>为什么需要它：容器部署时"嵌入服务地址"只能靠启动参数给，而设置面板里没有这个入口 ——
+     * 一旦没生效，从界面上完全看不出是"没传进来"还是"传了但被数据库盖住"。
+     * 这个只读接口把判断依据一次说清：数据库里有没有该键、Spring 能不能解析到外部值、
+     * 以及最终生效值。排错时先看它，不用再猜。
+     */
+    @GetMapping("/effective")
+    public Result<List<Map<String, Object>>> effective(@RequestParam(required = false) String keys) {
+        List<String> wanted = (keys == null || keys.isBlank())
+                ? List.of("ai.embed_base_url", "ai.embed_model", "kb.vector_enabled",
+                          "ai.model", "ai.base_url", "kb.vector_backend")
+                : List.of(keys.split(","));
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (String rawKey : wanted) {
+            String key = rawKey.trim();
+            if (key.isEmpty()) {
+                continue;
+            }
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("key", key);
+            m.put("envName", key.replace('.', '_').replace('_', '_').toUpperCase(Locale.ROOT));
+            m.put("canonical", key.replace('_', '-'));
+            m.put("fromDb", settingsService.raw(key));
+            m.put("fromExternal", settingsService.externalValue(key));
+            m.put("effective", settingsService.effective(key));
+            out.add(m);
+        }
+        return Result.ok(out);
     }
 
     /** API 字段名 → 内部设置键 */

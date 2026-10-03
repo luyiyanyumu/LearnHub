@@ -66,6 +66,13 @@ services:
       SPRING_SQL_INIT_CONTINUE_ON_ERROR: "true"
       # 技能提示词目录：镜像里放在 /app/skills，这里显式给一下（自动探测也能命中）
       LEARNHUB_SKILLS_DIR: /app/skills
+      # 嵌入（向量）服务：语义检索靠它把文本变成向量。
+      # 默认指向本栈里的 ollama 服务（`--profile ollama` 时才有；不启用时该地址不可达，
+      # 检索会退化成关键词检索 —— 不报错，但拿不到语义检索）。
+      # **这两个键必须在这里显式声明**，否则外部设了 KB_EMBED_BASE_URL 也进不了容器
+      # （实测：不声明时后端仍用代码默认的 localhost:11434）。
+      KB_EMBED_BASE_URL: ${KB_EMBED_BASE_URL:-http://ollama:11434}
+      KB_EMBED_MODEL: ${KB_EMBED_MODEL:-bge-m3}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       JAVA_OPTS: ${JAVA_OPTS:--XX:MaxRAMPercentage=75}
     volumes:
@@ -102,9 +109,38 @@ services:
       - "${WEB_HOST_PORT:-8888}:80"
     networks: [learn-hub]
 
+  # ---------- 本地嵌入模型（可选：语义检索要用）----------
+  #
+  # 为什么单独一个 profile：Ollama 镜像 + bge-m3 模型约 2GB 起，而**不启用也能跑**
+  # （检索自动退化成关键词；笔记/资料/阅读器都不受影响），所以不塞进默认路径。
+  #
+  #   docker compose --profile ollama up -d
+  #   docker compose exec ollama ollama pull bge-m3      # 拉模型（约 1.2GB，只需一次，存在卷里）
+  #
+  # 启用后 backend 的 KB_EMBED_BASE_URL 默认就是 http://ollama:11434，无需再配。
+  ollama:
+    image: ${DOCKER_REGISTRY:-docker.1ms.run}/ollama/ollama:latest
+    container_name: ${OLLAMA_CONTAINER_NAME:-learn-hub-ollama}
+    profiles: [ollama]
+    restart: unless-stopped
+    volumes:
+      # 模型文件（bge-m3 等）落在这里：容器重建不用重新拉
+      - ollama-models:/root/.ollama
+    ports:
+      # 暴露出来是为了用宿主机上的 ollama 命令拉模型 / 给别的程序复用；不需要可删
+      - "${OLLAMA_HOST_PORT:-11434}:11434"
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks: [learn-hub]
+
 volumes:
   mysql-data:
   uploads:
+  ollama-models:
 
 networks:
   learn-hub:
