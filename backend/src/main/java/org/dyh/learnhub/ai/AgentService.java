@@ -26,6 +26,7 @@ import org.dyh.learnhub.service.SettingsService;
 import org.dyh.learnhub.service.SkillService;
 import org.dyh.learnhub.service.WebService;
 import org.dyh.learnhub.service.VectorIndexService;
+import org.dyh.learnhub.service.WordDocService;
 import org.dyh.learnhub.service.WikiService;
 import org.dyh.learnhub.vo.AiChatVO;
 import org.dyh.learnhub.vo.NoteVO;
@@ -116,6 +117,14 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
     private final WebService webService;
     /** 资料库：资料也是知识源（正文在统一检索与自动召回里都能命中） */
     private final FileStorageService fileStorageService;
+    /**
+     * 生成 Word 文档（Markdown → .docx）。
+     *
+     * <p>产物存进资料库（不是临时文件）：这样它既能被检索命中，也有一条稳定的下载链接
+     * （{@code /api/files/{id}/download}）—— 对齐 DSH 的交付约定：**生成 → 校验 → 交付真实文件路径**，
+     * 而不是把内容塞进对话里让用户自己复制。
+     */
+    private final WordDocService wordDocService;
     /** 模型分工表：检索词扩展走本地（便宜、可慢），对话仍走主模型 */
     private final ModelRouting routing;
     /** 语义检索（向量）索引：与词面并行的那条召回路径 */
@@ -1309,6 +1318,8 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                 return listFiles(args);
             case "add_file_from_url":
                 return addFileFromUrl(args, events);
+            case "create_word_document":
+                return createWordDocument(args, events);
             case "search_code":
                 return searchCode(args);
             case "get_code":
@@ -1884,6 +1895,58 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
     }
 
     /**
+     * 把 Markdown 生成一份 Word（.docx）交给用户下载。
+     *
+     * <p><b>为什么产物进资料库，而不是丢一个临时文件：</b>
+     * ① 用户点开链接就能拿到文件，不需要"复制内容 → 自己粘到 Word 里另存"
+     *    （这是智能体最没意义的劳动转移）；② 进库后有稳定 id，链接长期有效，
+     *    也能被知识库检索命中；③ 之后想让智能体"再改改这份文档"时，它读得到内容。
+     *
+     * <p><b>为什么用 summary 而不是让它进知识图谱：</b>
+     * 抽取出的正文会进统一检索，这是想要的；suppressGraphEvent 是避免"生成一份文档"
+     * 就在概念图谱里凭空多出一个实体（图谱的价值在"读过的知识"，不在"我导出过什么"）。
+     *
+     * <p>返回值里带 markdown 链接，模型照抄即可；同时明确要求它在回答末尾给出链接
+     * （见 DEFAULT_CHAT_PROMPT 里那条"交付文件"的约束）。
+     */
+    String createWordDocument(JsonNode args, List<String> events) {
+        String title = args.path("title").asText("").trim();
+        String markdown = args.path("markdown").asText("");
+        if (!StringUtils.hasText(markdown)) {
+            return "{\"ok\":false,\"error\":\"正文不能为空：请把要生成的 Markdown 内容放在 markdown 字段\"}";
+        }
+        try {
+            WordDocService.Doc doc = wordDocService.render(title, markdown);
+            Long categoryId = resolveCategoryId(args, events);
+            org.dyh.learnhub.entity.FileInfo info =
+                    fileStorageService.uploadBytes(doc.fileName(), doc.bytes(), categoryId);
+
+            // 让生成物可被检索，但不在图谱里"无中生有"一个实体
+            String summary = args.path("summary").asText("").trim();
+            fileStorageService.updateSummary(info.getId(), StringUtils.hasText(summary)
+                    ? summary
+                    : ("由智能体生成的 Word 文档" + (StringUtils.hasText(title) ? "：" + title : "")));
+            events.add("📄 已生成 Word 文档《" + info.getOriginName() + "》");
+
+            String url = "/api/files/" + info.getId() + "/download";
+            ObjectNode out = objectMapper.createObjectNode();
+            out.put("ok", true);
+            out.put("file_id", info.getId());
+            out.put("file_name", nullTo(info.getOriginName()));
+            out.put("size", info.getSize() == null ? 0L : info.getSize());
+            out.put("download_url", url);
+            out.put("text_status", nullTo(info.getTextStatus()));
+            out.put("markdown_link", "[" + nullTo(info.getOriginName()) + "](" + url + ")");
+            out.put("hint", "交付要求：在回答正文里**说明文档内容概要**，并在**最后一行**给出下载链接"
+                    + "（照抄 markdown_link 即可）。不要只说「已生成」，也不要把全文再贴一遍。");
+            return out.toString();
+        } catch (Exception e) {
+            log.warn("生成 Word 文档失败: {}", e.getMessage());
+            return "{\"ok\":false,\"error\":\"" + esc(e.getMessage()) + "\"}";
+        }
+    }
+
+    /**
      * 读取资料的抽取正文。
      * <p>
      * <b>支持分页续读</b>（{@code offset}）：长文档一次性全给会撑爆上下文，只给开头又会让
@@ -2415,6 +2478,11 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                 String fname = a.path("filename").asText("");
                 return "存进资料库：从 " + a.path("url").asText("") + " 下载"
                         + (StringUtils.hasText(fname) ? "（存为 " + fname + "）" : "");
+            }
+            case "create_word_document" -> {
+                String title = a.path("title").asText("");
+                return "生成 Word 文档《" + (StringUtils.hasText(title) ? title : "无标题") + "》"
+                        + "，正文 " + a.path("markdown").asText("").length() + " 字（可下载）";
             }
             default -> {
                 return fn;
@@ -3111,6 +3179,17 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                         param("url", "string", "全文文件的直链（http/https）", true),
                         param("filename", "string", "入库文件名（可空；不给则从 URL 推断，PDF 会补 .pdf）", false),
                         param("category_name", "string", "目标分类名（不存在会自动创建；可留空）", false))));
+        defs.add(tool("create_word_document",
+                "把内容生成一份 **Word 文档（.docx）** 存进资料库，并返回**下载链接**。"
+                + "用户说「导出成 Word」「生成一份文档/报告/方案」「整理成可下载的文件」时用它。"
+                + "markdown 里可以用标题（#~####）、列表、表格、代码块、**加粗**，会渲染成对应的 Word 样式。"
+                + "内容通常来自已有笔记/资料：先用 get_note / search_knowledge 取到内容再生成，"
+                + "不要凭记忆重写用户的笔记。生成后**必须在回答最后给出返回里的下载链接**。",
+                List.of(
+                        param("title", "string", "文档标题（同时用作文件名）", true),
+                        param("markdown", "string", "文档正文（Markdown，≤20000 字；分节用 # 与 ##）", true),
+                        param("summary", "string", "一句话说明（进检索，便于以后找到这份文档；可空）", false),
+                        param("category_name", "string", "放进哪个分类（不存在会自动创建；可留空）", false))));
         defs.add(tool("search_code",
                 "检索「代码库」里保存的代码片段（独立于笔记/资料，**不含**知识库全文）。"
                 + "当用户问某段代码是怎么写的、某个方法/类在哪定义、某个项目怎么实现时用它。"
