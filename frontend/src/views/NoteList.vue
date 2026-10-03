@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown } from '@element-plus/icons-vue'
 import { categoryApi, tagApi, noteApi, saveBlob } from '../api'
+import { stripLeadingDocTitle } from '../utils/mdTitle'
 
 const router = useRouter()
 const loading = ref(false)
@@ -72,15 +73,17 @@ async function exportNote(row, fmt = 'md') {
   try {
     const n = await noteApi.detail(row.id)
     const safe = n.title.replace(/[\\/:*?"<>|]/g, '_')
+    // 标题只出现一次：正文首行若还是同一个 `# 标题`（历史笔记），先剥掉再拼
+    const body = stripLeadingDocTitle(n.content, n.title)
     if (fmt === 'html') {
       const { renderNoteHtml } = await import('../utils/mdToHtml')
       const meta = `${[n.categoryName, ...(n.tags || []).map((t) => `#${t.name}`)].filter(Boolean).join(' · ') || '未分类'}　·　更新于 ${time(n.updatedAt)}`
-      const html = renderNoteHtml({ title: n.title, content: n.content || '', meta })
+      const html = renderNoteHtml({ title: n.title, content: body, meta })
       const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
       saveBlob(blob, `${safe}.html`)
       ElMessage.success('已导出为 HTML 网页文件')
     } else {
-      const content = `# ${n.title}\n\n${n.content || ''}\n`
+      const content = `# ${n.title}\n\n${body}\n`
       const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' })
       saveBlob(blob, `${safe}.md`)
       ElMessage.success('已导出为 Markdown 文件')

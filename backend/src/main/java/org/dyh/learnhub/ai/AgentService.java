@@ -1355,13 +1355,21 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                     + " 节（再多建议拆成多篇）");
             sections = sections.subList(0, LONG_NOTE_MAX_SECTIONS);
         }
-        StringBuilder doc = new StringBuilder("# ").append(title).append('\n');
+        // 约定（见 skills/markdown-beautify/SKILL.md）：标题只存笔记的 title 字段，正文不再拼
+        // `# 标题` —— 否则编辑器里标题输入框与正文 H1 会同时出现，导出 .md 还会再拼一次。
+        StringBuilder doc = new StringBuilder();
         List<String> done = new ArrayList<>();
         int chars = 0;
         int truncated = 0;
         for (int i = 0; i < sections.size(); i++) {
             String heading = sections.get(i)[0];
             String points = sections.get(i)[1];
+            if (isTocOnlyHeading(heading)) {
+                // 「目录 / 大纲」这类小节：规范要求不要手写目录（右侧大纲自动生成），
+                // 而且模型写出来的往往是与正文脱节的一份表，白占一节。
+                events.add("⏭ 跳过「" + heading + "」小节：目录由界面右侧大纲自动生成");
+                continue;
+            }
             DeepSeekClient.ChatResult r = writeSection(title, outline, done, heading, points, t);
             String body = r == null ? "" : r.message().path("content").asText("").trim();
             if (r != null && r.truncated()) {
@@ -1377,7 +1385,12 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                 body = "（本节生成失败，可以对我说「重写「" + heading + "」」）";
                 events.add("⚠️ 第 " + (i + 1) + " 节「" + heading + "」生成失败");
             }
-            doc.append("\n## ").append(heading).append("\n\n").append(body).append('\n');
+            // 模型正文常自带本节的小节标题 → 拼装前先剥掉，避免每节两个标题
+            body = stripLeadingSectionHeading(body, heading);
+            if (doc.length() > 0) {
+                doc.append('\n');   // 首节不再顶一个空行
+            }
+            doc.append("## ").append(heading).append("\n\n").append(body).append('\n');
             done.add(heading);
             chars += body.length();
             events.add("✍️ 已写 " + (i + 1) + "/" + sections.size() + " 节：「" + heading
@@ -1393,10 +1406,10 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
         try {
             String argsJson = objectMapper.writeValueAsString(payload);
             AgentPendingAction staged = sessionService.stageAction(sessionId, "create_note", argsJson,
-                    "创建笔记「" + title + "」（" + sections.size() + " 节 / 约 " + chars + " 字，分段生成）");
+                    "创建笔记「" + title + "」（" + done.size() + " 节 / 约 " + chars + " 字，分段生成）");
             vo.getPendingActions().add(AgentSessionService.actionBrief(staged));
             return "{\"ok\":true,\"staged\":true,\"action_id\":" + staged.getId()
-                    + ",\"sections\":" + sections.size() + ",\"chars\":" + chars
+                    + ",\"sections\":" + done.size() + ",\"chars\":" + chars
                     + ",\"truncatedSections\":" + truncated
                     + ",\"message\":\"长文已分段生成并拼成**一篇**，已提交给用户确认，尚未写入笔记。"
                     + "请告诉用户：共 N 节约 M 字，请在下方卡片确认。不要说你已经写进笔记了。\"}";
@@ -1477,11 +1490,55 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
         return fallback;
     }
 
+    /** 「目录 / 大纲」这类小节：规范要求不要手写目录（右侧大纲自动生成） */
+    private static boolean isTocOnlyHeading(String heading) {
+        String h = heading == null ? "" : heading.replaceAll("[\\s`*#：:]", "").toLowerCase();
+        return h.equals("目录") || h.equals("大纲") || h.equals("contents")
+                || h.equals("tableofcontents") || h.equals("toc");
+    }
+
+    /**
+     * 去掉正文开头那行重复的小节标题。
+     * <p>
+     * 拼装时已经写了 {@code ## heading}，而模型正文常常自己又带一个 —— 实测两篇长文里
+     * 24~25 个二级标题对应 12 节，每节都是成对的：代码给一个、模型自己再写一个。
+     */
+    private static String stripLeadingSectionHeading(String body, String heading) {
+        if (!StringUtils.hasText(body)) {
+            return "";
+        }
+        String b = body.strip();
+        int nl = b.indexOf('\n');
+        String firstLine = (nl < 0 ? b : b.substring(0, nl)).trim();
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("^#{1,4}\\s+(.+)$").matcher(firstLine);
+        if (!m.matches() || !sameHeadingText(m.group(1), heading)) {
+            return b;
+        }
+        String rest = nl < 0 ? "" : b.substring(nl + 1);
+        return rest.replaceFirst("^(\\s*\\r?\\n)+", "");
+    }
+
+    /** 两个小节标题是否"同一个"：归一化后相等或互相包含（短名 vs 全名很常见） */
+    private static boolean sameHeadingText(String a, String b) {
+        String x = normHeading(a);
+        String y = normHeading(b);
+        if (x.isEmpty() || y.isEmpty()) {
+            return false;
+        }
+        return x.equals(y) || x.contains(y) || y.contains(x);
+    }
+
+    private static String normHeading(String s) {
+        return s == null ? "" : s.replaceAll("[\\s`*：:、，,。.（）()【】\\[\\]\\-]", "");
+    }
+
     /** 写其中一节：思考关闭、显式 token 上限，避免单节撞全局上限 */
     private DeepSeekClient.ChatResult writeSection(String title, String outline, List<String> done,
                                                   String heading, String points, ModelRouting.ModelTarget t) {
         String system = "你是技术文档作者。现在为一篇长文档写**其中一节**。"
-                + "只输出这一节的正文 Markdown：不要写 `#` 文档标题、不要重复其它小节、不要前言与结语。";
+                + "只输出这一节的正文 Markdown：不要写 `#` 文档标题，"
+                + "**也不要再写这一节的 `##` 小节标题**（小节标题由调用方添加）；"
+                + "不要重复其它小节、不要前言与结语。";
         StringBuilder user = new StringBuilder();
         user.append("文档标题：").append(title).append('\n');
         user.append("全文大纲：\n").append(outline).append('\n');
@@ -2901,14 +2958,18 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
     /** 工具定义列表（OpenAI function calling schema，会随请求带给模型） */
     private List<Object> toolDefinitions() {
         List<Object> defs = new ArrayList<>();
+        // 写进笔记正文的统一排版约定（与 skills/markdown-beautify/SKILL.md 一致）：
+        // 生成侧最容易犯的两个错就是"正文里又写一遍 # 标题"和"把结构写成整行加粗"。
+        final String rules = " 正文排版：用 `##` / `###` 组织层级；不要写 `# 标题` 行（标题由 title 承载）；"
+                + "不要手写目录（界面右侧大纲自动生成）；不要用整行加粗当小标题。";
         defs.add(tool("create_note",
-                "创建一篇新的 Markdown 笔记（沉淀知识点）。当用户说“记成笔记/存为笔记/做成笔记”，或明确要沉淀当前内容时调用。",
+                "创建一篇新的 Markdown 笔记（沉淀知识点）。当用户说“记成笔记/存为笔记/做成笔记”，或明确要沉淀当前内容时调用。" + rules,
                 List.of(
                         param("title", "string", "笔记标题", true),
                         param("content", "string", "Markdown 正文", true),
                         param("category_name", "string", "目标分类名（不存在会自动创建；可留空）", false))));
         defs.add(tool("update_note",
-                "更新已有笔记的标题/正文/分类。当用户要求“把刚才的回答补充进笔记/替换正文/修改这篇笔记”时调用。",
+                "更新已有笔记的标题/正文/分类。当用户要求“把刚才的回答补充进笔记/替换正文/修改这篇笔记”时调用。" + rules,
                 List.of(
                         param("note_id", "integer", "笔记 id", true),
                         param("title", "string", "新标题（不传则保留原标题）", false),
@@ -2918,17 +2979,18 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                 + "最后只挂一张待确认卡片。"
                 + "为什么要这样：单次输出受 max_tokens 限制，一次写两万字必然在半句处被截断"
                 + "（实测 16384 上限时正文只到 13724 token，思考还占掉一部分）。"
-                + "想让内容更多就**多分几节**，而不是让某一节更长。",
+                + "想让内容更多就**多分几节**，而不是让某一节更长。"
+                + "注意：正文由后端拼装，你不用写标题行，也不要给每节重复写小节标题。" + rules,
                 List.of(
                         param("title", "string", "笔记标题", true),
-                        param("outline", "string", "大纲：每行一节（`## 小节名` 或 `- 小节名：本节要点`），行内可跟本节要点", true),
+                        param("outline", "string", "大纲：每行一节（`## 小节名` 或 `- 小节名：本节要点`），行内可跟本节要点；**不要写「目录 / 大纲」这种小节**", true),
                         param("category_name", "string", "目标分类名（不存在会自动创建；可留空）", false))));
         defs.add(tool("append_to_note",
                 "把一段 Markdown **追加**到已有笔记末尾（原有内容一字不动）。"
                 + "**给笔记补充新章节时优先用它**，而不是 update_note 整篇重写 —— "
                 + "整篇重写要求模型一次生成全文，长笔记（上万字）极易在输出上限处被截断，"
                 + "参数就废了（实测踩到：要写 21653 字，只生成到 16031 字）。"
-                + "每次追加请控制在 4000 字以内；内容多就分多次调用。",
+                + "每次追加请控制在 4000 字以内；内容多就分多次调用。" + rules,
                 List.of(
                         param("note_id", "integer", "笔记 id", true),
                         param("markdown", "string", "要追加的 Markdown 片段（≤4000 字）", true))));        defs.add(tool("query_notes",                "按关键词检索用户已有笔记，返回标题+摘要列表（不含全文）。回答前若想参考用户以前学过什么可以调用。",

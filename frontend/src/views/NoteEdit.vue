@@ -9,6 +9,7 @@ import MarkdownIt from 'markdown-it'
 import '../utils/mdEditorSetup'
 import { aiApi, categoryApi, tagApi, noteApi, saveBlob } from '../api'
 import { fixHtmlQuotes } from '../utils/htmlQuotes'
+import { stripLeadingDocTitle } from '../utils/mdTitle'
 import {
   AGENT_NOTE_CONTEXT_EVENT,
   AGENT_NOTE_MERGE_EVENT,
@@ -701,14 +702,16 @@ async function exportNote(fmt = 'md') {
   const title = form.value.title.trim()
   const safe = title.replace(/[\\/:*?"<>|]/g, '_')
   try {
+    // 标题只出现一次：正文首行若还是同一个 `# 标题`（历史笔记 / 没保存的手写行），先剥掉
+    const body = stripLeadingDocTitle(form.value.content, title)
     if (fmt === 'html') {
       const { renderNoteHtml } = await import('../utils/mdToHtml')
-      const html = renderNoteHtml({ title, content: form.value.content || '' })
+      const html = renderNoteHtml({ title, content: body })
       const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
       saveBlob(blob, `${safe}.html`)
       ElMessage.success('已导出为 HTML 网页文件')
     } else {
-      const content = `# ${title}\n\n${form.value.content || ''}\n`
+      const content = `# ${title}\n\n${body}\n`
       const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' })
       saveBlob(blob, `${safe}.md`)
       ElMessage.success('已导出为 Markdown 文件')
@@ -768,8 +771,20 @@ function onToolsWheel(e) {
 
 function measureLayout() {
   const w = editorWrapRef.value?.clientWidth || window.innerWidth
+  const prev = layoutMode.value
   layoutMode.value = w >= 1280 ? 'wide' : w >= 860 ? 'mid' : 'tab'
-  if (layoutMode.value !== 'wide') outlineOpen.value = false
+  if (layoutMode.value === 'wide') {
+    if (prev !== 'wide' && /^#{1,3}\s/m.test(form.value.content || '')) {
+      // 由窄变宽：有标题就自动展开常驻大纲（窄屏时它是隐藏的）
+      outlineOpen.value = true
+    }
+  } else if (prev === 'wide') {
+    // 只在"从宽屏掉到窄屏"时收起常驻栏与抽屉。
+    // 窄屏内部的窗口微调（滚动条出现/消失、缩放几像素）也会触发 resize，
+    // 无条件在这里重置会把刚打开的抽屉立刻关掉。
+    outlineOpen.value = false
+    outlineDrawer.value = false
+  }
   updateToolsScroll()
 }
 
@@ -852,6 +867,36 @@ const outline = computed(() => {
 
 const activeIdx = ref(-1)
 let outlineScrollTarget = null
+
+/**
+ * 窄屏（mid / tab）与阅读模式下的大纲抽屉。
+ * <p>
+ * 为什么需要：常驻大纲栏的显示条件是 `layoutMode === 'wide'`（编辑区 ≥1280px），
+ * 而窄屏下**连「展开大纲」的浮标都没有**（那个浮标的 v-if 同样要求 wide）——
+ * 笔记本上把左侧导航和右侧智能体面板一开就够不到 1280px，等于永远没有大纲入口。
+ */
+const outlineDrawer = ref(false)
+function openOutlineDrawer() { outlineDrawer.value = true }
+function closeOutlineDrawer() { outlineDrawer.value = false }
+/** 抽屉里点条目：先关抽屉、下一帧再滚动，避免关闭动画与滚动打架导致目标位置算错 */
+function jumpFromDrawer(idx) {
+  outlineDrawer.value = false
+  nextTick(() => scrollToHeading(idx))
+}
+/**
+ * 大纲当前是否可见：宽屏看常驻侧栏，窄屏看抽屉。
+ * 用于「更多 → 展开/收起大纲」的文案与切换 —— 这个菜单项在窄屏原本是个**哑按钮**：
+ * 它只切 outlineOpen，而常驻侧栏要求 layoutMode === 'wide'，所以在窄屏点了没有任何反应，
+ * 这也是"找不到大纲"的一部分原因。快捷键 toggleOutline 走同一入口。
+ */
+const outlineShown = computed(() => (layoutMode.value === 'wide' ? outlineOpen.value : outlineDrawer.value))
+function toggleOutline() {
+  if (layoutMode.value === 'wide') {
+    outlineOpen.value = !outlineOpen.value
+  } else {
+    outlineDrawer.value = !outlineDrawer.value
+  }
+}
 
 function scrollToHeading(idx) {
   const pv = pvScrollRef.value
@@ -1049,7 +1094,7 @@ function moreCommand(cmd) {
     cmd()
     return
   }
-  if (cmd === 'toggleOutline') outlineOpen.value = !outlineOpen.value
+  if (cmd === 'toggleOutline') toggleOutline()
   else if (cmd === 'toggleFocus') toggleFocus()
   else if (cmd === 'toggleReading') toggleReading()
   else if (cmd === 'insertTemplate') insertTemplate()
@@ -2963,7 +3008,7 @@ onBeforeUnmount(() => {
               <span class="dd-ico"><svg viewBox="0 0 24 24"><path d="M5 4.5h9l5 5v10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-14a1 1 0 0 1 1-1Z" /><path d="M14 4.5v5h5M8 14h8M8 17h5" /></svg></span>插入 Markdown 模板
             </el-dropdown-item>
             <el-dropdown-item command="toggleOutline" divided>
-              <span class="dd-ico"><svg viewBox="0 0 24 24"><path d="M5 6h14M5 12h9M5 18h12" /></svg></span>{{ outlineOpen ? '收起大纲' : '展开大纲' }}
+              <span class="dd-ico"><svg viewBox="0 0 24 24"><path d="M5 6h14M5 12h9M5 18h12" /></svg></span>{{ outlineShown ? '收起大纲' : '展开大纲' }}
             </el-dropdown-item>
             <el-dropdown-item command="toggleFocus">
               <span class="dd-ico">
@@ -3317,6 +3362,42 @@ onBeforeUnmount(() => {
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M15 6l-6 6 6 6" /></svg>
         大纲
       </button>
+      <!--
+        窄屏 / 阅读模式的大纲入口（宽屏走上面的常驻侧栏 + 收起浮标）。
+        没有它的话，编辑区窄于 1280px 时大纲完全没有入口。
+      -->
+      <button
+        v-if="layoutMode !== 'wide' && outline.length"
+        class="outline-fab outline-fab-narrow"
+        type="button"
+        title="打开大纲"
+        @click="openOutlineDrawer"
+      >
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 6h14M5 12h9M5 18h12" /></svg>
+        大纲
+      </button>
+
+      <!-- 大纲抽屉：点条目跳转后自动关闭 -->
+      <div v-if="outlineDrawer" class="ol-mask" @click="closeOutlineDrawer"></div>
+      <aside v-if="outlineDrawer" class="ol-drawer" role="dialog" aria-label="大纲">
+        <div class="ol-head">
+          <span>大纲</span>
+          <button class="icon-btn sm" type="button" title="关闭大纲" @click="closeOutlineDrawer">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
+          </button>
+        </div>
+        <div class="ol-list">
+          <div
+            v-for="(h, i) in outline"
+            :key="'drawer-' + i"
+            class="ol-item"
+            :class="[`lv${h.level}`, { active: i === activeIdx }]"
+            :title="h.text"
+            @click="jumpFromDrawer(i)"
+          >{{ h.text }}</div>
+          <div v-if="!outline.length" class="ol-empty">正文里写个标题（# 开头）<br />就会出现在这里</div>
+        </div>
+      </aside>
     </div>
 
     <!-- AI 处理：处理中显示真实分段进度，完成后转为结果预览 -->
@@ -4302,6 +4383,35 @@ html.dark .ol-item.active {
 .outline-fab:hover {
   color: var(--app-brand-deep);
   border-color: color-mix(in srgb, var(--app-brand) 40%, var(--app-border));
+}
+/* ---- 窄屏 / 阅读模式的大纲入口与抽屉（宽屏用上面的常驻侧栏）---- */
+.outline-fab-narrow {
+  top: auto;
+  right: 18px;
+  bottom: 18px;
+  z-index: 6;
+}
+.ol-mask {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.28);
+  z-index: 20;
+}
+.ol-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(300px, 78%);
+  display: flex;
+  flex-direction: column;
+  background: var(--app-card);
+  border-left: 1px solid var(--app-border-weak);
+  box-shadow: -10px 0 28px rgba(0, 0, 0, 0.12);
+  z-index: 21;
+}
+.ol-drawer .ol-head {
+  border-bottom: 1px solid var(--app-border-weak);
 }
 .editor-wrap {
   position: relative;

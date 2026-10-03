@@ -129,9 +129,11 @@ public class NoteService {
     public NoteVO save(NoteDTO dto) {
         Note note = new Note();
         note.setTitle(dto.getTitle().trim());
-        note.setContent(dto.getContent());
+        // 标题只存 title 字段：正文开头那行重复的 `# 标题` 在这里统一剥掉（见 stripDuplicatedTitle）
+        String content = stripDuplicatedTitle(dto.getContent(), note.getTitle());
+        note.setContent(content);
         // 摘要随手写好落库：列表页就再也不用把整段 LONGTEXT 拉回来算这一行了
-        note.setSummary(plainSummary(dto.getContent()));
+        note.setSummary(plainSummary(content));
         note.setCategoryId(dto.getCategoryId());
         noteMapper.insert(note);
         saveTags(note.getId(), dto.getTagIds());
@@ -158,12 +160,15 @@ public class NoteService {
         if (exist == null) {
             throw new IllegalArgumentException("笔记不存在: " + id);
         }
+        // 与 save 同一条规则：正文开头重复的 `# 标题` 一律剥掉
+        //（AI 的「整篇重写 / 追加」最容易把标题又带回正文）
+        String content = stripDuplicatedTitle(dto.getContent(), dto.getTitle().trim());
         // 用显式 UpdateWrapper：categoryId 为 null 时也能真正清空（updateById 会忽略 null）
         noteMapper.update(null, Wrappers.<Note>lambdaUpdate()
                 .eq(Note::getId, id)
                 .set(Note::getTitle, dto.getTitle().trim())
-                .set(Note::getContent, dto.getContent())
-                .set(Note::getSummary, plainSummary(dto.getContent()))
+                .set(Note::getContent, content)
+                .set(Note::getSummary, plainSummary(content))
                 .set(Note::getCategoryId, dto.getCategoryId()));
         if (dto.getTagIds() != null) {
             noteMapper.deleteNoteTags(id);
@@ -173,6 +178,52 @@ public class NoteService {
         learningActivity.record("note", id);
         publishChanged(exist.getCategoryId(), dto.getCategoryId());
         return detail(id);
+    }
+
+    /**
+     * 剥掉正文开头那行「与标题重复」的一级标题。
+     * <p>
+     * 约定（见 skills/markdown-beautify/SKILL.md）：标题只存 {@code title} 字段，正文用
+     * {@code ##} / {@code ###} 组织层级。但历史数据与模型输出经常两处都写，于是打开笔记
+     * 就看到两个标题、导出 .md 时还会在前面再拼一次。这里在保存与更新的唯一入口统一剥掉。
+     * <p>
+     * 只在"确实是同一个标题"时剥：忽略空白与常见标点后两边相等，或一边包含另一边
+     *（模型爱把标题简写，例如标题「Spring Boot 启动流程（高频面试题）」对应 H1「Spring Boot 启动流程」）。
+     */
+    static String stripDuplicatedTitle(String content, String title) {
+        if (content == null || content.isEmpty()) {
+            return content;
+        }
+        String t = title == null ? "" : title.trim();
+        if (t.isEmpty()) {
+            return content;
+        }
+        int lineEnd = content.indexOf('\n');
+        String firstLine = (lineEnd < 0 ? content : content.substring(0, lineEnd)).trim();
+        if (!firstLine.startsWith("# ")) {
+            return content;   // 只处理一级标题行（`## ` 不满足这个前缀）
+        }
+        String heading = firstLine.substring(2).trim();
+        if (!sameTitleText(heading, t)) {
+            return content;
+        }
+        String rest = lineEnd < 0 ? "" : content.substring(lineEnd + 1);
+        // 连标题下面的空行一起去掉，别让正文一开头留一堆空行
+        return rest.replaceFirst("^(\\s*\\r?\\n)+", "");
+    }
+
+    /** 两个标题是否"同一个"：归一化后相等或互相包含 */
+    private static boolean sameTitleText(String a, String b) {
+        String x = normalizeTitle(a);
+        String y = normalizeTitle(b);
+        if (x.isEmpty() || y.isEmpty()) {
+            return false;
+        }
+        return x.equals(y) || x.contains(y) || y.contains(x);
+    }
+
+    private static String normalizeTitle(String s) {
+        return s == null ? "" : s.replaceAll("[\\s`*：:、，,。.（）()【】\\[\\]\\-]", "");
     }
 
     /** 内容变更通知：wiki 的自动增量更新靠它（见 WikiService#onKnowledgeChanged） */
