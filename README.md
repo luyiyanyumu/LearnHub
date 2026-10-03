@@ -58,7 +58,7 @@
 | --- | -------------------------------------------------------------------- |
 | 前端  | Vue 3 + Vite + Element Plus（按需引入）+ Vue Router + md-editor-v3 + axios |
 | 后端  | Spring Boot 3.5.16 + MyBatis-Plus 3.5.17 + Validation                |
-| 数据库 | MySQL 8（库 `learn_hub`；**一键部署**里是容器 `learn-hub-mysql`，手动部署时是自己起的实例） |
+| 数据库 | MySQL 8（库 `learn_hub`；**① Docker 路**里是容器 `learn-hub-mysql`，**② 本机路**里是你自己起的实例） |
 | AI  | DeepSeek API（OpenAI 兼容协议，手写客户端，无 SDK 依赖）                             |
 | 环境  | JDK 21 (Temurin) + Maven 3.9+ + Node 18+                             |
 | 部署  | **Docker Compose 一键起全套**（见 `deploy/`）；也支持宿主机直接跑 jar + Vite/nginx |
@@ -90,54 +90,76 @@ learn-hub/
 └── mcp/         # MCP server：把 REST 接口暴露给 DeepSeek Harness 等 MCP 客户端（零依赖，见 mcp/README.md）
 ```
 
-## 部署与启动：选一种
+## 部署与启动：两种方式，**别混用**
 
-四种方式都能跑，别混用（**同一个后端端口只跑一个**）：
+两条路是**分开的**，各自有各自的数据库与上传目录，互相看不见：
 
-| 场景 | 怎么起 | 地址 | 说明 |
-| --- | --- | --- | --- |
-| **① 一键部署**（推荐：服务器/另一台电脑） | `cd deploy && cp .env.example .env && docker compose up -d --build` | http://localhost:8888 | 只装 Docker；MySQL + 后端 + nginx 全在容器里；细节见 [deploy/README.md](deploy/README.md) |
-| **② 手动部署**（不想用 Docker 跑应用） | `mvn -DskipTests package` 后 `java -jar target/…jar`，前端 `npm run dev` 或 `npm run build` + nginx | 前端 5174 / 后端 18080 | 需要自备 MySQL 8；逐项清单见 [docs/deploy.md](docs/deploy.md) 与下面「快速开始」 |
-| **③ 本机一键脚本**（Windows） | 双击 `start-all.bat` / 停：`stop-all.bat` | 前端 5174 | 干的就是「`docker start` 已有 MySQL 容器 → 起 jar → 起前端 → 开浏览器」。**要求 `learn-hub-mysql` 容器已存在**（先照「快速开始」第 1 步建一次）且 jar 已构建过 |
-| **④ 只开发前端** | 后端已跑着，`cd frontend && npm run dev` | 5174 | `/api` 由 Vite 代理到 18080，不用配后端地址 |
-
-### 端口与数据位置（四种方式共用）
-
-| 东西 | 位置 | 备注 |
+| | **① Docker Compose（仓库唯一推荐的部署方式）** | **② 本机运行（开发者自己的机器）** |
 | --- | --- | --- |
-| 后端接口 | **18080** | 改：`--server.port=` 或环境变量 `SERVER__PORT` |
-| 前端开发服务器 | **5174** | strictPort：被占会直接报错，不会静默换端口 |
-| 网页入口（一键部署） | **8888** | 改 `deploy/.env` 的 `WEB_HOST_PORT` |
-| MySQL | **3307**（手动）/ 3307（一键部署对外） | `application.yml` 里写死 `localhost:3307`，容器里由 compose 覆盖成 `mysql:3306` |
-| 笔记/知识库/图谱/设置 | MySQL 库 `learn_hub` | 一键部署时在具名卷 `learn-hub_mysql-data` 里 |
-| 上传的资料原文 | `backend/uploads/`（手动）/ 卷 `learn-hub_uploads`（一键部署） | **不在 git 里**，换机器要单独搬 |
-| AI 密钥 | `backend/.env`（手动）/ `deploy/.env`（一键部署） | 也可在界面「设置 → 外观与 AI」里填，**库里的配置优先** |
-| 技能提示词 | `skills/`（镜像里是 `/app/skills`） | 实时读盘：改完存盘即生效，不用重启 |
+| 适合谁 | 服务器、另一台电脑、任何"只想要个能用的服务"的场景 | 改代码的人；或有历史数据绑在某个本机 MySQL 上的场景 |
+| 依赖 | **只要 Docker**（含 `docker compose` v2） | JDK 21 / Maven / Node 18+ / 一个 MySQL 8 |
+| 起法 | `cd deploy && cp .env.example .env && docker compose up -d --build` | 后端 `java -jar`，前端 `npm run dev` |
+| 地址 | 网页 **8888**（`deploy/.env` 可改） | 前端 **5174**、后端 **18080** |
+| 数据库 | 容器 `learn-hub-mysql`，数据在具名卷 `deploy_mysql-data` | 你自己起的 MySQL（本仓库历史部署用 3307 的那个） |
+| 上传资料 | 具名卷 `deploy_uploads` | `backend/uploads/` |
+| 配置 | `deploy/.env`（compose 读它） | `backend/.env` + 界面设置 |
+| 文档 | **[deploy/README.md](deploy/README.md)**（端口、数据卷、备份、更新、Ollama、Milvus） | **[docs/deploy.md](docs/deploy.md)** + 下面「快速开始」 |
 
-> **更新**：手动部署 = `git pull` → 停后端 → `mvn package` → 起；一键部署 = `git pull` → `docker compose up -d --build`。
+> **为什么强调别混用**：两条路各有一套数据库与上传目录，**在一边操作不会出现在另一边**。
+> 切到 Compose 之前，数据要用 `mysqldump` + 上传目录一起搬（步骤见 [docs/deploy.md](docs/deploy.md)）。
+> 同一个后端端口上也只该跑一个后端 —— 本机 jar 与容器后端同时起会抢 18080。
+
+### Windows 一键脚本：全部属于 ①（Docker Compose），不属于 ②
+
+`start-all.bat` / `stop-all.bat` / `update.bat` 是 **Docker Compose 那条路的包装**，
+它们干的事就是 `cd deploy && docker compose ...`，因此**不要**和本机运行的 jar 一起用：
+
+| 脚本 | 属于哪条路 | 做什么 |
+| --- | --- | --- |
+| `start-all.bat` | ① Docker | 起 Docker → `docker compose up -d` → 等健康 → 开浏览器 |
+| `stop-all.bat` | ① Docker | `docker compose stop`（默认）/ `down`（移除容器） |
+| `update.bat` | ① Docker | `git pull` → 冲突检查 → `docker compose up -d --build` |
+| `start-dev.bat` | ② 本机 | 起本机 jar + Vite（**不是** Docker 路；它只借用 Docker 里的 MySQL 容器） |
+
+脚本内的端口与容器名**每次都从 `deploy\.env` 读**，所以同一台机器上要和别的项目错开时，
+只改 `.env` 即可（见 [deploy/README.md](deploy/README.md) 的「端口/容器名被占用时怎么并存」）。
+
+### 端口与数据位置
+
+| 东西 | ① Docker Compose | ② 本机运行 |
+| --- | --- | --- |
+| 后端接口 | 容器内 18080，对外 `${BACKEND_HOST_PORT}`（默认 18080） | **18080**（改：`--server.port=` 或 `SERVER__PORT`） |
+| 前端 | nginx 容器 80，对外 `${WEB_HOST_PORT}`（默认 8888） | Vite **5174**（strictPort，被占直接报错） |
+| MySQL | 容器 3306，对外 `${MYSQL_HOST_PORT}`（默认 3307） | `application.yml` 写死 `localhost:3307` |
+| 笔记/知识库/图谱/设置 | 卷 `deploy_mysql-data` 里的库 `learn_hub` | 你那个 MySQL 里的库 `learn_hub` |
+| 上传的资料原文 | 卷 `deploy_uploads` | `backend/uploads/` |
+| AI 密钥 | `deploy/.env` 或界面设置 | `backend/.env` 或界面设置（**库里的配置优先**） |
+| 技能提示词 | `skills/`（镜像里 `/app/skills`，改完即生效不用重启） | `skills/`（同上） |
+
+> **更新**：① = `git pull` → `docker compose up -d --build`；② = `git pull` → 停后端 → `mvn package` → 起。
 > 两者都要留意：`schema.sql` 全是 `CREATE TABLE IF NOT EXISTS` 且没有迁移框架，
 > **给已有表加列不会自动生效**，得手工 `ALTER`（[docs/deploy.md](docs/deploy.md) 与 [deploy/README.md](deploy/README.md) 都写了）。
 
-## 快速开始（手动部署的精简版）
+## 快速开始（② 本机运行的精简版）
 
-**一键部署（只装 Docker）**：`cd deploy && cp .env.example .env && docker compose up -d --build` → http://localhost:8888，
-细节见 **[deploy/README.md](deploy/README.md)**（端口、数据卷、备份、更新、Milvus 可选叠加）。
-**换一台电脑手动部署**：看 **[docs/deploy.md](docs/deploy.md)** —— 清单式的「装什么 → 怎么起 → 怎么验证 →
-常见报错」，还包含**数据怎么搬**（笔记/资料在 MySQL 与 `backend/uploads/` 里，不在 GitHub 上）。
-以下是手动部署的精简版。
+> 走 **① Docker Compose** 的直接看 **[deploy/README.md](deploy/README.md)**，不用读本节 ——
+> 本节是"在本机直接跑"的路径，**两条路的数据互不相通**（各自的库 + 各自的上传目录）。
+> 要清单式的「装什么 → 怎么起 → 怎么验证 → 数据怎么搬」，看 [docs/deploy.md](docs/deploy.md)。
 
-### 0. 环境要求
+### 0. 环境要求（② 本机运行）
 
-**一键部署只要 Docker**（含 Compose v2，即 `docker compose` 而不是老的 `docker-compose`）——
-**JDK / Maven / Node 都不用装**：JDK 与 Node 只在镜像构建时用到，
-后端镜像的构建阶段用 `maven:3.9-eclipse-temurin-21` 编译、运行阶段只留 `eclipse-temurin:21-jre`，
-前端镜像的构建阶段用 `node:20-alpine` 跑 `npm ci && npm run build`。
-（唯一额外条件：构建镜像要能拉到基础镜像，国内直连 Docker Hub 常超时，所以默认走加速源，见 `deploy/.env`。）
+| 要装 | 版本 | 用途 |
+| --- | --- | --- |
+| JDK | 21 | 编译并运行后端 |
+| Maven | 3.9+ | `mvn package` 打出可执行 jar |
+| Node.js | 18+ | 前端 dev server / 构建 |
+| MySQL | 8 | 数据库（下面第 1 步用容器起一个最省事，也可以是你已有的实例） |
 
-手动部署（不用 Docker 跑应用）才需要：JDK 21、Maven 3.9+、Node 18+、MySQL 8。
-只有一件事**两种情况都要**：一开始得能连上 GitHub 把代码 clone 下来（或者用现成的源码压缩包）。
+> **① Docker 那条路这些都不用装**（JDK 与 Node 只在镜像构建阶段用到，见镜像里的多阶段构建）——
+> 两条路的依赖差异见上面「部署与启动」那节的对照表。
+> 共同前提只有一条：一开始得能连上 GitHub 把代码 clone 下来（或用现成的源码压缩包）。
 
-### 1. 数据库（手动部署）
+### 1. 数据库（② 本机运行）
 
 > **端口默认为 3307，要和 `application.yml` 对齐**：后端写死了
 > `jdbc:mysql://localhost:3307/learn_hub`、`root / root123456`（见 `backend/src/main/resources/application.yml`）。
@@ -1041,7 +1063,7 @@ skills/
 DeepSeek Harness 接入后即可用 `mcp__learnhub__*` 直接读写知识库，无需复制粘贴。
 
 - 零依赖、手写 JSON-RPC over stdio，**不改后端**（纯 REST 客户端）
-- 前置：后端在跑（一键部署的话 `docker compose up -d`；手动部署见上面「快速开始」）
+- 前置：后端在跑（① Docker 路：`docker compose up -d`；② 本机路：见上面「快速开始」）
 - 自测：`cd mcp && node smoke-test.mjs`（只读，加 `--write` 跑完整建/改/删闭环）
 - 接入方式（写进 `~/.dsh/profiles/<profile>/cordis.patch.yml`）与排错，见 **[mcp/README.md](mcp/README.md)**
 
