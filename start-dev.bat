@@ -1,22 +1,22 @@
 @echo off
 chcp 65001 >nul
-title learn-hub 开发模式
+title learn-hub dev mode
 cd /d "%~dp0"
 setlocal
 
 REM ============================================================
-REM  learn-hub 学习工作台 · 本机开发模式
+REM  learn-hub local dev mode
 REM
-REM    用途：改前端要热更新（Vite 5174）、或要在本机调试后端 jar 时用。
-REM          日常使用请走 Docker 版：start-all.bat（入口 8888）
-REM    前提：本机装了 Node.js（npm）与 JDK 17+，后端 jar 已构建过
+REM    Use: frontend hot reload (Vite 5174) or debugging the backend jar locally.
+REM          For daily use prefer Docker: start-all.bat (port 8888)
+REM    Needs: Node.js (npm) and JDK 17+ locally; backend jar already built
 REM
-REM    默认        ：后端 + 前端在后台运行，不弹黑窗口
-REM                  输出写入 logs\backend.log、logs\frontend.log
-REM    调试        ：start-dev.bat show    前后端窗口显示出来
-REM    停止        ：stop-all.bat
+REM    default     : backend + frontend run in background, no console window
+REM                  output written to logs\backend.log and logs\frontend.log
+REM    debug       : start-dev.bat show    both windows become visible
+REM    stop        : stop-all.bat
 REM
-REM  实际干活的是 tools\run-backend.cmd 与 tools\run-frontend.cmd
+REM  the real work is done by tools\run-backend.cmd and tools\run-frontend.cmd
 REM ============================================================
 
 set "SHOW=0"
@@ -28,16 +28,26 @@ set "FE_EXPECT=0"
 set "SOME_FAIL="
 
 echo ============================================
-echo   learn-hub 学习工作台 · 开发模式启动
-if "%SHOW%"=="1" echo   [调试模式] 前后端窗口会显示出来
+echo   learn-hub dev mode starting
+if "%SHOW%"=="1" echo   [DEBUG] backend/frontend windows will be visible
 echo ============================================
 echo.
 
 REM ---------- 1. Docker + MySQL ----------
-echo [1/4] 检查 Docker 与 MySQL...
+echo [1/4] checking Docker and MySQL...
+REM ---------- container names / ports: read deploy\.env ----------
+REM This machine may run several projects; a fixed name like learn-hub-mysql can
+REM belong to another stack. Reading .env keeps dev mode pointed at our own stack.
+set "MYSQL_NAME=learn-hub-mysql"
+set "MYSQL_PORT=3307"
+if exist "deploy\.env" for /f "usebackq tokens=1,* delims==" %%a in ("deploy\.env") do (
+  if /i "%%a"=="MYSQL_CONTAINER_NAME" set "MYSQL_NAME=%%b"
+  if /i "%%a"=="MYSQL_HOST_PORT"      set "MYSQL_PORT=%%b"
+)
+
 docker info >nul 2>&1
 if not errorlevel 1 goto :docker_ok
-echo   Docker 未运行，正在启动 Docker Desktop（首次可能要等 30 秒左右）...
+echo   Docker not running; starting Docker Desktop (~30s on first run)...
 start "" "%LocalAppData%\Programs\DockerDesktop\Docker Desktop.exe"
 :waitdocker
 timeout /t 3 /nobreak >nul
@@ -45,21 +55,21 @@ docker info >nul 2>&1
 if errorlevel 1 goto :waitdocker
 :docker_ok
 
-docker inspect learn-hub-mysql >nul 2>&1
+docker inspect %MYSQL_NAME% >nul 2>&1
 if errorlevel 1 goto :no_mysql
-docker start learn-hub-mysql >nul 2>&1
-echo   MySQL 容器 learn-hub-mysql 已就绪（端口 3307）
+docker start %MYSQL_NAME% >nul 2>&1
+echo   MySQL container %MYSQL_NAME% ready (port %MYSQL_PORT%)
 goto :step_backend
 
 :no_mysql
-echo   [错误] 没有找到容器 learn-hub-mysql
-echo   请先部署一次：start-all.bat build
+echo   [ERROR] container %MYSQL_NAME% not found
+echo   Deploy first: start-all.bat build
 set "SOME_FAIL=1"
 goto :summary
 
-REM ---------- 2. 后端 ----------
+REM ---------- 2. backend ----------
 :step_backend
-echo [2/4] 启动后端 (端口 18080)...
+echo [2/4] starting backend (port 18080)...
 call :port_listening 18080
 if not errorlevel 1 goto :backend_running
 
@@ -76,37 +86,37 @@ if not defined JAVA_OK goto :backend_no_java
 if not exist "logs" mkdir "logs"
 if "%SHOW%"=="1" goto :backend_show
 powershell -NoProfile -Command "Start-Process -FilePath '%~dp0tools\run-backend.cmd' -WindowStyle Hidden"
-echo   后端已后台启动（无窗口），日志：logs\backend.log
+echo   backend started in background (no window); log: logs\backend.log
 set "BE_EXPECT=1"
 goto :step_frontend
 
 :backend_show
 start "learn-hub-backend" cmd /k ""%~dp0tools\run-backend.cmd" visible"
-echo   后端窗口已启动（调试模式，输出不写入日志）
+echo   backend window started (debug mode, not logged)
 set "BE_EXPECT=1"
 goto :step_frontend
 
 :backend_running
-echo   端口 18080 已在监听，跳过启动
-echo   提示：若这是 Docker 里的 learn-hub-backend 容器，开发模式请先 docker stop learn-hub-backend
+echo   port 18080 already listening; skip start
+echo   NOTE: if this is the learn-hub-backend container, run: docker stop learn-hub-backend
 set "BE_EXPECT=1"
 goto :step_frontend
 
 :backend_no_jar
-echo   [错误] 未找到 backend\target\learn-hub-backend-0.0.1-SNAPSHOT.jar
-echo   本机开发：cd backend ^&^& mvn package -DskipTests（或在 IDEA 里跑 Maven package）
-echo   不想装 JDK/Maven：直接走 Docker 版 start-all.bat
+echo   [ERROR] backend\target\learn-hub-backend-0.0.1-SNAPSHOT.jar not found
+echo   local build: cd backend ^&^& mvn package -DskipTests (or run Maven package in IDEA)
+echo   no JDK/Maven? use the Docker route: start-all.bat
 set "SOME_FAIL=1"
 goto :step_frontend
 
 :backend_no_java
-echo   [错误] 没找到 java，请先安装 JDK 17 或更高版本（装完重新打开本窗口）
+echo   [ERROR] java not found. Install JDK 17+ then reopen this window
 set "SOME_FAIL=1"
 goto :step_frontend
 
-REM ---------- 3. 前端 ----------
+REM ---------- 3. frontend ----------
 :step_frontend
-echo [3/4] 启动前端 (端口 5174)...
+echo [3/4] starting frontend (port 5174)...
 call :port_listening 5174
 if not errorlevel 1 goto :frontend_running
 
@@ -117,36 +127,36 @@ if not exist "frontend\node_modules" goto :frontend_no_modules
 if not exist "logs" mkdir "logs"
 if "%SHOW%"=="1" goto :frontend_show
 powershell -NoProfile -Command "Start-Process -FilePath '%~dp0tools\run-frontend.cmd' -WindowStyle Hidden"
-echo   前端已后台启动（无窗口），日志：logs\frontend.log
+echo   frontend started in background (no window); log: logs\frontend.log
 set "FE_EXPECT=1"
 goto :step_wait
 
 :frontend_show
 start "learn-hub-frontend" cmd /k ""%~dp0tools\run-frontend.cmd" visible"
-echo   前端窗口已启动（调试模式，输出不写入日志）
+echo   frontend window started (debug mode, not logged)
 set "FE_EXPECT=1"
 goto :step_wait
 
 :frontend_running
-echo   端口 5174 已在监听，跳过启动
+echo   port 5174 already listening; skip start
 set "FE_EXPECT=1"
 goto :step_wait
 
 :frontend_no_npm
-echo   [错误] 没找到 npm，请先安装 Node.js LTS（装完重新打开本窗口）
-echo   只想用现成界面：直接走 Docker 版 start-all.bat（入口 8888）
+echo   [ERROR] npm not found. Install Node.js LTS then reopen this window
+echo   just want the UI? use Docker: start-all.bat (port 8888)
 set "SOME_FAIL=1"
 goto :step_wait
 
 :frontend_no_modules
-echo   [错误] 缺少 frontend\node_modules
-echo   请先安装依赖：cd frontend ^&^& npm install
+echo   [ERROR] missing frontend\node_modules
+echo   install deps first: cd frontend ^&^& npm install
 set "SOME_FAIL=1"
 goto :step_wait
 
-REM ---------- 4. 等待就绪 ----------
+REM ---------- 4. waiting for ready ----------
 :step_wait
-echo [4/4] 等待服务就绪（最多 60 秒）...
+echo [4/4] waiting for services (up to 60s)...
 set /a tries=0
 :waitloop
 set "BE_UP="
@@ -166,14 +176,14 @@ goto :waitloop
 
 :ready
 echo.
-echo   服务状态：
-if defined BE_UP echo     后端 18080：已就绪
-if not defined BE_UP if "%BE_EXPECT%"=="1" echo     后端 18080：未就绪，请看日志 logs\backend.log
-if not defined BE_UP if not "%BE_EXPECT%"=="1" echo     后端 18080：未启动（见上面的提示）
+echo   Service status:
+if defined BE_UP echo     backend 18080: ready
+if not defined BE_UP if "%BE_EXPECT%"=="1" echo     backend 18080: not ready, see logs\backend.log
+if not defined BE_UP if not "%BE_EXPECT%"=="1" echo     backend 18080: not started (see messages above)
 
-if defined FE_UP echo     前端 5174 ：已就绪
-if not defined FE_UP if "%FE_EXPECT%"=="1" echo     前端 5174 ：未就绪，请看日志 logs\frontend.log
-if not defined FE_UP if not "%FE_EXPECT%"=="1" echo     前端 5174 ：未启动（见上面的提示）
+if defined FE_UP echo     frontend 5174 : ready
+if not defined FE_UP if "%FE_EXPECT%"=="1" echo     frontend 5174 : not ready, see logs\frontend.log
+if not defined FE_UP if not "%FE_EXPECT%"=="1" echo     frontend 5174 : not started (see messages above)
 
 if "%BE_EXPECT%"=="1" if not defined BE_UP set "SOME_FAIL=1"
 if "%FE_EXPECT%"=="1" if not defined FE_UP set "SOME_FAIL=1"
@@ -184,22 +194,22 @@ if defined FE_UP start http://localhost:5174
 echo.
 echo ============================================
 if defined SOME_FAIL goto :summary_bad
-echo   全部启动完成：前后端在后台运行，不占用任何命令行窗口。
+echo   all started: backend + frontend run in background, no console window.
 goto :summary_common
 :summary_bad
-echo   注意：有服务没启动成功，请看上面的提示，并检查 logs 目录里的日志。
+echo   WARNING: some service failed to start; see messages above and logs\.
 :summary_common
-echo   日志文件：logs\backend.log   logs\frontend.log
-echo   实时看日志：powershell -Command "Get-Content logs\backend.log -Wait -Tail 50"
-echo   停止全部服务：stop-all.bat
-echo   想看到黑窗口（调试排查）：start-dev.bat show
-echo   日常使用（Docker 版）：start-all.bat
+echo   Log files: logs\backend.log   logs\frontend.log
+echo   Follow logs: powershell -Command "Get-Content logs\backend.log -Wait -Tail 50"
+echo   Stop all: stop-all.bat
+echo   Show windows (debug): start-dev.bat show
+echo   Daily use (Docker): start-all.bat
 echo ============================================
 pause
 exit /b 0
 
-REM ---------- 工具 ----------
+REM ---------- helpers ----------
 :port_listening
-REM %1 = 端口号；返回 errorlevel 0 表示该端口正在监听
+REM %1 = port number; errorlevel 0 means the port is listening
 netstat -ano | findstr /r /c:":%~1 .*LISTENING" >nul
 exit /b %errorlevel%

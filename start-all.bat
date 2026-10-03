@@ -1,24 +1,24 @@
 @echo off
 chcp 65001 >nul
-title learn-hub 一键启动
+title learn-hub launcher
 cd /d "%~dp0"
 setlocal
 
 REM ============================================================
-REM  learn-hub 学习工作台 · 一键启动（Docker 版）
+REM  learn-hub launcher (Docker)
 REM
-REM    做的事：启动 Docker 引擎 → 拉起容器 → 等就绪 → 打开前端界面
-REM    入口    ：http://localhost:8888
-REM              （nginx 托管前端静态文件，/api 反代到后端容器）
+REM    Does: start Docker engine -> compose up -> wait ready -> open UI
+REM    Entry   : http://localhost:<WEB_HOST_PORT from deploy\.env, default 8888>
+REM              (nginx serves UI, /api proxied to backend)
 REM
-REM    参数（可任意组合）：
-REM      build           先重建镜像再启动（改了后端/前端代码之后）
-REM      nobrowser       不打开浏览器
-REM      nopause         结束时不等待按键（供其它脚本调用）
-REM      dev             本机开发模式（Vite 5174 + 本机 jar，需要 Node/JDK）
+REM    Args (any combination):
+REM      build           rebuild images first, then start
+REM      nobrowser       do not open browser
+REM      nopause         no pause at exit (for scripting)
+REM      dev             local dev mode (Vite 5174 + local jar; needs Node/JDK)
 REM
-REM    停止：stop-all.bat（保留数据）   彻底移除容器：stop-all.bat down
-REM    更新源码：update.bat
+REM    Stop: stop-all.bat (keep data)   Remove: stop-all.bat down
+REM    Update source: update.bat
 REM ============================================================
 
 set "MODE=docker"
@@ -36,17 +36,37 @@ if not "%~1"=="" for %%a in (%*) do (
 if /i "%MODE%"=="dev" goto :dev_mode
 
 echo ============================================
-echo   learn-hub 学习工作台 · 一键启动
-if /i "%MODE%"=="build" echo   [重建模式] 先重新构建镜像，再启动
+echo   learn-hub launcher
+if /i "%MODE%"=="build" echo   [BUILD] rebuild images first, then start
 echo ============================================
 echo.
 
-REM ---------- 1/4 Docker 引擎 ----------
-echo [1/4] 检查 Docker 引擎...
+REM ---------- ports: read deploy\.env so messages match reality ----------
+REM Without this the script printed hardcoded 3307/18080/8888 even when .env
+REM maps other ports (common when a legacy container already owns the defaults).
+set "WEB_PORT=8888"
+set "BACKEND_PORT=18080"
+set "MYSQL_PORT=3307"
+if exist "deploy\.env" for /f "usebackq tokens=1,* delims==" %%a in ("deploy\.env") do (
+  if /i "%%a"=="WEB_HOST_PORT"     set "WEB_PORT=%%b"
+  if /i "%%a"=="BACKEND_HOST_PORT" set "BACKEND_PORT=%%b"
+  if /i "%%a"=="MYSQL_HOST_PORT"   set "MYSQL_PORT=%%b"
+  if /i "%%a"=="MYSQL_CONTAINER_NAME"    set "MYSQL_NAME=%%b"
+  if /i "%%a"=="FRONTEND_CONTAINER_NAME" set "FRONTEND_NAME=%%b"
+  if /i "%%a"=="BACKEND_CONTAINER_NAME"  set "BACKEND_NAME=%%b"
+)
+if not defined FRONTEND_NAME set "FRONTEND_NAME=learn-hub-frontend"
+if not defined MYSQL_NAME    set "MYSQL_NAME=learn-hub-mysql"
+if not defined BACKEND_NAME  set "BACKEND_NAME=learn-hub-backend"
+echo   UI port %WEB_PORT%  (from deploy\.env; edit it to change)
+echo.
+
+REM ---------- 1/4 Docker engine ----------
+echo [1/4] checking Docker engine...
 docker info >nul 2>&1
 if not errorlevel 1 goto :docker_ok
 
-echo   Docker 未运行，正在启动 Docker Desktop（引擎就绪一般要 30~60 秒）...
+echo   Docker not running; starting Docker Desktop (ready in ~30-60s)...
 set "DDPATH=%LocalAppData%\Programs\DockerDesktop\Docker Desktop.exe"
 if not exist "%DDPATH%" set "DDPATH=C:\Program Files\Docker\Docker\Docker Desktop.exe"
 if not exist "%DDPATH%" goto :no_dd
@@ -62,24 +82,24 @@ goto :waitdocker
 
 :docker_timeout
 echo.
-echo   [错误] 等了 %waited% 秒，Docker 引擎仍未就绪
-echo   请打开 Docker Desktop 看它的提示（常见：WSL2 未就绪、需要重启 Docker Desktop）
+echo   [ERROR] Docker not ready after %waited%s
+echo   Open Docker Desktop and check its message (common: WSL2 not ready / restart Docker Desktop)
 set "SOME_FAIL=1"
 goto :summary
 
 :no_dd
-echo   [错误] 找不到 Docker Desktop 的安装位置
-echo   请手动启动 Docker Desktop，然后再运行本脚本
+echo   [ERROR] Docker Desktop not found
+echo   Start Docker Desktop manually, then run this script again
 set "SOME_FAIL=1"
 goto :summary
 
 :docker_ok
 if %waited% gtr 0 echo.
-echo   Docker 引擎就绪
+echo   Docker engine ready
 
-REM ---------- 2/4 启动容器 ----------
-echo [2/4] 启动容器（MySQL + 后端 + 前端）...
-if not exist "deploy\.env" echo   提示：deploy\.env 不存在，AI 功能不可用（可复制 .env.example 为 .env 再填 key）
+REM ---------- 2/4 starting containers ----------
+echo [2/4] starting containers (MySQL + backend + frontend)...
+if not exist "deploy\.env" echo   NOTE: deploy\.env missing -> AI features disabled (copy .env.example to .env and fill the key)
 
 docker image inspect learn-hub-backend:local >nul 2>&1
 if errorlevel 1 goto :need_build
@@ -102,27 +122,27 @@ if not "%COMPOSE_RC%"=="0" goto :compose_fail
 goto :wait_stack
 
 :need_build
-echo   [错误] 本地缺少 learn-hub-backend:local / learn-hub-frontend:local 镜像
-echo   请先构建一次：start-all.bat build
+echo   [ERROR] missing local images: learn-hub-backend:local / learn-hub-frontend:local
+echo   Build first: start-all.bat build
 set "SOME_FAIL=1"
 goto :summary
 
 :compose_fail
-echo   [错误] docker compose up 失败（退出码 %COMPOSE_RC%），原因见上面的输出
+echo   [ERROR] docker compose up failed (exit %COMPOSE_RC%), see output above
 set "SOME_FAIL=1"
 goto :summary
 
-REM ---------- 3/4 等待就绪 ----------
+REM ---------- 3/4 waiting for ready ----------
 :wait_stack
-echo [3/4] 等待服务就绪（后端健康检查一般 20~40 秒）...
+echo [3/4] waiting for services (backend healthcheck usually 20-40s)...
 set /a waited=0
 :waitstack
 set "MYSQLST="
 set "BEST="
 set "FEST="
-for /f "delims=" %%s in ('docker inspect -f "{{.State.Health.Status}}" learn-hub-mysql 2^>nul') do set "MYSQLST=%%s"
-for /f "delims=" %%s in ('docker inspect -f "{{.State.Health.Status}}" learn-hub-backend 2^>nul') do set "BEST=%%s"
-for /f "delims=" %%s in ('docker inspect -f "{{.State.Status}}" learn-hub-frontend 2^>nul') do set "FEST=%%s"
+for /f "delims=" %%s in ('docker inspect -f "{{.State.Health.Status}}" %MYSQL_NAME% 2^>nul') do set "MYSQLST=%%s"
+for /f "delims=" %%s in ('docker inspect -f "{{.State.Health.Status}}" %BACKEND_NAME% 2^>nul') do set "BEST=%%s"
+for /f "delims=" %%s in ('docker inspect -f "{{.State.Status}}" %FRONTEND_NAME% 2^>nul') do set "FEST=%%s"
 if /i "%BEST%"=="healthy" if /i "%FEST%"=="running" goto :stack_ready
 set /a waited+=3
 if %waited% geq 180 goto :stack_ready
@@ -130,31 +150,31 @@ timeout /t 3 /nobreak >nul
 goto :waitstack
 
 :stack_ready
-if "%MYSQLST%"=="" set "MYSQLST=未找到容器"
-if "%BEST%"==""    set "BEST=未找到容器"
-if "%FEST%"==""    set "FEST=未找到容器"
+if "%MYSQLST%"=="" set "MYSQLST=not found"
+if "%BEST%"==""    set "BEST=not found"
+if "%FEST%"==""    set "FEST=not found"
 echo.
-echo   服务状态：
-echo     MySQL   3307 ：%MYSQLST%
-echo     后端    18080：%BEST%
-echo     前端    8888 ：%FEST%
+echo   Service status:
+echo     MySQL   %MYSQL_PORT% : %MYSQLST%
+echo     backend %BACKEND_PORT%: %BEST%
+echo     frontend    %WEB_PORT% : %FEST%
 
-REM ---------- 4/4 打开界面 ----------
-call :port_listening 8888
+REM ---------- 4/4 opening UI ----------
+call :port_listening %WEB_PORT%
 if errorlevel 1 goto :web_down
-echo [4/4] 前端端口 8888 已就绪
+echo [4/4] frontend port %WEB_PORT% is ready
 if "%OPEN%"=="1" goto :open_browser
-echo   已跳过打开浏览器（nobrowser）
+echo   skip opening browser (nobrowser)
 goto :summary
 
 :open_browser
-start "" http://localhost:8888
-echo   已在浏览器打开：http://localhost:8888
+start "" http://localhost:%WEB_PORT%
+echo   opened in browser: http://localhost:%WEB_PORT%
 goto :summary
 
 :web_down
-echo [4/4] 前端端口 8888 还没监听，暂不打开浏览器
-echo   看前端日志：docker logs learn-hub-frontend
+echo [4/4] frontend port %WEB_PORT% not listening yet; not opening browser
+echo   Frontend log: docker logs %FRONTEND_NAME%
 set "SOME_FAIL=1"
 goto :summary
 
@@ -162,16 +182,16 @@ goto :summary
 echo.
 echo ============================================
 if defined SOME_FAIL goto :summary_bad
-echo   启动完成，浏览器入口：http://localhost:8888
+echo   started. UI: http://localhost:%WEB_PORT%
 goto :summary_common
 :summary_bad
-echo   注意：有环节没成功，请看上面的提示。
+echo   WARNING: some step failed, see messages above.
 :summary_common
-echo   看后端日志：docker logs -f learn-hub-backend
-echo   停止服务  ：stop-all.bat          （保留数据，下次启动很快）
-echo   彻底移除  ：stop-all.bat down
-echo   改代码后重建镜像：start-all.bat build
-echo   从 GitHub 更新源码：update.bat
+echo   Backend log: docker logs -f %BACKEND_NAME%
+echo   Stop     : stop-all.bat          (keep data; next start is fast)
+echo   Remove   : stop-all.bat down
+echo   Rebuild  : start-all.bat build
+echo   Update from GitHub: update.bat
 echo ============================================
 if "%NOPAUSE%"=="1" goto :end_ok
 pause
@@ -179,13 +199,13 @@ pause
 if defined SOME_FAIL exit /b 1
 exit /b 0
 
-REM ---------- 开发模式：交给 start-dev.bat ----------
+REM ---------- dev mode: handled by start-dev.bat ----------
 :dev_mode
 call "%~dp0start-dev.bat" %2 %3
 exit /b %errorlevel%
 
-REM ---------- 工具 ----------
+REM ---------- helpers ----------
 :port_listening
-REM %1 = 端口号；返回 errorlevel 0 表示该端口正在监听
+REM %1 = port number; errorlevel 0 means the port is listening
 netstat -ano | findstr /r /c:":%~1 .*LISTENING" >nul
 exit /b %errorlevel%

@@ -68,6 +68,54 @@ curl http://localhost:18080/api/settings/effective?keys=ai.embed_base_url,ai.emb
 
 ---
 
+## 端口/容器名被占用时怎么并存（本机已有别的项目或旧部署）
+
+一键启动脚本（`start-all.bat`）会从 `deploy\.env` 读端口与容器名。**同一台机器上跑多个项目时**
+必须在这里错开，否则 compose 会以"容器名已被占用"或"端口已分配"直接失败 —— 实测踩过两种：
+
+```
+Conflict. The container name "/learn-hub-mysql" is already in use by container "0e5df83c..."
+Bind for 127.0.0.1:8889 failed: port is already allocated     # 被另一个项目的容器占着
+```
+
+在 `deploy\.env` 里改这六行即可（数据各自独立，互不影响）：
+
+```dotenv
+MYSQL_HOST_PORT=3309
+BACKEND_HOST_PORT=18082
+WEB_HOST_PORT=8890
+MYSQL_CONTAINER_NAME=learn-hub-mysql-deploy
+BACKEND_CONTAINER_NAME=learn-hub-backend-deploy
+FRONTEND_CONTAINER_NAME=learn-hub-frontend-deploy
+```
+
+改完 `start-all.bat` 打印的端口与容器名会跟着变（脚本每次从 `.env` 读，不再写死）。
+
+> **别为了消掉冲突直接 `docker rm learn-hub-mysql`**：旧容器如果数据在**匿名卷**里
+> （`docker inspect <容器> --format "{{json .Mounts}}"` 看到的是一串 64 位十六进制名字），
+> 让 compose 用新卷起一个空库，你的笔记/资料在界面上就"没了"。先备份再迁移，或直接用上面的并存方案。
+
+### 前端容器反复重启：`host not found in upstream "backend"`
+
+nginx 写死 `proxy_pass http://backend:18080;` 时，**启动那一刻**就要解析到这个主机名，
+解析不到直接 `emerg` 退出、容器重启循环（本机实测：compose 里已有 `depends_on: service_healthy`，
+但单独重启前端容器时后端不在它的解析视图里，照样崩）。
+
+`deploy/nginx.conf` 已改成**请求时解析**：
+
+```nginx
+resolver 127.0.0.11 valid=10s ipv6=off;      # Docker 内置 DNS
+location /api/ {
+    set $api_upstream "http://backend:18080";
+    proxy_pass $api_upstream$request_uri;    # 变量形式 → 延迟到请求时解析
+}
+```
+
+好处有两个：后端暂时没起来只是该请求 502（nginx 本身健康、页面照常打开），
+后端重启换了 IP 也会立刻跟上（写死 upstream 的话 nginx 会一直打到旧 IP）。
+
+---
+
 ## 数据在哪、怎么备份与恢复
 
 数据落在两个**具名卷**里，`docker compose down` 不会删：
