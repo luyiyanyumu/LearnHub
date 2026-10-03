@@ -127,8 +127,14 @@ learn-hub/
 
 ### 0. 环境要求
 
-**一键部署只要 Docker**（含 Compose v2，`docker compose` 而不是老的 `docker-compose`）。
-手动部署才需要：JDK 21、Maven 3.9+、Node 18+、MySQL 8。
+**一键部署只要 Docker**（含 Compose v2，即 `docker compose` 而不是老的 `docker-compose`）——
+**JDK / Maven / Node 都不用装**：JDK 与 Node 只在镜像构建时用到，
+后端镜像的构建阶段用 `maven:3.9-eclipse-temurin-21` 编译、运行阶段只留 `eclipse-temurin:21-jre`，
+前端镜像的构建阶段用 `node:20-alpine` 跑 `npm ci && npm run build`。
+（唯一额外条件：构建镜像要能拉到基础镜像，国内直连 Docker Hub 常超时，所以默认走加速源，见 `deploy/.env`。）
+
+手动部署（不用 Docker 跑应用）才需要：JDK 21、Maven 3.9+、Node 18+、MySQL 8。
+只有一件事**两种情况都要**：一开始得能连上 GitHub 把代码 clone 下来（或者用现成的源码压缩包）。
 
 ### 1. 数据库（手动部署）
 

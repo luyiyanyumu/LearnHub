@@ -9,8 +9,14 @@
 
 > **想最省事：只装 Docker（含 Compose），其余全交给容器。**
 > 见 **[deploy/README.md](../deploy/README.md)** —— `cd deploy && cp .env.example .env && docker compose up -d --build`，
-> 一条命令起 MySQL + 后端 + 前端 nginx，不用装 JDK/Maven/Node，也不用配 Maven 镜像。
-> 下面是**不用 Docker 跑应用**（或在开发机上直接跑）的逐项说明。
+> 一条命令起 MySQL + 后端 + 前端 nginx。
+>
+> **JDK / Maven / Node 一个都不用自己装**：它们只出现在**镜像构建过程**里
+> （后端镜像的构建阶段用 `maven:3.9-eclipse-temurin-21` 编译，运行阶段只留 `eclipse-temurin:21-jre`；
+> 前端镜像的构建阶段用 `node:20-alpine` 跑 `npm ci && npm run build`），
+> 跑起来之后你机器上不存在这些进程，也没有环境变量要配。
+> 下面这一节是**不用 Docker 跑应用**（或在开发机上直接跑）时才需要的。
+> 唯一额外条件：构建镜像要能拉基础镜像（国内直连 Docker Hub 常超时，所以默认走加速源，见 `deploy/.env`）。
 
 | 组件 | 是否必须 | 说明 |
 | --- | --- | --- |
