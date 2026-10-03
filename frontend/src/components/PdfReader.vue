@@ -35,7 +35,17 @@ const props = defineProps({
   initial: { type: Object, default: () => ({}) },
 })
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl
+/**
+ * 工作线程 URL 后面挂一个版本查询串。
+ *
+ * 为什么必须这么做：早期部署里 nginx 没给 `.mjs` 正确 MIME（发成
+ * application/octet-stream），而它在 /assets/ 下又带着
+ * `Cache-Control: public, immutable; max-age=2592000`，浏览器于是把这份**坏响应**
+ * 缓存了 30 天。服务器修好之后，同一个 URL 依然命中旧缓存，现象就是"还是失败"。
+ * 换 URL 是唯一能让已存在的老缓存立刻失效的办法。
+ * 以后再动 MIME / worker 相关配置，把这个版本号 +1 即可。
+ */
+pdfjsLib.GlobalWorkerOptions.workerSrc = `${workerUrl}?v=mjs-mime-fix`
 
 const wrap = ref(null)
 const loading = ref(true)
