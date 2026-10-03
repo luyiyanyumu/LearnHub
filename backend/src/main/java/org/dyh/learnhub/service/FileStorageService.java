@@ -459,17 +459,73 @@ public class FileStorageService {
                 mediaTypeOf(info.getOriginName()));
     }
 
-    /** 删除：删记录 + 删磁盘文件（图谱里的孤儿边在 KgService 查询时被过滤掉） */
+    /**
+     * 删除资料：删数据库记录，磁盘文件**移进回收站**（不是直接删掉）。
+     *
+     * <p>为什么不是真删：删资料是不可逆操作，而误删的代价很大 —— 实测踩过：
+     * 一条 14MB 的 PDF 被误删后，正文虽然还在知识库里，**原文件本身再也拿不回来**。
+     * 回收站给一次后悔的机会：文件改名为 {@code <storeName>.deleted-<时间戳>} 移到
+     * {@code uploads/.trash/} 下，恢复只需把它移回上一级目录（storeName 就是原名，
+     * 记录已删所以不会同名冲突）。
+     *
+     * <p>不做自动清理：什么时候清由人来定 —— 自动删"超过 N 天"的文件，
+     * 等于把"后悔窗口"偷偷关掉，与这里的目的相反。要清理直接删 {@code uploads/.trash/} 即可。
+     */
     @Transactional
     public void delete(Long id) {
         FileInfo info = require(id);
         fileInfoMapper.deleteById(id);
+        Path file = storageDir().resolve(info.getStoreName());
         try {
-            Files.deleteIfExists(storageDir().resolve(info.getStoreName()));
+            if (Files.exists(file)) {
+                Path trash = storageDir().resolve(TRASH_DIR);
+                Files.createDirectories(trash);
+                Path target = trash.resolve(info.getStoreName()
+                        + ".deleted-" + System.currentTimeMillis());
+                Files.move(file, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                log.info("资料 #{} 已移入回收站: {}（恢复：移回 {}/ 即可）", id, target.getFileName(), TRASH_DIR);
+            }
         } catch (IOException e) {
-            log.warn("磁盘文件删除失败(记录已删): {}", info.getStoreName(), e);
+            log.warn("移入回收站失败(记录已删): {}", info.getStoreName(), e);
         }
         publishChanged(info.getCategoryId());
+    }
+
+    /** 回收站目录名（相对上传目录）：删除的资料放这里，便于人工恢复 */
+    public static final String TRASH_DIR = ".trash";
+
+    /** 列出回收站里的文件（供界面/排查用；按修改时间倒序） */
+    public List<Map<String, Object>> trash() {
+        Path dir = storageDir().resolve(TRASH_DIR);
+        if (!Files.isDirectory(dir)) {
+            return List.of();
+        }
+        try (var stream = Files.list(dir)) {
+            return stream
+                    .filter(Files::isRegularFile)
+                    .sorted((a, b) -> {
+                        try {
+                            return Files.getLastModifiedTime(b).compareTo(Files.getLastModifiedTime(a));
+                        } catch (IOException e) {
+                            return 0;
+                        }
+                    })
+                    .map(p -> {
+                        Map<String, Object> m = new LinkedHashMap<>();
+                        m.put("name", p.getFileName().toString());
+                        try {
+                            m.put("size", Files.size(p));
+                            m.put("deletedAt", Files.getLastModifiedTime(p).toInstant().toString());
+                        } catch (IOException e) {
+                            m.put("size", 0L);
+                        }
+                        return m;
+                    })
+                    .toList();
+        } catch (IOException e) {
+            log.warn("读取回收站失败: {}", e.getMessage());
+            return List.of();
+        }
     }
 
     /** 列表用的字段（**不含正文**：正文列是 MEDIUMTEXT，列表永远不需要它） */

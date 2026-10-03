@@ -105,6 +105,17 @@ public class FileController {
                 .body(item.resource());
     }
 
+    /**
+     * 回收站列表：删除资料时磁盘文件被移进 uploads/.trash（**不是真删**），这里列出来便于恢复。
+     *
+     * <p>恢复方式：把文件从 .trash 移回上一级目录即可（文件名里的 `.deleted-<时间戳>` 要去掉，
+     * 去掉后就是原来的 storeName），然后重新上传同一份文件便能重新入库。
+     */
+    @GetMapping("/trash")
+    public Result<List<Map<String, Object>>> trash() {
+        return Result.ok(fileStorageService.trash());
+    }
+
 /**
      * 取**抽取出来的正文**（在线阅读用）。
      *
