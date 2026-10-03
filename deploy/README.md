@@ -114,6 +114,72 @@ location /api/ {
 好处有两个：后端暂时没起来只是该请求 502（nginx 本身健康、页面照常打开），
 后端重启换了 IP 也会立刻跟上（写死 upstream 的话 nginx 会一直打到旧 IP）。
 
+### 从本机部署迁移数据到本栈（含"向量必须重建"这个坑）
+
+把本机那套（自己起的 MySQL + `java -jar`）搬到 compose 时，**要搬两样东西**，
+并且**有一类数据是搬不过去的**：
+
+| 搬什么 | 怎么搬 |
+| --- | --- |
+| 数据库（笔记/资料元数据/图谱/设置） | `mysqldump` 导出 → 导入本栈的 `learn-hub-mysql` |
+| 上传的资料原文 | 把 `backend/uploads/*` 复制进本栈的卷 `learn-hub_uploads` |
+| **向量（`kb_chunk.vec`）** | ❌ **搬不了，必须重建** —— 见下 |
+
+#### 坑 1：导出时**绝不能让它经过管道/命令输出的文本层**
+
+```powershell
+# ❌ 错误：二进制 BLOB 会在这一层被当成文本解码，非法字节被替换成 U+FFFD（EF BF BD）
+docker exec learn-hub-mysql sh -c 'exec mysqldump ...' | Out-File -Encoding utf8 backup.sql
+
+# ✅ 正确：写文件用**重定向到磁盘**（或先在容器内落地再 docker cp 出来），
+#          然后把文件交给 mysql 客户端导入 —— 二进制全程不经过"读出来再写回去"
+cmd /c "docker exec learn-hub-mysql sh -c \"exec mysqldump -uroot -p... --single-transaction --databases learn_hub\" > backup.sql"
+docker cp backup.sql learn-hub-mysql:/tmp/restore.sql
+docker exec learn-hub-mysql sh -c 'mysql -uroot -p... < /tmp/restore.sql'
+```
+
+**症状**：库导进去了、笔记与文件都在，但**语义检索 0 命中**（词面正常）。
+原因就是向量字节被替换成了 `EF BF BD`（UTF-8 替换字符），解码出来是 `-6.7E+28` 这种垃圾浮点，
+余弦相似度全是 0.0，被 `MIN_SCORE` 过滤掉。
+排查命令（向量里出现 `EFBFBD` 即已损坏）：
+
+```bash
+docker exec learn-hub-mysql mysql -uroot -p... -N -e \
+  "SELECT HEX(LEFT(vec,32)) FROM learn_hub.kb_chunk LIMIT 1;"
+```
+
+#### 坑 2：向量**重建**才是正解（不要试图"修好"搬过来的向量）
+
+向量是**由文本算出来的产物**，文本在就一定能重算，而"修补二进制"既不划算也无必要：
+
+```bash
+# 确认嵌入服务可用（容器内能访问到 Ollama）
+docker compose exec backend wget -qO- http://ollama:11434/api/tags
+# 全量重建（22 个来源约 2 分钟）
+curl -X POST http://localhost:18080/api/kb/rebuild
+curl "http://localhost:18080/api/kb/status"      # chunks 涨回、stale=false
+```
+
+**文本有没有被上面那个坑破坏？** 用这条自查（应全为 0，非 0 说明文本也坏了，得重新导出）：
+
+```bash
+docker exec learn-hub-mysql mysql -uroot -p... -N -e "
+SELECT 'notes', COUNT(*) FROM learn_hub.note WHERE content LIKE CONCAT('%', CHAR(0xEFBFBD USING utf8mb4), '%')
+UNION ALL SELECT 'chunks', COUNT(*) FROM learn_hub.kb_chunk WHERE chunk_text LIKE CONCAT('%', CHAR(0xEFBFBD USING utf8mb4), '%');"
+```
+
+#### 坑 3：本机那套要**先停**，否则端口/容器名冲突
+
+本机的 MySQL（3307）与本栈的 `learn-hub-mysql` 会抢**同一个宿主机端口**，
+而本机 jar 与容器后端会抢 **18080**：
+
+```bash
+docker stop <你本机的 MySQL 容器>     # 数据在它的卷里，不会丢
+docker rm  <你本机的 MySQL 容器>      # 只有确认迁移成功后再做（这一步才腾出容器名）
+```
+
+> **顺序建议**：先导出 → 停本机 MySQL 与 jar → `docker compose up -d` → 导入 → 复制上传目录 → **重建索引** → 验证。
+
 ---
 
 ## 数据在哪、怎么备份与恢复
