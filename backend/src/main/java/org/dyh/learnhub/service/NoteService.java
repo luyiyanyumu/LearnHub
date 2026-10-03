@@ -130,7 +130,7 @@ public class NoteService {
         Note note = new Note();
         note.setTitle(dto.getTitle().trim());
         // 标题只存 title 字段：正文开头那行重复的 `# 标题` 在这里统一剥掉（见 stripDuplicatedTitle）
-        String content = stripDuplicatedTitle(dto.getContent(), note.getTitle());
+        String content = normalizeNoteContent(dto.getContent(), note.getTitle());
         note.setContent(content);
         // 摘要随手写好落库：列表页就再也不用把整段 LONGTEXT 拉回来算这一行了
         note.setSummary(plainSummary(content));
@@ -162,7 +162,7 @@ public class NoteService {
         }
         // 与 save 同一条规则：正文开头重复的 `# 标题` 一律剥掉
         //（AI 的「整篇重写 / 追加」最容易把标题又带回正文）
-        String content = stripDuplicatedTitle(dto.getContent(), dto.getTitle().trim());
+        String content = normalizeNoteContent(dto.getContent(), dto.getTitle().trim());
         // 用显式 UpdateWrapper：categoryId 为 null 时也能真正清空（updateById 会忽略 null）
         noteMapper.update(null, Wrappers.<Note>lambdaUpdate()
                 .eq(Note::getId, id)
@@ -224,6 +224,70 @@ public class NoteService {
 
     private static String normalizeTitle(String s) {
         return s == null ? "" : s.replaceAll("[\\s`*：:、，,。.（）()【】\\[\\]\\-]", "");
+    }
+    /**
+     * 保存 / 更新前的正文规范化，只做两件与「生成笔记」直接相关的事，其余一字不动：
+     * <ol>
+     *   <li>剥掉开头那行与本笔记标题重复的一级标题（标题只存 title 字段）；</li>
+     *   <li>合并「相邻（中间只有空行）且互相包含」的重复小节标题 —— 生成链路（模型整篇写、
+     *       长文分节拼装）经常把同一个小节标题写两遍，正文与右侧大纲于是都出现两条。</li>
+     * </ol>
+     * 之前只在长文分节那一条路径里去了重复，模型整篇写或用户粘贴进来的照样会带进来，
+     * 所以放到保存的唯一入口统一处理。
+     */
+    static String normalizeNoteContent(String content, String title) {
+        return collapseAdjacentDuplicateHeadings(stripDuplicatedTitle(content, title));
+    }
+
+    private static final java.util.regex.Pattern HEADING_LINE =
+            java.util.regex.Pattern.compile("^(#{1,6})\\s+(.*)$");
+    private static final java.util.regex.Pattern FENCE_LINE =
+            java.util.regex.Pattern.compile("^\\s*(```|~~~)");
+
+    /** 相邻且互相包含的同级标题只留更具体的那个（代码块里的 # 注释不动） */
+    static String collapseAdjacentDuplicateHeadings(String content) {
+        if (content == null || content.isEmpty()) {
+            return content;
+        }
+        String[] lines = content.split("\n", -1);
+        List<String> out = new ArrayList<>(lines.length);
+        boolean inFence = false;
+        int i = 0;
+        while (i < lines.length) {
+            String line = lines[i];
+            if (FENCE_LINE.matcher(line).find()) {
+                inFence = !inFence;
+                out.add(line);
+                i++;
+                continue;
+            }
+            if (!inFence) {
+                java.util.regex.Matcher m1 = HEADING_LINE.matcher(line.trim());
+                if (m1.matches()) {
+                    String level = m1.group(1);
+                    String text = m1.group(2).trim();
+                    int j = i + 1;
+                    while (j < lines.length && lines[j].trim().isEmpty()) {
+                        j++;
+                    }
+                    if (j < lines.length) {
+                        java.util.regex.Matcher m2 = HEADING_LINE.matcher(lines[j].trim());
+                        if (m2.matches() && m2.group(1).equals(level)) {
+                            String text2 = m2.group(2).trim();
+                            if (sameTitleText(text, text2)) {
+                                // 保留更具体（更长）的那一行，且原样写回它，避免动到换行风格
+                                out.add(text2.length() > text.length() ? lines[j] : line);
+                                i = j + 1;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+            out.add(line);
+            i++;
+        }
+        return String.join("\n", out);
     }
 
     /** 内容变更通知：wiki 的自动增量更新靠它（见 WikiService#onKnowledgeChanged） */
