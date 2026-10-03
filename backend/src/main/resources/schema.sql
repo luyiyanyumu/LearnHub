@@ -622,3 +622,13 @@ SET @ddl := IF(@c < 1000,
     'ALTER TABLE rag_eval MODIFY COLUMN note VARCHAR(1000) NULL COMMENT ''这条用例想验证什么 + 依据来自哪份材料的哪一段''',
     'SELECT 1');
 PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- 5) kb_chunk.heading（上下文化切块新增）：每块所属的小节路径（TextChunker.Chunk.heading）。
+--    历史库缺这一列时，向量索引重建的 INSERT 会直接报 Unknown column 'heading' in 'field list'，
+--    整个语义索引就建不起来。
+SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS
+           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'kb_chunk' AND COLUMN_NAME = 'heading');
+SET @ddl := IF(@c = 0,
+    'ALTER TABLE kb_chunk ADD COLUMN heading VARCHAR(255) NULL COMMENT ''所属小节路径（H1 > H2）'' AFTER title',
+    'SELECT 1');
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
