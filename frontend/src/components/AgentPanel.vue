@@ -10,6 +10,7 @@ import {
   AGENT_NOTE_MERGE_RESULT_EVENT,
 } from '../utils/agentNoteMerge'
 import { isDark } from '../composables/useTheme'
+import { AGENT_NOTE_UPDATED_EVENT, matchesOpenNote, parseActionResult } from '../utils/agentNoteEdit'
 
 /**
  * Markdown 预览（md-editor-v3）体积很大：整包 + 样式约 310 KB，
@@ -253,19 +254,37 @@ function newChat() {
  * 刷新后由 loadSession() 重新取回（否则待确认项会变成无法点击的死状态）。
  */
 const pending = ref([])
+const resolvingActions = ref(new Set())
 
 function notifyLearningActivity() {
   window.dispatchEvent(new CustomEvent('lh-learning-activity-changed'))
 }
 
 async function resolveAction(a, approve) {
+  if (resolvingActions.value.has(a.id)) return
+  if (approve && a.toolName === 'edit_note' && activeNote.value?.dirty
+      && matchesOpenNote(activeNote.value.noteId, a.preview?.noteId)) {
+    ElMessage.warning('当前笔记有未保存改动，请先保存，再重新生成定向编辑预览')
+    return
+  }
+  resolvingActions.value.add(a.id)
   try {
     let hint
+    let succeeded = true
     if (approve) {
       const r = await aiApi.approveAction(a.id)
-      notifyLearningActivity()
-      hint = r?.hint || '已执行'
-      ElMessage.success(hint)
+      const result = parseActionResult(r)
+      succeeded = r?.ok !== false
+      if (succeeded) {
+        notifyLearningActivity()
+        hint = r?.hint || '已执行'
+        ElMessage.success(hint)
+        const edit = r?.noteEdit || result.noteEdit
+        if (edit?.changed) window.dispatchEvent(new CustomEvent(AGENT_NOTE_UPDATED_EVENT, { detail: edit }))
+      } else {
+        hint = r?.error || result.error || r?.hint || '执行失败，未修改笔记'
+        ElMessage.error(hint)
+      }
     } else {
       await aiApi.rejectAction(a.id)
       hint = '已取消：' + (a.summary || '')
@@ -279,7 +298,7 @@ async function resolveAction(a, approve) {
       // 同时改正文：那条回答里通常写着"请在下方卡片上点确认"，而卡片点完就消失了 ——
       // 只剩这句话会让人以为还没确认。补一行结果，读起来才自洽。
       const tail = approve
-        ? `\n\n（已确认执行：${hint}）`
+        ? `\n\n（${succeeded ? '已确认执行' : '执行失败'}：${hint}）`
         : `\n\n（已取消，未做任何改动：${a.summary || ''}）`
       last.content = (last.content || '') + tail
       scrollBottom()
@@ -289,6 +308,8 @@ async function resolveAction(a, approve) {
     // 失败（例如已被处理过）时也把它从列表里摘掉，避免反复点同一个死项；
     // 错误提示已由请求拦截器统一弹出，这里不再重复打扰
     pending.value = pending.value.filter((x) => x.id !== a.id)
+  } finally {
+    resolvingActions.value.delete(a.id)
   }
 }
 
@@ -369,6 +390,7 @@ async function send(text, ctx) {
       noteId: ctx?.noteId ?? activeNote.value?.noteId ?? undefined,
       noteTitle: ctx?.noteTitle ?? activeNote.value?.title ?? undefined,
       noteContext: ctx?.noteContext ?? activeNote.value?.context ?? undefined,
+      noteDirty: (!ctx?.noteId || matchesOpenNote(ctx.noteId, activeNote.value?.noteId)) && !!activeNote.value?.dirty,
     })
     if (res.sessionId && res.sessionId !== sessionId.value) {
       sessionId.value = res.sessionId
@@ -409,7 +431,7 @@ async function send(text, ctx) {
 function noteContextFromEvent(e) {
   const d = e?.detail
   activeNote.value = d && (d.noteId || d.title || d.isNew)
-    ? { noteId: d.noteId || null, title: d.title || '', isNew: !!d.isNew, context: d.context || '' }
+    ? { noteId: d.noteId || null, title: d.title || '', isNew: !!d.isNew, context: d.context || '', dirty: !!d.dirty }
     : null
 }
 
@@ -833,10 +855,26 @@ function askFromEvent(e) {
         <div v-if="pending.length" class="pending-box">
           <div class="pending-head">待确认 · {{ pending.length }} 项（确认前不会写入）</div>
           <div v-for="a in pending" :key="a.id" class="pending-item">
-            <span class="pending-sum">{{ a.summary }}</span>
+            <div class="pending-body">
+              <span class="pending-sum">{{ a.summary }}</span>
+              <details v-if="a.preview?.changes?.length" class="edit-preview" open>
+                <summary>查看改动 · {{ a.preview.changes.length }} 项</summary>
+                <div class="edit-preview-list">
+                  <div v-for="(c, index) in a.preview.changes" :key="index" class="edit-preview-change">
+                    <div class="edit-preview-label">{{ index + 1 }}. {{ c.label }} · {{ c.count }} 处</div>
+                    <div class="edit-preview-caption">修改前</div>
+                    <MdPreview v-if="c.action === 'format'" :editor-id="`edit-before-${a.id}-${index}`" :model-value="c.before || '（空）'" :theme="isDark ? 'dark' : 'light'" preview-theme="github" class="edit-preview-rendered edit-preview-before" />
+                    <pre v-else class="edit-preview-before">{{ c.before || '（空）' }}</pre>
+                    <div class="edit-preview-caption">修改后</div>
+                    <MdPreview v-if="c.action === 'format'" :editor-id="`edit-after-${a.id}-${index}`" :model-value="c.after || '（空）'" :theme="isDark ? 'dark' : 'light'" preview-theme="github" class="edit-preview-rendered edit-preview-after" />
+                    <pre v-else class="edit-preview-after">{{ c.after || '（空）' }}</pre>
+                  </div>
+                </div>
+              </details>
+            </div>
             <span class="pending-btns">
-              <button type="button" class="act-btn primary" @click="resolveAction(a, true)">确认执行</button>
-              <button type="button" class="act-btn" @click="resolveAction(a, false)">取消</button>
+              <button type="button" class="act-btn primary" :disabled="resolvingActions.has(a.id)" @click="resolveAction(a, true)">{{ resolvingActions.has(a.id) ? '处理中…' : '确认执行' }}</button>
+              <button type="button" class="act-btn" :disabled="resolvingActions.has(a.id)" @click="resolveAction(a, false)">取消</button>
             </span>
           </div>
         </div>
@@ -869,7 +907,7 @@ function askFromEvent(e) {
               v-model="input"
               class="chat-input"
               rows="2"
-              placeholder="问我代码问题，或说「把 xxx 记成笔记」…"
+              :placeholder="activeNote ? '例如：添加目录、删除第 2 处某词、把某个字加粗…' : '问我代码问题，或说「把 xxx 记成笔记」…'"
               :disabled="busy"
               @keydown.enter.exact.prevent="send()"
             />
@@ -1510,6 +1548,9 @@ html.dark .cfg-tip {
   border: 1px solid color-mix(in srgb, var(--app-brand) 35%, var(--app-border));
   border-radius: 10px;
   background: color-mix(in srgb, var(--app-brand) 6%, transparent);
+  max-height: min(360px, 42vh);
+  overflow-y: auto;
+  flex-shrink: 0;
 }
 
 .pending-head {
@@ -1521,11 +1562,27 @@ html.dark .cfg-tip {
 
 .pending-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
   padding: 6px 0;
 }
+
+.pending-body { flex: 1; min-width: 0; }
+.edit-preview { margin-top: 6px; font-size: 12px; color: var(--app-text-2); }
+.edit-preview summary { cursor: pointer; color: var(--app-brand-deep); }
+.edit-preview-list { margin-top: 6px; }
+.edit-preview-change + .edit-preview-change { margin-top: 10px; }
+.edit-preview-label { font-weight: 600; color: var(--app-text-1); }
+.edit-preview-caption { margin: 4px 0 2px; font-size: 11px; }
+.edit-preview pre { padding: 6px 8px; margin: 0; border-radius: 5px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; line-height: 1.5; }
+.edit-preview-rendered { border-radius: 5px; background-color: transparent; }
+.edit-preview-rendered :deep(.md-editor-preview-wrapper) { padding: 6px 8px; }
+.edit-preview-rendered :deep(.md-editor-preview) { font-size: 12px; line-height: 1.5; }
+.edit-preview-rendered :deep(p) { margin: 0; }
+.edit-preview-before { background: color-mix(in srgb, #e34e58 10%, var(--app-bg)); }
+.edit-preview-after { background: color-mix(in srgb, #239b68 10%, var(--app-bg)); }
+.pending-btns button:disabled { opacity: .6; cursor: wait; }
 
 .pending-item + .pending-item {
   border-top: 1px dashed var(--app-border);

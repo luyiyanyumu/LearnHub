@@ -413,6 +413,12 @@ public class AgentSessionService {
         m.put("id", a.getId());
         m.put("toolName", a.getToolName());
         m.put("summary", a.getSummary());
+        if ("edit_note".equals(a.getToolName())) {
+            try {
+                var preview = new com.fasterxml.jackson.databind.ObjectMapper().readTree(a.getArgsJson()).get("_edit_preview");
+                if (preview != null) m.put("preview", preview);
+            } catch (Exception ignored) { /* 旧操作或不完整参数仍可取消 */ }
+        }
         return m;
     }
 }

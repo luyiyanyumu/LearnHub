@@ -3,9 +3,9 @@
 把 learn-hub 的 REST 接口暴露成 **MCP 工具**，让 DeepSeek Harness（或任何 MCP 客户端）能直接读写你的知识库——
 查笔记、建笔记、打标签、管分类、记速查卡、**把找到的论文一键存进资料库**，都不用手动复制粘贴。
 
-- **零 npm 依赖**：一个 `.mjs` 文件，手写 JSON-RPC 2.0 over stdio，不 import 任何包
+- **零 npm 依赖**：`.mjs` 脚本手写 JSON-RPC 2.0 over stdio，不 import 任何 npm 包
   （Node 18+ 自带 `fetch` / `FormData` / `Blob`，文件读写用 `node:fs/promises`）
-- **不改后端**：全部走已有的 REST 接口，后端不用重启、不用加依赖
+- **通过 REST 调用后端**：`edit_note` 需要新版后端的定向编辑接口；参数定义从仓库的 `backend/src/main/resources/note-edit-tool.json` 读取，部署时保留仓库目录结构
 - **不带数据库连接**：它只是后端的客户端，所以后端停了它才有感知（首次调用时给出可读提示）
 
 ---
@@ -22,9 +22,9 @@ java -jar target/learn-hub-backend-0.0.1-SNAPSHOT.jar
 
 ```powershell
 cd mcp
-node smoke-test.mjs            # 只读检查：握手 / 工具清单 / 笔记检索 / 资料库读取 / 错误路径（19 项）
+node smoke-test.mjs            # 只读检查：握手 / 工具清单 / 定向编辑预览及版本保护 / 检索 / 资料库 / 错误路径
 node smoke-test.mjs --write    # 额外跑「建笔记→改标题验正文不丢→删」+「本机文件入库→抽正文→能检索→删」
-                               # 两个写入闭环（31 项，全部自己清理）
+                               # 两个写入闭环（全部自己清理）
 ```
 
 期望输出 `结果：N 通过 / 0 失败`，退出码 0。
@@ -61,13 +61,14 @@ node smoke-test.mjs --write    # 额外跑「建笔记→改标题验正文不�
 **验证**：保存后再问 DSH 一句「用 learnhub 工具看看我知识库里有什么」，或直接让它调 `stats`。
 工具没出现就看 dsh 的日志——默认 `failOnStartupError: false`，服务端起不来时 harness 照常启动、只记一条错误。
 
-## 4. 工具清单（19 个）
+## 4. 工具清单（20 个）
 
 | 工具 | 作用 | 类型 |
 | --- | --- | --- |
 | `stats` | 工作台总览：笔记/速查卡/分类/标签数 + 最近笔记 | 只读 |
 | `search_notes` | 关键词全文检索笔记，返回精简列表（**不含正文**） | 只读 |
-| `get_note` | 取一篇笔记的完整 Markdown 正文、分类与标签 | 只读 |
+| `get_note` | 取完整 Markdown 正文、`content_hash`、分类与标签 | 只读 |
+| `edit_note` | 定向删除/替换/插入、单字格式、生成目录；默认只预览 | 写入（版本校验） |
 | `list_categories` | 分类树（拉平成带 `depth` 的列表） | 只读 |
 | `list_tags` | 标签及其使用次数，可按关键词过滤 | 只读 |
 | `list_quick_refs` | 速查卡列表（含正文） | 只读 |

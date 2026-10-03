@@ -116,6 +116,8 @@ try {
   check('tools/list 返回工具', tools.length > 0, `${tools.length} 个`)
   check('每个工具都有 object 型 inputSchema', tools.every((t) => t.inputSchema?.type === 'object'))
   check('工具名唯一', new Set(tools.map((t) => t.name)).size === tools.length)
+  const editTool = tools.find((t) => t.name === 'edit_note')
+  check('edit_note 注册了结构化 operations', editTool?.inputSchema?.properties?.operations?.items?.properties?.action?.enum?.includes('insert_toc'))
 
   console.log('\n--- 只读工具 ---')
   const stats = await call('stats')
@@ -136,6 +138,21 @@ try {
     const id = notes.data.list[0].id
     const n = await call('get_note', { id })
     check('get_note 取到正文', !n.isError && n.data.content.length > 0, `「${n.data.title}」${n.data.content.length} 字`)
+    check('get_note 返回正文版本', /^[a-f0-9]{64}$/.test(n.data?.content_hash || ''))
+    if (n.data?.content) {
+      const firstChar = Array.from(n.data.content)[0]
+      const preview = await call('edit_note', {
+        note_id: id, expected_hash: n.data.content_hash,
+        operations: [{ action: 'delete', text: firstChar, occurrence: 1 }],
+      })
+      check('edit_note 默认仅预览并报告命中数量', !preview.isError && preview.data?.changed && preview.data?.changes?.[0]?.count === 1)
+      const unchanged = await call('get_note', { id })
+      check('预览后原文一字未动', unchanged.data?.content === n.data.content && unchanged.data?.content_hash === n.data.content_hash)
+      const stale = await call('edit_note', {
+        note_id: id, expected_hash: '0'.repeat(64), operations: [{ action: 'delete', text: firstChar, occurrence: 1 }],
+      })
+      check('edit_note 拒绝过期版本', stale.isError && stale.text.includes('已变化'))
+    }
   } else {
     check('get_note 取到正文', false, '库里没有笔记，跳过（先写一篇再跑）')
   }

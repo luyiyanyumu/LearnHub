@@ -5,6 +5,8 @@ import lombok.RequiredArgsConstructor;
 import org.dyh.learnhub.common.PageResult;
 import org.dyh.learnhub.common.Result;
 import org.dyh.learnhub.dto.NoteDTO;
+import org.dyh.learnhub.dto.NoteEditRequest;
+import org.dyh.learnhub.vo.NoteEditVO;
 import org.dyh.learnhub.service.NoteService;
 import org.dyh.learnhub.vo.NoteVO;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -52,5 +54,15 @@ public class NoteController {
     public Result<Void> delete(@PathVariable Long id) {
         noteService.delete(id);
         return Result.ok();
+    }
+
+    @PostMapping("/{id}/edit/preview")
+    public Result<NoteEditVO> previewEdit(@PathVariable Long id, @Valid @RequestBody NoteEditRequest request) {
+        return Result.ok(noteService.previewEdit(id, request));
+    }
+
+    @PostMapping("/{id}/edit")
+    public Result<NoteEditVO> editContent(@PathVariable Long id, @Valid @RequestBody NoteEditRequest request) {
+        return Result.ok(noteService.editContent(id, request));
     }
 }

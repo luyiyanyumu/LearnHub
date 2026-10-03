@@ -10,7 +10,7 @@
  *    Node 18+ 自带 fetch / FormData / Blob，所以除了 node: 内置模块外不 import 任何包。
  * 2. **stdout 只走协议帧，日志一律 stderr**。这是 MCP stdio 的硬要求：
  *    往 stdout 打一行日志就会破坏帧解析（DSH 自己的 SDK 服务端也有同样约束）。
- * 3. **不改后端**。全部通过已有的 REST 接口访问，所以后端不需要重启、不需要新依赖。
+ * 3. 全部通过 REST 接口访问。edit_note 需要包含定向编辑接口的新版后端，参数定义与内置智能体共用。
  * 4. 工具粒度贴着「人怎么用这个知识库」设计，而不是贴着表结构。
  *
  * 环境变量：
@@ -23,6 +23,10 @@
 
 import { readFile, stat } from 'node:fs/promises'
 import { basename, extname } from 'node:path'
+import { createHash } from 'node:crypto'
+
+// 与内置智能体共用参数定义，目录/定位/格式的语义保持一致。
+const NOTE_EDIT_SCHEMA = JSON.parse(await readFile(new URL('../backend/src/main/resources/note-edit-tool.json', import.meta.url), 'utf8'))
 
 const BASE = (process.env.LEARNHUB_BASE_URL || 'http://localhost:18080').replace(/\/+$/, '')
 const TIMEOUT_MS = Number(process.env.LEARNHUB_TIMEOUT_MS || 15000)
@@ -255,6 +259,7 @@ const tools = {
       id: n.id,
       title: n.title,
       content: n.content || '',
+      content_hash: n.contentHash || createHash('sha256').update(n.content || '', 'utf8').digest('hex'),
       categoryId: n.categoryId ?? null,
       categoryName: n.categoryName || null,
       tags: (n.tags || []).map((t) => ({ id: t.id, name: t.name })),
@@ -273,6 +278,12 @@ const tools = {
     }
     walk(tree, 0)
     return { count: flat.length, categories: flat }
+  },
+
+  async edit_note({ note_id, expected_hash, operations, dry_run = true }) {
+    return api('POST', `/api/notes/${note_id}/edit${dry_run ? '/preview' : ''}`, {
+      body: { expected_hash, operations },
+    })
   },
 
   async list_tags({ kw } = {}) {
@@ -524,7 +535,7 @@ const TOOL_DEFS = [
   },
   {
     name: 'get_note',
-    description: '按 id 取一篇笔记的完整 Markdown 正文、分类与标签。',
+    description: '按 id 取完整 Markdown 正文、content_hash、分类与标签。定向编辑前先读取正文与版本。',
     inputSchema: {
       type: 'object',
       properties: { id: { type: 'number', description: '笔记 id' } },
@@ -532,6 +543,15 @@ const TOOL_DEFS = [
       additionalProperties: false,
     },
     annotations: { readOnlyHint: true },
+  },
+  {
+    name: 'edit_note',
+    description: '精确修改笔记：添加/更新目录、删除/替换文字、在原文前后插入、给一个字或一段文字设格式。先 get_note，将 content_hash 复制到 expected_hash。重复文字需明确第几处或前后文；默认 dry_run=true 只预览，检查后 dry_run=false 执行同一批操作。版本变化或任一操作失败时整批不写入。',
+    inputSchema: {
+      ...NOTE_EDIT_SCHEMA,
+      properties: { ...NOTE_EDIT_SCHEMA.properties, dry_run: { type: 'boolean', default: true, description: '默认仅预览；确认具体改动后传 false 执行。' } },
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
   },
   {
     name: 'list_categories',

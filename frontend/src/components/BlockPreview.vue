@@ -27,6 +27,7 @@ import { BlockMeta, isBlockId } from '../utils/blockMeta'
 import { findActionBlock } from '../utils/blockActions'
 import { runBlockTool, applyBlockFormat } from '../utils/blockToolbar'
 import { nextTableCell } from '../utils/tableNavigation'
+import { HeadingAnchorAttr, findNoteAnchor } from '../utils/headingAnchorAttr'
 import BlockActionMenu from './BlockActionMenu.vue'
 
 // Inline images keep the text on both sides of the caret in the same paragraph.
@@ -337,8 +338,8 @@ function captureCodeFocus(event) {
 function revealLinkedBlock() {
   let hash = ''
   try { hash = decodeURIComponent(window.location.hash.slice(1)) } catch { return }
-  if (!isBlockId(hash) || hash === revealedHash) return
-  const target = editor.value?.view.dom.querySelector(`#${CSS.escape(hash)}`)
+  if (!hash || hash === revealedHash) return
+  const target = findNoteAnchor(editor.value?.view.dom, window.location.hash)
   const scroller = previewRoot.value?.closest('.pv-scroll')
   if (!target || !scroller) return
   revealedHash = hash
@@ -346,6 +347,18 @@ function revealLinkedBlock() {
   target.animate?.([{ backgroundColor: 'rgba(30, 160, 140, .16)' }, { backgroundColor: 'transparent' }], { duration: 1800 })
 }
 function hashChanged() { revealedHash = ''; nextTick(revealLinkedBlock) }
+
+function jumpToNoteAnchor(event) {
+  const link = event.target?.closest?.('a[href]')
+  const href = link?.getAttribute('href')
+  if (!findNoteAnchor(editor.value?.view.dom, href)) return false
+  event.preventDefault()
+  event.stopPropagation()
+  revealedHash = ''
+  if (window.location.hash !== href) window.location.hash = href
+  nextTick(revealLinkedBlock)
+  return true
+}
 defineExpose({ runTool, applyFormat, captureToolbarTarget, undo: () => editor.value?.commands.undo(), redo: () => editor.value?.commands.redo() })
 
 /** Refresh source anchors without replacing content or moving the editing selection. */
@@ -381,8 +394,9 @@ function syncDown() {
 onMounted(() => {
   editor.value = new Editor({
     editable: true,
-    extensions: [StarterKit.configure({ codeBlock: false, underline: false, link: { openOnClick: false } }), CodeBlockCm, Callout, Details, Summary, Underline, Superscript, Subscript, Highlight, FontStyle, TableKit, ExcelTableNavigation, DataLineAttr, BlockMeta, ToolbarAttrs, InlineImage, TaskList, EditableTaskItem],
+    extensions: [StarterKit.configure({ codeBlock: false, underline: false, link: { openOnClick: false } }), CodeBlockCm, Callout, Details, Summary, Underline, Superscript, Subscript, Highlight, FontStyle, TableKit, ExcelTableNavigation, DataLineAttr, BlockMeta, HeadingAnchorAttr, ToolbarAttrs, InlineImage, TaskList, EditableTaskItem],
     content: renderContent(props.content),
+    editorProps: { handleClick: (_view, _position, event) => jumpToNoteAnchor(event) },
     onUpdate: syncDown,
     onTransaction: handleTransaction,
     onSelectionUpdate: refreshTableContext,

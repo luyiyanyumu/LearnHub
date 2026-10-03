@@ -36,18 +36,23 @@ export function headingSlug(text) {
  */
 export default function mdAnchor(md) {
   const seen = new Map()
+  const used = new Set()
 
   md.core.ruler.push('lh_heading_anchor', (state) => {
     seen.clear()
+    used.clear()
     for (let i = 0; i < state.tokens.length; i++) {
       const token = state.tokens[i]
       if (token.type !== 'heading_open') continue
       const inline = state.tokens[i + 1]
       const raw = inline && inline.type === 'inline' ? inline.content : ''
       const base = headingSlug(raw) || 'section'
-      const n = seen.get(base) || 0
+      let n = seen.get(base) || 0
+      let id = n === 0 ? base : `${base}-${n}`
+      while (used.has(id)) id = `${base}-${++n}`
       seen.set(base, n + 1)
-      token.attrSet('id', n === 0 ? base : `${base}-${n}`)
+      used.add(id)
+      token.attrSet('id', id)
     }
     return true
   })

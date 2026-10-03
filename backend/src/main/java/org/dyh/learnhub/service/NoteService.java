@@ -7,6 +7,7 @@ import lombok.RequiredArgsConstructor;
 import org.dyh.learnhub.common.KnowledgeChangedEvent;
 import org.dyh.learnhub.common.PageResult;
 import org.dyh.learnhub.dto.NoteDTO;
+import org.dyh.learnhub.dto.NoteEditRequest;
 import org.dyh.learnhub.dto.NoteTagRow;
 import org.dyh.learnhub.entity.Category;
 import org.dyh.learnhub.entity.Note;
@@ -15,6 +16,7 @@ import org.dyh.learnhub.mapper.CategoryMapper;
 import org.dyh.learnhub.mapper.NoteMapper;
 import org.dyh.learnhub.mapper.TagMapper;
 import org.dyh.learnhub.vo.NoteVO;
+import org.dyh.learnhub.vo.NoteEditVO;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -38,6 +40,39 @@ public class NoteService {
     private final LearningActivityService learningActivity;
     /** 内容变更广播：页面保存、智能体写入都会发；wiki 的自动增量更新订阅它 */
     private final ApplicationEventPublisher events;
+    private final NoteContentEditor contentEditor;
+
+    /** 完整验证整批操作后返回预览，数据库零改动。 */
+    public NoteEditVO previewEdit(Long id, NoteEditRequest request) {
+        Note note = noteMapper.selectById(id);
+        if (note == null) throw new IllegalArgumentException("笔记不存在: " + id);
+        var edit = contentEditor.apply(note.getContent(), request);
+        return editVO(note, edit);
+    }
+
+    /** 只更新正文与摘要，标题、分类、标签等不参与这次写入。 */
+    @Transactional
+    public NoteEditVO editContent(Long id, NoteEditRequest request) {
+        Note note = noteMapper.selectForEdit(id);
+        if (note == null) throw new IllegalArgumentException("笔记不存在: " + id);
+        var edit = contentEditor.apply(note.getContent(), request);
+        NoteEditVO result = editVO(note, edit);
+        if (result.changed()) {
+            noteMapper.update(null, Wrappers.<Note>lambdaUpdate().eq(Note::getId, id)
+                    .set(Note::getContent, edit.content())
+                    .set(Note::getSummary, plainSummary(edit.content()))
+                    .set(Note::getUpdatedAt, java.time.LocalDateTime.now()));
+            learningActivity.record("note", id);
+            publishChanged(note.getCategoryId());
+        }
+        return result;
+    }
+
+    private NoteEditVO editVO(Note note, NoteContentEditor.Edit edit) {
+        String before = NoteContentEditor.hash(note.getContent());
+        String after = NoteContentEditor.hash(edit.content());
+        return new NoteEditVO(note.getId(), note.getTitle(), before, after, !before.equals(after), edit.changes());
+    }
 
     /**
      * 列表/总览用的查询骨架：刻意只选这几列，**不含 content**。

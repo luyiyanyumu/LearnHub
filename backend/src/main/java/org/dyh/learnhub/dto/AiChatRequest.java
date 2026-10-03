@@ -41,4 +41,7 @@ public class AiChatRequest {
 
     /** 当前笔记正文节选（编辑页发起时可选，控制长度避免浪费 token） */
     private String noteContext;
+
+    /** 编辑器有未保存改动时，智能体应先提示保存，避免改旧版本。 */
+    private boolean noteDirty;
 }

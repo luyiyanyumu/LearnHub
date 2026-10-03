@@ -9,6 +9,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.dyh.learnhub.dto.AiChatMessage;
 import org.dyh.learnhub.dto.AiChatRequest;
 import org.dyh.learnhub.dto.NoteDTO;
+import org.dyh.learnhub.dto.NoteEditRequest;
+import org.dyh.learnhub.service.NoteContentEditor;
 import org.dyh.learnhub.dto.QuickRefDTO;
 import org.dyh.learnhub.entity.AgentEvent;
 import org.dyh.learnhub.entity.AgentPendingAction;
@@ -655,6 +657,10 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
         // 系统提示词从设置里读（数据库覆盖优先，否则用内置默认）——
         // 原来是硬编码常量，改一句话要重新打包；现在在设置面板改完即时生效。
         messages.add(msg("system", settingsService.effective(SettingsService.KEY_CHAT_PROMPT)));
+        messages.add(msg("system", "笔记编辑工具规则：局部删字、替换文字、插入内容、调整任意文字格式、生成目录，优先 get_note + edit_note；"
+                + "get_note 返回正文 content 和版本 content_hash，edit_note 仅接收定位与操作，无需传回整篇正文。"
+                + "若当前笔记未保存，请先提示保存；重复文字而用户没明确位置时先询问，不要自行选第一处。"
+                + "同一轮多项改动合成一次 edit_note；只有整篇替换才用 update_note。待确认表示尚未写入，不得宣称已经完成。"));
 
         // ② 更早内容的压缩摘要（有则带上；P1 只留读取口，压缩逻辑后续接入）
         String summary = sessionService.latestSummary(sessionId);
@@ -688,8 +694,9 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
         }
 
         // 当前笔记上下文（编辑页发起时）：单独一条 user 消息前置，防止污染角色时序
-        if (StringUtils.hasText(req.getNoteContext()) || StringUtils.hasText(req.getNoteTitle())) {
+        if (req.getNoteId() != null || StringUtils.hasText(req.getNoteContext()) || StringUtils.hasText(req.getNoteTitle())) {
             StringBuilder ctx = new StringBuilder("【当前笔记上下文】");
+            if (req.getNoteId() != null) ctx.append("笔记 id：").append(req.getNoteId()).append('\n');
             if (StringUtils.hasText(req.getNoteTitle())) {
                 ctx.append("标题：").append(req.getNoteTitle());
             }
@@ -697,7 +704,9 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                 String body = req.getNoteContext();
                 ctx.append("\n正文节选：\n").append(body.length() > 1500 ? body.substring(0, 1500) + "…" : body);
             }
-            ctx.append("\n\n（以上内容仅供你理解背景；若用户要求基于它修改，请调用 update_note 工具持久化。）");
+            ctx.append("\n\n（节选仅用于理解背景；局部删字/改字/插入内容/设置文字格式/添加目录，先 get_note 读取全文和 content_hash，再用 edit_note 定向修改。"
+                    + "同一轮的多项改动合成一个 operations 数组；不要用 update_note 重写整篇来改几个字。工具先生成预览，确认后才写入。）");
+            if (req.isNoteDirty()) ctx.append("\n当前编辑器有未保存改动，请先提示用户保存，不能基于数据库旧正文发起定向编辑。");
             messages.add(msg("user", ctx.toString()));
         }
 
@@ -828,6 +837,15 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                                     + "**不要重试同样长度的写入**：把内容拆成多次较小的调用"
                                     + "（单次正文控制在 4000 字以内）；补充章节请改用 append_to_note 逐节追加。\"}";
                             hint = fn + "（参数被截断，未提交）";
+                        } else if ("edit_note".equals(fn)) {
+                            allRepeats = false;
+                            try {
+                                result = stageNoteEdit(argsRaw, sessionId, vo, req);
+                                hint = "edit_note：" + objectMapper.readTree(result).path("message").asText();
+                            } catch (Exception e) {
+                                result = toolError(e);
+                                hint = "edit_note 未提交：" + e.getMessage();
+                            }
                         } else if (requiresApproval(fn)) {
                             allRepeats = false;
                             // 写操作**不直接执行**：挂成待确认，等用户在界面上点确认。
@@ -1266,6 +1284,13 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                 return createNote(args, events);
             case "update_note":
                 return updateNote(args, events);
+            case "edit_note":
+                var edited = noteService.editContent(args.path("note_id").asLong(), noteEditRequest(args));
+                events.add((edited.changed() ? "已定向修改" : "正文无需改动") + "笔记《" + edited.title() + "》#" + edited.noteId());
+                ObjectNode editResult = objectMapper.createObjectNode();
+                editResult.put("ok", true);
+                editResult.set("noteEdit", objectMapper.valueToTree(edited));
+                return editResult.toString();
             case "write_long_note":
                 return writeLongNote(args, events, sessionId, vo);
             case "append_to_note":
@@ -1717,6 +1742,7 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
             out.put("title", nullTo(vo.getTitle()));
             out.put("category", nullTo(vo.getCategoryName()));
             out.put("content", nullTo(vo.getContent()));
+            out.put("content_hash", NoteContentEditor.hash(vo.getContent()));
             return out.toString();
         } catch (IllegalArgumentException e) {
             return "{\"ok\":false,\"error\":\"笔记不存在: " + id + "\"}";
@@ -2285,7 +2311,7 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
     // ------------------------------------------------------------------
 
     /** 需要用户确认的写操作（读操作直接执行） */
-    private static final Set<String> WRITE_TOOLS = Set.of("create_note", "update_note", "append_to_note",
+    private static final Set<String> WRITE_TOOLS = Set.of("create_note", "update_note", "edit_note", "append_to_note",
             "create_quick_ref", "add_file_from_url");
 
     /**
@@ -2296,6 +2322,43 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
      */
     private static boolean requiresApproval(String fn) {
         return WRITE_TOOLS.contains(fn);
+    }
+
+    private NoteEditRequest noteEditRequest(JsonNode args) throws Exception {
+        ObjectNode request = objectMapper.createObjectNode();
+        request.set("expected_hash", args.path("expected_hash"));
+        request.set("operations", args.path("operations"));
+        return objectMapper.treeToValue(request, NoteEditRequest.class);
+    }
+
+    /** 执行前先验证全部补丁，保存具体片段预览；确认时按同一正文版本重放。 */
+    String stageNoteEdit(String argsRaw, String sessionId, AiChatVO vo, AiChatRequest context) throws Exception {
+        ObjectNode args = (ObjectNode) objectMapper.readTree(argsRaw);
+        long noteId = args.path("note_id").asLong(0);
+        if (noteId <= 0) throw new IllegalArgumentException("缺少有效 note_id；先查询或读取目标笔记");
+        if (context != null && context.isNoteDirty() && Long.valueOf(noteId).equals(context.getNoteId())) {
+            throw new IllegalArgumentException("当前笔记有未保存改动，请先保存再生成定向编辑预览");
+        }
+        var preview = noteService.previewEdit(noteId, noteEditRequest(args));
+        if (!preview.changed()) return "{\"ok\":true,\"changed\":false,\"message\":\"目标内容已经符合要求，无需修改。\"}";
+        args.set("_edit_preview", objectMapper.valueToTree(preview));
+        String summary = "定向修改《" + preview.title() + "》#" + noteId + "："
+                + preview.changes().stream().map(c -> c.label() + " ×" + c.count()).collect(java.util.stream.Collectors.joining("；"));
+        AgentPendingAction staged = sessionService.stageAction(sessionId, "edit_note", args.toString(), summary);
+        vo.getPendingActions().add(AgentSessionService.actionBrief(staged));
+        ObjectNode result = objectMapper.createObjectNode();
+        result.put("ok", true);
+        result.put("staged", true);
+        result.put("action_id", staged.getId());
+        result.put("message", "已生成改动前后预览，尚未写入。请在卡片里查看并确认；" + summary);
+        return result.toString();
+    }
+
+    private String toolError(Exception e) {
+        ObjectNode result = objectMapper.createObjectNode();
+        result.put("ok", false);
+        result.put("error", e.getMessage());
+        return result.toString();
     }
 
 /** 参数是不是一个合法的 JSON 对象（用于拦截"被输出上限截断的参数"） */
@@ -2371,7 +2434,7 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
             result = dispatch(a.getToolName(), a.getArgsJson(), events);
         } catch (Exception e) {
             log.warn("执行待确认操作失败（#{}）: {}", actionId, e.getMessage());
-            result = "{\"ok\":false,\"error\":\"" + esc(e.getMessage()) + "\"}";
+            result = toolError(e);
         }
         boolean ok = !result.contains("\"ok\":false");
         // 失败时摘要要说清是失败，不能让会话日志显示成"已执行"
@@ -2386,6 +2449,11 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
         out.put("ok", ok);
         out.put("hint", hint);
         out.put("result", result);
+        try {
+            JsonNode parsed = objectMapper.readTree(result);
+            if (ok && parsed.has("noteEdit")) out.put("noteEdit", parsed.get("noteEdit"));
+            if (!ok) out.put("error", parsed.path("error").asText("执行失败"));
+        } catch (Exception ignored) { /* 其它旧工具维持原有返回契约 */ }
         return out;
     }
 
@@ -2961,7 +3029,16 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
         // 写进笔记正文的统一排版约定（与 skills/markdown-beautify/SKILL.md 一致）：
         // 生成侧最容易犯的两个错就是"正文里又写一遍 # 标题"和"把结构写成整行加粗"。
         final String rules = " 正文排版：用 `##` / `###` 组织层级；不要写 `# 标题` 行（标题由 title 承载）；"
-                + "不要手写目录（界面右侧大纲自动生成）；不要用整行加粗当小标题。";
+                + "除非用户明确要求添加目录，否则无需手写目录（界面右侧大纲自动生成）；不要用整行加粗当小标题。";
+        ObjectNode editTool = tool("edit_note", "精确编辑已有笔记：插入/更新目录、删除一个或多个字、替换文字、在指定位置插入内容、给任意一个字设置格式。"
+                + "先 get_note 读取全文和 content_hash，再复制原文定位。重复文字必须指定 occurrence 或 prefix/suffix；不可猜测位置。"
+                + "同一轮所有改动放进一个 operations 数组。返回改动片段预览，用户确认后才会写入，正文版本变化则拒绝执行。", List.of());
+        try (var stream = new org.springframework.core.io.ClassPathResource("note-edit-tool.json").getInputStream()) {
+            ((ObjectNode) editTool.get("function")).set("parameters", objectMapper.readTree(stream));
+        } catch (java.io.IOException e) {
+            throw new IllegalStateException("定向编辑工具定义加载失败", e);
+        }
+        defs.add(editTool);
         defs.add(tool("create_note",
                 "创建一篇新的 Markdown 笔记（沉淀知识点）。当用户说“记成笔记/存为笔记/做成笔记”，或明确要沉淀当前内容时调用。" + rules,
                 List.of(
@@ -2969,7 +3046,7 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                         param("content", "string", "Markdown 正文", true),
                         param("category_name", "string", "目标分类名（不存在会自动创建；可留空）", false))));
         defs.add(tool("update_note",
-                "更新已有笔记的标题/正文/分类。当用户要求“把刚才的回答补充进笔记/替换正文/修改这篇笔记”时调用。" + rules,
+                "更新已有笔记的标题或整篇正文。局部删字、改字、设置格式、插入目录请优先 edit_note；追加章节用 append_to_note。" + rules,
                 List.of(
                         param("note_id", "integer", "笔记 id", true),
                         param("title", "string", "新标题（不传则保留原标题）", false),
@@ -2999,7 +3076,7 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                 "跨「笔记 + 速查卡」全库检索，返回带上下文片段的统一列表。回答用户提问前，若问题可能与用户已记录的知识相关（报错排查、命令用法、概念解释等），应优先调用本工具参考用户已有知识；需要某篇笔记全文时再用 get_note 跟进。",
                 List.of(param("keyword", "string", "检索关键词（可空，空则返回最近知识）", false))));
         defs.add(tool("get_note",
-                "读取某篇笔记的完整 Markdown 正文。",
+                "读取某篇笔记的完整 Markdown 正文及 content_hash。定向编辑前必须读取，并将 content_hash 原样传给 edit_note 的 expected_hash。",
                 List.of(param("note_id", "integer", "笔记 id", true))));
         defs.add(tool("get_quick_ref",
                 "读取一条速查卡（快捷命令/API 签名/易错点）的完整正文。自动检索里给的只是 120 字摘要，"

@@ -24,7 +24,7 @@ export const Highlight = Mark.create({
 /** 字体样式 <font style="…">（颜色/字号/背景色）。mark 的 renderHTML 无 node，样式从 HTMLAttributes 取 */
 export const FontStyle = Mark.create({
   name: 'fontStyle',
-  parseHTML() { return [{ tag: 'font' }] },
+  parseHTML() { return [{ tag: 'font' }, { tag: 'span[style]' }] },
   addAttributes() {
     return {
       style: {

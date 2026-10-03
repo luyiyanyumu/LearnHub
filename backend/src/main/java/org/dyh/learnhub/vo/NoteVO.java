@@ -20,6 +20,12 @@ public class NoteVO {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private String content;
 
+    /** 详情携带正文版本，供 edit_note 精确编辑时防止覆盖过期内容。 */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public String getContentHash() {
+        return content == null ? null : org.dyh.learnhub.service.NoteContentEditor.hash(content);
+    }
+
     private Long categoryId;
     private String categoryName;
     private List<Tag> tags;

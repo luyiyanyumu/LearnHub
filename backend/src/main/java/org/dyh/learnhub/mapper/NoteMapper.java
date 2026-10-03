@@ -14,6 +14,10 @@ import java.util.List;
 @Mapper
 public interface NoteMapper extends BaseMapper<Note> {
 
+    /** 确认定向编辑时锁住正文，版本校验与写入在同一事务内完成。 */
+    @Select("SELECT * FROM note WHERE id = #{id} FOR UPDATE")
+    Note selectForEdit(@Param("id") Long id);
+
     /** 保存笔记-标签关联（忽略重复） */
     @Insert("<script>" +
             "INSERT IGNORE INTO note_tag(note_id, tag_id) VALUES " +

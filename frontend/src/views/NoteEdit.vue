@@ -26,6 +26,7 @@ import { findTable, addRow, deleteRow, addCol, deleteCol, setHeaderRow, alignCol
 import { ensureColgroup, findColgroup } from '../utils/tableResize'
 import { boundScrollAnchors, mapScrollPosition, normalizeScrollAnchors } from '../utils/scrollAnchors'
 import { createSourceInsert } from '../utils/sourceToolbar'
+import { AGENT_NOTE_UPDATED_EVENT, matchesOpenNote } from '../utils/agentNoteEdit'
 
 const route = useRoute()
 const router = useRouter()
@@ -57,13 +58,14 @@ function formFingerprint() {
     tagIds: [...(f.tagIds || [])].sort(),
   })
 }
-let savedSnapshot = ''
+const savedSnapshot = ref('')
+const agentEditConflict = ref(false)
 /**
  * 「有未保存改动」= 表单与上次保存的指纹不同，**或者**预览里还有没反推回源码的改动。
  * 后半句是单栏阅读模式（默认模式）的安全网：那一栏里敲的字先落在 DOM 上、失焦才反推回 Markdown，
  * 只看指纹的话用户敲完还没离开正文时状态仍是「已保存」，点返回不会被拦，改动会静默丢掉。
  */
-const dirty = computed(() => previewUnsynced.value || formFingerprint() !== savedSnapshot)
+const dirty = computed(() => previewUnsynced.value || formFingerprint() !== savedSnapshot.value)
 
 /** 刚创建并跳转过来的笔记 id：用来跳过随之而来的那次重复加载 */
 let justCreatedId = null
@@ -488,8 +490,8 @@ function aiApply() {
  * 有了它，面板里回答后的主操作会从「保存为笔记」换成「融入当前笔记」，
  * 并把这篇笔记当提问背景一起发给模型（见 utils/agentNoteMerge.js 里的取舍说明）。
  *
- * 触发点挂在 `id` 与**标题**上：加载完成、保存成功、用户改标题都会打到；
- * 刻意不监听正文 —— 正文可能几十万字，每敲一键广播一遍没意义。
+ * 监听 id、标题与 dirty 状态切换；加载和保存成功后也广播最新节选。
+ * 正文每次输入无需广播；第一次变为未保存时通知面板，阻止它编辑库中的旧正文。
  * 广播里的 context 只是"提问背景"，后端还会再截到 1500 字注入。
  */
 function publishAgentNote() {
@@ -499,10 +501,51 @@ function publishAgentNote() {
       title: form.value.title || '',
       isNew: isNew.value,
       context: (form.value.content || '').slice(0, 4000),
+      dirty: dirty.value,
     },
   }))
 }
-watch([id, () => form.value.title], publishAgentNote)
+watch([id, () => form.value.title, dirty], publishAgentNote)
+
+async function onAgentNoteUpdated(e) {
+  const noteId = e?.detail?.noteId
+  if (!matchesOpenNote(id.value, noteId)) return
+  if (dirty.value) {
+    agentEditConflict.value = true
+    ElMessage.warning('智能体已更新库中正文，本地草稿已保留，请加载最新正文后再编辑')
+    return
+  }
+  try {
+    const latest = await noteApi.detail(noteId)
+    if (!matchesOpenNote(id.value, noteId)) return
+    // 请求期间敲了字也保留草稿，不让网络响应覆盖本地编辑。
+    if (dirty.value) {
+      agentEditConflict.value = true
+      return
+    }
+    form.value.content = fixHtmlQuotes(latest.content || '')
+    savedSnapshot.value = formFingerprint()
+    lastSavedAt.value = new Date()
+    publishAgentNote()
+  } catch {
+    if (matchesOpenNote(id.value, noteId)) agentEditConflict.value = true
+  }
+}
+
+async function reloadAfterAgentEdit() {
+  const expectedId = id.value
+  if (dirty.value) {
+    try {
+      await ElMessageBox.confirm('加载会替换当前未保存的正文，请先复制需要保留的草稿。', '加载最新笔记', {
+        confirmButtonText: '加载最新', cancelButtonText: '保留草稿', type: 'warning',
+      })
+    } catch { return }
+  }
+  if (!matchesOpenNote(id.value, expectedId)) return
+  previewUnsynced.value = false
+  previewEditing.value = false
+  await loadNote()
+}
 
 /**
  * 面板要把智能体的回答融入这篇笔记。
@@ -594,6 +637,7 @@ function flatten(nodes, depth = 0, out = []) {
 let loadSeq = 0
 
 async function loadNote() {
+  agentEditConflict.value = false
   // 每次点进一篇笔记都从「单栏阅读」开始（用户要求）：源码对照需要显式进
   readingMode.value = true
   if (isNew.value) {
@@ -605,7 +649,7 @@ async function loadNote() {
     form.value = { title: '', content: NEW_NOTE_TEMPLATE, categoryId: undefined, tagIds: [] }
     loading.value = false
     // 注意顺序：先铺模板再取指纹，这样刚建的空笔记不算「有未保存改动」，不会一进来就弹离开确认
-    savedSnapshot = formFingerprint()
+    savedSnapshot.value = formFingerprint()
     // 新建时自动聚焦标题，省一次手点（同时覆盖「编辑 A → 新建」的复用场景）
     nextTick(() => titleInputRef.value?.focus())
     return
@@ -626,7 +670,8 @@ async function loadNote() {
     if (seq === loadSeq) loading.value = false
   }
   if (seq !== loadSeq) return
-  savedSnapshot = formFingerprint()
+  savedSnapshot.value = formFingerprint()
+  publishAgentNote()
 }
 
 /**
@@ -654,6 +699,10 @@ function onPasteCapture(e) {
 const lastSavedAt = ref(null)
 
 async function save() {
+  if (agentEditConflict.value) {
+    ElMessage.warning('库中正文已更新，请先点击「加载最新正文」，避免旧草稿覆盖智能体的改动')
+    return
+  }
   if (!form.value.title.trim()) {
     ElMessage.warning('标题不能为空')
     return
@@ -673,14 +722,14 @@ async function save() {
       // 先让表单与刚存下的内容对齐，再刷新指纹，
       // 否则「新建 → 跳转到详情」会被自己的未保存提醒拦下来
       form.value.title = payload.title
-      savedSnapshot = formFingerprint()
+      savedSnapshot.value = formFingerprint()
       justCreatedId = String(created.id)
       lastSavedAt.value = new Date()
       ElMessage.success('笔记已创建')
       router.replace(`/notes/${created.id}`)
     } else {
       await noteApi.update(id.value, payload)
-      savedSnapshot = formFingerprint()
+      savedSnapshot.value = formFingerprint()
       lastSavedAt.value = new Date()
       ElMessage.success('已保存')
     }
@@ -2855,6 +2904,7 @@ onMounted(async () => {
   window.addEventListener('resize', measureLayout)
   // 悬浮面板的「融入当前笔记」把 Markdown 追加进正文（见 onAgentMerge）
   window.addEventListener(AGENT_NOTE_MERGE_EVENT, onAgentMerge)
+  window.addEventListener(AGENT_NOTE_UPDATED_EVENT, onAgentNoteUpdated)
   document.addEventListener('mousedown', onDocDownToolMenus)
   await loadMeta()
   loadNote()
@@ -2887,6 +2937,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('resize', measureLayout)
   window.removeEventListener(AGENT_NOTE_MERGE_EVENT, onAgentMerge)
+  window.removeEventListener(AGENT_NOTE_UPDATED_EVENT, onAgentNoteUpdated)
   // 离开笔记页：广播"现在没开笔记"，面板的主操作随之回退成「保存为笔记」
   window.dispatchEvent(new CustomEvent(AGENT_NOTE_CONTEXT_EVENT, { detail: null }))
   document.removeEventListener('mousedown', onDocDownToolMenus)
@@ -3025,6 +3076,10 @@ onBeforeUnmount(() => {
 
       <el-button type="primary" class="save-btn" :loading="saving" @click="save">{{ isNew ? '创建' : '保存' }}</el-button>
     </div>
+
+    <el-alert v-if="agentEditConflict" type="warning" :closable="false" show-icon>
+      <template #title>库中正文已更新，当前草稿已保留。<el-button link type="primary" @click="reloadAfterAgentEdit">加载最新正文</el-button></template>
+    </el-alert>
 
     <!-- ======== 顶部第二行：语雀式工具条（单栏阅读模式也保留，作用于那一栏正文；源码对照下作用于当前有焦点的编辑区） ======== -->
     <div

@@ -1,0 +1,29 @@
+{
+  "type": "object",
+  "properties": {
+    "note_id": { "type": "integer", "description": "要编辑的笔记 id；当前笔记上下文已提供 id 时直接使用。" },
+    "expected_hash": { "type": "string", "description": "先 get_note，原样复制返回的 content_hash，不要自己计算。防止修改过期正文。" },
+    "operations": {
+      "type": "array", "minItems": 1, "maxItems": 50,
+      "description": "把本轮所有局部改动合成一次调用，依次作用于上一步结果。原文精确匹配，不支持正则。文字重复时必须确定第几处/上下文；只有用户明确要求全部时才用 all=true。",
+      "items": {
+        "type": "object",
+        "properties": {
+          "action": { "type": "string", "enum": ["replace", "delete", "insert_before", "insert_after", "format", "insert_toc"] },
+          "text": { "type": "string", "description": "需定位的原文，可短至一个字。不要把整段文字作为格式目标；只指定要改的那个字/词。目录置于 start/end 时无需 text。" },
+          "value": { "type": "string", "description": "替换/插入的新内容；color/highlight 使用 #RGB、#RRGGBB 或 red 等英文颜色名；font_size 为 8～72 的整数文本（px）。" },
+          "occurrence": { "type": "integer", "minimum": 1, "description": "在 prefix/suffix 筛选后的第几处，从 1 开始。重复但用户没指明位置时先询问，不要猜第 1 处。" },
+          "all": { "type": "boolean", "description": "明确修改所有匹配（默认 false）；不能与 occurrence 同用。" },
+          "prefix": { "type": "string", "description": "目标前紧邻的原文，用来定位重复的单个字；保留空白和标点。" },
+          "suffix": { "type": "string", "description": "目标后紧邻的原文，用来定位重复的单个字；保留空白和标点。" },
+          "style": { "type": "string", "enum": ["bold", "italic", "underline", "strike", "code", "color", "highlight", "font_size", "superscript", "subscript"], "description": "format 的行内格式；可给英文单词内部的单个字母设格式。代码块、链接地址、HTML 属性不接受 format。" },
+          "placement": { "type": "string", "enum": ["start", "end", "before", "after"], "description": "insert_toc 的位置，默认 start；before/after 用 text 定位。已有工具生成的目录会更新，避免重复插入。" },
+          "min_level": { "type": "integer", "minimum": 1, "maximum": 6, "description": "目录最低标题级别（默认 1）。" },
+          "max_level": { "type": "integer", "minimum": 1, "maximum": 6, "description": "目录最高标题级别（默认 6）。" }
+        },
+        "required": ["action"], "additionalProperties": false
+      }
+    }
+  },
+  "required": ["note_id", "expected_hash", "operations"], "additionalProperties": false
+}
