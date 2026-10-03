@@ -85,6 +85,10 @@ learn-hub/
 
 ## 快速开始
 
+> **换一台电脑部署**（另一台机器、服务器、别人 clone 下来）：看 **[docs/deploy.md](docs/deploy.md)** ——
+> 清单式的「装什么 → 怎么起 → 怎么验证 → 常见报错」，还包含**数据怎么搬**（笔记/资料在 MySQL 与
+> `backend/uploads/` 里，不在 GitHub 上）。下面是熟悉环境时的精简版。
+
 ### 0. 环境要求
 
 JDK 21、Maven 3.9+、Node 18+、Docker（含 MySQL 8 镜像）。
