@@ -174,6 +174,7 @@ CREATE TABLE IF NOT EXISTS kb_chunk (
     source_id   BIGINT       NOT NULL,
     seq         INT          NOT NULL COMMENT '该来源的第几块（从 0 开始）',
     title       VARCHAR(255) NULL COMMENT '来源标题（冗余，检索展示用）',
+    heading     VARCHAR(255) NULL COMMENT '该块所属小节标题（上下文化嵌入用：检索时与标题一起拼进嵌入输入）',
     category    VARCHAR(255) NULL COMMENT '来源分类名（冗余）',
     chunk_text  TEXT         NOT NULL COMMENT '块正文',
     char_len    INT          NOT NULL DEFAULT 0,
@@ -185,6 +186,25 @@ CREATE TABLE IF NOT EXISTS kb_chunk (
     UNIQUE KEY uk_kb_chunk (source_type, source_id, seq),
     KEY idx_kb_source (source_type, source_id)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT ='语义检索分块索引';
+
+-- ============================================================================
+-- 给**已经存在**的库补列（自愈式，幂等）
+--
+-- 为什么必须有这一段：sql.init=always 只会执行 `CREATE TABLE IF NOT EXISTS`，
+-- 表一旦建过就再也不会被改动 —— 于是"实体/Mapper 加了字段、建表脚本也加了列"，
+-- 但**老库不会拿到这一列**，运行时直接报 `Unknown column 'xxx' in 'field list'`。
+-- 实测踩过：新部署的机器语义索引重建整体失败，job 报
+-- `Unknown column 'heading' in 'field list'`（kb_chunk 少了 2026-09 加的 heading 列）。
+--
+-- 写法与文件末尾处理 rag_eval.note 宽度的那段一致：先查 information_schema，
+-- 需要才拼 DDL 执行，已经是对的就执行 SELECT 1（幂等，反复启动无副作用）。
+-- ============================================================================
+SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS
+           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'kb_chunk' AND COLUMN_NAME = 'heading');
+SET @ddl := IF(@c = 0,
+    'ALTER TABLE kb_chunk ADD COLUMN heading VARCHAR(255) NULL COMMENT ''该块所属小节标题（上下文化嵌入用：检索时与标题一起拼进嵌入输入）'' AFTER title',
+    'SELECT 1');
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 -- ============================================================================
 -- 增量迁移（幂等）
