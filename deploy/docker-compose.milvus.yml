@@ -1,0 +1,47 @@
+# 可选：把 Milvus 加进一键部署（叠加在 docker-compose.yml 之上）
+#
+#   docker compose -f docker-compose.yml -f docker-compose.milvus.yml --profile milvus up -d
+#
+# 形态与仓库根的 docker-compose.milvus.yml 一致：单容器 + 嵌入式 etcd + 本地磁盘存储
+# （Milvus 2.4 支持 ETCD_USE_EMBED 与 COMMON_STORAGETYPE=local，于是不需要 etcd/minio 两个额外容器）。
+#
+# 数据落在具名卷 milvus-data 里（与 MySQL 的卷同属这个 compose 项目）。
+
+name: learn-hub
+
+services:
+  milvus:
+    image: milvusdb/milvus:v2.4.15
+    container_name: learn-hub-milvus
+    profiles: [milvus]
+    command: ["milvus", "run", "standalone"]
+    restart: unless-stopped
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_USE_EMBED: "true"
+      ETCD_DATA_DIR: /var/lib/milvus/etcd
+      ETCD_CONFIG_PATH: /milvus/configs/advanced/etcd.yaml
+      COMMON_STORAGETYPE: local
+    volumes:
+      - milvus-data:/var/lib/milvus
+    ports:
+      - "${MILVUS_HOST_PORT:-19530}:19530"
+      - "${MILVUS_METRICS_HOST_PORT:-9091}:9091"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 120s
+    networks: [learn-hub]
+
+  backend:
+    # 让后端能按服务名连到 milvus（应用里的 URI 在「设置 → 检索」或 app_setting 里配：
+    # http://milvus:19530），这里只是保证两个容器在同一个网络里
+    depends_on:
+      milvus:
+        condition: service_started
+
+volumes:
+  milvus-data:

@@ -1,0 +1,110 @@
+# LearnHub 一键部署（MySQL + 后端 + 前端 nginx）
+#
+#   cd deploy
+#   cp .env.example .env        # 填 DeepSeek key（不填也能跑，只是 AI 功能不可用）
+#   docker compose up -d --build
+#   # 打开 http://localhost:8888
+#
+# 数据落在两个**具名卷**里（mysql-data / uploads），`docker compose down` 不会删；
+# 只有 `down -v` 才会连数据一起清掉。
+#
+# 说明：镜像构建的上下文是**仓库根目录**（不是本目录），因为后端运行时要 /app/skills，
+#      而 skills/ 与 backend/ 是平级的两个目录 —— 所以下面 build.context 写的是 ..
+
+name: learn-hub
+
+services:
+  # ---------- 数据库 ----------
+  mysql:
+    image: mysql:8
+    container_name: ${MYSQL_CONTAINER_NAME:-learn-hub-mysql}
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root123456}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-learn_hub}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    # 宿主端口默认 3307：这台机器上常常已经有别的 MySQL 占着 3306
+    # （本仓库的 application.yml 也是按 3307 写的）。冲突就改 .env 里的 MYSQL_HOST_PORT。
+    ports:
+      - "${MYSQL_HOST_PORT:-3307}:3306"
+    healthcheck:
+      # 用 mysqladmin ping 而不是 tcp：端口通了不等于库能登（初始化要十几秒）
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-root123456}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    networks: [learn-hub]
+
+  # ---------- 后端 ----------
+  backend:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+      args:
+        # 基础镜像前缀（可留空 = 直连 Docker Hub）。见 .env.example 的说明
+        DOCKER_REGISTRY: ${DOCKER_REGISTRY-docker.1ms.run}
+    image: learn-hub-backend:local
+    container_name: ${BACKEND_CONTAINER_NAME:-learn-hub-backend}
+    restart: unless-stopped
+    depends_on:
+      # 等数据库**真能登**再启动：否则 sql.init 会在冷启动时连不上库直接失败
+      mysql:
+        condition: service_healthy
+    environment:
+      # 容器里必须换成服务名 mysql:3306，不能沿用 application.yml 的 localhost:3307
+      #（那个值是给"宿主机上直接 java -jar"用的）
+      SPRING_DATASOURCE_URL: >-
+        jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-learn_hub}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root123456}
+      # 冷启动时 sql.init 偶发的时序问题不该让整个容器起不来（schema/data 都是幂等的）
+      SPRING_SQL_INIT_CONTINUE_ON_ERROR: "true"
+      # 技能提示词目录：镜像里放在 /app/skills，这里显式给一下（自动探测也能命中）
+      LEARNHUB_SKILLS_DIR: /app/skills
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      JAVA_OPTS: ${JAVA_OPTS:--XX:MaxRAMPercentage=75}
+    volumes:
+      # 上传的资料原文（PDF/Word…）：不挂卷的话，容器一重建资料就没了
+      - uploads:/app/backend/uploads
+    ports:
+      # 单独暴露后端端口，方便直接用 curl / MCP server 连（MCP 默认连 localhost:18080）
+      - "${BACKEND_HOST_PORT:-18080}:18080"
+    # 让容器内能用 host.docker.internal 指到宿主机（本地 Ollama 做向量嵌入时会用到）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:18080/api/files?page=1&size=1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    networks: [learn-hub]
+
+  # ---------- 前端（nginx 托管静态文件 + 反代 /api）----------
+  frontend:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+      args:
+        DOCKER_REGISTRY: ${DOCKER_REGISTRY-docker.1ms.run}
+    image: learn-hub-frontend:local
+    container_name: ${FRONTEND_CONTAINER_NAME:-learn-hub-frontend}
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${WEB_HOST_PORT:-8888}:80"
+    networks: [learn-hub]
+
+volumes:
+  mysql-data:
+  uploads:
+
+networks:
+  learn-hub:

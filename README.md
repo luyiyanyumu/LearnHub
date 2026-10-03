@@ -85,7 +85,11 @@ learn-hub/
 
 ## 快速开始
 
-> **换一台电脑部署**（另一台机器、服务器、别人 clone 下来）：看 **[docs/deploy.md](docs/deploy.md)** ——
+> **一键部署（推荐，只装 Docker）**：`cd deploy && cp .env.example .env && docker compose up -d --build`，
+> 然后打开 http://localhost:8888 —— 一条命令起 MySQL + 后端 + 前端 nginx，细节见
+> **[deploy/README.md](deploy/README.md)**（含端口、数据卷、备份、更新、Milvus 可选叠加）。
+>
+> **换一台电脑手动部署**（不跑 Docker）：看 **[docs/deploy.md](docs/deploy.md)** ——
 > 清单式的「装什么 → 怎么起 → 怎么验证 → 常见报错」，还包含**数据怎么搬**（笔记/资料在 MySQL 与
 > `backend/uploads/` 里，不在 GitHub 上）。下面是熟悉环境时的精简版。
 

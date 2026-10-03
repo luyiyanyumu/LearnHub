@@ -7,6 +7,11 @@
 
 ## 0. 先看清：到底需要装什么
 
+> **想最省事：只装 Docker（含 Compose），其余全交给容器。**
+> 见 **[deploy/README.md](../deploy/README.md)** —— `cd deploy && cp .env.example .env && docker compose up -d --build`，
+> 一条命令起 MySQL + 后端 + 前端 nginx，不用装 JDK/Maven/Node，也不用配 Maven 镜像。
+> 下面是**不用 Docker 跑应用**（或在开发机上直接跑）的逐项说明。
+
 | 组件 | 是否必须 | 说明 |
 | --- | --- | --- |
 | **JDK 21** | 必须 | `backend/pom.xml` 里 `<java.version>21</java.version>`，版本低了编译不过 |

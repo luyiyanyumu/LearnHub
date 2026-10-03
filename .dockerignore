@@ -1,0 +1,32 @@
+# 构建上下文是仓库根目录，这里排除"不该进镜像、也不该拖慢构建"的东西。
+# 注意：docker 的 .dockerignore **不能反选**（不能被后面的 ! 规则救回来），
+# 所以这里只排除确定不需要的目录。
+
+# 依赖与产物（镜像里会重新装/重新构建）
+frontend/node_modules
+frontend/dist
+backend/target
+
+# 运行期数据：上传的资料原文走卷挂载，不打进镜像
+backend/uploads
+
+# 本机环境与密钥（绝不进镜像）
+.env
+**/.env
+
+# 版本控制与 IDE
+.git
+.idea
+.vscode
+*.iml
+.classpath
+.project
+.factorypath
+.settings
+
+# 本地数据与文档杂项
+milvus-data
+docs-shots
+*.log
+hs_err_pid*
+tmp-truncated.md

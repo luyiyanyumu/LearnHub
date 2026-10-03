@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  容器里构建后端时用的 Maven 配置。
+  存在的理由：作者本机把阿里云镜像配在 Maven 安装目录的 conf/settings.xml 里，
+  而那个文件**不会进镜像** —— 于是同一份代码在容器里会直连 Maven Central，
+  国内网络下要么很慢要么直接超时。把镜像配置放进仓库，谁构建都一样快。
+
+  只影响构建阶段（maven 镜像里那份 /root/.m2/settings.xml），运行阶段用不到。
+-->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
+  <mirrors>
+    <mirror>
+      <id>aliyun</id>
+      <name>aliyun public</name>
+      <url>https://maven.aliyun.com/repository/public</url>
+      <mirrorOf>central</mirrorOf>
+    </mirror>
+  </mirrors>
+</settings>
