@@ -11,6 +11,10 @@ docker compose up -d --build
 打开 **http://localhost:8888** 即可。首次构建要拉基础镜像 + 编译前后端，**约 5~15 分钟**；
 之后改代码再 `up -d --build` 只要几十秒（依赖层有缓存）。
 
+> **要语义检索 / 用本地模型**？看下面的「[本地模型（嵌入 + 对话/翻译）](#本地模型嵌入--对话翻译两种接入方式二选一)」——
+> 本机已装 Ollama 只需改地址（方式 A）；没有则用 `--profile ollama` 自带一套（方式 B）。
+> 默认的 `docker compose up -d --build` **不含 Ollama**，这是有意的。
+
 ---
 
 ## 端口与入口
@@ -20,29 +24,105 @@ docker compose up -d --build
 | 网页（nginx） | http://localhost:8888 | `.env` 的 `WEB_HOST_PORT` |
 | 后端接口 | http://localhost:18080 | `.env` 的 `BACKEND_HOST_PORT`（MCP server 默认连 18080，改了就同步改 MCP 配置） |
 | MySQL | localhost:3307 | `.env` 的 `MYSQL_HOST_PORT` |
-| 本地嵌入模型（可选） | http://localhost:11434 | `.env` 的 `OLLAMA_HOST_PORT` |
+| 本地模型（可选） | 见下节两种方式 | 方式 A（宿主机已有 Ollama）= 不用动；方式 B（容器版）= `.env` 的 `OLLAMA_HOST_PORT` |
 
 ---
 
-## 本地嵌入模型（语义检索要用，默认不开）
+## 本地模型（嵌入 + 对话/翻译）：两种接入方式，二选一
 
-**默认三件套里没有 Ollama** —— 它镜像加模型约 2GB 起，而**不启用也能正常用**：
-不启用时嵌入服务不可达，检索会退化成关键词检索（不报错，但"问什么都知道"的语义召回没有了）。
+**默认三件套里没有 Ollama** —— 它镜像 + 模型约 10GB 起，而**不启用也能正常用**：
+不启用时嵌入服务不可达，检索退化成关键词检索（不报错，只是没有语义召回），其余功能都不受影响。
 
-要语义检索就加上这个 profile：
+| | **方式 A：用宿主机已装的 Ollama** | **方式 B：让本栈自带容器版 Ollama** |
+| --- | --- | --- |
+| 适合 | 本机已装 Ollama（哪怕只是为了别的项目装的） | 新机器/服务器，不想额外装东西 |
+| 代价 | 0 下载 | 镜像约 **9.4GB** + 模型约 1.2GB |
+| 地址 | `http://host.docker.internal:11434` | `http://ollama:11434` |
+| 起法 | 不用动 compose（默认三件套即可） | `docker compose --profile ollama up -d` |
+
+> ⚠️ **别两套并行**：宿主机 Ollama 与容器版会抢同一个 **11434** 端口。
+
+### 铁律：同一个 Ollama，两条链路，`/v1` 不一样
+
+| 用途 | 实际端点 | 地址写法 |
+| --- | --- | --- |
+| **嵌入**（语义检索，`bge-m3`） | Ollama 原生 `/api/embed` | `http://<host>:11434` ← **不加 `/v1`** |
+| **对话/翻译/wiki**（`qwen3:8b` 等） | OpenAI 兼容 `/v1/chat/completions` | `http://<host>:11434/v1` ← **要加** |
+
+加错的表现：嵌入报 404 或"不支持嵌入"；对话档案报 404。**这是接入本地模型最容易错的一处。**
+
+### 方式 A：用宿主机已装的 Ollama
+
+```powershell
+ollama list                          # 宿主机上有哪些模型
+ollama pull qwen3:8b                 # 想用别的就先拉（Ollama 只管拉，不会"申请了就有"）
+```
+
+1. **嵌入**（只有一个入口，走环境变量）：在 `deploy\.env` 里写明地址，然后重启后端：
+
+   ```properties
+   KB_EMBED_BASE_URL=http://host.docker.internal:11434   # 注意不带 /v1
+   KB_EMBED_MODEL=bge-m3
+   ```
+   ```bash
+   docker compose up -d backend
+   ```
+
+2. **对话/翻译**（界面里配，可配多个）：**设置 → 外观与 AI → 模型档案 → 新建**
+
+   | 字段 | 填什么 |
+   | --- | --- |
+   | 名称 | 如「本地 qwen3」 |
+   | 提供方 | 选 **本地 Ollama**（也有 本地 LM Studio `1234` / 本地 vLLM `8000`） |
+   | Base URL | ⚠️ 预置填的是 `http://localhost:11434/v1` → **必须改成 `http://host.docker.internal:11434/v1`** |
+   | 模型名 | 与 `ollama list` **同名**，如 `qwen3:8b` |
+   | API Key | 本地留空 |
+
+   > 三种本地预置默认都是 `localhost`，容器部署下一律要换成 `host.docker.internal`。
+
+### 方式 B：让本栈自带 Ollama
 
 ```bash
 docker compose --profile ollama up -d
-docker compose exec ollama ollama pull bge-m3     # 约 1.2GB，只需一次（存在卷 ollama-models 里）
-curl http://localhost:18080/api/settings/effective?keys=ai.embed_base_url,ai.embed_model
+docker compose exec ollama ollama pull bge-m3      # 模型存在具名卷 ollama-models 里，重建不丢
 ```
 
-最后那条会把**生效值来自哪里**打印出来（`fromDb` / `fromExternal` / `effective`），确认嵌入地址是
-`http://ollama:11434` 而不是默认的 `localhost:11434`：
+然后把地址从 `host.docker.internal` 换成容器服务名 `ollama`：
 
-```json
-[{"key":"ai.embed_base_url","fromExternal":"http://ollama:11434","effective":"http://ollama:11434"}]
+```properties
+# deploy/.env（嵌入：不带 /v1）
+KB_EMBED_BASE_URL=http://ollama:11434
 ```
+```sql
+-- 本地档案（对话/翻译：带 /v1）；在界面里改效果相同
+UPDATE model_profile SET base_url='http://ollama:11434/v1' WHERE name LIKE '%Ollama%';
+```
+
+### 接入完先验证（别等用的时候才发现连不上）
+
+```bash
+# 容器能不能访问到 Ollama 的 OpenAI 兼容端点（方式 A 用 host.docker.internal，方式 B 用 ollama）
+docker compose exec backend wget -qO- http://host.docker.internal:11434/v1/models
+
+# 嵌入这一路的生效值来自哪里（fromDb / fromExternal / effective）
+curl "http://localhost:18080/api/settings/effective?keys=ai.embed_base_url,ai.embed_model"
+
+# 翻译真调一次（能返回译文即通）
+curl -X POST http://localhost:18080/api/files/1/translate \
+  -H 'Content-Type: application/json' -d '{"text":"线程池的核心参数","targetLang":"en"}'
+```
+
+### 接好之后：把模型指派给任务（「模型分工」）
+
+**设置 → 外观与 AI → 模型分工** 可以给每个后台任务单独指定档案。默认值是实测定的：
+
+| 任务 | 建议 | 为什么 |
+| --- | --- | --- |
+| 主题 wiki、检索词扩展 | **本地档案** | 批量生成，免费且够用（默认就是这么配的） |
+| 翻译 | **本地档案** | 逐段翻译，本地足够 |
+| 判定类（实体编译、影响分析、语义自检、图谱关联、三元组抽取、答案核对） | 云端档案 | 实测本地小模型守不住跨页规则、标签不稳定 |
+| 检索重排 | 云端档案 | 97 条用例：本地 8B 几乎无增益（MRR 0.759 vs 云端 0.902） |
+| 对话用哪个模型 | 智能体界面里**按会话选** | 每个会话可固定一个档案，或选「默认」用当前生效档案 |
 
 ### 为什么嵌入地址必须由部署时给（而不是界面里选）
 
