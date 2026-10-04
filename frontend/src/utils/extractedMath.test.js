@@ -2,8 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import domino from '@mixmark-io/domino'
 import {
-  exportExtractedText, extractedFormulaLatex, MAX_EXTRACTED_LATEX_CHARS,
-  normalizeExtractedLatex, renderExtractedMath, renderExtractedText,
+  exportExtractedText, extractedFormulaLatex, extractedFormulaState, MAX_EXTRACTED_LATEX_CHARS,
+  normalizeExtractedLatex, renderExtractedMath, renderExtractedText, validateFormulaRecognition,
 } from './extractedMath.js'
 
 function parse(html) {
@@ -34,6 +34,24 @@ test('inline and display delimiters render while keeping surrounding prose and M
   assert.ok(root.textContent.startsWith('Use energy'))
   assert.ok(root.textContent.trim().endsWith('.'))
   assert.deepEqual(result.errors, [])
+})
+
+test('recovery equations keep primes attached alongside subscripts and nested trajectory parentheses', () => {
+  const restore = String.raw`\begin{aligned}s_k^{\prime}&\leftarrow s_k,\\c_k^{\prime}&\leftarrow\operatorname{Inject}(c_k,M).\end{aligned}\tag{5}`
+  const trajectory = String.raw`\tau^{\prime}=((c_k^{\prime},s_k^{\prime}),u_k^{\prime},o_{k+1}^{\prime},\ldots).\tag{6}`
+  for (const [latex, count] of [[restore, 2], [trajectory, 4]]) {
+    const result = validateFormulaRecognition({ latex, status: 'recognized' })
+    assert.equal(result.ok, true)
+    const root = parse(result.html)
+    assert.equal(root.querySelectorAll('msubsup').length, count)
+    for (const variable of Array.from(root.querySelectorAll('msubsup'))) {
+      assert.ok(variable.children[2].textContent.includes('′'))
+    }
+    assert.equal(root.querySelector('annotation').textContent, latex)
+  }
+  const rows = parse(renderExtractedMath(restore).html)
+  assert.equal(Array.from(rows.querySelectorAll('mo')).filter(node => node.textContent === '←').length, 2)
+  assert.ok(rows.textContent.includes('Inject'))
 })
 
 test('multiline display formulas support aligned environments without eating adjacent paragraphs', () => {
@@ -133,4 +151,61 @@ test('formula delimiters normalize and export uses corrected LaTeX with inline/c
   assert.equal(exported, 'Inline $x_1$ formula.\n$$\n\\sqrt{x}\n$$\nunavailable fragments\nconst raw = "$x$"')
   assert.ok(!exported.includes('x 2 y 1'))
   assert.ok(exportExtractedText(pages).includes('$$\n\\frac{x^2}{y_1}\n$$'))
+})
+
+test('uncertain PDF geometry prioritizes the original crop even when the wrong candidate parses', () => {
+  const block = { latex: String.raw`u \sim \pi(c), tt`, latexStatus: 'partial' }
+  const state = extractedFormulaState(block, block.latex, { hasImage: true })
+  assert.equal(state.rendered.ok, true)
+  assert.equal(state.mainPreview, false)
+  assert.equal(state.candidatePreview, true)
+  assert.equal(state.originalOpen, true)
+  assert.equal(state.visual, false)
+  for (const status of ['unavailable', undefined, 'other']) {
+    assert.equal(extractedFormulaState({ ...block, latexStatus: status }, block.latex, { hasImage: true }).mainPreview, false)
+  }
+  // Native Word/Markdown structure without a PDF crop retains its existing preview.
+  assert.equal(extractedFormulaState(block, block.latex).mainPreview, true)
+})
+
+test('valid manual edits and visually recognized cached formulas can be the primary preview', () => {
+  const block = { latex: 'x', latexStatus: 'partial' }
+  const edited = extractedFormulaState(block, 'x_{t+1}', { hasImage: true })
+  assert.equal(edited.edited, true)
+  assert.equal(edited.mainPreview, true)
+  assert.equal(edited.originalOpen, false)
+  const recognized = extractedFormulaState({ latex: 'x_{t+1}', latexStatus: 'recognized', text: '' }, 'x_{t+1}', { hasImage: true })
+  assert.equal(recognized.visual, true)
+  assert.equal(recognized.mainPreview, true)
+  assert.equal(recognized.edited, false)
+  const partial = extractedFormulaState({ latex: 'x', latexStatus: 'partial', latexMessage: '视觉模型 local/model 识别（已缓存），请核对' }, 'x', { hasImage: true })
+  assert.equal(partial.visual, true)
+  assert.equal(partial.originalOpen, true)
+  assert.equal(partial.candidatePreview, true)
+})
+
+test('visual recognition adopts only bounded, safe LaTeX with an expected status', () => {
+  const good = validateFormulaRecognition({ latex: String.raw`$$\begin{aligned}u_t &\sim \pi(c_t),\\(s_{t+1},o_{t+1}) &= \mathcal{T}(s_t,u_t).\end{aligned}$$`, status: 'recognized' })
+  assert.equal(good.ok, true)
+  assert.ok(good.latex.startsWith('\\begin{aligned}'))
+  assert.ok(parse(good.html).querySelectorAll('msub').length >= 4)
+  assert.equal(validateFormulaRecognition({ latex: 'x', status: 'partial' }).ok, true)
+  for (const latex of ['', null, {}, String.raw`\frac{x}{`, String.raw`\frac{x}`, String.raw`\unknowncommand{a}`, String.raw`\htmlStyle{color:red}{x}`, 'x'.repeat(MAX_EXTRACTED_LATEX_CHARS + 1)]) {
+    const bad = validateFormulaRecognition({ latex, status: 'recognized' })
+    assert.equal(bad.ok, false)
+    assert.ok(bad.error.includes('保留之前'))
+  }
+  assert.equal(validateFormulaRecognition({ latex: 'x', status: 'restored' }).ok, false)
+  assert.equal(validateFormulaRecognition(null).ok, false)
+})
+
+test('copying all text keeps visually recognized formulas including blocks without extracted glyph text', () => {
+  const latex = String.raw`u_t \sim \pi(c_t)`
+  const pages = [{ page: 4, blocks: [{ type: 'para', text: 'Before.' }, { type: 'formula', latex: 'broken', latexStatus: 'partial', text: '' }] }]
+  assert.equal(exportExtractedText(pages, { '4:1': latex }), `Before.\n$$\n${latex}\n$$`)
+  assert.equal(exportExtractedText([{ page: 1, blocks: [{ type: 'formula', latex, latexStatus: 'recognized' }] }]), `$$\n${latex}\n$$`)
+  const partial = extractedFormulaState(pages[0].blocks[1], latex, { baseline: latex, recognition: { status: 'partial' }, hasImage: true })
+  assert.equal(partial.edited, false)
+  assert.equal(partial.mainPreview, false)
+  assert.equal(partial.originalOpen, true)
 })

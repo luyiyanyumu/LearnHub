@@ -2,6 +2,7 @@ package org.dyh.learnhub.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pdfbox.Loader;
@@ -23,6 +24,8 @@ import org.springframework.web.multipart.MultipartFile;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
+import java.awt.Color;
+import java.awt.Graphics2D;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.URLEncoder;
@@ -41,6 +44,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.HexFormat;
+import java.security.MessageDigest;
 import java.util.stream.Collectors;
 
 /**
@@ -83,6 +88,35 @@ public class FileStorageService {
 
     /** 资料列表：支持分类 / 关键词过滤 */
     public List<Map<String, Object>> list(Long categoryId, String kw) {
+        return fileInfoMapper.selectList(listWrapper(categoryId, kw)).stream().map(this::toMap).collect(Collectors.toList());
+    }
+
+    /**
+     * **分页**的资料列表（界面用）。与 {@link #list} 并存而不是替换它：
+     * 那个方法还被智能体的 `list_files` 工具用着（它要全量再自己截断），改签名会连带炸掉那条链路。
+     *
+     * <p>为什么必须分页：界面是 `el-table` 一次渲染全部行，1,000 份资料就是 7,000+ 个单元格 DOM，
+     * 没有虚拟滚动 —— 首屏卡顿、滚动掉帧。分页把渲染量压到一个页大小。
+     *
+     * @param current 页码，从 1 开始
+     * @param size    每页条数。上限 **100** —— 与 `MybatisPlusConfig` 里
+     *                `PaginationInnerInterceptor.setMaxLimit(100L)` 保持一致（那里是兜底，
+     *                这里显式夹一次，免得以后有人调大那边时这里悄悄变成全量）
+     */
+    public Map<String, Object> page(Long categoryId, String kw, Integer current, Integer size) {
+        long pageNo = current == null || current < 1 ? 1 : current;
+        long pageSize = size == null || size < 1 ? 20 : Math.min(size, PAGE_SIZE_MAX);
+        Page<FileInfo> p = fileInfoMapper.selectPage(new Page<>(pageNo, pageSize), listWrapper(categoryId, kw));
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("list", p.getRecords().stream().map(this::toMap).toList());
+        out.put("total", p.getTotal());
+        out.put("page", p.getCurrent());
+        out.put("size", p.getSize());
+        return out;
+    }
+
+    /** 列表与分页共用的过滤条件（两处必须一致，否则"翻页后条数对不上"这类 bug 极难查） */
+    private LambdaQueryWrapper<FileInfo> listWrapper(Long categoryId, String kw) {
         LambdaQueryWrapper<FileInfo> wrapper = Wrappers.<FileInfo>lambdaQuery()
                 .orderByDesc(FileInfo::getCreatedAt);
         if (categoryId != null && categoryId > 0) {
@@ -91,7 +125,52 @@ public class FileStorageService {
         if (StringUtils.hasText(kw)) {
             wrapper.like(FileInfo::getOriginName, kw.trim());
         }
-        return fileInfoMapper.selectList(wrapper).stream().map(this::toMap).collect(Collectors.toList());
+        return wrapper;
+    }
+
+    /** `origin_name` 的列上限（VARCHAR(255)）—— 超了 MySQL 会直接报 Data too long */
+    private static final int NAME_COLUMN_LIMIT = 255;
+
+    /** 每页条数上限：与 `MybatisPlusConfig` 的 `setMaxLimit(100L)` 对齐 */
+    private static final int PAGE_SIZE_MAX = 100;
+
+    /**
+     * 文件名落库前的规范化：**去控制字符** + **截到列上限**（保留扩展名）。
+     *
+     * <p>两个都必须做，且都由实测暴露：
+     * <ul>
+     *   <li><b>控制字符</b>：`StringUtils.cleanPath` 只处理路径分隔符，不碰 `\n`。而文件名里的换行
+     *       在前端表格里会被 CSS（`white-space: normal`）折叠成一个空格 —— 界面显示的名字与真实名字
+     *       不一致，用户按界面看到的名字去文件系统里找会找不到。</li>
+     *   <li><b>超长</b>：上传路径此前对长度没有任何限制，而列是 VARCHAR(255)。文件名超过 255
+     *       会让 INSERT 直接失败（严格模式下报 Data too long → 500），用户看到的是"上传失败"却不知为何。</li>
+     * </ul>
+     * 截断时保留扩展名：扩展名参与"用哪个解析器抽正文"的判断，丢了它就抽不出正文。
+     */
+    static String normalizeOriginName(String raw) {
+        String s = sanitizeControls(raw);
+        if (s.isEmpty()) {
+            return "unnamed";
+        }
+        if (s.length() <= NAME_COLUMN_LIMIT) {
+            return s;
+        }
+        String ext = extOf(s);
+        if (ext.isEmpty()) {
+            return s.substring(0, NAME_COLUMN_LIMIT);
+        }
+        int keep = NAME_COLUMN_LIMIT - ext.length() - 1;
+        return keep <= 0 ? s.substring(0, NAME_COLUMN_LIMIT) : s.substring(0, keep) + "." + ext;
+    }
+
+    /** 去掉控制字符（`\n` `\r` `\t` `\0` 与 DEL）并把连续空白压成一个空格（上传与改名共用同一条规则） */
+    static String sanitizeControls(String raw) {
+        String s = raw == null ? "" : raw;
+        // 替换成空格而不是删除，避免两个词粘成一个
+        s = s.replaceAll("\\p{Cntrl}", " ").replaceAll("\\s+", " ").trim();
+        // 上面是"替换成空格"，所以 `x\u0000y.pdf` 会变成 `x y .pdf` ——
+        // 扩展名前的空格一定是这个替换留下的副产物（真实文件名不会这么写），去掉它
+        return s.replaceAll("\\s+(\\.\\w{1,20})$", "$1");
     }
 
     /** 上传文件：保存到磁盘 + 写入元数据 + **立刻抽正文**（抽不到也记录原因） */
@@ -124,7 +203,11 @@ public class FileStorageService {
         if (bytes == null || bytes.length == 0) {
             throw new IllegalArgumentException("文件内容为空");
         }
-        String name = StringUtils.cleanPath(StringUtils.hasText(originName) ? originName.trim() : "unnamed");
+        // cleanPath 只管路径分隔符；normalizeOriginName 再去控制字符并截到列上限。
+        // 这里是**所有导入路径的唯一汇聚点**（网页上传 / 智能体存论文 / MCP / 生成 Word），
+        // 所以放在这一处就够了，不必在每个调用方各写一遍。
+        String name = normalizeOriginName(
+                StringUtils.cleanPath(StringUtils.hasText(originName) ? originName.trim() : "unnamed"));
         String ext = extOf(name);
         String storeName = UUID.randomUUID().toString().replace("-", "") + (ext.isEmpty() ? "" : "." + ext);
 
@@ -260,8 +343,11 @@ public class FileStorageService {
                     + "抽正文是按扩展名选解析器的，改了会出现「按 Word 解析 PDF」这类错。"
                     + "只改名字部分即可，例如把「旧名." + oldExt + "」改成「新名." + oldExt + "」。");
         }
-        // 去掉结尾的 ".ext" 就是新基名；基名不能为空
-        String base = cleaned.substring(0, cleaned.length() - (oldExt.isEmpty() ? 0 : oldExt.length() + 1)).trim();
+        // 去掉结尾的 ".ext" 就是新基名；基名不能为空。
+        // 与上传路径用同一条清洗规则（去控制字符）—— 否则"上传时干净、改名时能塞进换行"，
+        // 界面显示的名字又会与真实名字不一致。
+        String base = sanitizeControls(
+                cleaned.substring(0, cleaned.length() - (oldExt.isEmpty() ? 0 : oldExt.length() + 1)));
         if (!StringUtils.hasText(base)) {
             throw new IllegalArgumentException("文件名不能为空");
         }
@@ -367,7 +453,10 @@ public class FileStorageService {
         }
         PdfLayoutExtractor.Layout layout;
         try {
-            if ("pdf".equals(ext)) layout = pdfLayoutExtractor.extract(path);
+            if ("pdf".equals(ext)) {
+                layout = pdfLayoutExtractor.extract(path);
+                layout = withRecognizedFormulas(id, path, layout);
+            }
             else if ("docx".equals(ext) || "docm".equals(ext)) layout = wordLayoutExtractor.extract(path);
             else {
                 DocumentTextService.Extracted extracted = documentTextService.extract(path, ext, Files.size(path));
@@ -389,6 +478,121 @@ public class FileStorageService {
 
     /** 渲染插图的分辨率：150 够看清图里的字，单页位图也就 8MB 左右，不至于把内存吃掉 */
     private static final float FIGURE_DPI = 150f;
+    private static final float FORMULA_DPI = 300f;
+    private static final long MAX_FORMULA_PIXELS = 5_000_000;
+
+    /** Render only the selected formula into a high-resolution canvas, rather than a full-page bitmap. */
+    public byte[] formulaImage(Long id, int pageNo, double[] rect) {
+        validateFormulaRect(pageNo, rect);
+        FileInfo info = require(id);
+        if (!"pdf".equalsIgnoreCase(info.getExt())) throw new IllegalArgumentException("公式原图识别目前支持 PDF");
+        Path source = storageDir().resolve(info.getStoreName());
+        double scale = FORMULA_DPI / 72.0;
+        try (PDDocument doc = Loader.loadPDF(source.toFile())) {
+            if (pageNo > doc.getNumberOfPages()) throw new IllegalArgumentException("页码超出原文范围");
+            var box = doc.getPage(pageNo - 1).getCropBox();
+            boolean sideways = Math.floorMod(doc.getPage(pageNo - 1).getRotation(), 180) != 0;
+            double pageWidth = sideways ? box.getHeight() : box.getWidth();
+            double pageHeight = sideways ? box.getWidth() : box.getHeight();
+            // Preserve tiny subscript glyphs and equation numbers at the edges of the detected block.
+            int left = Math.max(0, (int) Math.floor((rect[0] - 2) * scale));
+            int top = Math.max(0, (int) Math.floor((rect[1] - 2) * scale));
+            int right = (int) Math.min(Math.ceil(pageWidth * scale), Math.ceil((rect[2] + 2) * scale));
+            int bottom = (int) Math.min(Math.ceil(pageHeight * scale), Math.ceil((rect[3] + 2) * scale));
+            int width = right - left, height = bottom - top;
+            if (width <= 0 || height <= 0) throw new IllegalArgumentException("公式区域位于页面之外");
+            if ((long) width * height > MAX_FORMULA_PIXELS)
+                throw new IllegalArgumentException("识别区域过大，请缩小到单个公式");
+            BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+            Graphics2D graphics = image.createGraphics();
+            try {
+                graphics.setColor(Color.WHITE);
+                graphics.setBackground(Color.WHITE);
+                graphics.fillRect(0, 0, width, height);
+                graphics.translate(-left, -top);
+                new PDFRenderer(doc).renderPageToGraphics(pageNo - 1, graphics, (float) scale, (float) scale);
+            } finally { graphics.dispose(); }
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            ImageIO.write(image, "png", bytes);
+            return bytes.toByteArray();
+        } catch (IllegalArgumentException e) { throw e; }
+        catch (IOException e) { throw new IllegalStateException("公式原图渲染失败，请查看原文", e); }
+    }
+
+    /** Source content, page and geometry determine cache identity; replacing a file never reuses an old result. */
+    public String formulaRecognitionKey(Long id, int pageNo, double[] rect) {
+        validateFormulaRect(pageNo, rect);
+        FileInfo info = require(id);
+        if (!"pdf".equalsIgnoreCase(info.getExt())) throw new IllegalArgumentException("公式原图识别目前支持 PDF");
+        return formulaKey(sourceRevision(storageDir().resolve(info.getStoreName())), pageNo, rect);
+    }
+
+    public Path formulaRecognitionCachePath(Long id, String key) {
+        if (id == null || id < 1 || key == null || !key.matches("[a-f0-9]{64}"))
+            throw new IllegalArgumentException("公式缓存标识无效");
+        return storageDir().resolve(".derived").resolve(String.valueOf(id)).resolve("formula-ocr").resolve(key + ".json");
+    }
+
+    private static void validateFormulaRect(int pageNo, double[] rect) {
+        if (pageNo < 1 || rect == null || rect.length != 4
+                || !java.util.Arrays.stream(rect).allMatch(Double::isFinite)
+                || rect[2] <= rect[0] || rect[3] <= rect[1]
+                || java.util.Arrays.stream(rect).anyMatch(value -> Math.abs(value) > 100_000))
+            throw new IllegalArgumentException("公式区域不合法");
+    }
+
+    private static String sourceRevision(Path path) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            try (var input = Files.newInputStream(path)) {
+                byte[] buffer = new byte[16_384];
+                for (int count; (count = input.read(buffer)) >= 0;) if (count > 0) digest.update(buffer, 0, count);
+            }
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (Exception e) { throw new IllegalStateException("无法读取公式原文件", e); }
+    }
+
+    private static String formulaKey(String revision, int page, double[] rect) {
+        String value = "formula-image-v1:" + revision + ":" + page;
+        for (double coordinate : rect) value += ":" + Double.toHexString(coordinate);
+        try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8))); }
+        catch (java.security.NoSuchAlgorithmException e) { throw new IllegalStateException(e); }
+    }
+
+    private PdfLayoutExtractor.Layout withRecognizedFormulas(Long id, Path source, PdfLayoutExtractor.Layout layout) {
+        if (layout.pages().stream().noneMatch(page -> page.blocks().stream().anyMatch(block -> "formula".equals(block.type())))) return layout;
+        Path directory = storageDir().resolve(".derived").resolve(String.valueOf(id)).resolve("formula-ocr");
+        if (!Files.isDirectory(directory)) return layout;
+        String revision = sourceRevision(source);
+        var json = new com.fasterxml.jackson.databind.ObjectMapper();
+        List<PdfLayoutExtractor.PageLayout> pages = new ArrayList<>();
+        for (var page : layout.pages()) {
+            List<PdfLayoutExtractor.Block> blocks = new ArrayList<>();
+            for (var block : page.blocks()) {
+                var shown = block;
+                if ("formula".equals(block.type()) && block.rect() != null) {
+                    Path cached = formulaRecognitionCachePath(id, formulaKey(revision, page.page(), block.rect()));
+                    try {
+                        if (Files.isRegularFile(cached) && Files.size(cached) <= 65_536) {
+                            var saved = json.readTree(cached.toFile());
+                            String latex = saved.path("latex").asText("");
+                            String status = saved.path("status").asText("");
+                            if (!latex.isBlank() && latex.length() <= 12_000 && Set.of("recognized", "partial").contains(status)) {
+                                String description = "视觉模型 " + saved.path("profile").asText("") + " / "
+                                        + saved.path("model").asText("") + " 识别（已缓存），请核对原图。"
+                                        + saved.path("message").asText("");
+                                shown = new PdfLayoutExtractor.Block(block.type(), block.text(), block.level(), block.src(),
+                                        block.page(), block.rect(), latex, status, description);
+                            }
+                        }
+                    } catch (Exception e) { log.debug("忽略不可用公式识别缓存: {}", cached.getFileName()); }
+                }
+                blocks.add(shown);
+            }
+            pages.add(new PdfLayoutExtractor.PageLayout(page.page(), page.columns(), blocks));
+        }
+        return new PdfLayoutExtractor.Layout(layout.status(), layout.error(), pages, layout.chars(), layout.pageCount());
+    }
 
     /**
      * 「抽取正文」里的插图：把 PDF 那一页渲染出来，**只裁那块图**，返回 PNG 字节。

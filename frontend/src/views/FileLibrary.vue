@@ -13,21 +13,36 @@ const loading = ref(false)
 const route = useRoute()
 const uploading = ref(false)
 const list = ref([])
+/** 分页状态。列表一次只渲染一页（而不是全量）——原因见 fileApi.page 的注释。 */
+const pager = ref({ page: 1, size: 20, total: 0 })
 const categories = ref([])
 const query = ref({ categoryId: undefined, kw: '' })
 const uploadCategoryId = ref(undefined)
 const uploadInput = ref(null)
 
+/**
+ * 数字格式化统一走 Intl：手拼字符串会把 1234567 显示成 `1234567`（该是 `1,234,567`），
+ * 而且不同语言环境下分隔符本来就不同。列表里的数字都参与"一眼比大小"，所以要给它们正确的格式。
+ */
+const NUM = new Intl.NumberFormat('zh-CN')
+
 function fmtSize(bytes) {
-  if (bytes == null) return '-'
-  if (bytes < 1024) return bytes + ' B'
+  if (bytes == null) return '—'
+  if (bytes < 1024) return NUM.format(bytes) + ' B'
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
   if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MB'
   return (bytes / 1024 / 1024 / 1024).toFixed(2) + ' GB'
 }
 
+/**
+ * 上传时间。
+ *
+ * <p>空值给 `—` 而不是空字符串：同一列里其他行都有时间，空字符串看起来像"漏渲染了"。
+ * 这里与 `fmtSize` 的约定保持一致（原来只有 fmtSize 有兜底，time 没有）。
+ */
 function time(v) {
-  return (v || '').replace('T', ' ').slice(0, 16)
+  if (!v) return '—'
+  return String(v).replace('T', ' ').slice(0, 16)
 }
 
 async function loadCats() {
@@ -41,24 +56,91 @@ function flatten(nodes, depth = 0, out = []) {
   return out
 }
 
+/**
+ * 分类下拉的 label：全角空格缩进，**封顶 3 层**。
+ *
+ * <p>为什么封顶：分类树深度没有上限，而「分类」列只有 150px（扣 padding ≈126px）。
+ * 深度 5 就是 5 个全角空格（约 70px），分类名本身只剩几十像素 —— 界面上一眼看过去全是缩进。
+ * 真要表达深层级，应该靠搜索或树形选择器，而不是把缩进堆在下拉里。
+ */
+function catLabel(c) {
+  return '　'.repeat(Math.min(c.depth || 0, 3)) + c.name
+}
+
+/**
+ * break-ui：最坏数据集开关（**dev-only**）。
+ *
+ * 只在 URL 带 `?data=` 时才生效 —— 生产里没有这个参数，就完全不激活、连 fixture 都不会被下载
+ * （fixture 是动态 import，单独成 chunk）。切换条也只在带参数时渲染，所以正式界面看不到它。
+ *
+ * 造它的原因：这个列表是照着"友好数据"设计出来的（文件名都不长、说明都空着、分类都选了），
+ * 而真实数据里会出现 255 字的长名、不能断行的相机文件名、六个抽取状态混排、1,000 行不分页。
+ */
+const DEV_FIXTURES = [
+  { key: 'worst', label: 'Worst case' },
+  { key: 'demo', label: 'Demo data' },
+  { key: 'empty', label: 'Empty' },
+  { key: 'one', label: 'One' },
+  { key: 'huge', label: '1,000 rows' },
+]
+const devData = ref(new URLSearchParams(window.location.search).get('data') || '')
+
+async function setDevData(key) {
+  devData.value = key
+  const url = new URL(window.location.href)
+  url.searchParams.set('data', key)
+  window.history.replaceState({}, '', url)
+  await load()
+}
+
 async function load() {
   loading.value = true
   try {
-    const params = { ...query.value }
+    if (devData.value && devData.value !== 'demo') {
+      const m = await import('../dev/worstCaseFiles')
+      const all = m.pickFixture(devData.value) || []
+      // 最坏数据集也走同一套分页逻辑 —— 这样 `1,000 rows` 这个状态看到的就是修复后的行为
+      pager.value.total = all.length
+      const start = (pager.value.page - 1) * pager.value.size
+      list.value = all.slice(start, start + pager.value.size)
+      return
+    }
+    const params = { ...query.value, page: pager.value.page, size: pager.value.size }
     if (!params.categoryId) delete params.categoryId
     if (!params.kw) delete params.kw
-    list.value = await fileApi.list(params)
+    const r = await fileApi.page(params)
+    list.value = r.list || []
+    pager.value.total = r.total || 0
+    // 删掉最后一页的最后一条后会停在一个空页上（第 3 页，但只剩 2 页数据）→ 自动退回上一页
+    if (!list.value.length && pager.value.page > 1 && pager.value.total > 0) {
+      pager.value.page -= 1
+      await load()
+    }
   } finally {
     loading.value = false
   }
 }
 
 function search() {
+  // 换筛选条件必须回到第 1 页：停在第 3 页搜一个只有 2 条结果的关键词会看到空表
+  pager.value.page = 1
   load()
 }
 
 function resetFilter() {
   query.value = { categoryId: undefined, kw: '' }
+  pager.value.page = 1
+  load()
+}
+
+function onPageChange(p) {
+  pager.value.page = p
+  load()
+}
+
+function onPageSizeChange(s) {
+  pager.value.size = s
+  pager.value.page = 1
   load()
 }
 
@@ -76,6 +158,8 @@ async function onFileChosen(e) {
       ElMessage.success(`已上传：${f.name}`)
     }
     e.target.value = ''
+    // 新资料按 createdAt 倒序排在最前 → 回第 1 页才看得到刚上传的那份
+    pager.value.page = 1
     load()
   } finally {
     uploading.value = false
@@ -251,7 +335,8 @@ function textLabel(row) {
   if (!row) return ''
   switch (row.textStatus) {
     case 'ok':
-      return `已抽 ${row.textChars} 字`
+      // 字数用 Intl 千位分隔：`已抽 1234567 字` 读不出量级
+      return `已抽 ${NUM.format(row.textChars || 0)} 字`
     case 'empty':
       return '无文字'
     case 'unsupported':
@@ -376,7 +461,12 @@ onBeforeUnmount(() => {
       <el-table :data="list">
         <el-table-column label="文件名" min-width="240">
           <template #default="{ row }">
-            <span class="fname">{{ row.originName }}</span>
+            <!--
+              裁到 2 行 + title 悬停看全名：origin_name 的列上限是 255 字符，
+              不裁的话一行能长到十几行（一行吃掉大半屏）；裁了就必须给 title，
+              否则"截断了却没处读全文"。
+            -->
+            <span class="fname" :title="row.originName">{{ row.originName }}</span>
           </template>
         </el-table-column>
         <el-table-column label="类型" width="90">
@@ -403,28 +493,36 @@ onBeforeUnmount(() => {
               style="width: 100%"
               @change="onChangeCategory(row, $event)"
             >
-              <el-option v-for="c in categories" :key="c.id" :label="'　'.repeat(c.depth) + c.name" :value="c.id" />
+              <el-option v-for="c in categories" :key="c.id" :label="catLabel(c)" :value="c.id" />
             </el-select>
           </template>
         </el-table-column>
         <el-table-column label="大小" width="100">
-          <template #default="{ row }">{{ fmtSize(row.size) }}</template>
+          <template #default="{ row }"><span class="num">{{ fmtSize(row.size) }}</span></template>
         </el-table-column>
         <el-table-column label="上传时间" width="165">
-          <template #default="{ row }">{{ time(row.createdAt) }}</template>
+          <template #default="{ row }"><span class="num">{{ time(row.createdAt) }}</span></template>
         </el-table-column>
-        <el-table-column label="操作" width="270" fixed="right">
+        <!--
+          操作列：主操作留在行内，次要操作（说明 / 重命名 / 重抽）收进 ⋯。
+          原因：这一列是 fixed="right"，宽度就是它在窄屏上**吃掉**的宽度 ——
+          五个按钮要 270px，320px 屏上文件名（min-width 240）直接被挤出视野，
+          而这一列永远可见。收进 ⋯ 后主操作只剩三个（阅读/下载/删除）。
+        -->
+        <el-table-column label="操作" width="196" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="openReader(row)">阅读</el-button>
-          <el-button link type="primary" @click="onDownload(row)">下载</el-button>
-            <el-button link type="primary" @click="onEditSummary(row)">说明</el-button>
-            <el-button link type="primary" @click="onRename(row)">重命名</el-button>
-            <el-button
-              v-if="row.textStatus !== 'ok'"
-              link
-              type="primary"
-              @click="onReextract(row)"
-            >重抽</el-button>
+            <el-button link type="primary" @click="onDownload(row)">下载</el-button>
+            <el-dropdown trigger="click">
+              <el-button link type="primary" aria-label="更多操作">⋯</el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item @click="onEditSummary(row)">说明</el-dropdown-item>
+                  <el-dropdown-item @click="onRename(row)">重命名</el-dropdown-item>
+                  <el-dropdown-item v-if="row.textStatus !== 'ok'" @click="onReextract(row)">重抽正文</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
             <el-button link type="danger" @click="onDelete(row)">删除</el-button>
           </template>
         </el-table-column>
@@ -432,6 +530,20 @@ onBeforeUnmount(() => {
           <el-empty description="资料库还是空的，点右上角上传第一份资料" :image-size="80" />
         </template>
       </el-table>
+
+      <!-- 分页：列表一次只渲染一页，而不是把上千行一次性塞进 DOM -->
+      <div v-if="pager.total > pager.size" class="fpage">
+        <el-pagination
+          :current-page="pager.page"
+          :page-size="pager.size"
+          :page-sizes="[20, 50, 100]"
+          :total="pager.total"
+          layout="total, sizes, prev, pager, next, jumper"
+          background
+          @current-change="onPageChange"
+          @size-change="onPageSizeChange"
+        />
+      </div>
     </el-card>
   </div>
 
@@ -577,11 +689,77 @@ onBeforeUnmount(() => {
         </ReaderTranslation>
       </div>
     </el-dialog>
+
+  <!-- break-ui 数据集切换条：只在 URL 带 ?data= 时渲染，正式界面看不到它 -->
+  <div v-if="devData" class="devdata-bar" role="group" aria-label="break-ui worst-case data">
+    <span class="devdata-title">break-ui</span>
+    <button
+      v-for="f in DEV_FIXTURES"
+      :key="f.key"
+      type="button"
+      class="devdata-seg"
+      :class="{ on: devData === f.key }"
+      @click="setDevData(f.key)"
+    >{{ f.label }}</button>
+  </div>
 </template>
 
 <style scoped>
+/* break-ui 的切换条：刻意做成"中性 chrome"（灰轨道 + 白色滑块、系统字体），
+   它不属于被测设计，所以不沿用应用的主题变量与动效。 */
+.devdata-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 999px;
+  background: #e8e8ea;
+  box-shadow: 0 2px 10px rgb(0 0 0 / 18%);
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 12px;
+}
+.devdata-title {
+  padding: 0 8px 0 6px;
+  color: #6b6b70;
+  font-size: 11px;
+  letter-spacing: .02em;
+}
+.devdata-seg {
+  padding: 5px 11px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #494950;
+  font: inherit;
+  cursor: pointer;
+}
+.devdata-seg.on {
+  background: #fff;
+  color: #18181b;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 14%);
+}
 .tip { font-size: 12px; color: var(--app-text-3); }
-.fname { color: var(--app-text-1); word-break: break-all; }
+/* 文件名：裁 2 行 + 只在必要时断行。
+   原来只有 `word-break: break-all` —— 那是"任意两个字符之间都能断"，于是 approved 会被切成
+   appro/ved，明明有空格和连字符可断。overflow-wrap: anywhere 只在真的放不下时才断。
+   裁切是必须的：origin_name 上限 255 字符，不裁的话一行能长到十几行（见 title 属性给全文）。 */
+.fname {
+  color: var(--app-text-1);
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* 参与"一眼比大小"的数字用等宽数字，值变化时列不会左右跳 */
+.num { font-variant-numeric: tabular-nums; }
+/* 分页条：右对齐、给表格一点呼吸 */
+.fpage { display: flex; justify-content: flex-end; margin-top: 12px; }
 .fsummary { margin-top: 4px; font-size: 12px; line-height: 1.5; color: var(--app-text-3); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .spacer { flex: 1 1 auto; }
 :global(.reader-dialog.el-dialog) { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }

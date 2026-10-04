@@ -11,6 +11,7 @@ import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.common.PDRectangle;
 import org.apache.pdfbox.pdmodel.font.encoding.GlyphList;
+import org.apache.pdfbox.pdmodel.font.PDSimpleFont;
 import org.apache.pdfbox.pdmodel.graphics.PDXObject;
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.apache.pdfbox.text.PDFTextStripper;
@@ -20,6 +21,7 @@ import org.apache.pdfbox.util.Vector;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
+import java.awt.geom.Rectangle2D;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -911,7 +913,116 @@ public class PdfLayoutExtractor {
                     monoChars * 2 > total, total == 0 ? 0 : (double) monoChars / total, lineText, top, bottom));
         }
         out.sort(Comparator.comparingDouble(Line::y));
-        return out;
+        return reconnectMathRows(out);
+    }
+
+    /** PDFBox may split a displayed row at each raised prime or script. Reconnect only notation,
+     * with the observed mathematical baseline as anchor; prose remains a hard boundary. */
+    static List<Line> reconnectMathRows(List<Line> source) {
+        List<Line> lines = new ArrayList<>(source);
+        // Raised inline primes can be emitted as their own row. Attach them to the nearest prose
+        // baseline before equation detection, so they neither prefix a paragraph nor become math.
+        for (int i = 0; i < lines.size(); i++) {
+            Line piece = lines.get(i);
+            if (piece.mono() || !mathNotation(piece.text()) || piece.text().length() > 12
+                    || piece.x1() - piece.x0() > piece.size() * 3
+                    || !piece.text().matches(".*[′″'(),].*")
+                    || piece.text().matches(".*[=≤≥≈≠→←↔].*")
+                    || piece.text().matches("\\(\\d{1,3}\\)")) {
+                continue;
+            }
+            int nearest = -1;
+            double distance = Double.MAX_VALUE;
+            for (int j = 0; j < lines.size(); j++) {
+                Line prose = lines.get(j);
+                double gap = Math.abs(prose.y() - piece.y());
+                if (i != j && !prose.mono() && !mathNotation(prose.text())
+                        && (piece.size() <= prose.size() * 0.8 || piece.text().matches(".*[′″'].*")
+                            || piece.text().matches("^[A-Za-z]{1,2}\\)[,.;:]*$"))
+                        && gap <= prose.size() * 0.6 && gap < distance
+                        && piece.x0() <= prose.x1() + prose.size() * 0.5
+                        && piece.x1() >= prose.x0()) {
+                    nearest = j;
+                    distance = gap;
+                }
+            }
+            if (nearest >= 0) {
+                Line prose = lines.get(nearest);
+                Line merged = combineRows(List.of(prose, piece), prose);
+                lines.remove(prose);
+                lines.remove(piece);
+                lines.add(merged);
+                lines.sort(Comparator.comparingDouble(Line::y));
+                i = -1;
+            }
+        }
+        for (int i = 0; i < lines.size(); i++) {
+            Line main = lines.get(i);
+            if (main.mono() || !mathish(main.text())) {
+                continue;
+            }
+            List<Line> pieces = new ArrayList<>(List.of(main));
+            boolean expanded;
+            do {
+                expanded = false;
+                double left = pieces.stream().mapToDouble(Line::x0).min().orElse(main.x0());
+                double right = pieces.stream().mapToDouble(Line::x1).max().orElse(main.x1());
+                for (Line piece : lines) {
+                    if (pieces.contains(piece) || piece.mono() || !mathNotation(piece.text())
+                            || piece.size() > main.size() * 1.2
+                            || Math.abs(piece.y() - main.y()) > main.size() * 0.7
+                            // A second relation at a separate x position is an independent equation.
+                            || (piece.text().matches(".*[=≤≥≈≠→←↔].*")
+                                && (piece.x0() > main.x1() + main.size()
+                                    || piece.x1() < main.x0() - main.size()))) {
+                        continue;
+                    }
+                    // Grow through contiguous fragments. Only a pure equation number is allowed
+                    // across the intentional large gap at the right edge of the display.
+                    boolean number = piece.text().matches("\\(\\d{1,3}\\)");
+                    double reach = main.size() * (number ? 20 : 1.2);
+                    if (piece.x1() < left - reach || piece.x0() > right + reach
+                            || proseBetween(lines, main, piece, left, right)) {
+                        continue;
+                    }
+                    pieces.add(piece);
+                    expanded = true;
+                }
+            } while (expanded);
+            if (pieces.size() == 1) {
+                continue;
+            }
+            Line merged = combineRows(pieces, main);
+            lines.removeAll(pieces);
+            lines.add(merged);
+            lines.sort(Comparator.comparingDouble(Line::y));
+            i = -1;
+        }
+        return lines;
+    }
+
+    private static boolean proseBetween(List<Line> lines, Line main, Line piece, double left, double right) {
+        double bridgeLeft = Math.min(left, piece.x0());
+        double bridgeRight = Math.max(right, piece.x1());
+        for (Line line : lines) {
+            if (line != main && line != piece && !mathNotation(line.text())
+                    && line.x0() < bridgeRight && line.x1() > bridgeLeft
+                    && Math.abs(line.y() - main.y()) <= main.size() * 0.7) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Line combineRows(List<Line> source, Line main) {
+        List<Line> pieces = new ArrayList<>(source);
+        pieces.sort(Comparator.comparingDouble(Line::x0).thenComparingDouble(Line::y));
+        String joined = pieces.stream().map(Line::text).reduce((a, b) -> a + " " + b).orElse(main.text());
+        return new Line(pieces.stream().mapToDouble(Line::x0).min().orElse(main.x0()),
+                pieces.stream().mapToDouble(Line::x1).max().orElse(main.x1()), main.y(), main.size(),
+                main.domSize(), main.bold(), main.mono(), main.monoRatio(), tidyInline(joined),
+                pieces.stream().mapToDouble(Line::top).min().orElse(main.top()),
+                pieces.stream().mapToDouble(Line::bottom).max().orElse(main.bottom()));
     }
 
     /** 一行拼成的纯文本（只用于长度判断） */
@@ -1610,7 +1721,7 @@ public class PdfLayoutExtractor {
      * 抽出来可能是 {@code (θ|q) R(q o … KL …)} 这种碎片。这里先识别公式块，
      * 再由 {@link PdfMathLatex} 使用字形位置与矢量分式线恢复有证据的结构。
      */
-    private static final Pattern MATH_GLYPH = Pattern.compile("[=+−±×÷∑∫√≤≥≈≠∈∀∃∂∇^_{}|<>]|[\\u0370-\\u03FF]");
+    private static final Pattern MATH_GLYPH = Pattern.compile("[=+−±×÷∑∫√≤≥≈≠∈∀∃∂∇^_{}|<>∼∝→←↔]|[\\u0370-\\u03FF]");
 
     /**
      * **真公式才有的**符号：希腊字母、数学运算符、比较符、集合/微积分符号。
@@ -1625,6 +1736,28 @@ public class PdfLayoutExtractor {
     private static final List<String> MATH_WORDS = List.of(
             "argmax", "argmin", "sin", "cos", "tan", "log", "exp", "lim", "max", "min", "det", "mod", "sum", "sim");
 
+    /** Named functions are evidence from notation, rather than a paper-specific vocabulary. */
+    private static boolean mathNotation(String text) {
+        String t = text.trim();
+        if (t.isEmpty() || t.length() > 120 || TEMPLATEISH.matcher(t).find()
+                || t.codePoints().anyMatch(c -> c >= 0x2E80)
+                || t.matches("^[A-Za-z]{1,3}\\.\\s+\\d+$")) {
+            return false;
+        }
+        Matcher words = LATIN_WORD.matcher(t);
+        while (words.find()) {
+            String word = words.group();
+            if (word.length() <= 2 || MATH_WORDS.contains(word.toLowerCase(Locale.ROOT))) {
+                continue;
+            }
+            String after = t.substring(words.end()).stripLeading();
+            if (after.isEmpty() || after.charAt(0) != '(') {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /**
      * 这一行像不像公式：短、不以句末标点结尾，而且**数学符号够密**。
      * <p>紧凑的变量等式单独识别；其他行要求符号密度至少 13%，避免把带等号的说明句截走。
@@ -1637,23 +1770,19 @@ public class PdfLayoutExtractor {
         if (t.isEmpty() || t.length() > 120 || t.indexOf('\n') >= 0) {
             return false;
         }
-        if (t.split("\\s+").length > 14) {
-            return false;
-        }
         if (TEMPLATEISH.matcher(t).find() || !REAL_MATH.matcher(t).find()) {
             return false;
         }
         int math = (int) MATH_GLYPH.matcher(t).results().count();
-        boolean relation = t.matches(".*[=≤≥≈≠].*");
-        boolean compact = t.length() <= 55 && relation
-                && LATIN_WORD.matcher(t).results()
-                    .allMatch(m -> m.group().length() <= 2 || MATH_WORDS.contains(m.group().toLowerCase(Locale.ROOT)))
-                && t.codePoints().noneMatch(c -> c >= 0x2E80);
+        boolean relation = t.matches(".*[=≤≥≈≠→←↔].*");
+        boolean compact = t.replaceAll("\\s+", "").length() <= 80 && relation
+                && mathNotation(t);
         // 短的 ASCII 等式（x+y=z、E=mc^2）也需要保留；有正文词的句子仍走保守判据。
         if (compact && math >= 1) {
             return true;
         }
-        return !SENTENCE_END.matcher(t).find() && math >= 3 && math * 100 >= t.length() * 13;
+        return t.split("\\s+").length <= 14 && !SENTENCE_END.matcher(t).find()
+                && math >= 3 && math * 100 >= t.length() * 13;
     }
 
     /** 上标脚注号不是整行的基线，按文字数量取中位数，避免续行间距被放大。 */
@@ -1725,6 +1854,23 @@ public class PdfLayoutExtractor {
                 }
             }
         }
+        // Equation numbers are often vertically centred between two display rows. Their large
+        // horizontal gap is intentional, so script proximity alone cannot attach them.
+        for (int i = 0; i < lines.size(); i++) {
+            Line number = lines.get(i);
+            if (!number.text().matches("\\(\\d{1,3}\\)")) {
+                continue;
+            }
+            for (int j = 0; j < lines.size(); j++) {
+                Line main = lines.get(j);
+                if (result[j] && main.x1() < number.x0() - number.size() * 2
+                        && number.x0() - main.x1() <= number.size() * 20
+                        && Math.abs(number.y() - main.y()) <= main.size() * 1.1) {
+                    result[i] = true;
+                    break;
+                }
+            }
+        }
         return result;
     }
 
@@ -1745,14 +1891,11 @@ public class PdfLayoutExtractor {
         String t = fragment.text();
         boolean notation = REAL_MATH.matcher(t).find()
                 || LATIN_WORD.matcher(t).results().anyMatch(m -> MATH_WORDS.contains(m.group().toLowerCase(Locale.ROOT)))
-                || t.matches(".*\\(\\d{1,3}\\)$");
+                || t.matches(".*\\(\\d{1,3}\\)$") || t.matches(".*[′″'(),].*");
         return !fragment.mono() && fragment.size() <= main.size() * 1.2
                 && (fragment.size() <= main.size() * 0.8 || notation)
                 && t.length() <= 60 && t.split("\\s+").length <= 12
-                && !SENTENCE_END.matcher(t).find() && !TEMPLATEISH.matcher(t).find()
-                && !CODE_LINE.matcher(t).find() && t.codePoints().noneMatch(c -> c >= 0x2E80)
-                && LATIN_WORD.matcher(t).results().allMatch(m -> m.group().length() <= 2
-                    || MATH_WORDS.contains(m.group().toLowerCase(Locale.ROOT)))
+                && !TEMPLATEISH.matcher(t).find() && mathNotation(t)
                 && Math.abs(fragment.y() - main.y()) <= main.size() * 1.8
                 && fragment.x0() <= main.x1() + main.size()
                 && fragment.x1() >= main.x0() - main.size();
@@ -1779,6 +1922,7 @@ public class PdfLayoutExtractor {
             double[] runRect = placed.get(i).block().rect();
             while (j < placed.size() && isMath(placed.get(j).block())
                     && (j == i || nearbyFormula(runRect, placed.get(j).block().rect())
+                        || nearbyEquationNumber(runRect, placed.get(j).block())
                         || connectedByFollowingFormula(placed, j, runRect))) {
                 runRect = unionRect(runRect, placed.get(j).block().rect());
                 j++;
@@ -1802,6 +1946,16 @@ public class PdfLayoutExtractor {
     /** 已识别的公式块，或整段文本都像公式的段落。 */
     private static boolean isMath(Block b) {
         return "formula".equals(b.type()) || ("para".equals(b.type()) && mathish(b.text()));
+    }
+
+    private static boolean nearbyEquationNumber(double[] run, Block candidate) {
+        double[] number = candidate.rect();
+        if (run == null || number == null || !candidate.text().matches("\\(\\d{1,3}\\)")) {
+            return false;
+        }
+        double height = Math.max(run[3] - run[1], number[3] - number[1]);
+        return number[1] <= run[3] + height * 0.5 && number[3] >= run[1] - height * 0.5
+                && number[0] > run[0] && number[0] - run[2] <= height * 15;
     }
 
     /** 两个上标可能横向分离，但紧接的公式主行同时连接它们，不能提前截断其中一个。 */
@@ -2273,45 +2427,108 @@ public class PdfLayoutExtractor {
             if (positions == null || positions.isEmpty()) {
                 return;
             }
-            StringBuilder sb = new StringBuilder();
-            for (TextPosition p : positions) {
-                String u = p.getUnicode();
-                if (placeholder(u)) {
-                    String fixed = recoverGlyph(p);          // 数学字体：用字形名换回真符号
-                    if (fixed != null) {
-                        u = fixed;
-                    }
-                }
-                if (u != null) {
-                    sb.append(u);
-                    if (!u.isBlank()) {
-                        double s = Math.max(1, fontSize(p));
-                        glyphs.add(new PdfMathLatex.Glyph(u, p.getXDirAdj(),
-                                p.getXDirAdj() + p.getWidthDirAdj(), p.getYDirAdj(), s,
-                                p.getYDirAdj() - Math.max(p.getHeightDir(), s * 0.9),
-                                p.getYDirAdj() + s * 0.3));
-                    }
-                }
-            }
-            String word = sb.toString();
-            if (word.isBlank()) {
+            if (positions.stream().map(RowCollector::unicode).allMatch(u -> u == null || u.isBlank())) {
                 spacePending = true;
                 return;
             }
+            List<TextPosition> ordinary = new ArrayList<>();
+            boolean leadingSpace = spacePending;
+            for (TextPosition p : positions) {
+                String u = unicode(p);
+                double s = Math.max(1, fontSize(p));
+                GlyphPlacement placement = placement(p);
+                if (u != null && !u.isBlank()) {
+                    glyphs.add(new PdfMathLatex.Glyph(u, p.getXDirAdj(),
+                            p.getXDirAdj() + p.getWidthDirAdj(), placement.baseline(), s,
+                            placement.top(), placement.bottom()));
+                }
+                if (extensionGlyph(p)) {
+                    // CMEX delimiters originate above their ink. PDFBox can insert them into a
+                    // prose word on the previous row; keep them separate until geometry reconnects
+                    // their actual display row. Adjacent prose chunks retain their original spacing.
+                    if (!ordinary.isEmpty()) {
+                        cur.add(word(ordinary, leadingSpace));
+                        ordinary.clear();
+                        leadingSpace = false;
+                    }
+                    rows.add(new ArrayList<>(List.of(word(List.of(p), false))));
+                } else {
+                    ordinary.add(p);
+                }
+            }
+            if (!ordinary.isEmpty()) {
+                Word w = word(ordinary, leadingSpace);
+                if (!w.text().isBlank()) {
+                    cur.add(w);
+                }
+            }
+            spacePending = false;
+        }
+
+        private static String unicode(TextPosition p) {
+            String u = p.getUnicode();
+            if (placeholder(u)) {
+                String fixed = recoverGlyph(p);
+                if (fixed != null) {
+                    u = fixed;
+                }
+            }
+            return u;
+        }
+
+        private static Word word(List<TextPosition> positions, boolean leadingSpace) {
+            StringBuilder sb = new StringBuilder();
             TextPosition first = positions.get(0);
             double x0 = Double.MAX_VALUE, x1 = -Double.MAX_VALUE;
             double top = Double.MAX_VALUE, bottom = -Double.MAX_VALUE, size = 0;
             for (TextPosition p : positions) {
+                String u = unicode(p);
+                if (u != null) {
+                    sb.append(u);
+                }
                 double s = Math.max(1, fontSize(p));
+                GlyphPlacement placement = placement(p);
                 x0 = Math.min(x0, p.getXDirAdj());
                 x1 = Math.max(x1, p.getXDirAdj() + p.getWidthDirAdj());
-                top = Math.min(top, p.getYDirAdj() - Math.max(p.getHeightDir(), s * 0.9));
-                bottom = Math.max(bottom, p.getYDirAdj() + s * 0.3);
+                top = Math.min(top, placement.top());
+                bottom = Math.max(bottom, placement.bottom());
                 size = Math.max(size, s);
             }
-            cur.add(new Word(x0, x1, first.getYDirAdj(), size, isBold(first), spacePending,
-                    isMono(first), word, top, bottom));
-            spacePending = false;
+            return new Word(x0, x1, placement(first).baseline(), size, isBold(first), leadingSpace,
+                    isMono(first), sb.toString(), top, bottom);
+        }
+
+        private record GlyphPlacement(double top, double bottom, double baseline) { }
+
+        private static boolean extensionGlyph(TextPosition p) {
+            return p.getDir() == 0 && fontName(p).contains("cmex")
+                    && p.getHeightDir() > fontSize(p) * 1.2;
+        }
+
+        private static GlyphPlacement placement(TextPosition p) {
+            double s = Math.max(1, fontSize(p));
+            if (extensionGlyph(p) && p.getFont() instanceof PDSimpleFont font) {
+                try {
+                    String name = glyphName(p);
+                    if (name != null) {
+                        Rectangle2D bounds = font.getPath(name).getBounds2D();
+                        Rectangle2D units = font.getFontMatrix().createAffineTransform()
+                                .createTransformedShape(bounds).getBounds2D();
+                        // Only the linear part is needed: XDirAdj/YDirAdj already account for the
+                        // crop box. TeX extension glyphs often have a negative lower extent.
+                        Matrix textMatrix = p.getTextMatrix();
+                        double top = p.getYDirAdj() - units.getMaxY() * textMatrix.getScalingFactorY();
+                        double bottom = p.getYDirAdj() - units.getMinY() * textMatrix.getScalingFactorY();
+                        if (bottom > top && bottom - top < s * 10) {
+                            return new GlyphPlacement(top, bottom, (top + bottom) / 2 + s * 0.25);
+                        }
+                    }
+                } catch (Exception ignored) {
+                    // Unknown glyph paths retain the conservative PDFBox envelope.
+                }
+            }
+            return new GlyphPlacement(p.getYDirAdj() - Math.max(p.getHeightDir(), s * 0.9),
+                    p.getYDirAdj() + s * 0.3, p.getYDirAdj());
         }
 
         private void flushLine() {

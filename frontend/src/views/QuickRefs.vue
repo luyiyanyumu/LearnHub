@@ -436,7 +436,10 @@ onBeforeUnmount(() => {
 .ref-body.md-mini :deep(.md-editor-preview.md-editor-preview h4),
 .ref-body.md-mini :deep(.md-editor-preview.md-editor-preview h5),
 .ref-body.md-mini :deep(.md-editor-preview.md-editor-preview h6) {
-  font-size: 13px;
+  /* !important 是必须的：全站标题字号那条（style.css）也带 !important，
+     而"卡片紧凑模式"是更具体的上下文 —— 靠特异性 + !important 才能胜过它。
+     否则卡片里的标题会跳到 26/21/18px 把小卡撑爆。 */
+  font-size: 13px !important;
   margin: 0.5em 0 0.25em;
   padding-bottom: 0;
   border-bottom: 0;

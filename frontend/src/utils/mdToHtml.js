@@ -100,14 +100,27 @@ body {
 .doc-head h1 { margin: 0 0 10px; font-size: 30px; line-height: 1.35; }
 .doc-meta { color: #6e7781; font-size: 13px; }
 .markdown-body > *:first-child { margin-top: 0; }
+/* 字号规定与 style.css 里的预览**必须同源**：从"正文 15px"出发，标题逐级 26/21/18/16/15/15，
+   h5/h6 不小于正文（用字重与颜色区分）。两边数字不一致就会变成"预览正常、导出变小/变大"，
+   这类问题极难发现，所以这里刻意写成与预览同一组数值，并注明出处。 */
+.markdown-body { font-size: 15px; }
+/* 标题默认字号优先级最高：与 style.css 的预览同源同值，且都带 !important ——
+   否则从 Word 粘进来的行内 font-size（htmlToMd 会原样保留）会把标题字号压小，
+   或者导出件与预览出现"一大一小"。预览与导出必须永远一致。 */
 .markdown-body h1, .markdown-body h2 { border-bottom: 1px solid #d8dee4; padding-bottom: .3em; }
-.markdown-body h1 { font-size: 1.75em; }
-.markdown-body h2 { font-size: 1.4em; }
-.markdown-body h3 { font-size: 1.2em; }
-.markdown-body h4 { font-size: 1.05em; }
-.markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4 {
-  margin: 1.4em 0 .6em; font-weight: 600; line-height: 1.35;
-}
+.markdown-body h1 { font-size: 26px !important; line-height: 1.35; font-weight: 700; margin: 1.6em 0 .6em; }
+.markdown-body h2 { font-size: 21px !important; line-height: 1.4; font-weight: 650; margin: 1.5em 0 .55em; }
+.markdown-body h3 { font-size: 18px !important; line-height: 1.45; font-weight: 650; margin: 1.4em 0 .5em; }
+.markdown-body h4 { font-size: 16px !important; line-height: 1.5; font-weight: 650; margin: 1.3em 0 .45em; }
+/* h5/h6 与正文同号：标题不该比正文还小 */
+.markdown-body h5 { font-size: 15px !important; line-height: 1.55; font-weight: 650; letter-spacing: .01em; margin: 1.2em 0 .4em; }
+.markdown-body h6 { font-size: 15px !important; line-height: 1.55; font-weight: 600; letter-spacing: .01em; color: #57606a; margin: 1.2em 0 .4em; }
+/* 标题默认字号优先级最高：标题内任何东西都不能改它。
+   必须 !important —— 行内样式优先级高于任何选择器；与 style.css 里预览那条同源，
+   两处必须一致，否则"预览里正常、导出后变小"会更难查。
+   放行 sup/sub/code：它们有正当的相对字号（上标下标、行内代码 88%），且是 em 相对值，
+   会跟着标题自动缩放；强制继承反而会把注脚标记变成标题大小。 */
+.markdown-body :is(h1, h2, h3, h4, h5, h6) :not(sup):not(sub):not(code) { font-size: inherit !important; }
 .markdown-body p { margin: .8em 0; }
 .markdown-body a { color: #0969da; text-decoration: none; }
 .markdown-body a:hover { text-decoration: underline; }

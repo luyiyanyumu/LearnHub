@@ -19,6 +19,7 @@ import { isDark } from '../composables/useTheme'
 import { focusMode } from '../composables/useViewMode'
 import { FORMAT_PRESETS, stripInline } from '../utils/richFormat'
 import { findUnsupported, previewHtmlToMd } from '../utils/htmlToMd'
+import { hasRichHtml, sanitizePastedHtml } from '../utils/pasteHtml'
 import FormatBar from '../components/FormatBar.vue'
 import CodeBlockEditor from '../components/CodeBlockEditor.vue'
 import BlockPreview from '../components/BlockPreview.vue'
@@ -219,13 +220,35 @@ function attachPreviewEditable() {
  * 让普通 div 失去可聚焦性，「点进去就能写」随即失效（见 attachPreviewEditable 的注释）。
  */
 
-/** 预览区粘贴：统一按纯文本插入，避免把外部网页/Word 的样式噪音带进来 */
+/**
+ * 预览区粘贴：**Ctrl/Cmd+V = 带格式，Ctrl/Cmd+Shift+V = 纯文本**。
+ *
+ * <p>带格式那条不再自己插内容 —— 把剪贴板里的 HTML 净化一下就交给浏览器的原生粘贴，
+ * 于是"贴进来什么样、渲染成什么样"，随后由既有的「预览 → 源码」反推管线
+ * （`previewHtmlToMd`）把它变成 Markdown。这条路径本来就是为预览 DOM 设计的，
+ * 网页/Word 的 HTML 也走它，行为一致。
+ *
+ * <p>纯文本那条保持原样：`execCommand('insertText')` 仍然是 contenteditable 下
+ * 保留撤销历史的最简方案。
+ */
 function onPreviewPaste(e) {
-  const raw = e.clipboardData?.getData('text/plain')
-  if (raw == null) return
-  e.preventDefault()
-  // execCommand 虽已标记废弃，但仍是 contenteditable 下保留撤销历史的最简方案
-  document.execCommand('insertText', false, raw)
+  const dt = e.clipboardData
+  if (e.shiftKey) {
+    const raw = dt?.getData('text/plain')
+    if (raw == null) return
+    e.preventDefault()
+    document.execCommand('insertText', false, raw)
+    return
+  }
+  // 带格式：只净化，不阻断（阻断就等于又变回纯文本了）
+  const html = dt?.getData('text/html')
+  if (!html || !hasRichHtml(html)) return // 纯文本剪贴板 → 浏览器默认行为已经是"插纯文本"
+  const { html: cleaned, droppedImages } = sanitizePastedHtml(html)
+  if (cleaned !== html) dt.setData('text/html', cleaned)
+  // 丢东西必须说一声：静默丢失内容比慢一点严重得多
+  if (droppedImages) {
+    ElMessage.info(`已忽略粘贴内容里的 ${droppedImages} 张内嵌大图（base64 太大，会把笔记撑到几百 KB）`)
+  }
 }
 
 /**
@@ -675,13 +698,38 @@ async function loadNote() {
 }
 
 /**
- * 粘贴时清洗：粘贴进编辑器的内容不过 loadNote 管线，
- * 在这里拦下剪贴板文本过一遍 fixHtmlQuotes（弯引号/反引号包font/星号混排），
- * 有变化才拦截默认粘贴并用 CodeMirror API 写入（保留撤销历史）。
+ * 源码区（CodeMirror）粘贴：与预览区同一套规则 —— **Ctrl/Cmd+V 带格式、+Shift 纯文本**。
+ *
+ * <p>带格式这条要把 HTML 转成 Markdown 再插入（源码区住的就是 Markdown，插 HTML 没意义）。
+ * 复用 `previewHtmlToMd`：它的规则本就是"把 DOM 还原成 Markdown"，对网页/Word 的 HTML 同样适用
+ * （其中"行内样式标签原样保留"那条正是"带格式"想要的：颜色、加粗、表格都留得住）。
+ *
+ * <p>纯文本这条保持原有行为：只过一遍 `fixHtmlQuotes`（弯引号等），有变化才接管，
+ * 尽量不打断 CodeMirror 自己的粘贴（保留它的撤销历史）。
  */
 function onPasteCapture(e) {
-  // 预览编辑模式下，粘贴由预览区的 onPreviewPaste 按纯文本处理
+  // 预览编辑模式下，粘贴由预览区的 onPreviewPaste 处理
   if (previewEditing.value) return
+
+  if (!e.shiftKey) {
+    const html = e.clipboardData?.getData('text/html')
+    if (html && hasRichHtml(html)) {
+      const { html: cleaned, droppedImages } = sanitizePastedHtml(html)
+      const md = fixHtmlQuotes(previewHtmlToMd(cleaned)).replace(/\s+$/, '')
+      const view = editorRef.value?.getEditorView?.()
+      if (md && view) {
+        e.preventDefault()
+        e.stopPropagation()
+        view.dispatch(view.state.replaceSelection(md))
+        view.focus()
+        if (droppedImages) {
+          ElMessage.info(`已忽略粘贴内容里的 ${droppedImages} 张内嵌大图（base64 太大，会把笔记撑到几百 KB）`)
+        }
+        return
+      }
+    }
+  }
+
   const raw = e.clipboardData?.getData('text/plain')
   if (!raw) return
   const cleaned = fixHtmlQuotes(raw)
@@ -1298,16 +1346,24 @@ function captureToolbarContext() {
 }
 
 /**
- * 工具栏「代码块」：先选语言，再插入。
+ * 工具栏「代码块」：**直接插入一个空代码块**，不再先弹语言选择。
  *
- * <p>弹层会夺走焦点，所以**先**跑一次预览取词（它内部会把当前插入点记进
- * {@code savedPreviewRange}），弹层关闭后再执行插入 —— 否则插入点就丢了。
+ * <p>为什么去掉那个语言弹窗（用户要求：插入空白的，后面再自己选）：
+ * 它是插入路径上多余的一步 —— 点"代码块"的此刻，用户往往还没决定用什么语言（甚至还没开始写），
+ * 先被迫选一个反而容易选错，事后还得再改一次。
+ *
+ * <p>语言的入口没有消失，只是**挪到块上**：
+ * <ul>
+ *   <li>点预览里代码块左上角的语言名 → 弹同一个语言网格（`onPreviewCodeLangClick`）；</li>
+ *   <li>或在源码模式直接写围栏（` ```python `）。</li>
+ * </ul>
+ * `captureToolbarContext()` 仍然要调：它不只是为"弹窗夺焦点"准备的，
+ * 还决定这条工具栏作用于**哪个编辑区**（块编辑器 vs Markdown 源码）。
  */
 function onCodeBlockClick() {
   const target = captureToolbarContext()
-  askCodeLang().then((lang) => {
-    if (lang) { lastCodeLang.value = lang; target.runTool('codeBlock', lang) }
-  }).finally(() => target.release?.())
+  target.runTool('codeBlock', '')
+  target.release?.()
 }
 
 // ---- 撤销 / 重做 ----
@@ -1928,7 +1984,7 @@ function onPreviewCodeLangClick(e) {
   const box = el.closest('.md-editor-code')
   const index = host && box ? [...host.querySelectorAll('.md-editor-code')].indexOf(box) : -1
   if (index < 0) return true
-  askCodeLang().then((lang) => {
+  askCodeLang('选择代码块语言').then((lang) => {
     if (!lang) return
     if (setCodeFenceLang(index, lang)) ElMessage.success(`已把代码块语言改为 ${lang}`)
     else ElMessage.warning('这个代码块不是围栏写法（可能是内联 HTML），请在源码模式里改')
@@ -1946,7 +2002,7 @@ function onPreviewCodeLangClick(e) {
  *
  * @returns {Promise<string|null>} 选中的语言 id；取消返回 null
  */
-function askCodeLang() {
+function askCodeLang(title = '选择代码语言') {
   return new Promise((resolve) => {
     let done = false
     const finish = (v) => {
@@ -1955,7 +2011,7 @@ function askCodeLang() {
       resolve(v)
     }
     const box = ElMessageBox({
-      title: '插入代码块',
+      title,
       customClass: 'code-lang-box',
       message: h(
         'div',
@@ -2164,8 +2220,11 @@ function previewMdTool(name, arg) {
       return
     }
     case 'codeBlock': {
-      const lang = arg || lastCodeLang.value
-      lastCodeLang.value = lang
+      // 工具栏插入时传的是**空串**（= 无语言的空块）；没传 arg 的调用方沿用上次选过的语言。
+      // 注意不能用 `arg || lastCodeLang` —— 空串会被当成 falsy 而回退到 java，
+      // 那就又变回"没得选也要先有个语言"了。
+      const lang = arg === undefined ? lastCodeLang.value : String(arg)
+      if (lang) lastCodeLang.value = lang
       // 直接改**源码**（form.content 是唯一真源），预览会自动重渲染成正式代码块。
       // 为什么不在预览里插 DOM：插进去的是裸 <pre>，md-editor 不认识它，
       // 渲染出来是没有语言头/复制/行号的空盒子，还要靠"反推回 Markdown"才能变正式块。
@@ -2182,7 +2241,9 @@ function previewMdTool(name, arg) {
           ? src.replace(/\s*$/, '') + '\n\n' + fence + '\n'
           : src.slice(0, at).replace(/\s*$/, '') + '\n\n' + fence + '\n\n' + src.slice(at).replace(/^\s*/, '')
       previewUnsynced.value = false
-      nextTick(() => ElMessage.success(`已插入 ${lang} 代码块，点击代码块内部即可开始写`))
+      nextTick(() => ElMessage.success(lang
+        ? `已插入 ${lang} 代码块，点击代码块内部即可开始写`
+        : '已插入空代码块 —— 点块内开始写，语言可点左上角语言名再选'))
       return
     }
     case 'table': {
@@ -4003,6 +4064,18 @@ html.dark .tbl-danger:hover {
   background: rgba(224, 123, 112, 0.12);
 }
 
+/* 空语言的代码块：给一个可点的占位。
+   md-editor 渲染语言名用的是 `info.trim()`，所以**没有语言的块渲染出一个空 span（零宽）**，
+   用户根本点不到它 —— 于是"插入空代码块、语言以后再选"就没有入口了。
+   这条规则只在语言为空时出现占位，有语言的块完全不受影响。
+   （`.md-editor-code-lang` 由 md-editor 内部渲染，没有 scoped 属性，所以必须用 :deep） */
+.pane-preview :deep(.md-editor-code-lang:empty)::after,
+.pv-md :deep(.md-editor-code-lang:empty)::after {
+  content: '选择语言';
+  color: var(--app-brand);
+  cursor: pointer;
+}
+
 /* 预览编辑：表格当前行/列高亮（交点更深一档） */
 .pane-preview :deep(td.lh-cell-row),
 .pane-preview :deep(th.lh-cell-row) {
@@ -4325,7 +4398,10 @@ html.dark .pane-editor :deep(.md-editor) {
      这里归零，左右 gutter 统一由 .pv-inner 控制 —— 否则 26px + 20px 叠成 46px，就不是「铺满」了。 */
   padding: 0;
 }
-/* 章节纵向间距加大：H2 是「换章」的呼吸点 */
+/* 章节纵向间距加大：H2 是「换章」的呼吸点。
+   ⚠️ 这里**只调边距**：标题字号（26/21/18/16/15/15）的唯一来源是 style.css 里那套
+   `--md-h1..--md-h6`，且带 !important。这里不要再写字号 —— 之前 style.css 里就有过
+   两套同权重字号，靠后者侥幸生效，改起来"改了没反应"（已清理）。 */
 .pane-preview :deep(.md-editor-preview.md-editor-preview h1) {
   margin: 1.7em 0 0.8em;
 }

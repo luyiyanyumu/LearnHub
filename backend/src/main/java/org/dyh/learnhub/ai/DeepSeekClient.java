@@ -490,7 +490,8 @@ public class DeepSeekClient {
         HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
         long cost = System.currentTimeMillis() - start;
         if (response.statusCode() != 200) {
-            log.error("AI 服务调用失败 status={} body={} cost={}ms", response.statusCode(), response.body(), cost);
+            // Vision providers may echo the input image or authentication data in an error body.
+            log.error("AI 服务调用失败 status={} model={} cost={}ms", response.statusCode(), model, cost);
             throw new RuntimeException(authHint(response.statusCode())
                     + "AI 服务调用失败(" + response.statusCode() + "): " + truncate(response.body(), 300)
                     + "　【目标：" + normalizeBase(baseUrl) + " / " + model + "】");
@@ -499,7 +500,7 @@ public class DeepSeekClient {
         JsonNode choice = root.path("choices").path(0);
         JsonNode message = choice.path("message");
         if (message.isMissingNode()) {
-            log.error("AI 响应缺少 choices[0].message: {}", response.body());
+            log.error("AI 响应缺少 choices[0].message model={} cost={}ms", model, cost);
             throw new RuntimeException("AI 服务返回格式异常");
         }
         String finish = choice.path("finish_reason").asText("");

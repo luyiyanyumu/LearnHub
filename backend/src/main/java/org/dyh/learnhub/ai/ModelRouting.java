@@ -55,6 +55,8 @@ public class ModelRouting {
     public static final String TASK_RERANK = "rerank";
     /** 阅读器里的翻译：机械任务、可慢，默认与批量摘要类一样优先本地档案 */
     public static final String TASK_TRANSLATE = "translate";
+    /** 按原图转写公式：需要具备图片输入能力的档案，避免把 PDF 碎字交给文本模型猜。 */
+    public static final String TASK_FORMULA = "formula";
     /** 答案级核对：判断回答有没有超出证据 */
     public static final String TASK_GROUNDING = "grounding";
 
@@ -90,6 +92,8 @@ public class ModelRouting {
                 "判断“这句话有没有被材料支撑”，判不准就会误报或漏报"));
         META.put(TASK_TRANSLATE, new TaskMeta(TASK_TRANSLATE, "阅读器翻译", LOCAL,
                 "机械任务：逐段翻译成中文。本地模型够用且免费；嫌质量差可在「模型参数」里把它的档案换成云端"));
+        META.put(TASK_FORMULA, new TaskMeta(TASK_FORMULA, "公式原图识别", MAIN,
+                "读取公式高清截图并转写 LaTeX，保留多行、上下标与编号；请选择支持图片输入的模型档案"));
         META.put(TASK_REWRITE, new TaskMeta(TASK_REWRITE, "检索词扩展（兜底）", LOCAL,
                 "只在词面 0 命中时触发，便宜、可以慢"));
     }

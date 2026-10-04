@@ -151,6 +151,34 @@ export function extractedFormulaLatex(block, correction) {
   return normalizeExtractedLatex(typeof correction === 'string' ? correction : block?.latex)
 }
 
+/** A renderable geometric candidate is still uncertain; show the PDF crop first. */
+export function extractedFormulaState(block, source, { baseline, recognition, hasImage = false } = {}) {
+  const rendered = renderExtractedMath(source)
+  const original = baseline === undefined ? extractedFormulaLatex(block) : normalizeExtractedLatex(baseline)
+  const edited = rendered.latex !== original
+  const status = recognition?.status || block?.latexStatus || 'unavailable'
+  const visual = !!recognition || status === 'recognized' || /视觉模型/.test(block?.latexMessage || '')
+  const mainPreview = rendered.ok && (edited || !hasImage || status === 'restored' || status === 'recognized')
+  return {
+    rendered, edited, status, visual, mainPreview,
+    candidatePreview: rendered.ok && !mainPreview,
+    originalOpen: hasImage && !mainPreview,
+    needsReview: !rendered.ok || (!edited && status !== 'restored'),
+  }
+}
+
+/** A model response is adopted only after safe, complete KaTeX parsing succeeds. */
+export function validateFormulaRecognition(result) {
+  if (!result || !['recognized', 'partial'].includes(result.status) || typeof result.latex !== 'string') {
+    return { ok: false, error: '识别结果状态无效，已保留之前的源码与原图。' }
+  }
+  const rendered = renderExtractedMath(result.latex)
+  if (!rendered.ok) {
+    return { ok: false, error: `识别结果不能安全预览，已保留之前的源码与原图。${rendered.error}` }
+  }
+  return { ...rendered, status: result.status }
+}
+
 /** Copies the corrected formula source, never the fragmented PDF glyph text. */
 export function exportExtractedText(pages, corrections = {}) {
   return (pages || []).map(page => (page.blocks || []).map((block, index) => {

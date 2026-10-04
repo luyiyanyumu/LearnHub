@@ -38,6 +38,23 @@ public class FileController {
         return Result.ok(fileStorageService.list(categoryId, kw));
     }
 
+    /**
+     * 分页的资料列表（**界面用**）。
+     *
+     * <p>与上面的 `GET /api/files` 并存，而不是改掉它：那个接口返回全量数组，
+     * 智能体的 `list_files` 工具与 MCP 桥接都按那个形状解析，改形状会连带炸掉两条链路。
+     *
+     * <p>为什么要分页：界面是 `el-table` 一次渲染全部行（没有虚拟滚动），
+     * 1,000 份资料就是 7,000+ 个单元格 DOM —— 首屏卡顿、滚动掉帧。
+     */
+    @GetMapping("/page")
+    public Result<Map<String, Object>> page(@RequestParam(required = false) Long categoryId,
+                                            @RequestParam(required = false) String kw,
+                                            @RequestParam(required = false) Integer page,
+                                            @RequestParam(required = false) Integer size) {
+        return Result.ok(fileStorageService.page(categoryId, kw, page, size));
+    }
+
     /** 上传资料 */
     @PostMapping("/upload")
     public Result<Map<String, Object>> upload(@RequestParam("file") MultipartFile file,

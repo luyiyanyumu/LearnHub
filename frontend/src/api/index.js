@@ -313,6 +313,14 @@ export const wikiApi = {
 
 export const fileApi = {
   list: (params) => request.get('/files', { params }),
+  /**
+   * 分页的资料列表（**界面用**）：`{ list, total, page, size }`。
+   *
+   * <p>与 `list` 并存而不是替换它：`list` 返回全量数组，智能体的 `list_files` 工具与
+   * MCP 桥接按那个形状解析。界面用分页是因为 `el-table` 一次渲染全部行（没有虚拟滚动），
+   * 上千份资料就是几千个单元格 DOM。
+   */
+  page: (params) => request.get('/files/page', { params }),
   upload: (file, categoryId) => {
     const fd = new FormData()
     fd.append('file', file)
@@ -331,6 +339,10 @@ export const fileApi = {
    * 单独一个接口：PDF 解析要几百毫秒到一两秒，而阅读器默认打开的是「原文」，切过来才付这个成本。
    */
   layout: (id) => request.get(`/files/${id}/text-layout`, { timeout: 120000 }),
+  /** 仅在用户点击时，从公式原图识别 LaTeX；不上传碎字还原候选。 */
+  recognizeFormula: (id, region) => request.post(`/files/${id}/formula-recognition`, region, { timeout: AI_TIMEOUT }),
+  acceptFormulaRecognition: (id, candidate) => request.post(`/files/${id}/formula-recognition/accept`, candidate),
+  formulaRecognitionCaps: () => request.get('/files/formula-recognition/capabilities'),
   /** 分段翻译（阅读器用）：只接受一段，超长会被后端拒绝并说明上限 */
   translate: (id, text, targetLang) => request.post(`/files/${id}/translate`, { text, targetLang }, { timeout: 180000 }),
   /** 翻译能力：用哪个档案翻、单段上限多少 */

@@ -1310,9 +1310,11 @@ html.dark .cfg-tip {
 }
 
 /* ---- AI 回答的排版：按"对话内阅读"收档 ----
-   全局那套是给笔记页的宽栏调的（正文 15px/1.8、h1 1.65em≈25px），
+   全局那套是给笔记页的宽栏调的（正文 15px/1.8、标题 26/21/18px —— 见 style.css 的 `--md-h*`），
    拿到 ~450px 的面板里就又大又散：标题像横幅、段间距过大、表格被挤到逐字换行。
-   这里整体降一档并收紧节奏，选择器双写 + scoped deep，确保压过预览主题。 */
+   这里整体降一档并收紧节奏（正文 13.5px、标题 1.3/1.18/1.06/1em）。
+   注意：全局标题字号带 !important，所以下面这几条字号**也必须带 !important** 才能生效
+   —— 光靠"选择器更具体"胜不过 !important。 */
 .bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview) {
   font-size: 13.5px;
   line-height: 1.72;
@@ -1333,23 +1335,26 @@ html.dark .cfg-tip {
   overflow-wrap: anywhere;
 }
 .bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview h1) {
-  font-size: 1.3em;
+  /* !important 是必须的：全站标题字号（style.css）带 !important，而悬浮面板是窄栏，
+     刻意用更小的一套比例（1.3/1.18/1.06/1em）。这里靠"更具体的选择器 + !important"胜过它，
+     否则窄栏里的标题会跳到 26/21/18px，一条回答的标题比面板还宽。 */
+  font-size: 1.3em !important;
   margin: 1.05em 0 0.4em;
 }
 .bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview h2) {
-  font-size: 1.18em;
+  font-size: 1.18em !important;
   margin: 1.05em 0 0.4em;
   padding-bottom: 0;
   border-bottom: 0; /* 窄栏里这条 GitHub 点线太抢眼，去掉 */
 }
 .bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview h3) {
-  font-size: 1.06em;
+  font-size: 1.06em !important;
   margin: 0.95em 0 0.35em;
 }
 .bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview h4),
 .bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview h5),
 .bubble.assistant .md-body :deep(.md-editor-preview.md-editor-preview h6) {
-  font-size: 1em;
+  font-size: 1em !important;
   margin: 0.85em 0 0.3em;
 }
 /* 首尾不留白：回答的开头贴着事件角标，结尾贴着操作按钮 */

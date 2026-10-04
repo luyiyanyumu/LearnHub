@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { fileApi } from '../api'
 import ExtractedFormula from './ExtractedFormula.vue'
@@ -43,6 +43,23 @@ const props = defineProps({
 })
 const emit = defineEmits(['open-original', 'translate'])
 const formulaCorrections = ref({})
+const formulaCapabilities = ref(null)
+let requestedFormulaCapabilities = false
+let mounted = true
+
+// One capability lookup per reader, never one request per formula or per page.
+watch(() => props.pages.some(pg => (pg.blocks || []).some(block => block.type === 'formula' && block.rect)), async hasFormulaImage => {
+  if (!hasFormulaImage || requestedFormulaCapabilities) return
+  requestedFormulaCapabilities = true
+  try {
+    const result = await fileApi.formulaRecognitionCaps()
+    if (mounted) formulaCapabilities.value = result
+  } catch {
+    // Recognition remains usable: clicking returns the endpoint's precise reason.
+    if (mounted) formulaCapabilities.value = { reason: '暂时无法读取识别配置，点击识别后可查看具体原因。' }
+  }
+}, { immediate: true })
+onBeforeUnmount(() => { mounted = false })
 
 const translateError = ref('')
 /** 译文缓存：key = 页码:块序号（跨页唯一，翻回来不用重翻） */
@@ -219,12 +236,13 @@ watch([() => props.fileId, () => props.pages], () => {
           <!-- 代码 / 表格：按"一行一行"原样渲染，不参与翻译（翻代码没有意义，还会把缩进搅乱） -->
           <pre v-else-if="b.type === 'code'" class="doc-code">{{ b.text }}</pre>
           <pre v-else-if="b.type === 'table'" class="doc-table" v-html="renderedText(pg.page, i).html" />
-          <!-- 优先显示还原的 LaTeX；原图和抽取文本保留用于核对与安全降级。 -->
+          <!-- 不确定的 PDF 几何结果优先保留原图，由用户按需发起视觉识别。 -->
           <ExtractedFormula
             v-else-if="b.type === 'formula'"
             :block="b"
             :file-id="fileId"
             :page="pg.page"
+            :recognition-capabilities="formulaCapabilities"
             @open-original="emit('open-original', $event)"
             @update-latex="correctFormula(pg.page, i, $event)"
           />
