@@ -321,6 +321,8 @@ export const fileApi = {
   },
   /** 抽取出来的正文（阅读器用；**不含在 detail 里**，因为正文动辄十几万字） */
   text: (id) => request.get(`/files/${id}/text`),
+  /** 原文件阅读预览：Word 保留文档结构，Markdown 返回上传的原始源码。 */
+  originalPreview: (id) => request.get(`/files/${id}/original-preview`, { timeout: 120000 }),
   /**
    * **排版还原**后的正文（阅读器「抽取正文」页用）。
    *

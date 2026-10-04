@@ -36,8 +36,10 @@ const props = defineProps({
   targetLang: { type: String, default: '简体中文' },
   /** 单段翻译上限（与后端一致，超了按钮直接禁用，免得点了没反应） */
   maxChars: { type: Number, default: 4000 },
+  /** 宿主提供右侧译文栏时，段落按钮将原文交给宿主。 */
+  externalTranslation: { type: Boolean, default: false },
 })
-const emit = defineEmits(['open-original'])
+const emit = defineEmits(['open-original', 'translate'])
 const failedFormulaImages = ref(new Set())
 
 const translateError = ref('')
@@ -117,6 +119,10 @@ function firstParagraphs(n) {
 }
 
 async function translateOne(page, index, block, force) {
+  if (props.externalTranslation) {
+    emit('translate', block.text)
+    return
+  }
   const key = keyOf(page, index)
   if (translatingKey.value || tooLong(block)) return
   if (translations.value[key] && !force) return
@@ -181,9 +187,10 @@ watch([() => props.fileId, () => props.pages], () => {
         > · 含 {{ figureCount }} 张插图</template>
       </span>
       <span class="reader-sep" />
-      <span class="reader-hint">段落 hover 出「译」，逐段翻译</span>
+      <span class="reader-hint">{{ externalTranslation ? '选中文字或点击「译」，右侧对照阅读' : '段落 hover 出「译」，逐段翻译' }}</span>
       <span class="reader-spacer" />
       <button
+        v-if="!externalTranslation"
         type="button"
         class="reader-btn"
         :disabled="busy || !firstParagraphs(5).length"
@@ -250,7 +257,7 @@ watch([() => props.fileId, () => props.pages], () => {
             <p :class="['doc-text', b.type === 'bullet' ? 'doc-bullet' : 'doc-para']">
               <template v-if="b.type === 'bullet'">•&nbsp;&nbsp;</template>{{ b.text }}
             </p>
-            <div v-if="translations[keyOf(pg.page, i)]" class="doc-trans">
+            <div v-if="!externalTranslation && translations[keyOf(pg.page, i)]" class="doc-trans">
               <span class="doc-trans-tag">
                 译 · {{ translations[keyOf(pg.page, i)].by || '模型' }}
               </span>

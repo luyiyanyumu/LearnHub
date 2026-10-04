@@ -7,6 +7,7 @@ import 'pdfjs-dist/web/pdf_viewer.css'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import { ElMessage } from 'element-plus'
 import { fileApi } from '../api'
+import ReaderTranslation from './ReaderTranslation.vue'
 
 /**
  * 自研 PDF 阅读器（不用浏览器内置查看器）。
@@ -33,6 +34,7 @@ const props = defineProps({
   src: { type: String, required: true },
   /** 上次的阅读位置（来自资料详情），打开时恢复 */
   initial: { type: Object, default: () => ({}) },
+  translationCaps: { type: Object, default: () => ({}) },
 })
 
 /**
@@ -62,12 +64,13 @@ const rendering = ref(false)
 const pages = ref([])               // [{ n, canvas, text }] —— 连续模式用
 const textSpans = ref(0)
 
-/** 选中翻译：{ text, translation, loading, x, y } */
-const sel = ref(null)
+const translationReader = ref(null)
 
 let doc = null
 let renderTask = null
 let resizeObserver = null
+let resizeTimer = null
+let observedWidth = 0
 let io = null
 let saveTimer = null
 let pendingJump = null
@@ -251,9 +254,10 @@ async function renderOne(n, holder, fixed) {
       textHost.innerHTML = ''
       // pdf.js 用 --scale-factor 定位每个 span，必须设（设错就完全选不中）
       textHost.style.setProperty('--scale-factor', String(viewport.scale))
-      // 官方 viewer 把缩放系数设在**页容器**上，再由 CSS 算 --total-scale-factor；
-      // 只设在文字层上不够（实测：位置对、命中不通）
+      // Custom page containers do not inherit the official .pdfViewer .page
+      // variables. Set total scale too, so selectable glyphs match the canvas.
       holder.style.setProperty('--scale-factor', String(viewport.scale))
+      holder.style.setProperty('--total-scale-factor', String(viewport.scale * (viewport.userUnit || 1)))
       textHost.style.width = Math.floor(viewport.width) + 'px'
       textHost.style.height = Math.floor(viewport.height) + 'px'
       const layer = new pdfjsLib.TextLayer({
@@ -328,8 +332,13 @@ async function rerenderAll() {
 
 function observeResize() {
   if (!wrap.value || resizeObserver) return
+  observedWidth = wrap.value.clientWidth
   resizeObserver = new ResizeObserver(() => {
-    if (fitWidth.value) rerenderAll()
+    const width = wrap.value?.clientWidth || 0
+    if (!width || Math.abs(width - observedWidth) < 1) return
+    observedWidth = width
+    if (resizeTimer) clearTimeout(resizeTimer)
+    if (fitWidth.value) resizeTimer = setTimeout(() => rerenderAll(), 100)
   })
   resizeObserver.observe(wrap.value)
 }
@@ -338,44 +347,14 @@ function observeResize() {
 // 选中翻译
 // ------------------------------------------------------------------
 
-/** 鼠标在文字层里放开时：有选中就翻译（这是"读英文论文"最常用的动作） */
-function onMouseUp() {
-  const text = String(window.getSelection?.() || '').trim()
-  if (!text) {
-    sel.value = null
-    return
-  }
-  translateSelection(text)
-}
-
-async function translateSelection(text) {
-  // 纯数字/符号没必要翻
-  if (!/[\p{L}]/u.test(text)) {
-    return
-  }
-  sel.value = { text, translation: '', loading: true }
-  try {
-    const r = await fileApi.translate(props.fileId, text.slice(0, 4000), '简体中文')
-    sel.value = { text, translation: r.translation, loading: false, model: r.profile || r.model }
-  } catch (e) {
-    sel.value = { text, translation: '', loading: false, err: e?.message || String(e) }
-  }
-}
-
 async function translateFullPage() {
-  const row = pages.value.find((p) => p.n === pageNo.value)
   const holder = wrap.value?.querySelector(`.pdf-page-box[data-page="${pageNo.value}"]`)
   const text = (holder?.querySelector('.pdf-textlayer')?.innerText || '').replace(/\s+\n/g, '\n').trim()
   if (!text) {
     ElMessage.warning('本页没有可提取的文字（可能是扫描件）')
     return
   }
-  if (text.length > 4000) {
-    ElMessage.warning(`本页 ${text.length} 字，超过单段上限 4000 —— 请选中要翻的段落`)
-    return
-  }
-  translateSelection(text)
-  if (row) row.spans = row.spans || 0
+  await translationReader.value?.translateText(text)
 }
 
 // ------------------------------------------------------------------
@@ -409,8 +388,10 @@ function onScroll() {
 }
 
 function onKey(e) {
+  if (!wrap.value?.getClientRects().length) return
+  if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return
   const tag = (e.target?.tagName || '').toLowerCase()
-  if (tag === 'input' || tag === 'textarea') return
+  if (['input', 'textarea', 'select', 'button'].includes(tag) || e.target?.isContentEditable) return
   if (e.key === 'PageDown' || e.key === 'ArrowRight') go(1)
   else if (e.key === 'PageUp' || e.key === 'ArrowLeft') go(-1)
 }
@@ -420,6 +401,7 @@ defineExpose({ jump })
 onBeforeUnmount(() => {
   if (renderTask) { try { renderTask.cancel() } catch (e) { /* ignore */ } }
   if (resizeObserver) resizeObserver.disconnect()
+  if (resizeTimer) clearTimeout(resizeTimer)
   if (io) io.disconnect()
   if (saveTimer) clearTimeout(saveTimer)
   if (doc) { try { doc.destroy() } catch (e) { /* ignore */ } }
@@ -454,9 +436,10 @@ window.addEventListener('keydown', onKey)
       <button type="button" class="reader-btn" :class="{ on: mode === 'continuous' }" @click="setMode('continuous')">连续</button>
       <span class="reader-spacer" />
       <button type="button" class="reader-btn" @click="translateFullPage">翻译本页</button>
-      <span class="reader-hint">选中文字即翻译 · PageUp/Down 翻页</span>
+      <span class="reader-hint">划词/选段翻译 · PageUp/Down 翻页</span>
     </div>
 
+    <ReaderTranslation ref="translationReader" :file-id="fileId" :source-root="wrap" :capabilities="translationCaps">
     <div class="pdf-main">
       <!-- 目录侧栏 -->
       <aside v-if="showOutline" class="pdf-outline">
@@ -475,7 +458,7 @@ window.addEventListener('keydown', onKey)
         </template>
       </aside>
 
-      <div ref="wrap" class="pdf-canvas-wrap" @mouseup="onMouseUp" @scroll="onScroll">
+      <div ref="wrap" class="pdf-canvas-wrap" @scroll="onScroll">
         <div v-if="loading" class="pdf-state">正在解析 PDF…</div>
         <div v-else-if="error" class="pdf-state pdf-error">{{ error }}</div>
         <div class="pdf-pages" :class="'mode-' + mode">
@@ -498,20 +481,7 @@ window.addEventListener('keydown', onKey)
         <div v-if="rendering" class="pdf-rendering">渲染中…</div>
       </div>
     </div>
-
-    <!-- 选中翻译结果 -->
-    <div v-if="sel" class="sel-panel">
-      <div class="sel-head">
-        <b>选中翻译</b>
-        <span class="pdf-hint">{{ sel.model ? '用 ' + sel.model : '' }}</span>
-        <span class="reader-spacer" />
-        <button type="button" class="reader-btn" @click="sel = null">关闭</button>
-      </div>
-      <p class="sel-src">{{ sel.text }}</p>
-      <p v-if="sel.loading" class="pdf-hint">翻译中…</p>
-      <p v-else-if="sel.err" class="pdf-error">翻译失败：{{ sel.err }}</p>
-      <p v-else class="sel-trans">{{ sel.translation }}</p>
-    </div>
+    </ReaderTranslation>
   </div>
 </template>
 
@@ -664,34 +634,5 @@ window.addEventListener('keydown', onKey)
   background: rgba(0, 0, 0, 0.4);
   padding: 2px 8px;
   border-radius: 6px;
-}
-/* 选中翻译结果面板：贴在阅读器底部，不遮挡正文 */
-.sel-panel {
-  border: 1px solid color-mix(in srgb, var(--app-brand) 40%, transparent);
-  border-radius: 8px;
-  background: var(--app-card);
-  padding: 8px 10px;
-  max-height: 30vh;
-  overflow: auto;
-}
-.sel-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12.5px;
-}
-.sel-src {
-  margin: 6px 0 0;
-  font-size: 12.5px;
-  line-height: 1.7;
-  color: var(--app-text-3);
-  white-space: pre-wrap;
-}
-.sel-trans {
-  margin: 6px 0 0;
-  font-size: 14px;
-  line-height: 1.9;
-  color: var(--app-text-1);
-  white-space: pre-wrap;
 }
 </style>

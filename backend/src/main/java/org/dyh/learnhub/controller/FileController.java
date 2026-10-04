@@ -29,6 +29,7 @@ public class FileController {
 
     private final FileStorageService fileStorageService;
     private final org.dyh.learnhub.service.TranslationService translationService;
+    private final org.dyh.learnhub.service.DocumentPreviewService documentPreviewService;
 
     /** 资料列表 */
     @GetMapping
@@ -116,6 +117,12 @@ public class FileController {
                 .header("X-Content-Type-Options", "nosniff")
                 .header("Content-Security-Policy", "default-src 'none'; img-src 'self' data:; media-src 'self'; object-src 'self'; style-src 'unsafe-inline'")
                 .body(item.resource());
+    }
+
+    /** 从 Word / Markdown 原文件生成阅读预览，不复用检索用的抽取正文。 */
+    @GetMapping("/{id}/original-preview")
+    public Result<Map<String, Object>> originalPreview(@PathVariable Long id) {
+        return Result.ok(documentPreviewService.preview(id));
     }
 
     /**

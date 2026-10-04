@@ -154,6 +154,18 @@ body {
   background: color-mix(in srgb, var(--app-brand) 20%, transparent);
 }
 
+/* Reading selection stays visible against white pages and PDF's transparent text
+   layer. Only change the background: PDF glyphs are already drawn on its canvas. */
+.reader-translation-layout .reader-original ::selection {
+  background-color: rgb(255 211 78 / 65%) !important;
+}
+.reader-translation-layout .reader-original .textLayer br::selection {
+  background-color: transparent !important;
+}
+::highlight(learnhub-reader-selection) {
+  background-color: rgb(255 211 78 / 55%);
+}
+
 /* 键盘可达性：焦点环统一走品牌色（鼠标点击不出现，Tab 才出现） */
 :focus-visible {
   outline: 2px solid color-mix(in srgb, var(--app-brand) 55%, transparent);
@@ -1042,7 +1054,7 @@ html.theme-switching *::after {
    原理：canvas 画像素，这一层叠同样位置的**透明文字**，于是可以选中/复制/搜索。
    关键点：容器要有 --scale-factor（pdf.js 用它算字号与位置，设错就完全选不中），
    span 用 transform 定位、颜色透明、只能看见选区背景。 */
-.pdf-textlayer { z-index: 2; }
+.pdf-textlayer.textLayer { z-index: 2; }
 .pdf-textlayer > span { pointer-events: auto; }
 /* 连续模式：让页与页之间留白，滚动时能分清边界 */
 .pdf-pages.mode-continuous .pdf-page-box + .pdf-page-box {
