@@ -20,6 +20,7 @@ import { focusMode } from '../composables/useViewMode'
 import { FORMAT_PRESETS, stripInline } from '../utils/richFormat'
 import { findUnsupported, previewHtmlToMd } from '../utils/htmlToMd'
 import { hasRichHtml, sanitizePastedHtml } from '../utils/pasteHtml'
+import { stripFontSizeInHtml } from '../utils/fontSize'
 import FormatBar from '../components/FormatBar.vue'
 import CodeBlockEditor from '../components/CodeBlockEditor.vue'
 import BlockPreview from '../components/BlockPreview.vue'
@@ -771,13 +772,24 @@ async function save() {
       // 否则「新建 → 跳转到详情」会被自己的未保存提醒拦下来
       form.value.title = payload.title
       savedSnapshot.value = formFingerprint()
+      previewUnsynced.value = false // 内容已经落库，没有"待反推"的东西了
       justCreatedId = String(created.id)
       lastSavedAt.value = new Date()
       ElMessage.success('笔记已创建')
       router.replace(`/notes/${created.id}`)
     } else {
+      // 保存**前**先记指纹：保存期间用户若继续打字，指纹会变，那时状态必须仍然是「未保存」。
+      // 原来在 await 之后才取指纹，会把"保存期间新打的字"误标成已保存（服务端并没有这些内容）。
+      const fingerprintAtSave = formFingerprint()
       await noteApi.update(id.value, payload)
-      savedSnapshot.value = formFingerprint()
+      savedSnapshot.value = fingerprintAtSave
+      // 清掉「预览里有未反推回源码的改动」标记。
+      //
+      // 为什么必须清（实测 bug）：块编辑器（默认渲染器）每次编辑都会把它置 true
+      // （onBlockPreviewUpdate），而保存路径从来不重置它 —— 于是 `dirty` 永远为真，
+      // 顶部弹出「已保存」的同时状态栏一直显示「未保存」，看起来像没保存成功。
+      // 只有确认保存后内容没再变（指纹一致）才清，避免把保存期间新打的字一起清掉。
+      if (formFingerprint() === fingerprintAtSave) previewUnsynced.value = false
       lastSavedAt.value = new Date()
       ElMessage.success('已保存')
     }
@@ -1242,6 +1254,8 @@ function mdWrap(before, after) {
  *  选区可在行任意位置；先剥掉已有行前缀再套新的（切换级别/类型即替换而非叠加，
  *  前缀落不到行首会导致大纲/渲染都不认）。失败回退旧的选区前插入行为。 */
 const LINE_PREFIX_RE = /^(#{1,6}\s+|>\s+|[-*+]\s+\[[ xX]\]\s+|[-*+]\s+|\d+\.\s+)/
+/** 行前缀是不是标题（`# `~`###### `）—— 改成标题时要顺手清掉行内字号，见 mdLinePrefix */
+const isHeadingPrefix = (prefix) => /^#{1,6}\s+$/.test(prefix || '')
 function mdLinePrefix(prefix) {
   const ed = editorScrollEl()
   const v = ed ? cmView(ed) : null
@@ -1256,6 +1270,16 @@ function mdLinePrefix(prefix) {
         const old = line.text.match(LINE_PREFIX_RE)
         if (old) changes.push({ from: line.from, to: line.from + old[0].length, insert: '' })
         if (prefix) changes.push({ from: line.from, insert: prefix })
+        // 改成标题时清掉行内字号代码（标题字号由级别决定）。
+        // 与块编辑器走同一条规则（utils/fontSize.js）：只清 font-size，颜色/字体保留。
+        // 不这么做的话，从 Word 粘进来的 font-size 会一直压着标题字号，表现为"转成 H2 没反应"。
+        // 只替换行内容、不动行首前缀，所以光标位置映射不受影响。
+        if (isHeadingPrefix(prefix)) {
+          const bodyFrom = line.from + (old ? old[0].length : 0)
+          const body = line.text.slice(old ? old[0].length : 0)
+          const cleaned = stripFontSizeInHtml(body)
+          if (cleaned !== body) changes.push({ from: bodyFrom, to: line.to, insert: cleaned })
+        }
       }
       if (changes.length) v.dispatch({ changes })
       v.contentDOM?.focus?.()
@@ -1650,7 +1674,14 @@ const CODE_LANGS = [
 /** 上次选的代码语言（本次会话内记住，默认 java = 改动前的行为） */
 const lastCodeLang = ref('java')
 
-/** Stage 0 开关：?editor=block 时用 Tiptap 只读渲染器（默认关闭，绝不影响日常使用） */
+/**
+ * 渲染器开关：**默认就是 Tiptap 块编辑器**，只有 `?editor=md` 才回退到 md-editor 预览。
+ *
+ * <p>⚠️ 这里原来写着"默认关闭"，与代码正好相反 —— 那句话误导过一次排查：
+ * 我按"默认走 md-editor"给 `.md-editor-preview` 调标题字号，而用户实际看的是块编辑器
+ * （`.block-preview .tiptap`），于是"改了没反应"。**两套渲染器的排版规则必须成对修改**：
+ * 字号变量在 style.css（--md-h*），块编辑器在 BlockPreview.vue，md-editor 在 style.css。
+ */
 const useBlockPreview = new URLSearchParams(window.location.search).get('editor') !== 'md'
 const blockLinkBase = computed(() => id.value
   ? new URL(router.resolve({ name: 'noteEdit', params: { id: id.value } }).href, window.location.origin).href

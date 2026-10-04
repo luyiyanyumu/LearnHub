@@ -2,10 +2,41 @@ import { DOMSerializer, Fragment } from '@tiptap/pm/model'
 import { NodeSelection, Selection, TextSelection } from '@tiptap/pm/state'
 import { liftListItem, sinkListItem } from '@tiptap/pm/schema-list'
 import { closeHistory } from '@tiptap/pm/history'
+import { withoutFontSize } from './fontSize.js'
 
 const lists = new Set(['bulletList', 'orderedList', 'taskList'])
 const wrappers = new Set(['blockquote', 'callout', 'details'])
 const itemNames = new Set(['listItem', 'taskItem'])
+
+/**
+ * 清掉行内 `fontStyle` mark 里的 font-size（样式清空后连这个 mark 一起去掉）。
+ *
+ * <p>**为什么在"转成标题"这一步做**：标题的字号由**级别**决定（--md-h1..--md-h6）。
+ * 从 Word 粘进来的 `<font style="font-size:10.5pt">` 会把标题里的文字压回正文字号 ——
+ * 表现为"转成 H2 没反应"（实测）。所以级别一变就清掉字号代码，让标题用自己的默认字号。
+ *
+ * <p>**为什么不是用 CSS 压制**：那样"后面再改字号"就永远不生效了。
+ * 清数据是"一次性"的：之后再手动改字号属于**最近的一步操作**，会照常写回并生效。
+ */
+function clearFontSizeInContent(content) {
+  if (!content || typeof content.forEach !== 'function' || content.size === 0) return content
+  const out = []
+  content.forEach((node) => {
+    if (!node.isText) {
+      out.push(node)
+      return
+    }
+    const marks = node.marks
+      .map((m) => {
+        if (m.type.name !== 'fontStyle') return m
+        const style = withoutFontSize(m.attrs.style)
+        return style ? m.type.create({ ...m.attrs, style }) : null
+      })
+      .filter(Boolean)
+    out.push(node.mark(marks))
+  })
+  return Fragment.fromArray(out)
+}
 
 function contextAt(editor, pos) {
   const { doc } = editor.state
@@ -119,7 +150,9 @@ function asTextBlocks(schema, node, level = null) {
     ? textWithBreaks(schema, first.attrs.code ?? first.textContent) : first.content
   blocks[0] = level === null
     ? paragraph(schema, content, first.attrs)
-    : schema.nodes.heading?.create({ ...first.attrs, level }, content)
+    // 转成标题时清掉行内字号：标题字号由级别决定（见 clearFontSizeInContent 的注释）。
+    // 转正文（level === null）**不清** —— 从标题降回正文时，正文本就该保留原有字号。
+    : schema.nodes.heading?.create({ ...first.attrs, level }, clearFontSizeInContent(content))
   return blocks[0] ? blocks : null
 }
 

@@ -13,6 +13,8 @@ import { Details, Summary } from '../utils/detailsNode'
 import { Superscript, Subscript, Highlight, FontStyle } from '../utils/inlineMarks'
 import { Underline } from '@tiptap/extension-underline'
 import markdownItSup from 'markdown-it-sup'
+import { ElMessage } from 'element-plus'
+import { hasRichHtml, sanitizePastedHtml } from '../utils/pasteHtml'
 import markdownItSub from 'markdown-it-sub'
 import markdownItMark from 'markdown-it-mark'
 import mdDataLine from '../utils/mdDataLine'
@@ -404,14 +406,38 @@ onMounted(() => {
   lastEmitted = props.content || ''
   refreshTableContext()
   window.addEventListener('hashchange', hashChanged)
+  // 带格式粘贴的前置清洗。**必须用捕获阶段**：ProseMirror 的粘贴处理挂在 .tiptap（事件目标）上，
+  // 冒泡阶段再改 clipboardData 就晚了（它已经读完剪贴板）。捕获阶段先跑，改完的 HTML 才轮到它读。
+  previewRoot.value?.addEventListener('paste', onBlockPasteCapture, true)
   nextTick(revealLinkedBlock)
 })
 onBeforeUnmount(() => {
   window.removeEventListener('hashchange', hashChanged)
+  previewRoot.value?.removeEventListener('paste', onBlockPasteCapture, true)
   invalidateToolbarTargets()
   editor.value?.destroy()
   editor.value = null
 })
+
+/**
+ * 带格式粘贴（Ctrl/Cmd+V）的净化：块编辑器是笔记页的**默认**渲染器，
+ * 而它自己没有 paste 处理 —— Word 里贴一张截图就会变成几百 KB 的 base64 直接写进笔记。
+ * 这条与 md-editor 那条（NoteEdit 的 onPreviewPaste）用同一个清洗函数，规则一致。
+ *
+ * <p>只净化、不阻断：Ctrl/Cmd+Shift+V（纯文本）直接 return，交给浏览器与 ProseMirror
+ * 原生处理（Chrome 的"粘贴为纯文本"本来只给 text/plain）。
+ */
+function onBlockPasteCapture(e) {
+  if (e.shiftKey) return
+  const dt = e.clipboardData
+  const html = dt?.getData('text/html')
+  if (!html || !hasRichHtml(html)) return
+  const { html: cleaned, droppedImages } = sanitizePastedHtml(html)
+  if (cleaned !== html) dt.setData('text/html', cleaned)
+  if (droppedImages) {
+    ElMessage.info(`已忽略粘贴内容里的 ${droppedImages} 张内嵌大图（base64 太大，会把笔记撑到几百 KB）`)
+  }
+}
 watch(
   () => props.content,
   (v) => {
@@ -462,7 +488,24 @@ watch(
   margin: 0 auto;
   padding: 24px 28px;
 }
-.block-preview :deep(.tiptap h1), .block-preview :deep(.tiptap h2), .block-preview :deep(.tiptap h3) { font-weight: 650; margin: 1.2em 0 0.6em; }
+/* 标题字号：**与 md-editor 预览共用同一组变量**（style.css 里的 --md-h1..--md-h6）。
+   块编辑器是笔记页的**默认**渲染器（只有 ?editor=md 才走 md-editor），所以这套字号必须两处都有 ——
+   否则就是"预览里有字号、日常界面里没有"（实测踩过：改完 md-editor 那套，块编辑器里标题
+   仍然走浏览器默认值，被粘贴带进来的行内字号压成正文大小，看起来像"转成 H2 没反应"）。
+   数字只存在一处（那些变量），这里只引用。 */
+.block-preview :deep(.tiptap h1) { font-size: var(--md-h1) !important; line-height: 1.35; font-weight: 700; margin: 1.6em 0 0.6em; }
+.block-preview :deep(.tiptap h2) { font-size: var(--md-h2) !important; line-height: 1.4; font-weight: 650; margin: 1.5em 0 0.55em; }
+.block-preview :deep(.tiptap h3) { font-size: var(--md-h3) !important; line-height: 1.45; font-weight: 650; margin: 1.4em 0 0.5em; }
+.block-preview :deep(.tiptap h4) { font-size: var(--md-h4) !important; line-height: 1.5; font-weight: 650; margin: 1.3em 0 0.45em; }
+/* h5/h6 与正文同号：标题不比正文小，用字重与颜色区分 */
+.block-preview :deep(.tiptap h5) { font-size: var(--md-h5) !important; line-height: 1.55; font-weight: 650; letter-spacing: .01em; margin: 1.2em 0 0.4em; }
+.block-preview :deep(.tiptap h6) { font-size: var(--md-h6) !important; line-height: 1.55; font-weight: 600; letter-spacing: .01em; color: var(--app-text-2); margin: 1.2em 0 0.4em; }
+/* 标题字号口径："改级别清字号代码，谁最近按谁"。
+   级别默认值在这里给（复用 style.css 的 --md-h*），元素自身带 !important 防止标题元素上的
+   行内 style 盖掉它；但标题**内部**的显式字号不压制 —— 用户改级别时清了一次，
+   之后手动改的字号属于最近的一步操作，必须生效（见 utils/fontSize.js）。
+   曾经在这里加过 `:is(h1..h6) :not(sup):not(sub):not(code){font-size:inherit!important}`，
+   已删除：它能修显示，但会让"后面再改"永远无效。 */
 .block-preview :deep(.tiptap blockquote) { margin: 1em 0; padding-left: 14px; border-left: 3px solid var(--app-border); color: var(--app-text-2); }
 /* 表格边框 */
 .block-preview :deep(.tiptap table) { border-collapse: collapse; width: 100%; margin: 1em 0; }
