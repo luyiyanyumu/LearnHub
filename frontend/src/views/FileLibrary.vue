@@ -87,8 +87,8 @@ async function onFileChosen(e) {
  *
  *   · **原文** —— PDF 由 pdf.js 渲染；Word / Markdown 从上传的原文件生成阅读视图；
  *     三种文档共用选区翻译，图片/音视频直接显示；
- *   · **抽取正文** —— 走 /api/files/{id}/text，是检索层实际用的那份文本，
- *     抽不出时把原因显示出来（而不是给一片空白）。
+ *   · **抽取正文** —— PDF / Word / Markdown 走 text-layout，保留段落与公式；
+ *     其他格式使用检索文本兜底，抽不出时显示原因。
  */
 const reader = ref(null)
 const readerTab = ref('doc')
@@ -104,7 +104,7 @@ const readerLoading = ref(false)
  * 排版还原后的正文（{ pages:[{page,columns,blocks}] }）。
  *
  * 与 readerText 的关系：readerText 是**检索层那份纯文本**（PDF 两栏会逐行交错），
- * 只有排版还原不了（非 PDF、扫描件、失败）时才拿它兜底显示。
+ * 只有排版还原不了（旧版 Word、其他格式、扫描件或解析失败）时才拿它兜底显示。
  * 懒加载：默认打开的是「原文」，切到「抽取正文」才去拉，PDF 解析那 1 秒不该让开卷就等。
  */
 const readerLayout = ref(null)
@@ -118,7 +118,7 @@ const layoutUsable = computed(() =>
 async function ensureLayout() {
   const id = reader.value?.id
   if (!id || readerLayout.value || layoutLoading.value) return
-  if (docKind.value !== 'pdf') {
+  if (!['pdf', 'docx', 'docm', 'md', 'markdown'].includes(String(reader.value?.ext || '').toLowerCase())) {
     readerLayout.value = { status: 'text', pages: [], error: '当前页显示用于检索的抽取文字' }
     return
   }
@@ -512,7 +512,7 @@ onBeforeUnmount(() => {
 
         <!--
           抽取正文：**优先**用后端排版还原出来的结构（标题/章节/段落/列表，按页回传），
-          照原文档排版；还原不了（非 PDF / 扫描件 / 失败）时才退回"检索层纯文本分段"，
+          照原文档排版并渲染 LaTeX 公式；还原不了时退回检索层纯文本分段，
           并保留下面的逐段翻译 —— 两条路都不会让这一页空着。
         -->
         <ReaderTranslation

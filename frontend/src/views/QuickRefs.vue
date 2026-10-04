@@ -392,9 +392,14 @@ onBeforeUnmount(() => {
 }
 
 /* 卡片正文：按需裁切，**不嵌滚动条**（嵌套滚动条是"乱"的主要来源），
-   溢出时底部渐隐，点卡片看全文 */
+   溢出时底部渐隐，点卡片看全文。
+   min-height 与 max-height 同为 172px：内容多的卡被截到 172，内容少的卡也撑到 172 —— 否则
+   "只有两行"的卡会矮一大截，而 CSS Grid **每行高度独立**，两行之间就会参差不齐（实测现象）。
+   flex:1 让正文吃掉卡片内的剩余空间，配合 grid 项默认 stretch，同一行的卡等高。 */
 .ref-body {
   position: relative;
+  flex: 1;
+  min-height: 172px;
   max-height: 172px;
   overflow: hidden;
   border-top: 1px dashed var(--app-border);

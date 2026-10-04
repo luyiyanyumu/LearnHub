@@ -263,10 +263,15 @@ public class PdfLayoutExtractor {
      * <p>{@code page} 与 {@code rect}（pt，左上角原点、y 向下）是**可选几何**：`formula` 块带它，
      * 界面就能把这块按原 PDF 渲染出来贴上去（公式的排版、上下标只有原图是准的，见 §5.3）。
      * <p>{@code meta} 是居中元信息（作者单位、邮箱），{@code note} 是页面底部的脚注小字（左对齐），
-     * {@code formula} 是"像公式"的行（见 {@link #mergeFormulaRuns}：不做 LaTeX 化，只单独成块、不与正文混排）。
+     * {@code formula} 是"像公式"的行；原始文字和裁剪框始终保留，LaTeX 只是带状态的几何还原结果。
      */
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    public record Block(String type, String text, int level, String src, Integer page, double[] rect) {
+    public record Block(String type, String text, int level, String src, Integer page, double[] rect,
+                        String latex, String latexStatus, String latexMessage) {
+        public Block(String type, String text, int level, String src, Integer page, double[] rect) {
+            this(type, text, level, src, page, rect, null, null, null);
+        }
+
         public Block(String type, String text, int level) {
             this(type, text, level, null, null, null);
         }
@@ -431,6 +436,7 @@ public class PdfLayoutExtractor {
         collector.flushLine();                      // PDFBox 的页尾不保证回调 writeLineSeparator
 
         List<List<Word>> rows = collector.rows;
+        List<PdfMathLatex.Bar> fractionBars = rotation == 0 ? PdfMathLatex.scanBars(page) : List.of();
         List<Figure> figures = scanFigures(page, pageNo, width, height, rotation);
         if (rows.isEmpty()) {
             // 整页没字但有图（扫描件、纯图页）：**不硬"识别"**，把这一页当一张图交给界面
@@ -502,8 +508,8 @@ public class PdfLayoutExtractor {
             }
             List<Block> blocks = new ArrayList<>(
                     headBlocks(head, bodySize, pageNo, width, height, bodyBottomOf(head, bodySize, height)));
-            blocks.addAll(mergeFormulaRuns(columnPlaced(columnOf(body), bodySize, pageNo, height, figures), pageNo));
-            return new PageLayout(pageNo, 1, blocks);
+            blocks.addAll(mergeFormulaRuns(columnPlaced(columnOf(body), bodySize, pageNo, height, figures, fractionBars), pageNo));
+            return new PageLayout(pageNo, 1, restoreFormulaLatex(blocks, collector.glyphs, fractionBars, rotation));
         }
 
         List<Figure> leftFigures = pickFigures(figures, f -> centerX(f) < gutter && !spansGutter(f, gutter));
@@ -512,8 +518,8 @@ public class PdfLayoutExtractor {
 
         List<Line> leftLines = toLines(left);
         List<Line> rightLines = toLines(right);
-        List<Placed> leftBlocks = columnPlaced(columnOf(leftLines), bodySize, pageNo, height, leftFigures);
-        List<Placed> rightBlocks = columnPlaced(columnOf(rightLines), bodySize, pageNo, height, rightFigures);
+        List<Placed> leftBlocks = columnPlaced(columnOf(leftLines), bodySize, pageNo, height, leftFigures, fractionBars);
+        List<Placed> rightBlocks = columnPlaced(columnOf(rightLines), bodySize, pageNo, height, rightFigures, fractionBars);
         mergeColumnSeam(leftBlocks, rightBlocks);
 
         // 通栏块：**首页**栏目之上的（标题区）走标题处理；其余（含后续页面的页首通栏行）
@@ -529,12 +535,91 @@ public class PdfLayoutExtractor {
                 spanningLines.add(ln);
             }
         }
-        List<Placed> spanning = columnPlaced(columnOf(spanningLines), bodySize, pageNo, height, wideFigures);
+        List<Placed> spanning = columnPlaced(columnOf(spanningLines), bodySize, pageNo, height, wideFigures, fractionBars);
         List<Block> blocks = new ArrayList<>(
                 headBlocks(head, bodySize, pageNo, width, height, bodyBottomOf(head, bodySize, height)));
         blocks.addAll(mergeFormulaRuns(interleave(leftBlocks, spanning), pageNo));
         blocks.addAll(mergeFormulaRuns(rightBlocks, pageNo));
-        return new PageLayout(pageNo, 2, blocks);
+        return new PageLayout(pageNo, 2, restoreFormulaLatex(blocks, collector.glyphs, fractionBars, rotation));
+    }
+
+    /** 只处理最终公式块，不把正文里的上标脚注或数学词语改写为公式。 */
+    private static List<Block> restoreFormulaLatex(List<Block> blocks, List<PdfMathLatex.Glyph> glyphs,
+                                                  List<PdfMathLatex.Bar> bars, int rotation) {
+        if (blocks.stream().noneMatch(b -> "formula".equals(b.type()))) {
+            return blocks;
+        }
+        List<Block> joined = mergeFractionParts(blocks, bars);
+        List<Block> out = new ArrayList<>(joined.size());
+        for (Block b : joined) {
+            if (!"formula".equals(b.type())) {
+                out.add(b);
+                continue;
+            }
+            PdfMathLatex.Restoration restored = PdfMathLatex.restore(glyphs, bars, b.rect(), b.text(), rotation == 0);
+            out.add(new Block(b.type(), b.text(), b.level(), b.src(), b.page(),
+                    restored.rect() == null ? b.rect() : restored.rect(),
+                    restored.latex(), restored.status(), restored.message()));
+        }
+        return out;
+    }
+
+    /** PDFBox can order numerator → left-hand relation → denominator; the actual rule joins them. */
+    private static List<Block> mergeFractionParts(List<Block> blocks, List<PdfMathLatex.Bar> bars) {
+        List<Block> out = new ArrayList<>(blocks);
+        for (PdfMathLatex.Bar bar : bars) {
+            int first = -1;
+            int last = -1;
+            boolean above = false;
+            boolean below = false;
+            for (int i = 0; i < out.size(); i++) {
+                Block block = out.get(i);
+                double[] r = block.rect();
+                if (!"formula".equals(block.type()) || r == null
+                        || r[0] >= bar.x1() || r[2] <= bar.x0()) {
+                    continue;
+                }
+                double height = r[3] - r[1];
+                if (bar.y() - r[3] > height * 0.8 || r[1] - bar.y() > height * 0.8) {
+                    continue;
+                }
+                first = first < 0 ? i : first;
+                last = i;
+                above |= r[1] < bar.y() - height * 0.4;
+                below |= r[3] > bar.y() + height * 0.4;
+            }
+            if (!above || !below || first < 0 || last <= first) {
+                continue;
+            }
+            boolean formulaOnly = true;
+            for (int i = first; i <= last; i++) {
+                Block block = out.get(i);
+                double[] r = block.rect();
+                if (!"formula".equals(block.type()) || r == null
+                        || Math.abs((r[1] + r[3]) / 2 - bar.y()) > (r[3] - r[1]) * 1.6
+                        || r[2] < bar.x0() - (r[3] - r[1]) * 4
+                        || r[0] > bar.x1() + (r[3] - r[1]) * 4) {
+                    formulaOnly = false;
+                    break;
+                }
+            }
+            if (!formulaOnly) {
+                continue;
+            }
+            Block base = out.get(first);
+            double[] rect = null;
+            StringBuilder original = new StringBuilder();
+            for (int i = first; i <= last; i++) {
+                if (!original.isEmpty()) {
+                    original.append('\n');
+                }
+                original.append(out.get(i).text());
+                rect = unionRect(rect, out.get(i).rect());
+            }
+            out.subList(first, last + 1).clear();
+            out.add(first, new Block("formula", original.toString(), 0, null, base.page(), rect));
+        }
+        return out;
     }
 
     /**
@@ -1143,7 +1228,7 @@ public class PdfLayoutExtractor {
      * 图不能一律堆到页尾，否则读者要自己找它对应哪段话。
      */
     private List<Placed> columnPlaced(Column column, double bodySize, int pageNo, double pageHeight,
-                                      List<Figure> figures) {
+                                      List<Figure> figures, List<PdfMathLatex.Bar> bars) {
         double bodyBottom = column == null ? 0 : bodyBottomOf(column.lines(), bodySize, pageHeight);
         List<Placed> out = new ArrayList<>();
         if (column == null) {
@@ -1163,7 +1248,7 @@ public class PdfLayoutExtractor {
         // （"1The code and trained models have been released at" + "https://github.com/…"），
         // 一行一块会读成两条互不相干的注。
         NoteBuffer note = new NoteBuffer();
-        boolean[] formulaLines = formulaLines(column.lines());
+        boolean[] formulaLines = formulaLines(column.lines(), bars);
         Line prev = null;
         int figureAt = 0;
 
@@ -1522,8 +1607,8 @@ public class PdfLayoutExtractor {
     /**
      * 数学符号（公式行的形态证据）。
      * <p>PDF 里没有"公式对象"：公式是散落在坐标上的一堆字形（上下标字号还不一样），
-     * 抽出来必然是 {@code (θ|q) R(q o … KL …)} 这种粘连的碎片。这里做不了 LaTeX 化，
-     * 能做的只有两件事：把公式行单独成块（不与正文段落混排）、按原样保留换行。
+     * 抽出来可能是 {@code (θ|q) R(q o … KL …)} 这种碎片。这里先识别公式块，
+     * 再由 {@link PdfMathLatex} 使用字形位置与矢量分式线恢复有证据的结构。
      */
     private static final Pattern MATH_GLYPH = Pattern.compile("[=+−±×÷∑∫√≤≥≈≠∈∀∃∂∇^_{}|<>]|[\\u0370-\\u03FF]");
 
@@ -1587,8 +1672,39 @@ public class PdfLayoutExtractor {
     }
 
     /** 标记公式主行及紧邻的独立上下标碎行；按位置约束，避免把说明文字收进公式。 */
-    private static boolean[] formulaLines(List<Line> lines) {
+    private static boolean[] formulaLines(List<Line> lines, List<PdfMathLatex.Bar> bars) {
         boolean[] result = new boolean[lines.size()];
+        // 没有等号的 a/b 也可能是公式：必须同时有实际分式线、紧邻上下两行与水平范围证据。
+        for (PdfMathLatex.Bar bar : bars) {
+            List<Integer> above = new ArrayList<>();
+            List<Integer> below = new ArrayList<>();
+            for (int i = 0; i < lines.size(); i++) {
+                Line line = lines.get(i);
+                // A radical with a matching overbar is structural evidence even without '='.
+                if (line.text().contains("√") && !line.mono() && line.text().length() <= 60
+                        && LATIN_WORD.matcher(line.text()).results().allMatch(m -> m.group().length() <= 2
+                            || MATH_WORDS.contains(m.group().toLowerCase(Locale.ROOT)))
+                        && line.x0() <= bar.x0() && bar.x0() - line.x0() <= line.size() * 2
+                        && line.x1() <= bar.x1() + line.size() * 0.4
+                        && bar.y() >= line.top() - line.size() * 0.3
+                        && line.y() - bar.y() >= line.size() * 0.2
+                        && line.y() - bar.y() <= line.size() * 1.5) {
+                    result[i] = true;
+                }
+                if (!fractionPiece(line, bar)) {
+                    continue;
+                }
+                if (line.y() < bar.y() - 1 && bar.y() - line.y() <= line.size() * 1.8) {
+                    above.add(i);
+                } else if (line.top() > bar.y() + 0.5 && line.y() - bar.y() <= line.size() * 2.2) {
+                    below.add(i);
+                }
+            }
+            if (!above.isEmpty() && !below.isEmpty()) {
+                above.forEach(i -> result[i] = true);
+                below.forEach(i -> result[i] = true);
+            }
+        }
         for (int i = 0; i < lines.size(); i++) {
             Line main = lines.get(i);
             if (main.mono() || !mathish(main.text())) {
@@ -1610,6 +1726,19 @@ public class PdfLayoutExtractor {
             }
         }
         return result;
+    }
+
+    private static boolean fractionPiece(Line line, PdfMathLatex.Bar bar) {
+        String t = line.text().trim();
+        double width = bar.x1() - bar.x0();
+        return !line.mono() && !t.isBlank() && t.length() <= 60
+                && !SENTENCE_END.matcher(t).find() && !TEMPLATEISH.matcher(t).find()
+                && t.codePoints().noneMatch(c -> c >= 0x2E80)
+                && LATIN_WORD.matcher(t).results().allMatch(m -> m.group().length() <= 2
+                    || MATH_WORDS.contains(m.group().toLowerCase(Locale.ROOT)))
+                && width >= line.size() * 0.5 && width <= (line.x1() - line.x0()) * 1.5 + line.size()
+                && line.x0() >= bar.x0() - line.size() * 0.25
+                && line.x1() <= bar.x1() + line.size() * 0.25;
     }
 
     private static boolean scriptFragment(Line fragment, Line main) {
@@ -2120,6 +2249,7 @@ public class PdfLayoutExtractor {
     private static final class RowCollector extends PDFTextStripper {
 
         private final List<List<Word>> rows = new ArrayList<>();
+        private final List<PdfMathLatex.Glyph> glyphs = new ArrayList<>();
         private List<Word> cur = new ArrayList<>();
         private boolean spacePending = false;
 
@@ -2154,6 +2284,13 @@ public class PdfLayoutExtractor {
                 }
                 if (u != null) {
                     sb.append(u);
+                    if (!u.isBlank()) {
+                        double s = Math.max(1, fontSize(p));
+                        glyphs.add(new PdfMathLatex.Glyph(u, p.getXDirAdj(),
+                                p.getXDirAdj() + p.getWidthDirAdj(), p.getYDirAdj(), s,
+                                p.getYDirAdj() - Math.max(p.getHeightDir(), s * 0.9),
+                                p.getYDirAdj() + s * 0.3));
+                    }
                 }
             }
             String word = sb.toString();

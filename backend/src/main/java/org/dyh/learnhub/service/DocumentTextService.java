@@ -15,8 +15,6 @@ import org.apache.poi.ss.usermodel.Sheet;
 import org.apache.poi.ss.usermodel.Workbook;
 import org.apache.poi.xslf.usermodel.XMLSlideShow;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
-import org.apache.poi.xwpf.extractor.XWPFWordExtractor;
-import org.apache.poi.xwpf.usermodel.XWPFDocument;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
@@ -173,10 +171,7 @@ public class DocumentTextService {
     }
 
     private String wordOoxml(Path path) throws IOException {
-        try (XWPFDocument doc = new XWPFDocument(Files.newInputStream(path));
-             XWPFWordExtractor ex = new XWPFWordExtractor(doc)) {
-            return ex.getText();
-        }
+        return new WordLayoutExtractor().plainText(path);
     }
 
     private String wordLegacy(Path path) throws IOException {

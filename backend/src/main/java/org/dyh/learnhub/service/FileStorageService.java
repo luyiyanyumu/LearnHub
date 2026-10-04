@@ -63,6 +63,8 @@ public class FileStorageService {
     private final CategoryMapper categoryMapper;
     private final DocumentTextService documentTextService;
     private final PdfLayoutExtractor pdfLayoutExtractor;
+    private final WordLayoutExtractor wordLayoutExtractor;
+    private final TextMathLayout textMathLayout;
     private final ApplicationEventPublisher events;
     private final LearningActivityService learningActivity;
     /** 改名时要同步 kb_chunk 里的冗余标题（检索结果展示用） */
@@ -337,7 +339,7 @@ public class FileStorageService {
      *
      * <p>与 {@link #textOf} 的分工：textOf 给的是**检索层实际用的那份纯文本**（一行一段、两栏交错），
      * 这里给的是**按坐标重建过版面的结构化正文**（标题/作者/章节/段落/列表/脚注，按页返回），
-     * 界面照原文档排版，"抽取正文"才能当原文读。非 PDF 一律返回 unsupported，前端继续用分段正文。
+     * PDF 从字形坐标还原，Word 从 OOXML 结构还原，Markdown 保留原有 LaTeX。
      */
     public Map<String, Object> layoutOf(Long id) {
         FileInfo info = require(id);
@@ -346,9 +348,9 @@ public class FileStorageService {
         m.put("ext", info.getExt() == null ? "" : info.getExt());
         m.put("textStatus", info.getTextStatus() == null ? "" : info.getTextStatus());
         String ext = info.getExt() == null ? "" : info.getExt().toLowerCase(Locale.ROOT);
-        if (!"pdf".equals(ext)) {
+        if (!Set.of("pdf", "docx", "docm", "md", "markdown").contains(ext)) {
             m.put("status", "unsupported");
-            m.put("error", "排版还原只针对 PDF，其它格式请用分段正文");
+            m.put("error", "该格式使用分段正文阅读");
             m.put("pages", List.of());
             m.put("chars", 0);
             m.put("pageCount", 0);
@@ -363,7 +365,20 @@ public class FileStorageService {
             m.put("pageCount", 0);
             return m;
         }
-        PdfLayoutExtractor.Layout layout = pdfLayoutExtractor.extract(path);
+        PdfLayoutExtractor.Layout layout;
+        try {
+            if ("pdf".equals(ext)) layout = pdfLayoutExtractor.extract(path);
+            else if ("docx".equals(ext) || "docm".equals(ext)) layout = wordLayoutExtractor.extract(path);
+            else {
+                DocumentTextService.Extracted extracted = documentTextService.extract(path, ext, Files.size(path));
+                if (!DocumentTextService.STATUS_OK.equals(extracted.status())) {
+                    layout = new PdfLayoutExtractor.Layout(extracted.status(), extracted.error(), List.of(), 0, 0);
+                } else layout = textMathLayout.extract(extracted.text());
+            }
+        } catch (Exception e) {
+            log.warn("结构化正文抽取失败: {} - {}", info.getId(), e.toString());
+            layout = new PdfLayoutExtractor.Layout("failed", e.getMessage(), List.of(), 0, 0);
+        }
         m.put("status", layout.status());
         m.put("error", layout.error());
         m.put("pages", layout.pages());
@@ -393,9 +408,7 @@ public class FileStorageService {
     /**
      * 按**任意区域**裁一页（pt，左上角原点、y 向下）：公式块用这个。
      *
-     * <p>为什么公式要走"裁原图"：PDF 里没有公式对象，符号还是散落的字形（上下标字号都不一样），
-     * 抽出来的文本必然是碎片（见 docs/pdf-layout-design.md §5.3）。原图里的排版与上下标是准的，
-     * 所以 {@code formula} 块把原 PDF 那块渲染出来贴上去 —— 与插图同一套做法、同一套缓存。
+     * <p>公式的 LaTeX 还原保留原图作为对照，无法确定的结构也能按原图阅读。
      */
     public byte[] pageImageRect(Long id, int pageNo, double x0, double y0, double x1, double y1) {
         if (!Double.isFinite(x0) || !Double.isFinite(y0) || !Double.isFinite(x1) || !Double.isFinite(y1)
