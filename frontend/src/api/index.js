@@ -18,7 +18,15 @@ request.interceptors.response.use(
     return Promise.reject(new Error((body && body.msg) || '请求失败'))
   },
   (err) => {
-    ElMessage.error(err.response?.data?.msg || err.message || '网络错误')
+    const data = err.response?.data
+    const msg = (data && data.msg) || err.message || '网络错误'
+    ElMessage.error(msg)
+    // 把后端的可读信息回填到 .message：阅读器翻译、公式识别等直接显示 err.message
+    // 的面板会因此看到「翻译调用失败（档案：xxx）」而不是 axios 的英文默认文案
+    // （实测：上游 llama.cpp 引擎崩了后端回 500 + 可读 msg，但面板只会显示
+    // 「Request failed with status code 500」，完全看不出是哪个档案、为什么挂了）。
+    // .response 保留原值，其他走 e?.response?.data?.msg 的页面不受影响。
+    err.message = msg
     return Promise.reject(err)
   },
 )

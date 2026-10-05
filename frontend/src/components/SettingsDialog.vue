@@ -268,16 +268,26 @@ async function testParamProfile() {
   }
 }
 
-/** 任务 → 设置字段名（与后端 SettingsController 的映射一一对应） */
-function fieldOfTask(task) {
+/**
+ * 任务 → 设置字段名。
+ *
+ * <p>**优先用后端 /api/model/routing 下发的 row.field** —— 那份映射是从任务清单
+ * （ModelRouting.META）派生的，加任务时只改一处。前端自己拼字符串是以前的做法，
+ * 拼错/后端没登记的后果就是「设置项不支持」：2026-10 实测给「阅读器翻译」选档案时
+ * 弹「切换失败：不支持的设置项: modelForTranslate」（后端字段表漏了 translate/formula）。
+ * 只在后端没下发 field 时（老版本后端）才退回本地拼法，保证向后兼容。
+ */
+function fieldOfTask(row) {
+  if (row && row.field) return row.field
+  const task = (row && row.task) || row || ''
   return 'modelFor' + task.charAt(0).toUpperCase() + task.slice(1)
 }
 
-async function setTaskTarget(task, target) {
+async function setTaskTarget(row, target) {
   routingBusy.value = true
   try {
     const payload = {}
-    payload[fieldOfTask(task)] = target
+    payload[fieldOfTask(row)] = target
     // 必须用 update：settingsApi 只有 get/update，写 save() 会抛 TypeError。
     // 当时那个空 catch 把它吞了 → 界面看起来"点了没反应"（实测踩到：任务分工改不动）。
     await settingsApi.update(payload)
@@ -1146,7 +1156,7 @@ function notifyMetaChanged() {
                 :model-value="row.target"
                 size="small"
                 :disabled="routingBusy"
-                @change="(v) => setTaskTarget(row.task, v)"
+                @change="(v) => setTaskTarget(row, v)"
               >
                 <el-option
                   v-for="t in routing.targets"

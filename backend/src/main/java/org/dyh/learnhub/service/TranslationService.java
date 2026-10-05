@@ -75,9 +75,11 @@ public class TranslationService {
             }
             out = result.message().path("content").asText("").trim();
         } catch (Exception e) {
-            // 把"哪个档案失败"带出来：换档是用户最可能的下一步动作
-            throw new IllegalStateException("翻译调用失败（档案：" + t.label() + " / " + t.model() + "）："
-                    + e.getMessage(), e);
+            // 把"哪个档案失败"带出来：换档是用户最可能的下一步动作。
+            // 上游异常有时 message 为 null（ConnectException 实测就这样）—— 直接拼会得到
+            // "：null" 对用户毫无帮助，退回类名至少知道是哪一类错（同类教训见 ModelProfileService.flatten）。
+            String why = StringUtils.hasText(e.getMessage()) ? e.getMessage() : e.getClass().getSimpleName();
+            throw new IllegalStateException("翻译调用失败（档案：" + t.label() + " / " + t.model() + "）：" + why, e);
         }
         long cost = System.currentTimeMillis() - started;
         if (!StringUtils.hasText(out)) {

@@ -1,6 +1,7 @@
 package org.dyh.learnhub.controller;
 
 import lombok.RequiredArgsConstructor;
+import org.dyh.learnhub.ai.ModelRouting;
 import org.dyh.learnhub.common.Result;
 import org.dyh.learnhub.service.SettingsService;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -67,52 +68,73 @@ public class SettingsController {
         return Result.ok(out);
     }
 
-    /** API 字段名 → 内部设置键 */
-    private static final Map<String, String> FIELD_MAPPING = Map.ofEntries(
-            Map.entry("model", SettingsService.KEY_MODEL),
-            Map.entry("baseUrl", SettingsService.KEY_BASE_URL),
-            Map.entry("apiKey", SettingsService.KEY_API_KEY),
-            Map.entry("maxTokens", SettingsService.KEY_MAX_TOKENS),
-            Map.entry("temperature", SettingsService.KEY_TEMPERATURE),
-            Map.entry("thinking", SettingsService.KEY_THINKING),
-            Map.entry("reasoningEffort", SettingsService.KEY_REASONING_EFFORT),
-            // 注意：polishPrompt / formatPrompt 已移除 —— 润色与格式的提示词改为技能文件
-            // （skills/<id>/SKILL.md），见 SkillService 与 skills/README.md。
-            // 前端若还在送这两个字段会得到 400，这是故意的：避免"改了半天没生效"。
-            Map.entry("chatPrompt", SettingsService.KEY_CHAT_PROMPT),
-            // 联网总开关（搜索端点/模型是部署级设置，走 ai.search_base_url / ai.search_model，不进面板）
-            Map.entry("webEnabled", SettingsService.KEY_WEB_ENABLED),
-            // 长文生成（主题 wiki）用的模型：留空跟随主模型；配本机 Ollama 可让这块零成本
-            Map.entry("wikiBaseUrl", SettingsService.KEY_WIKI_BASE_URL),
-            Map.entry("wikiModel", SettingsService.KEY_WIKI_MODEL),
-            Map.entry("wikiApiKey", SettingsService.KEY_WIKI_API_KEY),
-            // 检索词自动扩展（仅第一遍无命中时启用）
-            Map.entry("queryRewrite", SettingsService.KEY_QUERY_REWRITE),
-            // 第三/四路证据源（主题 wiki / 概念图谱）的注入开关：跑"开 vs 关"对照用
-            Map.entry("wikiInject", SettingsService.KEY_WIKI_INJECT),
-            Map.entry("kgInject", SettingsService.KEY_KG_INJECT),
-            // 向量后端：mysql（全扫，默认）/ milvus（ANN）+ 连接参数
-            Map.entry("vectorBackend", "kb.vector_backend"),
-            Map.entry("milvusUri", "kb.milvus_uri"),
-            Map.entry("milvusToken", "kb.milvus_token"),
-            // 精排后端：llm（列表重排，默认）/ cross（Cross-Encoder sidecar）+ 服务地址
-            Map.entry("rerankBackend", "kb.rerank_backend"),
-            Map.entry("rerankUrl", "kb.rerank_url"),
-            Map.entry("rerankSnippet", "kb.rerank_snippet"),
-            Map.entry("autoRecompile", SettingsService.KEY_AUTO_RECOMPILE),
-            Map.entry("modelForChat", SettingsService.modelForTaskKey("chat")),
-            Map.entry("modelForWiki", SettingsService.modelForTaskKey("wiki")),
-            Map.entry("modelForEntity", SettingsService.modelForTaskKey("entity")),
-            Map.entry("modelForImpact", SettingsService.modelForTaskKey("impact")),
-            Map.entry("modelForLint", SettingsService.modelForTaskKey("lint")),
-            Map.entry("modelForGraph", SettingsService.modelForTaskKey("graph")),
-            // 这三个是后加的任务。漏登记的表现是"改这一行没反应"：
-            // 后端返回 400「不支持的设置项」，而前端当时把异常吞掉了，界面上什么都不显示。
-            // 约定：凡 ModelRouting 里登记过的任务，这里必须有对应字段名。
-            Map.entry("modelForTriple", SettingsService.modelForTaskKey("triple")),
-            Map.entry("modelForRerank", SettingsService.modelForTaskKey("rerank")),
-            Map.entry("modelForGrounding", SettingsService.modelForTaskKey("grounding")),
-            Map.entry("modelForRewrite", SettingsService.modelForTaskKey("rewrite")));
+    /**
+     * API 字段名 → 内部设置键。
+     *
+     * <h3>模型分工字段**一律从任务清单派生**，不要再手写</h3>
+     * 这里原来是把 {@code modelForChat / modelForTriple / …} 一行行写死的，于是每加一个任务都要记得回来补一行，
+     * 实测漏过三次：{@code triple / rerank / grounding}，以及 2026-10 的 {@code translate / formula}
+     *（症状：任务分工表里「阅读器翻译」「公式原图识别」那两行选了档案 → 后端 400
+     * 「不支持的设置项: modelForTranslate」→ 前端弹出「切换失败」，值其实没写进去）。
+     * 任务清单的唯一源头是 {@link ModelRouting#allTasks()}（即 ModelRouting.META），
+     * 字段名统一由 {@link SettingsService#modelForTaskField} 换算 —— 加任务只改 META 一处。
+     */
+    private static final Map<String, String> FIELD_MAPPING = buildFieldMapping();
+
+    /** 包内可见：给「接口字段 ↔ 白名单」一致性测试用（见 SettingsControllerRoutingFieldTest） */
+    static Map<String, String> fieldMapping() {
+        return FIELD_MAPPING;
+    }
+
+    private static Map<String, String> buildFieldMapping() {
+        Map<String, String> m = new LinkedHashMap<>();
+        // ---- 非「模型分工」字段：逐个显式登记 ----
+        m.put("model", SettingsService.KEY_MODEL);
+        m.put("baseUrl", SettingsService.KEY_BASE_URL);
+        m.put("apiKey", SettingsService.KEY_API_KEY);
+        m.put("maxTokens", SettingsService.KEY_MAX_TOKENS);
+        m.put("temperature", SettingsService.KEY_TEMPERATURE);
+        m.put("thinking", SettingsService.KEY_THINKING);
+        m.put("reasoningEffort", SettingsService.KEY_REASONING_EFFORT);
+        // 注意：polishPrompt / formatPrompt 已移除 —— 润色与格式的提示词改为技能文件
+        // （skills/<id>/SKILL.md），见 SkillService 与 skills/README.md。
+        // 前端若还在送这两个字段会得到 400，这是故意的：避免"改了半天没生效"。
+        m.put("chatPrompt", SettingsService.KEY_CHAT_PROMPT);
+        // 联网总开关（搜索端点/模型是部署级设置，走 ai.search_base_url / ai.search_model，不进面板）
+        m.put("webEnabled", SettingsService.KEY_WEB_ENABLED);
+        // 长文生成（主题 wiki）用的模型：留空跟随主模型；配本机 Ollama 可让这块零成本
+        m.put("wikiBaseUrl", SettingsService.KEY_WIKI_BASE_URL);
+        m.put("wikiModel", SettingsService.KEY_WIKI_MODEL);
+        m.put("wikiApiKey", SettingsService.KEY_WIKI_API_KEY);
+        // 检索词自动扩展（仅第一遍无命中时启用）
+        m.put("queryRewrite", SettingsService.KEY_QUERY_REWRITE);
+        // 第三/四路证据源（主题 wiki / 概念图谱）的注入开关：跑"开 vs 关"对照用
+        m.put("wikiInject", SettingsService.KEY_WIKI_INJECT);
+        m.put("kgInject", SettingsService.KEY_KG_INJECT);
+        // 向量后端：mysql（全扫，默认）/ milvus（ANN）+ 连接参数
+        m.put("vectorBackend", "kb.vector_backend");
+        m.put("milvusUri", "kb.milvus_uri");
+        m.put("milvusToken", "kb.milvus_token");
+        // 精排后端：llm（列表重排，默认）/ cross（Cross-Encoder sidecar）+ 服务地址
+        m.put("rerankBackend", "kb.rerank_backend");
+        m.put("rerankUrl", "kb.rerank_url");
+        m.put("rerankSnippet", "kb.rerank_snippet");
+        m.put("autoRecompile", SettingsService.KEY_AUTO_RECOMPILE);
+        // 当前激活的模型档案（模型配置已改为"档案列表"，各任务指向档案 id）
+        m.put("activeProfile", "ai.active_profile");
+
+        // ---- 模型分工字段：从任务清单派生（见类注释）----
+        for (String task : ModelRouting.allTasks()) {
+            String field = SettingsService.modelForTaskField(task);
+            String key = SettingsService.modelForTaskKey(task);
+            String prev = m.put(field, key);
+            if (prev != null && !prev.equals(key)) {
+                // 任务名撞车会让两个任务共用一个字段：宁可启动即报，也不要静默串味
+                throw new IllegalStateException("模型分工字段名冲突: " + field + " → " + prev + " / " + key);
+            }
+        }
+        return Map.copyOf(m);
+    }
 
     @PutMapping
     public Result<Map<String, Object>> update(@RequestBody Map<String, String> body) {

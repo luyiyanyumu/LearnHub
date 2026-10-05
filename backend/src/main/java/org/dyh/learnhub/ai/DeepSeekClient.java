@@ -488,6 +488,15 @@ public class DeepSeekClient {
 
         long start = System.currentTimeMillis();
         HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        // 上游引擎崩溃时**自愈一次**：llama.cpp 这类服务在子进程挂掉之后会回 503 +
+        // "the engine stopped unexpectedly (exit code …); the next request restarts it" ——
+        // 上游自己承诺"下一次请求会把它拉起来"，那就把同一个请求再发一遍，而不是把一次
+        // 可恢复的崩溃原样抛给用户。实测（2026-10-05）：strata 上的 qwen3.8-flash-next-iq2_xs
+        // 崩过一次，阅读器翻译直接 500；紧接着的下一次请求 22 秒就正常返回了。
+        if (engineRestartable(response.statusCode(), response.body())) {
+            log.warn("上游模型引擎崩溃（status={} model={}），按其约定重试一次", response.statusCode(), model);
+            response = http.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        }
         long cost = System.currentTimeMillis() - start;
         if (response.statusCode() != 200) {
             // Vision providers may echo the input image or authentication data in an error body.
@@ -524,6 +533,26 @@ public class DeepSeekClient {
             return "";
         }
         return s.length() > max ? s.substring(0, max) + "…" : s;
+    }
+
+    /**
+     * 这次失败是否值得**立刻把同一个请求再发一次**。
+     *
+     * <p>只认一种情况：上游（llama.cpp / llama-server 这类自托管引擎）明说子进程崩了、
+     * 而且下一次请求会把它重新拉起来 ——
+     * {@code "the engine stopped unexpectedly (exit code …); the next request restarts it"}。
+     * 这种崩溃是自愈的，重试就是上游自己给的解法（实测：崩完的下一次请求 22 秒正常返回）。
+     *
+     * <p>刻意**不**对所有 5xx 重试：鉴权失败、模型名不存在、请求体过大这类错误重试一次
+     * 只是让用户多等一遍（还可能撞上前端 180s 超时），没有任何好处。
+     */
+    static boolean engineRestartable(int status, String body) {
+        if (status < 500 || status > 599 || body == null || body.isEmpty()) {
+            return false;
+        }
+        String b = body.toLowerCase(java.util.Locale.ROOT);
+        return b.contains("the next request restarts it")
+                || (b.contains("engine stopped unexpectedly") && b.contains("restart"));
     }
 
     /**

@@ -236,6 +236,10 @@ public class ModelRouting {
             o.put("label", m.label());
             o.put("why", m.why());
             o.put("defaultKind", m.defaultKind());
+            // 设置接口里这个任务对应的字段名（如 modelForTranslate）。
+            // 前端 SettingsDialog 用它 PUT，**不要再自己拼** —— 详见 SettingsController 的注释：
+            // 这份映射由 SettingsController 派生，加新任务时只改 META 即可。
+            o.put("field", SettingsService.modelForTaskField(m.task()));
             String id = targetIdOf(m.task());
             o.put("target", id);
             ModelTarget t = forTask(m.task());

@@ -57,4 +57,21 @@ class TranslationServiceTest {
         assertThrows(IllegalArgumentException.class, () -> service.translate("Hello", "English\n其它指令"));
         verifyNoInteractions(client, routing);
     }
+
+    /**
+     * 上游抛的异常 message 经常是 null（java.net.ConnectException 连不上时就是这样），
+     * 直接拼会得到"：null"，对用户毫无帮助——退回类名至少知道是哪一类错（同类教训见
+     * ModelProfileService.flatten）。这条锁的是 2026-10 那次真实回归。
+     */
+    @Test void upstreamErrorWithNullMessageFallsBackToClassName() throws Exception {
+        when(routing.forTask(ModelRouting.TASK_TRANSLATE)).thenReturn(
+                new ModelRouting.ModelTarget("test", "测试档案", "http://localhost:1", "", "test-model", true));
+        when(client.chatFull(anyList(), isNull(), anyString(), anyString(), anyString(), anyInt(), anyDouble(),
+                anyString(), isNull(), any(Duration.class))).thenThrow(new java.net.ConnectException());
+        var failure = assertThrows(IllegalStateException.class, () -> service.translate("hello", "简体中文"));
+        String msg = failure.getMessage();
+        assertTrue(msg.contains("测试档案"), "错误信息应点名是哪个档案挂了: " + msg);
+        assertFalse(msg.contains("：null"), "message 为 null 时不要直接拼，否则用户看到「：null」: " + msg);
+        assertTrue(msg.contains("ConnectException"), "退回类名（至少知道是哪一类错）: " + msg);
+    }
 }

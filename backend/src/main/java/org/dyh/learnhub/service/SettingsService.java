@@ -70,6 +70,21 @@ public class SettingsService {
         return "ai.model_for_" + task;
     }
 
+    /**
+     * 设置接口里这个任务的**字段名**：{@code ai.model_for_triple → modelForTriple}。
+     *
+     * <p>为什么要有这个函数：这个词形换算原来在**两个地方各写了一遍**
+     *（{@code SettingsController.FIELD_MAPPING} 手写字段名，前端 {@code SettingsDialog.fieldOfTask} 拼字符串），
+     * 于是每加一个任务都要记得改两处 —— 实测漏过三次：triple/rerank/grounding、
+     * 以及 2026-10 的 translate / formula（界面上「阅读器翻译」那一行选了档案就弹
+     * 「不支持的设置项: modelForTranslate」，值根本没写进去）。
+     * 现在只有这一份：后端映射用 {@link SettingsService#modelForTaskField}，
+     * 前端优先用 {@code /api/model/routing} 下发的 {@code field}（不再自己猜）。
+     */
+    public static String modelForTaskField(String task) {
+        return "modelFor" + Character.toUpperCase(task.charAt(0)) + task.substring(1);
+    }
+
     /** 自动局部重编译（默认关：每次改动都要调模型判断"该更新哪些页"，会花云端 token） */
     public static final String KEY_AUTO_RECOMPILE = "ai.auto_recompile";
 
@@ -77,6 +92,17 @@ public class SettingsService {
     public static final String KEY_VECTOR_ENABLED = "ai.vector_enabled";
 
     private static final List<String> KNOWN_KEYS = buildKnownKeys();
+
+    /**
+     * 白名单只读视图（给测试 / 启动自检用）。
+     *
+     * <p>为什么需要它：{@code update()} 对不在白名单的键抛异常（界面只看到 500，值其实没变），
+     * 而"接口收哪些字段"在 {@code SettingsController} 里另有一张映射表 —— 两张表必须同源。
+     * 现在两边都从 {@link ModelRouting#allTasks()} 派生，这条 getter 让测试能把"同源"钉住。
+     */
+    public static List<String> knownKeys() {
+        return KNOWN_KEYS;
+    }
 
     /**
      * 白名单**从 ModelRouting 的任务清单派生**，不再手写。
