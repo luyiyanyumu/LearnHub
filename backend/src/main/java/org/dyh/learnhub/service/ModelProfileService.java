@@ -385,18 +385,45 @@ public class ModelProfileService {
         } catch (Exception e) {
             o.put("ok", false);
             o.put("ms", System.currentTimeMillis() - t0);
-            o.put("message", e.getMessage() == null ? e.toString() : e.getMessage());
-            // 常见毛病的提示：少 /v1、模型名不对、密钥错
-            String msg = String.valueOf(e.getMessage());
+            // 原来直接回 e.getMessage()：ConnectException 的 message 是 null，界面只看到
+            // "java.net.ConnectException"，而下面的提示又在匹配 "Connection" —— 两头都没对上，用户什么提示都拿不到
+            // （实测：strata 档案填 127.0.0.1:8080，容器里连的是自己）。这里把异常链拍平再判断。
+            String msg = flatten(e);
+            o.put("message", msg);
             if (msg.contains("404")) {
                 o.put("hint", "404 多为基址缺 /v1 或模型名不存在（本地 Ollama 的 OpenAI 兼容端口是 /v1）");
             } else if (msg.contains("401") || msg.contains("403")) {
                 o.put("hint", "鉴权失败：检查密钥；本地服务通常随便填一个非空值即可");
-            } else if (msg.contains("Connection") || msg.contains("timed out") || msg.contains("refused")) {
-                o.put("hint", "连不上：确认服务在跑、端口对；容器里访问本机要用 host.docker.internal");
+            } else if (msg.contains("Connect") || msg.contains("timed out") || msg.contains("refused")
+                    || msg.contains("UnresolvedAddress") || msg.contains("UnknownHost")) {
+                o.put("hint", isLoopback(p.getBaseUrl())
+                        ? "连不上：后端跑在容器里，localhost / 127.0.0.1 指的是容器自己，改成 host.docker.internal（编辑档案点「获取模型」会自动帮你改）"
+                        : "连不上：确认服务在跑、端口对、网络通");
             }
         }
         return o;
+    }
+
+    /** 异常链拍平成一行：类名 + message，避免 null message 只剩类名 */
+    static String flatten(Throwable e) {
+        StringBuilder sb = new StringBuilder();
+        java.util.Set<Throwable> seen = new java.util.HashSet<>();
+        for (Throwable t = e; t != null && seen.add(t); t = t.getCause()) {
+            if (sb.length() > 0) {
+                sb.append(" ← ");
+            }
+            String m = t.getMessage();
+            sb.append(StringUtils.hasText(m) ? m : t.getClass().getSimpleName());
+        }
+        return sb.toString();
+    }
+
+    private static boolean isLoopback(String baseUrl) {
+        if (baseUrl == null) {
+            return false;
+        }
+        String s = baseUrl.toLowerCase(java.util.Locale.ROOT);
+        return s.contains("://localhost") || s.contains("://127.0.0.1") || s.contains("://0.0.0.0") || s.contains("://[::1]");
     }
 
     /**

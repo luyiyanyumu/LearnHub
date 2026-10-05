@@ -231,6 +231,12 @@ export const modelApi = {
   activateProfile: (id) => request.post(`/model/profiles/${id}/activate`, {}),
   /** 连通性探测：真实发一次最小请求，返回 ok / 耗时 / 失败原因与提示 */
   testProfile: (id) => request.post(`/model/profiles/${id}/test`, {}, { timeout: 60000 }),
+  /**
+   * 按「地址 + 密钥」自动获取模型列表（服务端 GET {baseUrl}/models）。
+   * 用 POST：可能带着还没保存的密钥，不能进 URL。编辑已有档案时 apiKey 留空、传 profileId 即用库里那把。
+   * 返回 { ok, models:[{id, ownedBy, embedding}], baseUrl, suggestedBaseUrl?, message, hint? }
+   */
+  discoverModels: (body) => request.post('/model/discover', body, { timeout: 60000 }),
   migrate: () => request.post('/model/profiles/migrate', {}),
   routing: () => request.get('/model/routing'),
 

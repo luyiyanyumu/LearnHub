@@ -42,6 +42,7 @@ public class ModelController {
     private final ModelProfileService profiles;
     private final ModelRouting routing;
     private final AgentSessionService sessions;
+    private final org.dyh.learnhub.service.ModelDiscoveryService discovery;
 
     // ---------------- 档案 ----------------
 
@@ -84,6 +85,18 @@ public class ModelController {
     @PostMapping("/profiles/{id}/test")
     public Result<Map<String, Object>> test(@PathVariable String id) {
         return Result.ok(profiles.probe(id));
+    }
+
+    /**
+     * 按「地址 + 密钥」自动获取模型列表（{@code GET {baseUrl}/models}）。
+     *
+     * <p>用 POST 而不是 GET：body 里可能带着用户刚填、**还没保存**的密钥，不能出现在 URL / 访问日志里。
+     * 编辑已有档案时密钥框留空即可，传 {@code profileId}，后端用库里那把。
+     */
+    @PostMapping("/discover")
+    public Result<Map<String, Object>> discover(@RequestBody(required = false) Map<String, Object> body) {
+        Map<String, Object> b = body == null ? Map.of() : body;
+        return Result.ok(discovery.discover(str(b.get("profileId")), str(b.get("baseUrl")), str(b.get("apiKey"))));
     }
 
     /** 从老配置迁移（幂等：已有档案时返回 0） */

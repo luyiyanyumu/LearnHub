@@ -49,6 +49,71 @@ const probingId = ref('')
 const savingProfile = ref(false)
 const editor = ref({ open: false, id: '', name: '', provider: 'custom', baseUrl: '', apiKey: '', model: '', note: '', hasKey: false, keyHint: '' })
 
+/**
+ * 「获取模型」：按编辑器里**当前填的**地址 + 密钥，让服务自己列出有哪些模型。
+ *
+ * <p>为什么需要：模型名原来全靠手敲，`qwen3.8-flash-next-coder-iq1_m` 敲错一个字符
+ * 要到「测试」或真正调用时才 404。现在列出来让用户选；选不到的仍然可以手填（下拉允许自由输入）。
+ *
+ * <p>后端会顺手修三类地址错误（缺 /v1、容器里写 localhost、误贴完整接口地址），
+ * 成功时若用了修正后的地址，这里直接替用户把 Base URL 改掉并说明原因。
+ */
+const discovery = ref({ loading: false, models: [], message: '', hint: '', ok: null })
+
+function resetDiscovery() {
+  discovery.value = { loading: false, models: [], message: '', hint: '', ok: null }
+}
+
+async function discoverModels() {
+  const e = editor.value
+  if (!e.baseUrl.trim()) {
+    ElMessage.warning('先填 Base URL')
+    return
+  }
+  discovery.value = { ...discovery.value, loading: true, message: '', hint: '', ok: null }
+  try {
+    const r = await modelApi.discoverModels({
+      profileId: e.id || null,
+      baseUrl: e.baseUrl.trim(),
+      // 编辑已有档案时密钥框通常是空的（接口只给掩码）—— 留空即用库里那把
+      apiKey: e.apiKey.trim() || null,
+    })
+    discovery.value = {
+      loading: false,
+      ok: !!r.ok,
+      models: r.models || [],
+      message: r.message || '',
+      hint: r.hint || '',
+    }
+    if (r.ok && r.suggestedBaseUrl && r.suggestedBaseUrl !== e.baseUrl.trim()) {
+      e.baseUrl = r.suggestedBaseUrl
+    }
+    if (r.ok && r.models?.length) {
+      // 当前模型名不在列表里（或还没填）时，自动选第一个对话模型
+      const ids = r.models.map((m) => m.id)
+      if (!e.model.trim() || !ids.includes(e.model.trim())) {
+        const firstChat = r.models.find((m) => !m.embedding) || r.models[0]
+        if (!e.model.trim()) e.model = firstChat.id
+      }
+    }
+  } catch {
+    discovery.value = { loading: false, ok: false, models: [], message: '请求失败（看后端日志）', hint: '' }
+  }
+}
+
+/** 编辑中的档案：云端地址 + 没有已存密钥 + 这次也没填 = 保存后调用必然 401 */
+const editorMissingKey = computed(() => {
+  const e = editor.value
+  return !e.hasKey && !String(e.apiKey || '').trim() && !isLocalUrl(e.baseUrl)
+})
+
+/** 当前模型名是否在获取到的列表里（不在时给个温和提示，不阻止保存：有些服务不列全） */
+const modelNotListed = computed(() => {
+  const d = discovery.value
+  const m = editor.value.model.trim()
+  return d.ok && d.models.length > 0 && m && !d.models.some((x) => x.id === m)
+})
+
 async function loadRouting() {
   try {
     const d = await modelApi.profiles()
@@ -76,11 +141,36 @@ function providerLabel(p) {
 }
 
 /**
+ * 是不是「本机 / 内网」地址 —— 这类服务通常不需要密钥，缺密钥不算问题。
+ * host.docker.internal 也算本机：后端在容器里，访问宿主机就是走它。
+ */
+function isLocalUrl(url) {
+  const s = String(url || '').toLowerCase()
+  if (!s) return true // 还没填地址时别提前报警
+  return /\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|host\.docker\.internal)(:|\/|$)/.test(s)
+    || /\/\/(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(s)
+}
+
+/**
+ * 云端地址 + 没密钥 = **必然** 401。
+ *
+ * <p>为什么要提前标出来：上游对这种请求的原话是 "Authentication Fails, Your api key: null is invalid"，
+ * 应用里则显示成「该档案的 API Key 无效或未配置」—— 用户看到"密钥无效"，第一反应是"我的密钥填错了"，
+ * 但真正的原因是**这个档案压根没填密钥**。在设置页直接标出来，省掉这一轮排查。
+ */
+function missingKey(p) {
+  return !p.hasKey && !isLocalUrl(p.baseUrl)
+}
+
+/**
  * 打开档案编辑器。
  * @param p    要编辑的档案（null = 新增）
  * @param pre  预设（新增时预填地址与模型名）
  */
 function openProfileEditor(p, pre) {
+  // 换档案必须清掉上一次「获取模型」的结果：否则 A 档案的模型列表会挂到 B 档案的编辑器里，
+  // 用户以为这就是 B 的可用模型（列表和地址不是一套）。
+  resetDiscovery()
   if (p) {
     editor.value = {
       open: true, id: p.id, name: p.name, provider: p.provider, baseUrl: p.baseUrl,
@@ -1082,6 +1172,11 @@ function notifyMetaChanged() {
               <div class="profile-main">
                 <b class="profile-name">{{ p.name }}</b>
                 <span v-if="p.active" class="badge badge-ok">当前生效</span>
+                <span
+                  v-if="missingKey(p)"
+                  class="badge badge-warn"
+                  title="这个地址是云端服务但没配密钥，调用会返回 401（上游原文：Your api key: null is invalid）"
+                >缺密钥</span>
                 <span class="hint profile-meta">
                   {{ providerLabel(p.provider) }} · {{ p.model }}
                   <template v-if="p.hasKey"> · 密钥 {{ p.keyHint }}</template>
@@ -1121,18 +1216,69 @@ function notifyMetaChanged() {
                 <el-option v-for="pre in presets" :key="pre.provider" :label="pre.name" :value="pre.provider" />
               </el-select>
               <label class="fl">Base URL</label>
-              <el-input v-model="editor.baseUrl" placeholder="OpenAI 兼容基址，本地 Ollama 是 http://localhost:11434/v1" />
+              <el-input
+                v-model="editor.baseUrl"
+                placeholder="OpenAI 兼容基址，本地 Ollama 是 http://localhost:11434/v1，容器里访问本机用 host.docker.internal"
+                @input="resetDiscovery"
+              >
+                <template #append>
+                  <el-button :loading="discovery.loading" @click="discoverModels">获取模型</el-button>
+                </template>
+              </el-input>
               <label class="fl">API Key</label>
-              <el-input v-model="editor.apiKey" :placeholder="editor.hasKey ? '已配置（' + editor.keyHint + '），留空保持不变' : '本地服务随便填一个非空值即可'" />
+              <el-input
+                v-model="editor.apiKey"
+                :placeholder="editor.hasKey ? '已配置（' + editor.keyHint + '），留空用原密钥' : '本地服务随便填一个非空值即可；中转站填它给你的密钥'"
+              />
+              <template v-if="editorMissingKey">
+                <span />
+                <p class="model-msg bad">
+                  这个地址像是云端服务，但还没填密钥 —— 调用会返回 401，应用里显示为「该档案的 API Key 无效或未配置」
+                  （上游原文是 “Your api key: null is invalid”）。填好密钥后点上面的「获取模型」可当场验证它是否有效。
+                </p>
+              </template>
               <label class="fl">模型名</label>
-              <el-input v-model="editor.model" placeholder="如 deepseek-flash / qwen3:8b" />
+              <!-- 取到列表就用可搜索下拉（仍允许直接输入：有些服务不列自定义接入点），没取到就退回纯输入 -->
+              <el-select
+                v-if="discovery.ok && discovery.models.length"
+                v-model="editor.model"
+                filterable
+                allow-create
+                default-first-option
+                style="width: 100%"
+                placeholder="选择模型，或直接输入模型名"
+              >
+                <el-option
+                  v-for="m in discovery.models"
+                  :key="m.id"
+                  :label="m.embedding ? m.id + '（嵌入模型）' : m.id"
+                  :value="m.id"
+                />
+              </el-select>
+              <el-input v-else v-model="editor.model" placeholder="如 deepseek-flash / qwen3:8b；点上面的「获取模型」可自动列出" />
+              <template v-if="discovery.message">
+                <span />
+                <p class="model-msg" :class="{ bad: !discovery.ok }">
+                  {{ discovery.message }}
+                  <span v-if="modelNotListed" class="model-warn">
+                    · 当前模型名不在列表里（自定义接入点/微调模型常不出现在 /models，可忽略）
+                  </span>
+                </p>
+              </template>
+              <template v-if="discovery.hint">
+                <span />
+                <p class="model-hint">{{ discovery.hint }}</p>
+              </template>
               <label class="fl">备注</label>
               <el-input v-model="editor.note" placeholder="这档准备用来干什么（可空）" />
             </div>
             <div class="ai-actions">
               <el-button size="small" type="primary" :loading="savingProfile" @click="saveProfile">保存</el-button>
               <el-button size="small" @click="editor.open = false">取消</el-button>
-              <span class="hint">保存后可点列表里的「测试」真实发一次请求，确认地址与模型名都对</span>
+              <span class="hint">
+                「获取模型」按当前填的地址与密钥列出服务端有哪些模型，并顺手修正「缺 /v1」「容器里写了 localhost」这类地址错误；
+                保存后还可点列表里的「测试」真实发一次请求
+              </span>
             </div>
           </section>
 
@@ -1530,6 +1676,55 @@ function notifyMetaChanged() {
   font-size: 12.5px;
   color: var(--app-text-2);
   text-align: right;
+}
+/* 徽章：原来模板里用了 .badge/.badge-ok 但**全局与本文件都没有样式** —— 那个「当前生效」
+   其实是纯文字，看着不像状态标记。这里补齐，并加上「缺密钥」这一档。 */
+.badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  line-height: 1.7;
+  white-space: nowrap;
+}
+.badge-ok {
+  background: var(--app-brand-soft);
+  color: var(--app-brand);
+}
+.badge-warn {
+  background: rgba(180, 83, 9, 0.14);
+  color: #b45309;
+}
+html.dark .badge-warn {
+  background: rgba(240, 180, 41, 0.18);
+  color: #f0b429;
+}
+/* 「获取模型」的结果与提示：占满整行、跟输入框左边对齐（第 1 列是 label，所以空一个 span） */
+.model-msg {
+  grid-column: 2 / -1;
+  margin: -4px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--app-text-2);
+}
+.model-msg.bad {
+  color: #c0392b;
+}
+html.dark .model-msg.bad {
+  color: #ff8a80;
+}
+.model-warn {
+  color: #b45309;
+}
+html.dark .model-warn {
+  color: #f0b429;
+}
+.model-hint {
+  grid-column: 2 / -1;
+  margin: -4px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--app-text-3);
 }
 /* 模型分工表 */
 .route-row {
