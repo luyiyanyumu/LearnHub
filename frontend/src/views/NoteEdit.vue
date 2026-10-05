@@ -580,6 +580,10 @@ async function reloadAfterAgentEdit() {
  *
  * 无论成功失败都要回报面板（见 agentNoteMerge.js 的职责划分）：失败时面板把按钮恢复成可重试，
  * 而不是永远显示"已融入"。失败时**正文保持原样**，不做降级追加。
+ *
+ * 用户可见的失败文案由**这里**给（面板不再自己弹一条，见 AgentPanel.mergeResultFromEvent）：
+ * 进度弹窗本来就在这一页，关掉它 + 一条提示是同一处发生的事；面板那边只恢复按钮。
+ * 所以下面每个 reply(false) 分支都必须自己有一句提示，漏一个就是静默失败。
  */
 async function onAgentMerge(e) {
   const d = e?.detail || {}
@@ -589,6 +593,7 @@ async function onAgentMerge(e) {
     detail: { noteId, ok, message },
   }))
   if (!answer) {
+    ElMessage.warning('这条回答是空的，没有可融入的内容')
     reply(false, '这条回答是空的，没有可融入的内容')
     return
   }
@@ -617,6 +622,7 @@ async function onAgentMerge(e) {
     aiProgress.value.percent = 100
     if (String(expectId) !== String(id.value)) {
       aiDialog.value = false
+      ElMessage.warning('期间切换了笔记，已放弃本次融入（正文未改动）')
       reply(false, '期间切换了笔记，已放弃本次融入（正文未改动）')
       return
     }

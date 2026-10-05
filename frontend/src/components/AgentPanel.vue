@@ -479,6 +479,14 @@ function mergeIntoNote(holder, index) {
  * 笔记页回报融入结果。
  *
  * 失败要**恢复按钮**而不是打勾：失败时正文没有改动，用户应该能直接重试或改用「复制」。
+ *
+ * 失败时**面板不再自己弹一条**。原因（超长闸门 / 输出缩水 / 用户取消）只有笔记页知道，
+ * 它那边已经用进度弹窗 + 一条提示报过了；面板再报一次就是两条几乎一样的红条
+ * （实测一条写"正文保持原样"、另一条写"融入失败：…（正文未改动）"），
+ * 而且"取消"和"内容已在笔记里"这种非失败结局会被面板说成"融入失败"。
+ * 所以用户可见的文案统一由笔记页给（见 utils/agentNoteMerge.js 的职责划分），
+ * 面板只留成功确认 —— 它负责把用户引到笔记页的预览弹窗。
+ * `d.message` 仍然收着并进契约，只是当前不拿来弹提示。
  */
 function mergeResultFromEvent(e) {
   const d = e?.detail || {}
@@ -489,8 +497,6 @@ function mergeResultFromEvent(e) {
   if (d.ok) {
     holder.merged = true
     ElMessage.success(d.message || '已在笔记页打开融入预览')
-  } else {
-    ElMessage.error('融入失败：' + (d.message || '未知原因') + '（正文未改动）')
   }
 }
 
