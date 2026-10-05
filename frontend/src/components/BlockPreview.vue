@@ -398,7 +398,14 @@ onMounted(() => {
     editable: true,
     extensions: [StarterKit.configure({ codeBlock: false, underline: false, link: { openOnClick: false } }), CodeBlockCm, Callout, Details, Summary, Underline, Superscript, Subscript, Highlight, FontStyle, TableKit, ExcelTableNavigation, DataLineAttr, BlockMeta, HeadingAnchorAttr, ToolbarAttrs, InlineImage, TaskList, EditableTaskItem],
     content: renderContent(props.content),
-    editorProps: { handleClick: (_view, _position, event) => jumpToNoteAnchor(event) },
+    editorProps: {
+      // 关掉浏览器拼写检查：笔记里全是 StringBuffer / spring_factories / AutoConfiguration 这类
+      // 标识符，contenteditable 默认开启拼写检查，它们会被英文词典逐条标红波浪线（中文不查，
+      // 只有这些"疑似英文单词"被误报）。autocorrect/autocapitalize 同理关掉，避免移动端首字母大写。
+      // 组件自带该属性，所以在笔记页之外使用也不会重新冒出来（页面根节点另有兜底，见 NoteEdit.vue）。
+      attributes: { spellcheck: 'false', autocorrect: 'off', autocapitalize: 'off' },
+      handleClick: (_view, _position, event) => jumpToNoteAnchor(event),
+    },
     onUpdate: syncDown,
     onTransaction: handleTransaction,
     onSelectionUpdate: refreshTableContext,

@@ -3057,7 +3057,16 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="edit-page" :class="{ 'is-focus': focusMode, 'is-reading': readingMode }" v-loading="loading">
+  <!--
+    spellcheck="false" 放在**页面根节点**上，而不是只贴在某个编辑器上。
+    原因：spellcheck 是**可继承**属性，根上一设，页内所有可编辑区一起关掉 ——
+    Tiptap 块编辑器、md-editor 预览、md-editor 的源码 CodeMirror、代码块里的 CodeMirror。
+    只贴在单个元素上就会漏（实测漏的就是默认渲染器块编辑器与代码块，笔记里
+    spring_factories / StringBuffer 这类标识符被英文词典逐条标红波浪线）。
+    md-editor 内部那个 CodeMirror 我们没法注入配置，靠继承是唯一的办法。
+    组件自身（BlockPreview / CM 组件）另外再声明一次，保证脱离本页也不会误开。
+  -->
+  <div class="edit-page" :class="{ 'is-focus': focusMode, 'is-reading': readingMode }" v-loading="loading" spellcheck="false">
     <!-- ======== 顶部第一行：返回 · 标题 · 分类 · 标签 · 保存状态 · AI助手 · 更多 · 保存 ========
          阅读模式**保留**这一行（用户要求：阅读时工具栏不消失，并冻结在顶部）；只把右端的
          「保存」旁边多一个「退出阅读」，因为原来的极简顶栏已经去掉了。 -->
