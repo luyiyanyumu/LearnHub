@@ -15,6 +15,15 @@ import {
   AGENT_NOTE_MERGE_EVENT,
   AGENT_NOTE_MERGE_RESULT_EVENT,
 } from '../utils/agentNoteMerge'
+// 「分节融入」：长笔记不再整篇重写，改成"先定位小节、只改写那一节、只贴回那一节"
+import {
+  SECTION_REWRITE_MAX,
+  appendNoteSection,
+  appendToSection,
+  applySectionPatch,
+  buildNoteOutline,
+  splitNoteSections,
+} from '../utils/noteSections'
 import { isDark } from '../composables/useTheme'
 import { focusMode } from '../composables/useViewMode'
 import { FORMAT_PRESETS, stripInline } from '../utils/richFormat'
@@ -394,6 +403,11 @@ const aiBusy = ref(false)
 const aiDialog = ref(false)
 const aiLabel = ref('')
 const aiResult = ref('')
+/**
+ * 「分节融入」待确认的补丁。有它 = 这次只替换某一节（预览只显示这一节的前后），
+ * 为空 = 整篇重写（预览显示整篇）。两者的确认动作不同，所以状态要分开存。
+ */
+const mergePatch = ref(null)
 /** 弹窗里的说明文字：润色/融入的等待方式不同（分段 vs 整篇），各说各的 */
 const aiHint = ref('')
 
@@ -452,6 +466,8 @@ function cancelAiProcess() {
   stopAiProgress()
   aiBusy.value = false
   aiDialog.value = false
+  // 连同待确认的分节补丁一起丢掉：取消之后再点确认不该还能贴回去
+  mergePatch.value = null
   ElMessage.info('已取消 AI 处理')
 }
 
@@ -471,6 +487,9 @@ async function aiProcess(mode) {
   aiHint.value = '长文按 4000 字分段逐段处理，思考型模型单段可能耗时 1–3 分钟；'
     + '进度按「已完成段数」推进，段内不动属正常。可继续等待，或点「取消处理」中止。'
   aiResult.value = ''
+  // 润色/整理格式走的是"整篇替换"，把可能残留的分节补丁清掉：
+  // 否则点确认时贴回去的会是上一次融入留下的那一节（同一个弹窗、同一个确认按钮）
+  mergePatch.value = null
   // 先开弹窗：进度就显示在弹窗里，而不是让用户对着一个不动的按钮等三分钟
   aiDialog.value = true
   startAiProgress()
@@ -497,11 +516,51 @@ async function aiProcess(mode) {
   }
 }
 
-/** 用 AI 结果替换正文（不自动保存，用户再点一次「保存」把控结果） */
+/** 确认按钮的文案：整篇替换 / 替换本节 / 追加到本节 / 末尾新增一节，动作不同就别说成一样 */
+const mergeApplyLabel = computed(() => {
+  const kind = mergePatch.value?.kind
+  if (kind === 'replace-section') return '替换本节'
+  if (kind === 'append-section') return '追加到本节'
+  if (kind === 'append-note-section') return '新增这一节'
+  return '替换正文'
+})
+
+/**
+ * 用 AI 结果替换正文（不自动保存，用户再点一次「保存」把控结果）。
+ *
+ * 两条路：整篇重写 → 整段替换；分节融入 → 只把改好的那一节贴回去。
+ * 后者贴之前会核对原文区间（见 noteSections.applySectionPatch）：用户在模型跑的过程中
+ * 改过字就直接放弃并报错，**宁可什么都不做，也不要把改好的节贴到错的位置**。
+ */
 function aiApply() {
-  form.value.content = fixHtmlQuotes(aiResult.value)
+  const patch = mergePatch.value
+  if (patch) {
+    try {
+      const source = form.value.content || ''
+      const after = fixHtmlQuotes(patch.after)
+      const next = patch.kind === 'replace-section'
+        ? applySectionPatch(source, patch.section, after)
+        : patch.kind === 'append-section'
+          ? appendToSection(source, patch.section, after)
+          : appendNoteSection(source, patch.heading, after)
+      form.value.content = next
+      if (patch.kind === 'replace-section') {
+        ElMessage.success(`已替换「${patch.heading}」这一节，确认无误后点「保存」`)
+      } else if (patch.kind === 'append-section') {
+        ElMessage.success(`已在「${patch.heading}」末尾追加内容，原正文未改动；确认无误后点「保存」`)
+      } else {
+        ElMessage.success(`已新增一节「${patch.heading}」，确认无误后点「保存」`)
+      }
+    } catch (err) {
+      ElMessage.error(err?.message || '替换失败（正文保持原样）')
+      return
+    }
+  } else {
+    form.value.content = fixHtmlQuotes(aiResult.value)
+    ElMessage.success('已用 AI 结果替换正文，确认无误后点「保存」')
+  }
+  mergePatch.value = null
   aiDialog.value = false
-  ElMessage.success('已用 AI 结果替换正文，确认无误后点「保存」')
 }
 
 // 注：打开 AI 对话的唯一入口是右下角常驻的智能体悬浮按钮（顶栏原来的「打开 AI 对话」菜单项
@@ -572,11 +631,113 @@ async function reloadAfterAgentEdit() {
 }
 
 /**
+ * 整篇重写的字数上限（后端 `/api/ai/status` 下发）。超过它就走「分节融入」。
+ *
+ * 刻意**不在前端写死这个数**：阈值只有后端一个来源，前端抄一份必然两边漂移。
+ * 拿不到（请求失败/字段缺失）就当作没有上限 —— 那会退回整篇路径，由后端那道闸门
+ * 给出它自己的提示，与改动前的行为一致。
+ */
+let mergeWholeLimit = null
+async function wholeMergeLimit() {
+  if (mergeWholeLimit == null) {
+    try {
+      const n = Number((await aiApi.status())?.mergeMaxChars)
+      mergeWholeLimit = Number.isFinite(n) && n > 0 ? n : Infinity
+    } catch {
+      mergeWholeLimit = Infinity
+    }
+  }
+  return mergeWholeLimit
+}
+
+/**
+ * 长笔记的分节融入：**先定位、再只改写那一节**。
+ *
+ * 为什么这么做：整篇重写要求模型输出整篇正文，长笔记必然撞输出上限（截断的结果看起来
+ * 还像是完成的）；而分节之后，输出量由"这一节"决定，与整篇多长无关。更关键的是
+ * **其它小节根本不进模型的输出** —— 不是"模型保证不改"，而是"模型没有机会改"。
+ *
+ * 返回改写后的这一节正文；返回 null 表示模型判断"笔记里已经讲过"。
+ * 结果写进 `mergePatch`，等用户在预览里点确认。
+ */
+async function mergeIntoSections({ answer, question }) {
+  const source = form.value.content || ''
+  const title = form.value.title || ''
+  const split = splitNoteSections(source)
+  const { text: outline } = buildNoteOutline(source)
+
+  // ① 定位：只喂大纲（编号 + 标题 + 字数 + 子标题 + 开头一句），输出只有一行 JSON
+  const loc = await aiApi.mergeLocate({ title, outline, question, answer })
+  if (loc?.action === 'covered') return null
+  const reason = loc?.reason ? `定位：${loc.reason}` : ''
+
+  // ② 改写：只喂那一节
+  const index = Number(loc?.index) || 0
+  const target = index > 0 ? split.sections[index - 1] : null
+  const insertNew = !target
+  if (insertNew && !split.sections.length && loc?.action !== 'append') {
+    throw new Error('这篇笔记没有可用的小节，且模型没有给出放置位置，请重试')
+  }
+  if (index > 0 && !target) {
+    throw new Error('模型定位到的小节不存在（笔记可能已改动），请重试')
+  }
+  // 小节本身太大就不再整节重写，只往里加一块（输出同样有界）
+  const mode = !insertNew && target.size > SECTION_REWRITE_MAX ? 'insert' : 'rewrite'
+  const heading = insertNew ? (loc?.heading || '补充') : target.heading
+  const body = insertNew ? '' : target.body
+
+  const done = await aiApi.mergeSectionStream(
+    { title, outline, heading, section: body, question, answer, mode },
+    onAiProgress,
+    aiAbort.signal,
+  )
+  const added = fixHtmlQuotes(done?.content || '')
+  if (!added.trim()) throw new Error('模型没有给出可用的内容，请重试')
+
+  if (insertNew) {
+    mergePatch.value = {
+      kind: 'append-note-section',
+      section: null,
+      heading,
+      mode,
+      reason,
+      before: '',
+      after: added,
+    }
+  } else if (mode === 'insert') {
+    const after = [body.trimEnd(), added.trim()].filter(Boolean).join('\n\n')
+    mergePatch.value = {
+      kind: 'append-section',
+      section: target,
+      heading: target.heading,
+      mode,
+      reason,
+      before: body,
+      after,
+    }
+  } else {
+    mergePatch.value = {
+      kind: 'replace-section',
+      section: target,
+      heading: target.heading,
+      mode,
+      reason,
+      before: body,
+      after: added,
+    }
+  }
+  return mergePatch.value.after
+}
+
+/**
  * 面板要把智能体的回答融入这篇笔记。
  *
- * 这里**不是**往文末追加一段，而是让模型读完**整篇**（`form.content` 是唯一权威的那一份，
- * 可能包含未保存的改动）再产出"把新知识放到合适位置"的新正文，然后在弹窗里给用户预览，
- * 点「替换正文」才写进编辑器 —— 落库仍由用户点「保存」决定。
+ * **短笔记**：让模型读完**整篇**（`form.content` 是唯一权威的那一份，可能包含未保存的改动）
+ * 再产出完整新正文 —— 质量最好，能跨小节去重与重排。
+ * **长笔记**：走 {@link mergeIntoSections}，只改写一节，见那里的说明。
+ *
+ * 两种情况都只在弹窗里给预览，点「替换正文」/「替换本节」才写进编辑器 ——
+ * 落库仍由用户点「保存」决定。
  *
  * 无论成功失败都要回报面板（见 agentNoteMerge.js 的职责划分）：失败时面板把按钮恢复成可重试，
  * 而不是永远显示"已融入"。失败时**正文保持原样**，不做降级追加。
@@ -601,42 +762,57 @@ async function onAgentMerge(e) {
   const expectId = id.value
   aiBusy.value = true
   aiLabel.value = '融入当前笔记'
-  aiHint.value = '整篇一次重写：模型会把回答按结构并进对应小节（或新增合适的小节），产出完整新正文；'
-    + '确认无误后再点「替换正文」，然后点「保存」才会落库。'
   aiResult.value = ''
+  mergePatch.value = null
   aiDialog.value = true
   startAiProgress()
   aiAbort = new AbortController()
   try {
-    const out = await aiApi.mergeNoteStream(
-      {
-        noteId: noteId ? Number(noteId) : undefined,
-        title: form.value.title || '',
-        note: form.value.content || '',
-        question: d.question || '',
-        answer,
-      },
-      onAiProgress,
-      aiAbort.signal,
-    )
-    aiProgress.value.percent = 100
+    const source = form.value.content || ''
+    const question = d.question || ''
+    const sectionPath = source.length > (await wholeMergeLimit())
+    aiHint.value = sectionPath
+      ? '长笔记按小节融入：先把内容定位到某一节（这一步只喂大纲），再只改写那一节；'
+        + '其余部分不经过模型、不会被改动。确认无误后点「替换本节」，再点「保存」才会落库。'
+      : '整篇一次重写：模型会把回答按结构并进对应小节（或新增合适的小节），产出完整新正文；'
+        + '确认无误后再点「替换正文」，然后点「保存」才会落库。'
+    const out = sectionPath
+      ? await mergeIntoSections({ answer, question })
+      : await aiApi.mergeNoteStream(
+        { noteId: noteId ? Number(noteId) : undefined, title: form.value.title || '', note: source, question, answer },
+        onAiProgress,
+        aiAbort.signal,
+      )
+    aiProgress.value = 100
     if (String(expectId) !== String(id.value)) {
       aiDialog.value = false
       ElMessage.warning('期间切换了笔记，已放弃本次融入（正文未改动）')
       reply(false, '期间切换了笔记，已放弃本次融入（正文未改动）')
       return
     }
-    if ((out || '').trim() === (form.value.content || '').trim()) {
+    if (out == null || (!mergePatch.value && (out || '').trim() === source.trim())) {
       aiDialog.value = false
       ElMessage.info('模型认为这条内容已经在笔记里了，未做改动')
       reply(false, '模型认为这条内容已经在笔记里，未做改动')
       return
     }
-    aiResult.value = out
-    // 只回报"预览已生成"：真正替换要等用户点弹窗里的「替换正文」
-    reply(true, '已在笔记页打开融入预览，确认后点「替换正文」')
+    if (!mergePatch.value) aiResult.value = out
+    // 只回报"预览已生成"：真正替换要等用户在弹窗里点确认。文案按补丁种类说 ——
+    // "新增一节"被说成"只替换这一节"，用户会以为正文被换掉了。
+    const patch = mergePatch.value
+    if (patch) {
+      const what = patch.kind === 'replace-section'
+        ? `只替换「${patch.heading}」这一节`
+        : patch.kind === 'append-section'
+          ? `在「${patch.heading}」末尾追加，已有内容不动`
+          : `在末尾新增一节「${patch.heading}」`
+      reply(true, `已在笔记页打开融入预览（${what}），确认后点「${mergeApplyLabel.value}」`)
+    } else {
+      reply(true, '已在笔记页打开融入预览，确认后点「替换正文」')
+    }
   } catch (err) {
     aiDialog.value = false
+    mergePatch.value = null
     const msg = err?.message || 'AI 处理失败'
     if (msg !== '已取消处理') ElMessage.error(msg + '（正文保持原样）')
     reply(false, msg)
@@ -3586,13 +3762,33 @@ onBeforeUnmount(() => {
         <p class="ai-progress-tip">{{ aiHint }}</p>
       </div>
       <div v-else class="ai-preview">
-        <MdPreview :modelValue="fixHtmlQuotes(aiResult) || '*空内容*'" :theme="isDark ? 'dark' : 'light'" previewTheme="github" />
+        <!--
+          分节融入的预览：说清楚**只动哪一节**，并把这一节的前后都摆出来。
+          长笔记下"整篇 before/after"是没法看的（几万字），所以这一档只显示这一节。
+        -->
+        <div v-if="mergePatch" class="ai-patch-head">
+          <span class="ai-patch-what">
+            <template v-if="mergePatch.kind === 'replace-section'">只替换「{{ mergePatch.heading }}」这一节，其余部分不动</template>
+            <template v-else-if="mergePatch.kind === 'append-section'">在「{{ mergePatch.heading }}」这一节末尾追加，已有内容不动</template>
+            <template v-else>在笔记末尾新增一节「{{ mergePatch.heading }}」</template>
+          </span>
+          <span v-if="mergePatch.reason" class="ai-patch-why">{{ mergePatch.reason }}</span>
+        </div>
+        <details v-if="mergePatch && mergePatch.before" class="ai-patch-before">
+          <summary>展开这一节的原文（{{ mergePatch.before.length }} 字）对比</summary>
+          <pre>{{ mergePatch.before }}</pre>
+        </details>
+        <MdPreview
+          :modelValue="fixHtmlQuotes(mergePatch ? mergePatch.after : aiResult) || '*空内容*'"
+          :theme="isDark ? 'dark' : 'light'"
+          previewTheme="github"
+        />
       </div>
       <template #footer>
         <el-button v-if="aiBusy" @click="cancelAiProcess">取消处理</el-button>
         <template v-else>
           <el-button @click="aiDialog = false">取消</el-button>
-          <el-button type="primary" @click="aiApply">替换正文</el-button>
+          <el-button type="primary" @click="aiApply">{{ mergeApplyLabel }}</el-button>
         </template>
       </template>
     </el-dialog>
@@ -4637,6 +4833,51 @@ html.dark .ol-item.active {
 }
 .ai-preview :deep(.md-editor-preview) {
   background: transparent;
+}
+
+/* ---- 分节融入：先说清"只动哪一节"，再给这一节的前后 ---- */
+.ai-patch-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding-bottom: 8px;
+  margin-bottom: 10px;
+  border-bottom: 1px dashed var(--app-border);
+}
+
+.ai-patch-what {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-text-1);
+}
+
+.ai-patch-why {
+  font-size: 12px;
+  color: var(--app-text-2);
+}
+
+.ai-patch-before {
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--app-text-2);
+}
+
+.ai-patch-before summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.ai-patch-before pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  max-height: 30vh;
+  overflow: auto;
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--app-surface-2);
+  border-radius: 8px;
 }
 
 /* ---- AI 处理进度（分段串行，按已完成段数推进）---- */

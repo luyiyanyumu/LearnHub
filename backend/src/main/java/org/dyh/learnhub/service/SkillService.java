@@ -51,6 +51,10 @@ public class SkillService {
     public static final String SKILL_BEAUTIFY = "markdown-beautify";
     /** 「融入当前笔记」技能 id：把一条新内容按结构并进已有笔记（不是追加到文末） */
     public static final String SKILL_NOTE_MERGE = "note-merge";
+    /** 「分节融入」第一步：长笔记只给大纲，让模型选定目标小节（输出一个 JSON） */
+    public static final String SKILL_NOTE_MERGE_LOCATE = "note-merge-locate";
+    /** 「分节融入」第二步：只改写被选中的那一节（输出这一节的正文） */
+    public static final String SKILL_NOTE_MERGE_SECTION = "note-merge-section";
 
     /** 显式配置的技能目录（留空则按候选顺序自动探测） */
     @Value("${learnhub.skills-dir:}")

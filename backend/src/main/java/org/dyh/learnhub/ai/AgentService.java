@@ -160,8 +160,14 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
         return polish(text, mode, null);
     }
 
-    /** 「融入当前笔记」的笔记正文长度上限：整篇一次重写，超了必然被输出上限截断 */
-    private static final int MERGE_MAX_CHARS = 16000;
+    /**
+     * 「融入当前笔记」**整篇一次重写**的字数上限：超了必然被输出上限截断。
+     *
+     * <p>超过它的笔记走「分节融入」（{@link #locateMergeSection} + {@link #mergeIntoSection}）：
+     * 那条路只输出一节，输出量与被融入的笔记多长无关。这个值同时下发给前端（`/api/ai/status`
+     * 的 `mergeMaxChars`），让"什么时候切分节路径"只有一个来源。
+     */
+    public static final int MERGE_MAX_CHARS = 16000;
 
     /**
      * 把「新内容」（通常是一条智能体回答）**按结构融入**原笔记，返回完整的新正文。
@@ -241,6 +247,180 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
 
     /** 融入结果的长度下界（技能 frontmatter 的 min_ratio 优先） */
     private static final double MERGE_MIN_RATIO = 0.9;
+
+    /**
+     * 「分节融入」第一步：从**大纲**里挑出该融入的小节。
+     *
+     * <p>为什么要有这一步：{@link #mergeIntoNote} 要模型输出整篇，长笔记必然撞输出上限，
+     * 所以那种笔记原来只能被闸门拒绝。但"放哪儿"只看结构就够 —— 输入侧从来不是瓶颈，
+     * 这一趟只喂大纲（标题 + 字数 + 子标题 + 开头一句），输出只有一行 JSON。
+     *
+     * <p>返回 {@code {action, index, heading, reason}}，其中 {@code action}：
+     * <ul>
+     *   <li>{@code merge} —— 并进第 {@code index} 节（下一步只重写那一节）；</li>
+     *   <li>{@code append} —— 在第 {@code index} 节之后新增一节（{@code index=0} 表示整篇末尾，
+     *       笔记没有可用分节时走这条）；{@code heading} 是自拟标题；</li>
+     *   <li>{@code covered} —— 笔记里已经讲过，不必融入。</li>
+     * </ul>
+     *
+     * <p>解析不出来就**报错**，不猜一个位置：猜错位置的后果是把内容塞进不相干的小节，
+     * 而用户从预览里很难发现（与"技能缺失就报错、不静默回退"是同一条原则）。
+     */
+    public Map<String, Object> locateMergeSection(String title, String outline, String question, String answer) {
+        ensureConfigured();
+        String map = outline == null ? "" : outline.trim();
+        String add = answer == null ? "" : answer.trim();
+        if (!StringUtils.hasText(map)) {
+            throw new IllegalStateException("笔记大纲为空，无法定位目标小节");
+        }
+        if (!StringUtils.hasText(add)) {
+            throw new IllegalStateException("没有可融入的内容（回答为空）");
+        }
+        String system = skillService.prompt(SkillService.SKILL_NOTE_MERGE_LOCATE);
+
+        StringBuilder user = new StringBuilder();
+        if (StringUtils.hasText(title)) {
+            user.append("【笔记标题】\n").append(title.trim()).append("\n\n");
+        }
+        user.append("【笔记大纲】（编号即 index；正文不提供，也不需要）\n").append(map);
+        user.append("\n\n【要融入的新内容】\n").append(add);
+        if (StringUtils.hasText(question)) {
+            user.append("\n\n【用户当时问的问题】（仅用于判断主题与归属，不必写进笔记）\n")
+                    .append(question.trim());
+        }
+        user.append("\n\n【要求】只输出一个 JSON："
+                    + "{\"action\":\"merge|append|covered\",\"index\":0,\"heading\":\"\",\"reason\":\"\"}");
+        try {
+            DeepSeekClient.ChatResult replyResult = chatOnce(
+                    List.of(msg("system", system), msg("user", user.toString())), null, true,
+                    Duration.ofMillis(ROUND_BUDGET_MS));
+            String raw = stripFence(replyResult.message().path("content").asText("").trim());
+            return parseLocateResult(raw);
+        } catch (IllegalStateException e) {
+            throw e;
+        } catch (HttpTimeoutException e) {
+            throw new IllegalStateException("AI 请求超时（本轮剩余时间不足）。可以把「思考模式」切为「关闭」后重试。");
+        } catch (Exception e) {
+            log.error("定位融入小节失败", e);
+            throw new IllegalStateException("AI 服务异常: " + e.getMessage());
+        }
+    }
+
+    /** 解析定位结果；action 不认识、编号缺失都直接报错，绝不猜位置 */
+    private Map<String, Object> parseLocateResult(String raw) {
+        String t = raw == null ? "" : raw.trim();
+        int s = t.indexOf('{');
+        int e = t.lastIndexOf('}');
+        if (s < 0 || e <= s) {
+            throw new IllegalStateException("定位失败：模型没有返回 JSON，请重试");
+        }
+        JsonNode n;
+        try {
+            n = objectMapper.readTree(t.substring(s, e + 1));
+        } catch (Exception ex) {
+            throw new IllegalStateException("定位失败：模型返回的 JSON 无法解析，请重试");
+        }
+        String action = n.path("action").asText("").trim().toLowerCase();
+        if (!Set.of("merge", "append", "covered").contains(action)) {
+            throw new IllegalStateException("定位失败：模型给的动作不认识（" + action + "），请重试");
+        }
+        int index = n.path("index").asInt(0);
+        if ("merge".equals(action) && index <= 0) {
+            throw new IllegalStateException("定位失败：模型没有给出有效的小节编号，请重试");
+        }
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("action", action);
+        out.put("index", index);
+        out.put("heading", n.path("heading").asText("").trim());
+        out.put("reason", n.path("reason").asText("").trim());
+        return out;
+    }
+
+    /**
+     * 「分节融入」第二步：只改写被选中的那一节，输出这一节的**正文**（不含标题行）。
+     *
+     * <p>这是"长笔记也能融入"的关键：输出量由这一节决定，与整篇多长无关。整篇的其它部分
+     * 由前端按区间贴补丁，**根本不经过模型**，所以不可能被改写或截断掉 —— 这比整篇重写更安全，
+     * 不只是"能用"（整篇重写时模型漏写一节，产出仍然是一篇看起来完整的笔记）。
+     *
+     * @param mode {@code rewrite} 整节重写；{@code insert} 只产出要新增的子小节（该节本身太大时）
+     */
+    public String mergeIntoSection(String title, String outline, String heading, String section,
+                                   String question, String answer, String mode) {
+        ensureConfigured();
+        String body = section == null ? "" : section;
+        String add = answer == null ? "" : answer.trim();
+        String head = heading == null ? "" : heading.trim();
+        boolean insert = "insert".equalsIgnoreCase(mode == null ? "" : mode.trim());
+        if (!StringUtils.hasText(add)) {
+            throw new IllegalStateException("没有可融入的内容（回答为空）");
+        }
+        String system = skillService.prompt(SkillService.SKILL_NOTE_MERGE_SECTION);
+
+        StringBuilder user = new StringBuilder();
+        // insert 有两种来路：**已有一节太大**（只追加一块，块自带 ### 小标题），
+        // 与**新建一整节**（标题由外层给，正文里不要重复写标题行）。两者要求不同，必须说清。
+        String modeLine;
+        if (!insert) {
+            modeLine = "rewrite —— 输出改写后的整节正文（含本节原有的全部内容）";
+        } else if (StringUtils.hasText(body)) {
+            modeLine = "insert —— 这一节已经太大，不允许整节重写：只输出要**追加到这一节末尾**的新增内容"
+                    + "（一个 `###` 小标题 + 它的正文）；不要重复已有内容，也不要改动任何已有句子";
+        } else {
+            modeLine = "insert —— 这是新建的空节：只输出它的正文（**不要写标题行**），不要用 ``` 包起来";
+        }
+        user.append("本次模式：").append(modeLine).append('\n');
+        if (StringUtils.hasText(title)) {
+            user.append("\n【笔记标题】\n").append(title.trim()).append('\n');
+        }
+        String map = outline == null ? "" : outline.trim();
+        if (StringUtils.hasText(map)) {
+            user.append("\n【笔记大纲】（只用于判断这一节在整篇里的位置与命名风格，不要输出其它小节）\n")
+                    .append(map).append('\n');
+        }
+        user.append("\n【目标小节】## ").append(head).append('\n');
+        user.append(StringUtils.hasText(body) ? body : "（这一节目前还没有正文）");
+        user.append("\n\n【要融入的新内容】\n").append(add);
+        if (StringUtils.hasText(question)) {
+            user.append("\n\n【用户当时问的问题】（仅用于判断主题与放置位置）\n").append(question.trim());
+        }
+        user.append("\n\n【要求】只输出这一节的正文 Markdown：不要写小节标题行、"
+                    + "不要用 ``` 把整节包起来、不要任何说明文字。");
+        try {
+            DeepSeekClient.ChatResult replyResult = chatOnce(
+                    List.of(msg("system", system), msg("user", user.toString())), null, true,
+                    Duration.ofMillis(ROUND_BUDGET_MS));
+            String result = stripFence(replyResult.message().path("content").asText("").trim());
+            if (!StringUtils.hasText(result)) {
+                throw new IllegalStateException("AI 未返回有效内容，请稍后重试");
+            }
+            // 闸门①：不能比原小节短 —— 短了就是丢了这一节的信息（空小节 / 极短小节不判）
+            double minRatio = skillService.minRatio(SkillService.SKILL_NOTE_MERGE_SECTION, MERGE_MIN_RATIO);
+            int oldLen = body.trim().length();
+            if (!insert && oldLen >= 120 && result.length() < oldLen * minRatio) {
+                throw new IllegalStateException(String.format(
+                        "模型输出疑似丢了内容（原小节 %d 字 → 结果 %d 字，下界 %.0f%%），已放弃本次改动。"
+                        + "可重试一次，或改用「复制」手动贴到对应小节。",
+                        oldLen, result.length(), minRatio * 100));
+            }
+            // 闸门②：不能长得离谱 —— 远超"原小节 + 新内容"的和，多半是自己重写了一段
+            String base = insert ? add : body;
+            long ceiling = (long) ((base.length() + add.length()) * 3L + 4000);
+            if (result.length() > ceiling) {
+                throw new IllegalStateException(String.format(
+                        "模型输出远超预期（这一节 %d 字 + 新内容 %d 字 → 结果 %d 字），疑似自己重写了一段，已放弃。",
+                        base.length(), add.length(), result.length()));
+            }
+            return result;
+        } catch (IllegalStateException e) {
+            throw e;
+        } catch (HttpTimeoutException e) {
+            throw new IllegalStateException("AI 请求超时（本轮剩余时间不足）。可以把「思考模式」切为「关闭」后重试。");
+        } catch (Exception e) {
+            log.error("分节融入失败", e);
+            throw new IllegalStateException("AI 服务异常: " + e.getMessage());
+        }
+    }
 
     /** 模型偶尔会把整篇包进 ``` 围栏：剥掉它，否则正文里会多出一层代码块 */
     static String stripFence(String md) {
@@ -1669,7 +1849,14 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                 : exist.getTags().stream().map(t -> t.getId()).toList());
         noteService.update(id, dto);
         events.add("已追加到笔记《" + exist.getTitle() + "》#" + id + "（+" + md.length() + " 字）");
-        return "{\"ok\":true,\"note_id\":" + id + ",\"appended_chars\":" + md.length() + "}";
+        ObjectNode out = objectMapper.createObjectNode();
+        out.put("ok", true);
+        out.put("note_id", id);
+        out.put("appended_chars", md.length());
+        // 关键：告诉界面"这篇笔记的库中正文变了"。少了它，开着的编辑页会在下一次保存时
+        // 用旧正文把刚追加的内容整段覆盖掉（见 noteWriteNotice 的说明）。
+        out.set("noteEdit", noteWriteNotice(id, exist.getTitle()));
+        return out.toString();
     }
     private String updateNote(JsonNode args, List<String> events) {
         long id = args.path("note_id").asLong(0);
@@ -2344,7 +2531,34 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
         out.put("note_id", vo.getId());
         out.put("title", nullTo(vo.getTitle()));
         out.put("category", nullTo(vo.getCategoryName()));
+        // 整篇替换也要通知编辑器（理由见 noteWriteNotice）
+        out.set("noteEdit", noteWriteNotice(vo.getId(), vo.getTitle()));
         return out.toString();
+    }
+
+    /**
+     * 给「整篇替换 / 追加章节」这类写操作补一个与 {@code edit_note} 同形的 {@code noteEdit} 通知。
+     *
+     * <h3>为什么必须有</h3>
+     * 前端只有看到审批响应里有 {@code noteEdit} 才会派发"库中正文已更新"事件给编辑页
+     * （见 `AgentPanel.resolveAction` → `AGENT_NOTE_UPDATED_EVENT`）：
+
+     * <ul>
+     *   <li>编辑页干净 → 自动重新拉取正文，用户能看见智能体刚写进去的东西；</li>
+     *   <li>编辑页有未保存草稿 → 置冲突标记并**拦下保存**，提示先「加载最新正文」。</li>
+     * </ul>
+     *
+     * 而 {@code append_to_note} / {@code update_note} 原先不回这个字段，编辑页就完全不知情，
+     * 它手里那份旧正文会在用户下一次点「保存」时把刚追加的内容整段覆盖掉 ——
+     * 实测踩到：三段追加（+4128/+3784/+1764 字）都在库里写成功了，8 秒后编辑器一次保存全抹掉，
+     * 界面上却还显示着"已确认执行：已追加到笔记…#94"。前端只认 {@code noteId} 和 {@code changed}。
+     */
+    private ObjectNode noteWriteNotice(long noteId, String title) {
+        ObjectNode n = objectMapper.createObjectNode();
+        n.put("noteId", noteId);
+        n.put("title", nullTo(title));
+        n.put("changed", true);
+        return n;
     }
 
     private String nullTo(String s) {

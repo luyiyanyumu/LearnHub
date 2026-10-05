@@ -8,7 +8,9 @@ import org.dyh.learnhub.common.Result;
 import org.dyh.learnhub.dto.AiChatRequest;
 import org.dyh.learnhub.dto.AiPolishRequest;
 import org.dyh.learnhub.dto.AiTestRequest;
+import org.dyh.learnhub.dto.NoteMergeLocateRequest;
 import org.dyh.learnhub.dto.NoteMergeRequest;
+import org.dyh.learnhub.dto.NoteMergeSectionRequest;
 import org.dyh.learnhub.entity.AgentSession;
 import org.dyh.learnhub.service.AgentSessionService;
 import org.dyh.learnhub.service.SkillService;
@@ -85,6 +87,9 @@ public class AiController {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("configured", agentService.isConfigured());
         m.put("model", agentService.model());
+        // 整篇重写的字数上限（超过就走"分节融入"）。**下发给前端**是刻意的：
+        // 阈值只有这一个来源，前端不用把这个常量抄一份（抄了就会各自漂移）。
+        m.put("mergeMaxChars", AgentService.MERGE_MAX_CHARS);
         return Result.ok(m);
     }
 
@@ -199,9 +204,57 @@ public class AiController {
         return emitter;
     }
 
+    /**
+     * 「分节融入」第一步：长笔记只给大纲，让模型选定目标小节。
+     *
+     * <p>不进 SSE：输出只有一行 JSON，但要等一次模型调用（思考型模型可能几十秒），
+     * 所以走普通 JSON 接口 + 前端统一超时，不用为它再开一条流。
+     */
+    @PostMapping("/note-merge-locate")
+    public Result<Map<String, Object>> noteMergeLocate(@Valid @RequestBody NoteMergeLocateRequest req) {
+        return Result.ok(agentService.locateMergeSection(
+                req.getTitle(), req.getOutline(), req.getQuestion(), req.getAnswer()));
+    }
+
+    /**
+     * 「分节融入」第二步：只改写被选中的那一节（流式）。
+     *
+     * <p>产出的是**这一节的正文**（不含标题行），由前端按区间贴回正文并预览 ——
+     * 整篇的其它部分不经过模型，也不会被改动。这是"长笔记也能融入"的落地方式：
+     * 输出量由这一节决定，与整篇多长无关。
+     */
+    @PostMapping(value = "/note-merge-section-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter noteMergeSectionStream(@Valid @RequestBody NoteMergeSectionRequest req) {
+        SseEmitter emitter = new SseEmitter(320_000L);
+        String mode = StringUtils.hasText(req.getMode()) ? req.getMode().trim() : "rewrite";
+
+        polishStreamPool.execute(() -> {
+            try {
+                // 只改一节，同样只有一个进度点（前端显示不确定态 + 已用时间）
+                send(emitter, "progress", Map.of("stage", "start", "total", 1));
+                String out = agentService.mergeIntoSection(req.getTitle(), req.getOutline(), req.getHeading(),
+                        req.getSection(), req.getQuestion(), req.getAnswer(), mode);
+                Map<String, Object> done = new LinkedHashMap<>();
+                done.put("content", out == null ? "" : out);
+                done.put("heading", req.getHeading() == null ? "" : req.getHeading());
+                done.put("mode", mode);
+                send(emitter, "done", done);
+            } catch (Exception e) {
+                String msg = e.getMessage() == null ? "AI 服务异常" : e.getMessage();
+                log.warn("分节融入失败: {}", msg);
+                send(emitter, "failed", Map.of("message", msg));
+            } finally {
+                emitter.complete();
+            }
+        });
+
+        return emitter;
+    }
+
     @PostMapping("/chat")
     public Result<AiChatVO> chat(@Valid @RequestBody AiChatRequest req) {
-        return Result.ok(agentService.chat(req));    }
+        return Result.ok(agentService.chat(req));
+    }
 
     /**
      * 会话回看：把事件日志投影成「气泡列表」返回。

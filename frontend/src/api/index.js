@@ -106,13 +106,41 @@ async function mergeNoteStream(data, onEvent, signal) {
 }
 
 /**
- * 流式 POST 的公共实现（润色 / 融入笔记共用）。
+ * 「分节融入」两步（长笔记走这条，短笔记仍走上面的整篇重写）。
+ *
+ * 第一步只喂**大纲**（分节工具生成），拿回一个编号 —— 输出极小，所以定位这一步很便宜。
+ * 第二步只喂**那一节**，拿回改写后的这一节正文。整篇的其它部分不经过模型，
+ * 由 noteSections.applySectionPatch 按区间贴回去。
+ *
+ * @param {{title?:string,outline:string,question?:string,answer:string}} data
+ * @returns {Promise<{action:'merge'|'append'|'covered',index:number,heading:string,reason:string}>}
+ */
+async function mergeLocate(data) {
+  const res = await request.post('/ai/note-merge-locate', data, { timeout: AI_TIMEOUT })
+  return res
+}
+
+/**
+ * 第二步：改写指定小节（SSE）。返回整个 done 负载 `{content, heading, mode}` ——
+ * content 是这一节的**正文**（不含标题行）。
+ *
+ * @param {{title?:string,outline?:string,heading:string,section:string,question?:string,answer:string,mode?:'rewrite'|'insert'}} data
+ */
+async function mergeSectionStream(data, onEvent, signal) {
+  return streamPost('/api/ai/note-merge-section-stream', data, onEvent, signal, true)
+}
+
+/**
+ * 流式 POST 的公共实现（润色 / 融入笔记 / 分节融入共用）。
  *
  * 为什么不用 axios：要逐段读响应流；而 axios 的响应拦截器做的是「一次性 json 解包 + 统一报错」，
  * 对 SSE 不适用。所以这里用 fetch 手工读流，并**自行复刻拦截器的报错文案**
  * （err.response.data.msg → err.message → '网络错误'），保证错误提示风格与其他接口一致。
+ *
+ * @param {boolean} [wantPayload] true = 返回 `done` 事件的**整个负载**（分节融入要拿 heading/mode），
+ *                               默认只返回 content 字符串（润色/整体融入只要正文）
  */
-async function streamPost(path, data, onEvent, signal) {
+async function streamPost(path, data, onEvent, signal, wantPayload = false) {
   let resp
   try {
     resp = await fetch(path, {
@@ -143,6 +171,7 @@ async function streamPost(path, data, onEvent, signal) {
   const decoder = new TextDecoder()
   let buf = ''
   let content = ''
+  let donePayload = null
   let failure = null
 
   for (;;) {
@@ -166,14 +195,16 @@ async function streamPost(path, data, onEvent, signal) {
       } catch {
         continue // 半截 JSON（极少见）直接跳过，不影响最终结果
       }
-      if (event === 'done') content = payload.content || ''
-      else if (event === 'failed') failure = payload.message || 'AI 服务异常'
+      if (event === 'done') {
+        content = payload.content || ''
+        donePayload = payload
+      } else if (event === 'failed') failure = payload.message || 'AI 服务异常'
       else onEvent?.(event, payload)
     }
   }
 
   if (failure) throw new Error(failure)
-  return content
+  return wantPayload ? (donePayload || { content }) : content
 }
 
 export const aiApi = {
@@ -185,6 +216,10 @@ export const aiApi = {
   polishStream: (data, onEvent, signal) => polishStream(data, onEvent, signal),
   /** 把智能体的回答融入当前笔记（SSE，整篇重写；调用方预览后由用户决定是否替换正文） */
   mergeNoteStream: (data, onEvent, signal) => mergeNoteStream(data, onEvent, signal),
+  /** 分节融入第一步：只喂大纲，拿回目标小节编号（长笔记用；输出极小） */
+  mergeLocate: (data) => mergeLocate(data),
+  /** 分节融入第二步：只改写那一节（SSE；返回 {content, heading, mode}） */
+  mergeSectionStream: (data, onEvent, signal) => mergeSectionStream(data, onEvent, signal),
   /** 智能体对话：{ message, sessionId, history?, noteId?, noteTitle?, noteContext? } → AiChatVO（最多 8 轮工具调用，耗时叠加） */
   chat: (data) => request.post('/ai/chat', data, { timeout: AI_TIMEOUT }),
   /** 会话回看：把事件日志投影成气泡列表（刷新页面后靠它恢复对话） */
