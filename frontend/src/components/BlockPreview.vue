@@ -156,7 +156,8 @@ function readTableContext(ed) {
 }
 
 function refreshTableContext() {
-  tableContext.value = readTableContext(editor.value)
+  // 只读渲染不显示表格工具栏：这里直接清空，避免只读场景还去读选区/算表格上下文
+  tableContext.value = props.readonly ? null : readTableContext(editor.value)
 }
 
 function selectCurrentCell() {
@@ -188,7 +189,18 @@ const ExcelTableNavigation = Extension.create({
   },
 })
 
-const props = defineProps({ content: { type: String, default: '' }, linkBase: { type: String, default: '' } })
+/**
+ * readonly：只读渲染（速查卡这类"只读预览"用）。
+ *   关掉编辑能力与编辑期配件（块手柄、表格工具栏、粘贴清洗、代码块的语言下拉），
+ *   但保留代码块头部（语言 / 复制 / 折叠）与行号 —— 只读场景同样要能选中、复制命令。
+ * compact：紧凑档排版（280px 宽的索引卡里用），整套字号与间距降一档。
+ */
+const props = defineProps({
+  content: { type: String, default: '' },
+  linkBase: { type: String, default: '' },
+  readonly: { type: Boolean, default: false },
+  compact: { type: Boolean, default: false },
+})
 const emit = defineEmits(['update', 'outline'])
 const editor = shallowRef(null)
 const previewRoot = ref(null)
@@ -255,6 +267,7 @@ function mapToolbarTargets({ transaction }) {
 
 function handleTransaction(payload) {
   mapToolbarTargets(payload)
+  if (props.readonly) return
   refreshTableContext()
 }
 
@@ -271,7 +284,7 @@ function focusToolbarSelection(ed) {
 
 function runTool(name, arg) {
   const ed = editor.value
-  if (!ed || ed.isDestroyed) return false
+  if (!ed || ed.isDestroyed || props.readonly) return false
   captureCodeFocus({ target: document.activeElement })
   let applied = false
   if (name === 'markdown') {
@@ -285,7 +298,7 @@ function runTool(name, arg) {
 
 function applyFormat(format) {
   const ed = editor.value
-  if (!ed || ed.isDestroyed) return false
+  if (!ed || ed.isDestroyed || props.readonly) return false
   captureCodeFocus({ target: document.activeElement })
   const applied = applyBlockFormat(ed, format)
   if (applied) focusToolbarSelection(ed)
@@ -295,7 +308,7 @@ function applyFormat(format) {
 /** Dialogs retain a mapped selection instead of reading a caret after focus moves. */
 function captureToolbarTarget() {
   const ed = editor.value
-  if (!ed || ed.isDestroyed) return null
+  if (!ed || ed.isDestroyed || props.readonly) return null
   captureCodeFocus({ target: document.activeElement })
   const selection = ed.state.selection
   const target = { bookmark: selection.getBookmark(), from: selection.from, to: selection.to, storedMarks: ed.state.storedMarks, invalid: false }
@@ -330,7 +343,7 @@ function captureToolbarTarget() {
 
 function captureCodeFocus(event) {
   const ed = editor.value
-  if (!ed || !event.target?.closest?.('.code-block-cm')) return
+  if (!ed || props.readonly || !event.target?.closest?.('.code-block-cm')) return
   const block = findActionBlock(ed.view, event.target)
   if (!block || block.node.type.name !== 'codeBlock') return
   if (ed.state.selection instanceof NodeSelection && ed.state.selection.from === block.pos) return
@@ -385,7 +398,7 @@ function refreshDataLines(markdown) {
 }
 
 function syncDown() {
-  if (!editor.value) return
+  if (!editor.value || props.readonly) return
   const markdown = previewHtmlToMd(editor.value.getHTML())
   if (markdown === lastEmitted) return
   lastEmitted = markdown
@@ -395,7 +408,7 @@ function syncDown() {
 
 onMounted(() => {
   editor.value = new Editor({
-    editable: true,
+    editable: !props.readonly,
     extensions: [StarterKit.configure({ codeBlock: false, underline: false, link: { openOnClick: false } }), CodeBlockCm, Callout, Details, Summary, Underline, Superscript, Subscript, Highlight, FontStyle, TableKit, ExcelTableNavigation, DataLineAttr, BlockMeta, HeadingAnchorAttr, ToolbarAttrs, InlineImage, TaskList, EditableTaskItem],
     content: renderContent(props.content),
     editorProps: {
@@ -411,11 +424,12 @@ onMounted(() => {
     onSelectionUpdate: refreshTableContext,
   })
   lastEmitted = props.content || ''
-  refreshTableContext()
+  if (!props.readonly) refreshTableContext()
   window.addEventListener('hashchange', hashChanged)
   // 带格式粘贴的前置清洗。**必须用捕获阶段**：ProseMirror 的粘贴处理挂在 .tiptap（事件目标）上，
   // 冒泡阶段再改 clipboardData 就晚了（它已经读完剪贴板）。捕获阶段先跑，改完的 HTML 才轮到它读。
-  previewRoot.value?.addEventListener('paste', onBlockPasteCapture, true)
+  // 只读渲染没有输入路径，不挂这条（既省事，也避免给卡片挂上编辑器专属的监听）。
+  if (!props.readonly) previewRoot.value?.addEventListener('paste', onBlockPasteCapture, true)
   nextTick(revealLinkedBlock)
 })
 onBeforeUnmount(() => {
@@ -458,10 +472,28 @@ watch(
     nextTick(revealLinkedBlock)
   },
 )
+// 只读开关中途变化（同一个组件实例被复用）时，跟着切换编辑能力，避免留下可写视图
+watch(
+  () => props.readonly,
+  (v) => {
+    const ed = editor.value
+    if (!ed || ed.isDestroyed) return
+    ed.setEditable(!v)
+    if (v) actions.value?.close()
+    refreshTableContext()
+  },
+)
 </script>
 
 <template>
-  <div ref="previewRoot" class="block-preview" @focusin="captureCodeFocus" @pointermove="actions?.hover($event)" @pointerleave="actions?.leave()">
+  <div
+    ref="previewRoot"
+    class="block-preview"
+    :class="{ 'is-readonly': readonly, 'is-compact': compact }"
+    @focusin="captureCodeFocus"
+    @pointermove="readonly ? null : actions?.hover($event)"
+    @pointerleave="readonly ? null : actions?.leave()"
+  >
     <div v-if="tableContext" class="block-table-toolbar" role="toolbar" aria-label="表格编辑工具" @mousedown.prevent>
       <span class="block-table-label">
         {{ tableContext.cellSelection ? `已选 ${tableContext.selectedRows}×${tableContext.selectedCols}` : `单元格 ${tableContext.row + 1}/${tableContext.rows} · ${tableContext.col + 1}/${tableContext.cols}` }}
@@ -478,7 +510,7 @@ watch(
       <button type="button" title="拆分当前合并单元格" :disabled="!tableContext.canSplit" @click="runTableCommand('splitCell')">拆分单元格</button>
     </div>
     <EditorContent :editor="editor" />
-    <BlockActionMenu v-if="editor" ref="actions" :editor="editor" :host="previewRoot" :link-base="linkBase" @outline="emit('outline', $event)" />
+    <BlockActionMenu v-if="editor && !readonly" ref="actions" :editor="editor" :host="previewRoot" :link-base="linkBase" @outline="emit('outline', $event)" />
   </div>
 </template>
 
@@ -531,4 +563,63 @@ watch(
 .block-preview :deep(.tiptap li[data-type="taskItem"] > div) { flex: 1; min-width: 0; }
 .block-preview :deep(.tiptap li[data-type="taskItem"] > div > p) { margin: 0; }
 .block-preview :deep(.tiptap li[data-type="taskItem"] input[type="checkbox"]) { accent-color: var(--app-brand); cursor: pointer; }
+
+/* ============================================================
+   紧凑档（compact）：速查卡那种 280px 宽的索引卡里用。
+   默认那套是给笔记页/A4 宽栏调的（15px/1.8、标题按 --md-h* 铺开、表格 100% 宽），
+   放进小卡里会又挤又乱 —— 这里整体降一档、去掉页面级留白，并收紧块间距。
+   与 md-editor 时代的「卡片迷你排版」保持同一套尺度，视觉上是同一个东西的两种渲染。
+   ============================================================ */
+.block-preview.is-compact :deep(.tiptap) {
+  font-size: 12.5px;
+  line-height: 1.7;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* !important 是必须的：默认那套标题字号也带 !important（复用 style.css 的 --md-h*），
+   紧凑档靠特异性 + !important 才能胜过它。 */
+.block-preview.is-compact :deep(.tiptap h1),
+.block-preview.is-compact :deep(.tiptap h2),
+.block-preview.is-compact :deep(.tiptap h3),
+.block-preview.is-compact :deep(.tiptap h4),
+.block-preview.is-compact :deep(.tiptap h5),
+.block-preview.is-compact :deep(.tiptap h6) {
+  font-size: 13px !important;
+  line-height: 1.4;
+  margin: 0.5em 0 0.25em;
+}
+
+.block-preview.is-compact :deep(.tiptap p) { margin: 0.3em 0; }
+.block-preview.is-compact :deep(.tiptap ul),
+.block-preview.is-compact :deep(.tiptap ol) { margin: 0.25em 0; padding-left: 1.05em; }
+.block-preview.is-compact :deep(.tiptap li) { margin: 0.1em 0; }
+.block-preview.is-compact :deep(.tiptap blockquote) { margin: 0.3em 0; padding-left: 0.65em; }
+.block-preview.is-compact :deep(.tiptap hr) { margin: 0.6em 0; }
+.block-preview.is-compact :deep(.tiptap img) { max-width: 100%; }
+
+/* 表格不在卡里横竖滚动，按内容撑开、被卡片裁掉即可（放大后看全） */
+.block-preview.is-compact :deep(.tiptap table) {
+  width: max-content;
+  min-width: 100%;
+  margin: 0.3em 0;
+  font-size: 0.97em;
+}
+.block-preview.is-compact :deep(.tiptap th),
+.block-preview.is-compact :deep(.tiptap td) {
+  padding: 0.2em 0.5em;
+  white-space: nowrap;
+}
+
+/* 代码块：外边距收紧；CodeMirror 的字号要写到组件内部的 .cm-editor 上 */
+.block-preview.is-compact :deep(.code-block-cm) { margin: 0.4em 0; border-radius: 8px; }
+.block-preview.is-compact :deep(.code-block-cm-host .cm-editor),
+.block-preview.is-compact :deep(.code-block-cm-host .cm-editor .cm-scroller),
+.block-preview.is-compact :deep(.code-block-cm-host .cm-editor .cm-content),
+.block-preview.is-compact :deep(.code-block-cm-host .cm-editor .cm-gutters) {
+  font-size: 12.5px;
+}
+.block-preview.is-compact :deep(.code-block-cm .cm-head) { gap: 6px; padding: 3px 8px; }
+
 </style>

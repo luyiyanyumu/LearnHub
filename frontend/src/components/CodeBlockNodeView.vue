@@ -17,6 +17,14 @@ let languageVersion = 0
 
 const LANGS = ['python', 'java', 'javascript', 'typescript', 'vue', 'html', 'css', 'json', 'yaml', 'xml', 'sql', 'go', 'rust', 'c', 'cpp', 'csharp', 'php', 'ruby', 'kotlin', 'markdown', 'plaintext']
 
+/**
+ * 只读渲染（速查卡这类只读预览）：语言控件从下拉换成静态标签，CodeMirror 关掉编辑。
+ * 取编辑器的 options.editable 而不是 isEditable —— node view 是在 EditorView 构造期间创建的，
+ * 那一刻 editor.view 还没赋值，isEditable 会返回 undefined。
+ * 行号、复制、折叠全部保留：只读场景照样要能看清、能选中复制命令。
+ */
+const readonly = props.editor?.options?.editable === false
+
 const LANG_LOADERS = {
   python: () => import('@codemirror/lang-python').then((m) => m.python()),
   java: () => import('@codemirror/lang-java').then((m) => m.java()),
@@ -67,6 +75,9 @@ onMounted(async () => {
       bracketMatching(),
       keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
       EditorView.lineWrapping,
+      // 只读时连 CodeMirror 一起锁住（否则卡片里的代码块还能改，改完却无处可存）
+      EditorState.readOnly.of(readonly),
+      EditorView.editable.of(!readonly),
       langComp.of(language),
       EditorView.updateListener.of((u) => { if (u.docChanged) props.updateAttributes({ code: u.state.doc.toString() }) }),
     ],
@@ -97,9 +108,11 @@ onBeforeUnmount(() => { disposed = true; view.value?.destroy(); view.value = nul
 <template>
   <NodeViewWrapper class="code-block-cm" :class="{ 'is-selected': selected }" :data-line="node.attrs.dataLine || null">
     <div class="cm-head" contenteditable="false">
-      <select class="cm-lang" :value="node.attrs.language || ''" @change="changeLang" @mousedown.stop @click.stop>
+      <select v-if="!readonly" class="cm-lang" :value="node.attrs.language || ''" @change="changeLang" @mousedown.stop @click.stop>
         <option v-for="l in LANGS" :key="l" :value="l">{{ l }}</option>
       </select>
+      <!-- 只读时语言是静态标签：没有语言就不显示（跟下拉没选中时的空白一致） -->
+      <span v-else-if="node.attrs.language" class="cm-lang-text">{{ node.attrs.language }}</span>
       <span class="cm-head-spacer" />
       <button class="cm-btn" type="button" @mousedown.stop @click.stop="copyCode">{{ copied ? '已复制' : '复制代码' }}</button>
       <button class="cm-btn" type="button" @mousedown.stop @click.stop="collapsed = !collapsed">{{ collapsed ? '展开' : '折叠' }}</button>
@@ -113,6 +126,8 @@ onBeforeUnmount(() => { disposed = true; view.value?.destroy(); view.value = nul
 .code-block-cm.is-selected { border-color: var(--app-brand); }
 .cm-head { display: flex; align-items: center; gap: 8px; padding: 4px 10px; border-bottom: 1px solid var(--app-border-weak); }
 .cm-lang { font: 12px/1 ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--app-text-2); background: transparent; border: 1px solid var(--app-border-weak); border-radius: 5px; padding: 2px 4px; cursor: pointer; }
+/* 只读态的语言标签：去掉下拉的边框与光标感，其余与下拉的字体/颜色一致 */
+.cm-lang-text { font: 12px/1 ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--app-text-2); padding: 2px 2px; user-select: none; }
 .cm-head-spacer { flex: 1; }
 .cm-btn { font-size: 12px; color: var(--app-text-2); background: transparent; border: 0; border-radius: 5px; padding: 2px 8px; cursor: pointer; }
 .cm-btn:hover { background: color-mix(in srgb, var(--app-text-1) 8%, transparent); color: var(--app-text-1); }

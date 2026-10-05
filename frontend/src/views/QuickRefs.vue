@@ -1,12 +1,11 @@
 <script setup>
 import { nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { MdPreview } from 'md-editor-v3'
-// 编辑器全局初始化 + 样式（原来在 main.js，为了不占首屏挪到这里）
-import '../utils/mdEditorSetup'
+// 正文渲染不再走 md-editor（老版预览），改用笔记页那套块编辑器（tiptap）的只读模式：
+// 代码块、提示块、折叠块、表格、任务列表…与笔记里看到的是同一套渲染与同一套样式。
+import BlockPreview from '../components/BlockPreview.vue'
 import { categoryApi, quickRefApi } from '../api'
 import { fixHtmlQuotes } from '../utils/htmlQuotes'
-import { isDark } from '../composables/useTheme'
 
 const loading = ref(false)
 const list = ref([])
@@ -35,7 +34,9 @@ function openView(row) {
  * 点卡片放大。
  * 但要是用户正在卡片里**选字**（速查卡常被用来选中复制命令），就别弹窗打断他。
  */
-function onCardClick(row) {
+function onCardClick(row, ev) {
+  // 代码块（复制 / 折叠 / 选中命令）是它自己的交互区，点它别顺带放大大图
+  if (ev?.target?.closest?.('.code-block-cm')) return
   const sel = window.getSelection?.()?.toString()
   if (sel && sel.trim()) return
   openView(row)
@@ -207,7 +208,7 @@ onBeforeUnmount(() => {
           role="button"
           tabindex="0"
           :aria-label="'放大查看「' + r.title + '」'"
-          @click="onCardClick(r)"
+          @click="onCardClick(r, $event)"
           @keydown.enter.prevent="openView(r)"
           @keydown.space.prevent="openView(r)"
         >
@@ -233,8 +234,8 @@ onBeforeUnmount(() => {
               </el-dropdown>
             </span>
           </div>
-          <div class="ref-body md-mini" :class="{ 'is-clipped': clipped[r.id] }" :data-rid="r.id">
-            <MdPreview :modelValue="fixHtmlQuotes(r.content || '')" :theme="isDark ? 'dark' : 'light'" previewTheme="github" />
+          <div class="ref-body" :class="{ 'is-clipped': clipped[r.id] }" :data-rid="r.id">
+            <BlockPreview :content="fixHtmlQuotes(r.content || '')" readonly compact />
           </div>
           <div class="ref-foot">
             <el-tag v-if="r.categoryName" size="small" type="info">{{ r.categoryName }}</el-tag>
@@ -259,11 +260,7 @@ onBeforeUnmount(() => {
         <span class="ref-time">{{ fmtTime(viewRow?.updatedAt) }}</span>
       </div>
       <div class="view-body">
-        <MdPreview
-          :modelValue="fixHtmlQuotes(viewRow?.content || '*暂无内容*')"
-          :theme="isDark ? 'dark' : 'light'"
-          previewTheme="github"
-        />
+        <BlockPreview :content="fixHtmlQuotes(viewRow?.content || '*暂无内容*')" readonly />
       </div>
       <template #footer>
         <el-button @click="copyContent">复制内容</el-button>
@@ -287,7 +284,10 @@ onBeforeUnmount(() => {
             <el-option v-for="c in categories" :key="c.id" :label="c.name" :value="c.id" />
           </el-select>
         </div>
-        <MdPreview class="dlg-preview" :modelValue="fixHtmlQuotes(form.content || '*暂无内容*')" :theme="isDark ? 'dark' : 'light'" previewTheme="github" />
+        <!-- 实时预览：与卡片/笔记同一套只读渲染器，看到的排版就是要存的排版 -->
+        <div class="dlg-preview">
+          <BlockPreview :content="fixHtmlQuotes(form.content || '*暂无内容*')" readonly compact />
+        </div>
         <el-input
           v-model="form.content"
           type="textarea"
@@ -416,105 +416,9 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 
-/* ---- 迷你排版：全局那套是给笔记页宽栏调的（15px/1.8、表格大内距），
-   放进 280px 卡片就又挤又乱，这里整体降一档并收紧 ---- */
-.ref-body.md-mini :deep(.md-editor-preview.md-editor-preview) {
-  font-size: 12.5px;
-  line-height: 1.7;
-  padding: 0;
-  word-break: normal;
-  overflow-wrap: anywhere;
-}
-
-.ref-body.md-mini :deep(.md-editor-preview.md-editor-preview p) {
-  margin: 0.3em 0;
-}
-
-.ref-body.md-mini :deep(.md-editor-preview.md-editor-preview h1),
-.ref-body.md-mini :deep(.md-editor-preview.md-editor-preview h2),
-.ref-body.md-mini :deep(.md-editor-preview.md-editor-preview h3),
-.ref-body.md-mini :deep(.md-editor-preview.md-editor-preview h4),
-.ref-body.md-mini :deep(.md-editor-preview.md-editor-preview h5),
-.ref-body.md-mini :deep(.md-editor-preview.md-editor-preview h6) {
-  /* !important 是必须的：全站标题字号那条（style.css）也带 !important，
-     而"卡片紧凑模式"是更具体的上下文 —— 靠特异性 + !important 才能胜过它。
-     否则卡片里的标题会跳到 26/21/18px 把小卡撑爆。 */
-  font-size: 13px !important;
-  margin: 0.5em 0 0.25em;
-  padding-bottom: 0;
-  border-bottom: 0;
-  word-break: normal;
-  overflow-wrap: anywhere;
-}
-
-.ref-body.md-mini :deep(.md-editor-preview.md-editor-preview ul),
-.ref-body.md-mini :deep(.md-editor-preview.md-editor-preview ol) {
-  margin: 0.25em 0;
-  padding-left: 1.05em;
-}
-
-.ref-body.md-mini :deep(.md-editor-preview.md-editor-preview li) {
-  margin: 0.1em 0;
-}
-
-.ref-body.md-mini :deep(.md-editor-preview.md-editor-preview blockquote) {
-  margin: 0.3em 0;
-  padding: 0.05em 0.65em;
-}
-
-.ref-body.md-mini :deep(.md-editor-preview.md-editor-preview hr) {
-  margin: 0.6em 0;
-}
-
-.ref-body.md-mini :deep(.md-editor-preview.md-editor-preview code) {
-  font-size: 0.94em;
-}
-
-.ref-body.md-mini :deep(.md-editor-preview.md-editor-preview code:not(.md-editor-code-block)) {
-  padding: 0.08em 0.3em;
-}
-
-/* 表格：不在卡里横竖滚动，按内容撑开被卡片裁掉即可（放大后看全） */
-.ref-body.md-mini :deep(.md-editor-preview.md-editor-preview table) {
-  width: max-content;
-  min-width: 100%;
-  margin: 0.3em 0;
-  overflow: hidden;
-  font-size: 0.97em;
-}
-
-.ref-body.md-mini :deep(.md-editor-preview.md-editor-preview th),
-.ref-body.md-mini :deep(.md-editor-preview.md-editor-preview td) {
-  padding: 0.2em 0.5em;
-  white-space: nowrap;
-}
-
-.ref-body.md-mini :deep(.md-editor-preview.md-editor-preview pre) {
-  margin: 0.3em 0;
-  overflow: hidden;
-}
-
-/* 代码块在卡片里去掉编辑器配件（语言条/复制按钮/行号栏），只留代码本身；
-   这些在放大预览里都还在 */
-.ref-body.md-mini :deep(.md-editor-code-head) {
-  display: none;
-}
-
-.ref-body.md-mini :deep([rn-wrapper]) {
-  display: none;
-}
-
-.ref-body.md-mini :deep(.md-editor-code) {
-  margin: 0.3em 0;
-  overflow: hidden;
-}
-
-/* 主题给代码正文的包装 span 设了 overflow:auto（宽度 100% 却仍会溢出），
-   只压 pre / .md-editor-code 不够 —— 滚动条会画在这个 span 上。
-   卡片里统一裁切，长命令横向滚动留给放大预览。 */
-.ref-body.md-mini :deep(.md-editor-preview.md-editor-preview .md-editor-code pre code .md-editor-code-block) {
-  overflow: hidden;
-}
+/* 正文渲染已换成笔记页那套块编辑器（BlockPreview 只读模式）：
+   卡片的紧凑排版不再写在这里 —— 它是渲染器自己的一个档位（<BlockPreview compact>），
+   与放大预览的 A4 排版共用同一份源码，避免"同一段正文两套迷你样式"再次各改各的。 */
 
 .ref-foot {
   display: flex;
