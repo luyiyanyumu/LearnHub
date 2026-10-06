@@ -452,11 +452,73 @@ function onBlockPasteCapture(e) {
   if (e.shiftKey) return
   const dt = e.clipboardData
   const html = dt?.getData('text/html')
-  if (!html || !hasRichHtml(html)) return
-  const { html: cleaned, droppedImages } = sanitizePastedHtml(html)
-  if (cleaned !== html) dt.setData('text/html', cleaned)
-  if (droppedImages) {
-    ElMessage.info(`已忽略粘贴内容里的 ${droppedImages} 张内嵌大图（base64 太大，会把笔记撑到几百 KB）`)
+  if (html && hasRichHtml(html)) {
+    const { html: cleaned, droppedImages } = sanitizePastedHtml(html)
+    if (cleaned !== html) dt.setData('text/html', cleaned)
+    if (droppedImages) {
+      ElMessage.info(`已忽略粘贴内容里的 ${droppedImages} 张内嵌大图（base64 太大，会把笔记撑到几百 KB）`)
+    }
+  }
+  // 净化之后再看光标在不在标题里（下面会把光标挪走，所以要放在净化之后、且不 return）
+  moveCaretOutOfHeading(dt)
+}
+
+/**
+ * 光标停在**标题**里时粘贴多段内容 —— 把光标挪到标题之后，别让第一段并进标题。
+ *
+ * <h3>为什么要这道</h3>
+ * ProseMirror 的粘贴是"插到当前块的光标处"：光标在标题里，第一段就会跟标题连成同一行，
+ * 于是标题被撑成一句长句。实测（真机复现）：
+ *
+ * <pre>
+ *   原标题：   ## 1.第一小节
+ *   光标在末尾粘两段后：## 1.第一小这是粘贴进来的第一句话。   ← 标题行被撑长
+ *                       这是第二段。节                        ← 光标后面剩下的标题文字被挤到后面
+ * </pre>
+ *
+ * 用户从聊天面板复制回答、粘进一个刚建好的空小节时最容易撞上（标题行本来就是落点）。
+ *
+ * <h3>为什么是"挪光标"而不是"自己接管粘贴"</h3>
+ * 接管就得自己解析剪贴板、自己构造节点，净化、schema 校验、撤销栈、协同状态都得复刻一遍。
+ * 这里只做一件事：必要时在标题之后补一个空段落，把选区移过去，然后**照旧让 ProseMirror
+ * 处理这次粘贴** —— 它按新选区插入，一切都走原生路径。
+ *
+ * 只在"多块内容"时挪：粘一行字进标题是正常的改名操作，不该被打断。
+ */
+function moveCaretOutOfHeading(dt) {
+  const ed = editor.value
+  if (!ed || ed.isDestroyed || props.readonly) return false
+  const { state } = ed
+  const { $from, empty } = state.selection
+  if (!empty) return false                                   // 有选区的粘贴另说
+  if ($from.parent.type.name !== 'heading') return false     // 只管标题
+  if (!isMultiBlockPaste(dt)) return false
+
+  const after = $from.after($from.depth)                     // 标题块之后的位置
+  const tr = state.tr
+  // 一律新起一个空段落当落点：若复用标题后面已有的段落，粘贴内容的**最后一段**会和
+  // 那段原文并成一行（实测："这是第二段。原有正文一句话。"）。新起一段则原文一行都不动。
+  tr.insert(after, state.schema.nodes.paragraph.create())
+  tr.setSelection(TextSelection.near(tr.doc.resolve(after + 1), 1))
+  ed.view.dispatch(tr)
+  return true
+}
+
+/** 这次粘贴是不是"多块内容"（多段 / 列表 / 表格）—— 单行不进标题保护 */
+function isMultiBlockPaste(dt) {
+  if (!dt) return false
+  const text = dt.getData('text/plain') || ''
+  if (/\n[ \t]*\n/.test(text)) return true                  // 纯文本里就已经是两段以上
+  const html = dt.getData('text/html') || ''
+  if (!html) return false
+  try {
+    const body = new DOMParser().parseFromString(html, 'text/html').body
+    const top = [...body.children].filter((el) => !/^(SPAN|A|B|I|EM|STRONG|CODE|FONT|SUP|SUB|MARK|U|S)$/.test(el.tagName))
+    if (top.length >= 2) return true
+    // 单个列表/表格/引用块进来也是多行，同样不该并进标题
+    return top.length === 1 && /^(UL|OL|TABLE|BLOCKQUOTE|PRE)$/.test(top[0].tagName)
+  } catch {
+    return false
   }
 }
 watch(

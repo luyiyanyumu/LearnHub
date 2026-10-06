@@ -104,12 +104,16 @@ export function splitNoteSections(md) {
   const tops = heads.filter((h) => h.level === level)
   const sections = tops.map((h, i) => {
     const next = tops[i + 1]
-    const rawEnd = next ? next.start : text.length
-    // 尾部的空行留给"下一节之前的间隔"，不算进本节，免得补丁把间隔吃掉
-    const raw = text.slice(h.start, rawEnd)
-    const trimmed = raw.replace(/\s+$/, '')
-    const end = h.start + trimmed.length
-    const bodyStart = Math.min(h.end, end)
+    const nextStart = next ? next.start : text.length
+    // 标题行之后、下一节标题之前的这一段，拆成「前导空白 + 正文」：
+    // 前导空白**留在区间里**（贴补丁时原样保留），所以正文起点永远在标题行的换行之后。
+    // 早先这里写成 `min(h.end, end)`，空小节会退化成"标题文字的末尾"，
+    // 于是新正文被贴到标题同一行（实测：`## 10.泛型常用特点泛型（Generics）是把…`）。
+    const region = text.slice(h.end, nextStart)
+    const lead = /^\s*/.exec(region)[0]
+    const body = region.slice(lead.length).replace(/\s+$/, '')
+    const bodyStart = h.end + lead.length
+    const end = bodyStart + body.length
     return {
       index: i + 1,
       heading: h.heading,
@@ -118,7 +122,7 @@ export function splitNoteSections(md) {
       end,
       bodyStart,
       text: text.slice(h.start, end),
-      body: text.slice(bodyStart, end),
+      body,
       size: end - h.start,
     }
   })
@@ -236,10 +240,15 @@ export function applySectionPatch(md, section, newBody) {
     throw new Error('模型没有给出可用的小节正文，已放弃本次改动（正文保持原样）')
   }
   const body = demoteSectionHeadings(raw, section.level)
-  // 标题行与正文之间那段空白（通常是一个空行）按**原文**保留：模型的输出不会带它，
-  // 直接替换会把 `## 标题` 和正文贴在一起 —— 这个仓库对 Markdown 排版是有洁癖的。
-  const lead = /^\s*/.exec(section.body)[0]
-  return text.slice(0, section.bodyStart) + lead + body + text.slice(section.end)
+  // 前半段：标题行 + 原文的前导空行（原样保留，所以正文永远从标题行的下一行开始）。
+  // 空小节可能一个空行都没有（标题是最后一行），也可能有一串空行，统一成"标题后恰好一个空行"。
+  const headRaw = text.slice(0, section.bodyStart)
+  const head = section.body ? headRaw : headRaw.replace(/\n+$/, '') + '\n\n'
+  // 后半段：原文正文之后的部分。空小节的 end 就落在标题后的空白之后，直接接下一节标题
+  // 会黏在一起，所以需要时补一个空行。
+  const tail = text.slice(section.end)
+  const sep = tail && !tail.startsWith('\n') ? '\n\n' : ''
+  return head + body + sep + tail
 }
 
 /** 在某一节末尾追加内容（"只新增子小节"那一档用它） */
