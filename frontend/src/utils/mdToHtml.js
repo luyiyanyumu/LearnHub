@@ -20,17 +20,26 @@ const md = new MarkdownIt({
   html: true, // 笔记中允许少量原始 HTML（图片/表格微调等），与编辑器预览一致
   linkify: true,
   breaks: true, // 单个换行即 <br>，贴合 md-editor 编辑习惯
+  /**
+   * 代码块渲染成 `<pre class="hljs"><code class="language-xxx">`。
+   *
+   * **`language-xxx` 这个类不能省** —— 它是"代码块用什么语言"唯一的载体：
+   *   · 粘进编辑器时，代码块节点是从 `code.className` 里读回语言的（见 codeBlockCm 的 parseHTML）；
+   *   · 导入 HTML 时，Turndown 也按 `language-([\w+#.-]+)` 认语言（见 htmlToMd）。
+   * 早先只写 `<pre class="hljs"><code>`，于是"复制回答 → 粘进笔记"和"导出 HTML → 再导入"
+   * 都会把语言丢掉，只剩一个裸围栏（代码块没了高亮语言，语言选择器也是空的）。
+   */
   highlight(code, lang) {
     const esc = (s) =>
       s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     if (lang && hljs.getLanguage(lang)) {
       try {
-        return `<pre class="hljs"><code>${hljs.highlight(code, { language: lang, ignoreIllegals: true }).value}</code></pre>`
+        return `<pre class="hljs"><code class="language-${lang}">${hljs.highlight(code, { language: lang, ignoreIllegals: true }).value}</code></pre>`
       } catch {
         /* 高亮失败则退回纯文本 */
       }
     }
-    return `<pre class="hljs"><code>${esc(code)}</code></pre>`
+    return `<pre class="hljs"><code${lang ? ` class="language-${lang}"` : ''}>${esc(code)}</code></pre>`
   },
 })
 md.use(mdCallout) // :::名称 … ::: 彩色提示块，与编辑器预览保持一致
@@ -228,4 +237,20 @@ ${body}
 </body>
 </html>
 `
+}
+
+/**
+ * 把 Markdown 渲染成 **HTML 片段**（不带 `<!DOCTYPE>`/样式外壳）。
+ *
+ * 用途：把内容按"富文本"放进剪贴板 —— 智能体面板的「复制」同时写 text/html 与
+ * text/plain，粘到富文本编辑器（本应用的阅读模式、Word、飞书…）保留结构，
+ * 粘到源码/终端这类只认纯文本的地方仍拿到 Markdown 原文。
+ *
+ * 与 renderNoteHtml 用**同一个 markdown-it 实例**（同样的 callout/锚点规则、
+ * 同样的 highlight.js 高亮、同样 breaks:true），所以"复制贴进笔记"与"导出 HTML 再打开"
+ * 看到的结构一致。这里不做 fixHtmlQuotes：那个修的是导出文件里属性引号被弯引号污染，
+ * 片段交给浏览器 DOMParser 解析，不经过那一步。
+ */
+export function renderMarkdownFragment(markdown) {
+  return md.render(String(markdown == null ? '' : markdown))
 }

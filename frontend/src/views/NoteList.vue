@@ -5,10 +5,21 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown } from '@element-plus/icons-vue'
 import { categoryApi, tagApi, noteApi, saveBlob } from '../api'
 import { stripLeadingDocTitle } from '../utils/mdTitle'
+import {
+  IMPORT_ACCEPT,
+  IMPORT_MAX_BYTES,
+  isHtmlFile,
+  isMarkdownFile,
+  readNoteFile,
+  titleFromFileName,
+} from '../utils/importNote'
 
 const router = useRouter()
 const loading = ref(false)
 const exporting = ref(false)
+const importing = ref(false)
+/** 隐藏的文件选择框：点「导入」按钮时程序化触发 */
+const importInput = ref(null)
 const list = ref([])
 const total = ref(0)
 const query = ref({ page: 1, size: 10, categoryId: undefined, tagId: undefined, kw: '' })
@@ -67,6 +78,11 @@ function openNew() {
   router.push('/notes/new')
 }
 
+/** 点「导入」= 打开隐藏的文件选择框（accept 在模板上，与导入工具同一份常量） */
+function pickImport() {
+  importInput.value?.click()
+}
+
 /** 导出笔记：md 或自包含 html（html 渲染器懒加载，不拖首屏） */
 async function exportNote(row, fmt = 'md') {
   exporting.value = true
@@ -93,6 +109,50 @@ async function exportNote(row, fmt = 'md') {
   } finally {
     exporting.value = false
   }
+}
+
+/**
+ * 导入 Markdown / HTML 文件成新笔记。
+ *
+ * 规则与"导出"对称：文件首行的 `# 标题` 提升为笔记标题（导出写的就是 `# 标题\n\n正文`），
+ * HTML 则取文档里的 h1（其次 <title>）当标题、正文由 Turndown 转回 Markdown。
+ * 解析细节在 `utils/importNote.js`（那边是纯函数，有单测）。
+ *
+ * 多选时逐个导入并汇总结果：**一个失败不影响其余**——批量导 20 个文件时，
+ * 因为其中一个坏了就整批中止，是最让人恼火的行为。导入到当前筛选的分类下（若选了分类）。
+ */
+async function onImportChosen(e) {
+  const files = Array.from(e.target?.files || [])
+  // 同一个文件连选两次也要能再次触发 change
+  if (e.target) e.target.value = ''
+  if (!files.length) return
+  importing.value = true
+  const ok = []
+  const bad = []
+  try {
+    for (const f of files) {
+      try {
+        if (f.size > IMPORT_MAX_BYTES) throw new Error(`文件超过 ${Math.round(IMPORT_MAX_BYTES / 1024 / 1024)}MB`)
+        if (!isMarkdownFile(f.name) && !isHtmlFile(f.name)) throw new Error('只支持 .md / .markdown / .txt / .html / .htm')
+        const { title, content } = await readNoteFile(f)
+        if (!content.trim()) throw new Error('文件里没有可导入的正文')
+        const created = await noteApi.add({
+          title: title || titleFromFileName(f.name),
+          content,
+          categoryId: query.value.categoryId || null,
+          tagIds: [],
+        })
+        ok.push(created?.title || title)
+      } catch (err) {
+        bad.push(`${f.name}：${err?.message || '导入失败'}`)
+      }
+    }
+  } finally {
+    importing.value = false
+  }
+  await load()
+  if (ok.length) ElMessage.success(`已导入 ${ok.length} 篇：${ok.join('、')}`)
+  for (const msg of bad) ElMessage.error(msg)
 }
 
 function time(v) {
@@ -139,10 +199,26 @@ async function reloadMeta() {
         <el-option v-for="t in tags" :key="t.id" :label="t.name" :value="t.id" />
       </el-select>
       <el-button type="primary" @click="openNew">＋ 新建笔记</el-button>
+      <!-- 导入：md / markdown / txt 按原文入库，html 走 Turndown 转 Markdown；可多选。
+           图标沿用全局 .btn-ico 内联 SVG（与资料库「上传资料」同一套笔画）：
+           这里是那枚上传图标的镜像 —— 托盘 + 向下的箭头，语义就是"把文件收进来"。 -->
+      <el-button :loading="importing" title="导入 Markdown / HTML 文件" @click="pickImport">
+        <span class="btn-ico">
+          <svg viewBox="0 0 24 24"><path d="M12 4.5V16M6.5 10.5 12 16 17.5 10.5M4.5 19.5h15" /></svg>
+        </span>导入
+      </el-button>
+      <input
+        ref="importInput"
+        type="file"
+        multiple
+        hidden
+        :accept="IMPORT_ACCEPT"
+        @change="onImportChosen"
+      />
       <el-button v-if="query.categoryId || query.tagId || query.kw" @click="resetFilter">重置</el-button>
     </div>
 
-    <el-card shadow="never" v-loading="loading || exporting">
+    <el-card shadow="never" v-loading="loading || exporting || importing">
       <el-table :data="list" class="note-table">
         <el-table-column label="标题" min-width="220">
           <template #default="{ row }">

@@ -3,7 +3,7 @@ import { nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vu
 import { Editor, EditorContent } from '@tiptap/vue-3'
 import { Extension, Node, mergeAttributes } from '@tiptap/core'
 import { DOMParser as ProseMirrorDOMParser } from '@tiptap/pm/model'
-import { NodeSelection, Selection, TextSelection } from '@tiptap/pm/state'
+import { NodeSelection, Selection, TextSelection, Plugin } from '@tiptap/pm/state'
 import { CellSelection, TableMap, cellAround } from '@tiptap/pm/tables'
 import StarterKit from '@tiptap/starter-kit'
 import { TaskList, TaskItem } from '@tiptap/extension-list'
@@ -14,7 +14,7 @@ import { Superscript, Subscript, Highlight, FontStyle } from '../utils/inlineMar
 import { Underline } from '@tiptap/extension-underline'
 import markdownItSup from 'markdown-it-sup'
 import { ElMessage } from 'element-plus'
-import { hasRichHtml, sanitizePastedHtml } from '../utils/pasteHtml'
+import { sanitizePastedHtml } from '../utils/pasteHtml'
 import markdownItSub from 'markdown-it-sub'
 import markdownItMark from 'markdown-it-mark'
 import mdDataLine from '../utils/mdDataLine'
@@ -29,6 +29,8 @@ import { BlockMeta, isBlockId } from '../utils/blockMeta'
 import { findActionBlock } from '../utils/blockActions'
 import { runBlockTool, applyBlockFormat } from '../utils/blockToolbar'
 import { nextTableCell } from '../utils/tableNavigation'
+import { insertTableLineBreak } from '../utils/tableLineBreak'
+import { createDeferredSync } from '../utils/deferredSync'
 import { HeadingAnchorAttr, findNoteAnchor } from '../utils/headingAnchorAttr'
 import BlockActionMenu from './BlockActionMenu.vue'
 
@@ -152,6 +154,7 @@ function readTableContext(ed) {
     multiple,
     canMerge,
     canSplit,
+    canLineBreak: insertTableLineBreak(ed.state),
   }
 }
 
@@ -179,12 +182,24 @@ function runTableCommand(command) {
   return applied
 }
 
+function breakTableLine(ed = editor.value) {
+  if (!ed || ed.isDestroyed) return false
+  return ed.commands.command(({ state, dispatch }) => insertTableLineBreak(state, dispatch))
+}
+
 const ExcelTableNavigation = Extension.create({
   name: 'excelTableNavigation',
+  priority: 110,
   addKeyboardShortcuts() {
+    // Consume invalid table ranges too: falling through to the general hard-break
+    // command could replace a selection spanning several cells.
+    const lineBreak = () => breakTableLine(this.editor)
+      || Boolean(cellAround(this.editor.state.selection.$from) || cellAround(this.editor.state.selection.$to))
     return {
       Enter: () => moveExcelTableCell(this.editor, 1),
-      'Shift-Enter': () => moveExcelTableCell(this.editor, -1),
+      'Shift-Enter': lineBreak,
+      'Alt-Enter': lineBreak,
+      'Mod-Shift-Enter': () => moveExcelTableCell(this.editor, -1),
     }
   },
 })
@@ -200,8 +215,9 @@ const props = defineProps({
   linkBase: { type: String, default: '' },
   readonly: { type: Boolean, default: false },
   compact: { type: Boolean, default: false },
+  sourceLinesActive: { type: Boolean, default: true },
 })
-const emit = defineEmits(['update', 'outline'])
+const emit = defineEmits(['update', 'outline', 'change'])
 const editor = shallowRef(null)
 const previewRoot = ref(null)
 const actions = ref(null)
@@ -212,6 +228,7 @@ const md = new MarkdownIt({ html: true, linkify: true, breaks: true }).use(mdCal
 let lastEmitted = ''
 let revealedHash = ''
 const toolbarTargets = new Set()
+const contentSync = createDeferredSync(syncDown)
 
 /** Convert saved Markdown tasks back into editable checkbox nodes. */
 function renderContent(markdown) {
@@ -374,7 +391,21 @@ function jumpToNoteAnchor(event) {
   nextTick(revealLinkedBlock)
   return true
 }
-defineExpose({ runTool, applyFormat, captureToolbarTarget, undo: () => editor.value?.commands.undo(), redo: () => editor.value?.commands.redo() })
+function flushContent() {
+  contentSync.flush()
+  return lastEmitted
+}
+function onDocumentUpdate() {
+  if (props.readonly) return
+  contentSync.schedule()
+  emit('change')
+}
+function flushOnBlur(event) {
+  if (!previewRoot.value?.contains(event.relatedTarget)) flushContent()
+}
+defineExpose({ runTool, applyFormat, captureToolbarTarget, flushContent,
+  hasPendingContent: contentSync.hasPending,
+  undo: () => editor.value?.commands.undo(), redo: () => editor.value?.commands.redo() })
 
 /** Refresh source anchors without replacing content or moving the editing selection. */
 function refreshDataLines(markdown) {
@@ -398,18 +429,18 @@ function refreshDataLines(markdown) {
 }
 
 function syncDown() {
-  if (!editor.value || props.readonly) return
+  if (!editor.value || editor.value.isDestroyed) return
   const markdown = previewHtmlToMd(editor.value.getHTML())
   if (markdown === lastEmitted) return
   lastEmitted = markdown
-  refreshDataLines(markdown)
+  if (props.sourceLinesActive) refreshDataLines(markdown)
   emit('update', markdown)
 }
 
 onMounted(() => {
   editor.value = new Editor({
     editable: !props.readonly,
-    extensions: [StarterKit.configure({ codeBlock: false, underline: false, link: { openOnClick: false } }), CodeBlockCm, Callout, Details, Summary, Underline, Superscript, Subscript, Highlight, FontStyle, TableKit, ExcelTableNavigation, DataLineAttr, BlockMeta, HeadingAnchorAttr, ToolbarAttrs, InlineImage, TaskList, EditableTaskItem],
+    extensions: [StarterKit.configure({ codeBlock: false, underline: false, link: { openOnClick: false } }), CodeBlockCm, Callout, Details, Summary, Underline, Superscript, Subscript, Highlight, FontStyle, TableKit, ExcelTableNavigation, DataLineAttr, BlockMeta, HeadingAnchorAttr, ToolbarAttrs, InlineImage, TaskList, EditableTaskItem, BlockPaste],
     content: renderContent(props.content),
     editorProps: {
       // 关掉浏览器拼写检查：笔记里全是 StringBuffer / spring_factories / AutoConfiguration 这类
@@ -419,113 +450,44 @@ onMounted(() => {
       attributes: { spellcheck: 'false', autocorrect: 'off', autocapitalize: 'off' },
       handleClick: (_view, _position, event) => jumpToNoteAnchor(event),
     },
-    onUpdate: syncDown,
+    onUpdate: onDocumentUpdate,
     onTransaction: handleTransaction,
     onSelectionUpdate: refreshTableContext,
   })
   lastEmitted = props.content || ''
   if (!props.readonly) refreshTableContext()
   window.addEventListener('hashchange', hashChanged)
-  // 带格式粘贴的前置清洗。**必须用捕获阶段**：ProseMirror 的粘贴处理挂在 .tiptap（事件目标）上，
-  // 冒泡阶段再改 clipboardData 就晚了（它已经读完剪贴板）。捕获阶段先跑，改完的 HTML 才轮到它读。
-  // 只读渲染没有输入路径，不挂这条（既省事，也避免给卡片挂上编辑器专属的监听）。
-  if (!props.readonly) previewRoot.value?.addEventListener('paste', onBlockPasteCapture, true)
   nextTick(revealLinkedBlock)
 })
 onBeforeUnmount(() => {
+  contentSync.cancel()
   window.removeEventListener('hashchange', hashChanged)
-  previewRoot.value?.removeEventListener('paste', onBlockPasteCapture, true)
   invalidateToolbarTargets()
   editor.value?.destroy()
   editor.value = null
 })
 
-/**
- * 带格式粘贴（Ctrl/Cmd+V）的净化：块编辑器是笔记页的**默认**渲染器，
- * 而它自己没有 paste 处理 —— Word 里贴一张截图就会变成几百 KB 的 base64 直接写进笔记。
- * 这条与 md-editor 那条（NoteEdit 的 onPreviewPaste）用同一个清洗函数，规则一致。
- *
- * <p>只净化、不阻断：Ctrl/Cmd+Shift+V（纯文本）直接 return，交给浏览器与 ProseMirror
- * 原生处理（Chrome 的"粘贴为纯文本"本来只给 text/plain）。
- */
-function onBlockPasteCapture(e) {
-  if (e.shiftKey) return
-  const dt = e.clipboardData
-  const html = dt?.getData('text/html')
-  if (html && hasRichHtml(html)) {
-    const { html: cleaned, droppedImages } = sanitizePastedHtml(html)
-    if (cleaned !== html) dt.setData('text/html', cleaned)
-    if (droppedImages) {
-      ElMessage.info(`已忽略粘贴内容里的 ${droppedImages} 张内嵌大图（base64 太大，会把笔记撑到几百 KB）`)
-    }
-  }
-  // 净化之后再看光标在不在标题里（下面会把光标挪走，所以要放在净化之后、且不 return）
-  moveCaretOutOfHeading(dt)
-}
-
-/**
- * 光标停在**标题**里时粘贴多段内容 —— 把光标挪到标题之后，别让第一段并进标题。
- *
- * <h3>为什么要这道</h3>
- * ProseMirror 的粘贴是"插到当前块的光标处"：光标在标题里，第一段就会跟标题连成同一行，
- * 于是标题被撑成一句长句。实测（真机复现）：
- *
- * <pre>
- *   原标题：   ## 1.第一小节
- *   光标在末尾粘两段后：## 1.第一小这是粘贴进来的第一句话。   ← 标题行被撑长
- *                       这是第二段。节                        ← 光标后面剩下的标题文字被挤到后面
- * </pre>
- *
- * 用户从聊天面板复制回答、粘进一个刚建好的空小节时最容易撞上（标题行本来就是落点）。
- *
- * <h3>为什么是"挪光标"而不是"自己接管粘贴"</h3>
- * 接管就得自己解析剪贴板、自己构造节点，净化、schema 校验、撤销栈、协同状态都得复刻一遍。
- * 这里只做一件事：必要时在标题之后补一个空段落，把选区移过去，然后**照旧让 ProseMirror
- * 处理这次粘贴** —— 它按新选区插入，一切都走原生路径。
- *
- * 只在"多块内容"时挪：粘一行字进标题是正常的改名操作，不该被打断。
- */
-function moveCaretOutOfHeading(dt) {
-  const ed = editor.value
-  if (!ed || ed.isDestroyed || props.readonly) return false
-  const { state } = ed
-  const { $from, empty } = state.selection
-  if (!empty) return false                                   // 有选区的粘贴另说
-  if ($from.parent.type.name !== 'heading') return false     // 只管标题
-  if (!isMultiBlockPaste(dt)) return false
-
-  const after = $from.after($from.depth)                     // 标题块之后的位置
-  const tr = state.tr
-  // 一律新起一个空段落当落点：若复用标题后面已有的段落，粘贴内容的**最后一段**会和
-  // 那段原文并成一行（实测："这是第二段。原有正文一句话。"）。新起一段则原文一行都不动。
-  tr.insert(after, state.schema.nodes.paragraph.create())
-  tr.setSelection(TextSelection.near(tr.doc.resolve(after + 1), 1))
-  ed.view.dispatch(tr)
-  return true
-}
-
-/** 这次粘贴是不是"多块内容"（多段 / 列表 / 表格）—— 单行不进标题保护 */
-function isMultiBlockPaste(dt) {
-  if (!dt) return false
-  const text = dt.getData('text/plain') || ''
-  if (/\n[ \t]*\n/.test(text)) return true                  // 纯文本里就已经是两段以上
-  const html = dt.getData('text/html') || ''
-  if (!html) return false
-  try {
-    const body = new DOMParser().parseFromString(html, 'text/html').body
-    const top = [...body.children].filter((el) => !/^(SPAN|A|B|I|EM|STRONG|CODE|FONT|SUP|SUB|MARK|U|S)$/.test(el.tagName))
-    if (top.length >= 2) return true
-    // 单个列表/表格/引用块进来也是多行，同样不该并进标题
-    return top.length === 1 && /^(UL|OL|TABLE|BLOCKQUOTE|PRE)$/.test(top[0].tagName)
-  } catch {
-    return false
-  }
-}
+/** Clean rich clipboard HTML without changing the editor's actual selection. */
+const BlockPaste = Extension.create({
+  name: 'blockPaste',
+  addProseMirrorPlugins() {
+    return [new Plugin({ props: {
+      transformPastedHTML(html) {
+        const { html: cleaned, droppedImages } = sanitizePastedHtml(html)
+        if (droppedImages) {
+          ElMessage.info(`已忽略粘贴内容里的 ${droppedImages} 张内嵌大图（base64 太大，会把笔记撑到几百 KB）`)
+        }
+        return cleaned
+      },
+    } })]
+  },
+})
 watch(
   () => props.content,
   (v) => {
     if (!editor.value) return
     if (v === lastEmitted) return // 自己发出的回显，忽略
+    contentSync.cancel()
     lastEmitted = v
     invalidateToolbarTargets()
     editor.value.commands.setContent(renderContent(v), { emitUpdate: false })
@@ -540,11 +502,19 @@ watch(
   (v) => {
     const ed = editor.value
     if (!ed || ed.isDestroyed) return
+    flushContent()
     ed.setEditable(!v)
     if (v) actions.value?.close()
     refreshTableContext()
   },
 )
+// Source-line mappings are only needed for the visible source/preview pair.
+// Rebuild once when opening that pair instead of reparsing on every saved draft.
+watch(() => props.sourceLinesActive, (active) => {
+  if (!active || !editor.value) return
+  flushContent()
+  refreshDataLines(lastEmitted)
+})
 </script>
 
 <template>
@@ -553,6 +523,9 @@ watch(
     class="block-preview"
     :class="{ 'is-readonly': readonly, 'is-compact': compact }"
     @focusin="captureCodeFocus"
+    @focusout="flushOnBlur"
+    @compositionstart="contentSync.pause()"
+    @compositionend="contentSync.resume()"
     @pointermove="readonly ? null : actions?.hover($event)"
     @pointerleave="readonly ? null : actions?.leave()"
   >
@@ -561,6 +534,7 @@ watch(
         {{ tableContext.cellSelection ? `已选 ${tableContext.selectedRows}×${tableContext.selectedCols}` : `单元格 ${tableContext.row + 1}/${tableContext.rows} · ${tableContext.col + 1}/${tableContext.cols}` }}
       </span>
       <button v-if="!tableContext.cellSelection" type="button" title="选择当前单元格" @click="selectCurrentCell">选中单元格</button>
+      <button type="button" title="在当前光标处换行（Shift+Enter / Alt+Enter）；Enter 移到下一行单元格" :disabled="!tableContext.canLineBreak" @click="breakTableLine()">单元格换行</button>
       <button type="button" title="上方插入行" @click="runTableCommand('addRowBefore')">上方加行</button>
       <button type="button" title="下方插入行" @click="runTableCommand('addRowAfter')">下方加行</button>
       <button type="button" title="左侧插入列" @click="runTableCommand('addColumnBefore')">左侧加列</button>
@@ -609,8 +583,10 @@ watch(
    已删除：它能修显示，但会让"后面再改"永远无效。 */
 .block-preview :deep(.tiptap blockquote) { margin: 1em 0; padding-left: 14px; border-left: 3px solid var(--app-border); color: var(--app-text-2); }
 /* 表格边框 */
-.block-preview :deep(.tiptap table) { border-collapse: collapse; width: 100%; margin: 1em 0; }
-.block-preview :deep(.tiptap th), .block-preview :deep(.tiptap td) { border: 1px solid var(--app-border); padding: 6px 12px; text-align: left; }
+.block-preview :deep(.tiptap table) { border-collapse: collapse; table-layout: fixed; width: 100%; margin: 1em 0; }
+.block-preview :deep(.tiptap th), .block-preview :deep(.tiptap td) { border: 1px solid var(--app-border); padding: 6px 12px; text-align: left; vertical-align: top; white-space: normal; overflow-wrap: anywhere; }
+.block-preview :deep(.tiptap th > p), .block-preview :deep(.tiptap td > p) { margin: 0; }
+.block-preview :deep(.tiptap th > p + p), .block-preview :deep(.tiptap td > p + p) { margin-top: .35em; }
 .block-preview :deep(.tiptap th) { background: color-mix(in srgb, var(--app-text-1) 6%, transparent); font-weight: 600; }
 .block-preview :deep(.tiptap img) { max-width: 100%; height: auto; vertical-align: middle; }
 .block-table-toolbar { position: sticky; top: 8px; z-index: 8; display: flex; flex-wrap: wrap; align-items: center; gap: 5px; width: fit-content; max-width: calc(100% - 24px); margin: 8px auto -36px; padding: 5px 7px; border: 1px solid var(--app-border); border-radius: 8px; background: color-mix(in srgb, var(--app-card) 94%, transparent); box-shadow: 0 4px 18px #0002; font-size: 12px; }
@@ -663,6 +639,7 @@ watch(
 
 /* 表格不在卡里横竖滚动，按内容撑开、被卡片裁掉即可（放大后看全） */
 .block-preview.is-compact :deep(.tiptap table) {
+  table-layout: auto;
   width: max-content;
   min-width: 100%;
   margin: 0.3em 0;

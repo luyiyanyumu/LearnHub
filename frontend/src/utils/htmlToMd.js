@@ -86,11 +86,26 @@ function getService() {
   t.use(gfm)
   t.keep(KEEP_TAGS)
 
-  // 带显式列宽/行高的表格：保留为内联 HTML <table>（Markdown 管道表无法表达尺寸）。
+  // 管道表无法表示尺寸、合并单元格或单元格内换行/多个块，保留这些表格的 HTML。
   // addRule 内部是 unshift，此规则会排在 gfm 的 table 规则之前，先命中。
   t.addRule('sizedTable', {
-    filter: (node) => node.nodeName === 'TABLE' && hasExplicitSize(node),
+    filter: (node) => node.nodeName === 'TABLE' && (
+      hasExplicitSize(node)
+      || Array.from(node.querySelectorAll('th,td')).some((cell) =>
+        Number(cell.getAttribute('colspan')) > 1 || Number(cell.getAttribute('rowspan')) > 1
+        || cell.querySelector('br,ul,ol,pre,blockquote,table')
+        || Array.from(cell.children).some((child) => /^(H[1-6]|DIV)$/.test(child.nodeName) || hasBlockMetadata(child))
+        || Array.from(cell.children).filter((child) => child.nodeName === 'P').length > 1)
+    ),
     replacement: (content, node) => `\n\n${node.outerHTML}\n\n`,
+  })
+
+  // Tiptap wraps even a single-line cell in <p>; paragraph separators would
+  // otherwise split an ordinary GFM table row into several Markdown lines.
+  t.addRule('singleTableParagraph', {
+    filter: (node) => node.nodeName === 'P' && /^(TH|TD)$/.test(node.parentNode?.nodeName)
+      && node.parentNode.children.length === 1 && !hasBlockMetadata(node),
+    replacement: (content) => content,
   })
 
   // gfm 插件把 <s> 转成单波浪线 ~x~，但 markdown-it 只认 ~~x~~，这里覆盖成正确的双波浪线
@@ -288,4 +303,39 @@ export function previewHtmlToMd(html) {
     .map((p) => (p.code ? p.text : clean(p.text)))
     .join('\n')
     .trim()
+}
+
+/**
+ * 把**一整份 HTML 文档**转成笔记内容：返回 `{title, content}`（笔记导入用）。
+ *
+ * <h3>与 previewHtmlToMd 的分工</h3>
+ * 那个吃的是编辑器预览区的**片段**（结构已知、专门为反推源码调过规则）；
+ * 这个吃的是用户从别处存下来的**完整文档** —— 得自己挑正文、扔掉 head 与脚本样式，
+ * 以及**本应用导出时自己加的**那几块：`.doc-head`（h1 + 分类/标签/时间）、
+ * `.doc-foot`（"由 learn-hub 笔记工作台导出"）。这样"导出 HTML → 再导入"不会把
+ * 元信息行和页脚也吃进正文。转换本身仍走同一套 Turndown 规则，所以代码围栏、
+ * 表格、任务列表的写法与反推源码时完全一致。
+ *
+ * <h3>标题规则</h3>
+ * 优先文档里第一个 `<h1>`（多数文档的真标题），其次 `<title>`；取到标题的那个元素
+ * 会从正文里移除，避免正文第一行又是同一个标题（与 Markdown 导入"首行 # 标题提升为
+ * 笔记标题"是同一条规则）。
+ *
+ * <h3>刻意不做"正文提取"</h3>
+ * readability 那类算法猜错就会把用户的内容整段丢掉，而导入是**只增不减**的操作 ——
+ * 网页里的导航文字留着，用户自己删，比丢内容好。只丢掉几乎一定是外壳的 `nav`。
+ */
+export function documentHtmlToMd(html) {
+  const doc = new DOMParser().parseFromString(String(html || ''), 'text/html')
+  const titleEl = doc.querySelector('h1') || doc.querySelector('title')
+  const title = (titleEl?.textContent || '').replace(/\s+/g, ' ').trim()
+  // 标题已经取走：正文里别再来一遍（<title> 在 head 里，删不删都无所谓）
+  if (titleEl && titleEl.nodeName === 'H1') titleEl.remove()
+  doc.querySelectorAll('script,style,noscript,link,meta,title,iframe,form,button,nav,.doc-meta,.doc-foot,.doc-head')
+    .forEach((n) => n.remove())
+  // 本应用导出的正文在 article.markdown-body 里；别处的 HTML 就退回 article/main/body
+  const root = doc.querySelector('article.markdown-body') || doc.querySelector('.markdown-body')
+    || doc.querySelector('article') || doc.querySelector('main') || doc.body
+  if (!root) return { title, content: '' }
+  return { title, content: previewHtmlToMd(root.innerHTML) }
 }

@@ -21,6 +21,7 @@ const box = reactive({ top: 0, left: 0, width: 0, height: 0 })
 const position = reactive({ left: 0, top: 0, flip: false, maxHeight: 600 })
 let leaveTimer = 0
 let clipboardTarget = null
+let locationFrame = 0
 
 const types = [
   { key: 'paragraph', label: '正文', icon: 'T' },
@@ -49,12 +50,25 @@ function locate(item) {
   const host = props.host.getBoundingClientRect()
   Object.assign(box, { top: rect.top - host.top, left: rect.left - host.left, width: rect.width, height: rect.height })
 }
+function refreshLocation() {
+  locationFrame = 0
+  const item = active.value
+  if (!item || props.editor.isDestroyed) return
+  // Transactions can replace the node view before the scheduled frame runs.
+  // Resolve its current DOM instead of measuring the previously hovered node.
+  const dom = props.editor.view.nodeDOM(item.pos)
+  if (dom?.nodeType === 1) item.dom = dom
+  locate(item)
+}
+function scheduleLocation() {
+  if (!locationFrame) locationFrame = requestAnimationFrame(refreshLocation)
+}
 function choose(item) {
   if (!item) return
   const target = createBlockTarget(props.editor.state.doc, item.pos)
   if (!target) return
   active.value = { ...target, dom: item.dom }
-  locate(item)
+  scheduleLocation()
 }
 function hover(event) {
   clearTimeout(leaveTimer)
@@ -73,6 +87,9 @@ function close(focusGrip = false) {
 }
 async function toggle(event) {
   if (open.value) { close(); return }
+  if (locationFrame) { cancelAnimationFrame(locationFrame); locationFrame = 0 }
+  refreshLocation()
+  await nextTick()
   const rect = grip.value?.getBoundingClientRect()
   if (!rect) return
   position.left = Math.max(8, Math.min(rect.left, window.innerWidth - 248))
@@ -187,9 +204,7 @@ function transactionChanged({ transaction }) {
   mapBlockTarget(active.value, transaction)
   const node = props.editor.state.doc.nodeAt(active.value.pos)
   if (!node || active.value.deleted) { active.value = null; close(); return }
-  const dom = props.editor.view.nodeDOM(active.value.pos)
-  if (dom?.nodeType === 1) choose({ pos: active.value.pos, dom })
-  nextTick(() => { if (active.value) locate(active.value) })
+  scheduleLocation()
 }
 function outside(event) {
   if (menu.value?.contains(event.target) || grip.value?.contains(event.target)) return
@@ -207,7 +222,7 @@ function menuKeydown(event) {
     : (index + (event.key === 'ArrowUp' ? -1 : 1) + buttons.length) % buttons.length
   buttons[next]?.focus()
 }
-function scrollChanged() { close(); if (active.value) locate(active.value) }
+function scrollChanged() { close(); if (active.value) scheduleLocation() }
 let scroller = null
 onMounted(() => {
   props.editor.on('selectionUpdate', selectionChanged)
@@ -225,6 +240,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', scrollChanged)
   scroller?.removeEventListener('scroll', scrollChanged)
   clearTimeout(leaveTimer)
+  cancelAnimationFrame(locationFrame)
+  locationFrame = 0
 })
 defineExpose({ hover, leave, close })
 </script>

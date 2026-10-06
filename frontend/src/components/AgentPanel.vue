@@ -574,13 +574,41 @@ async function doSaveNote() {
   }
 }
 
-/** 整段回答一键复制 */
+/**
+ * 整段回答一键复制：**同时写 text/html 与 text/plain**。
+ *
+ * 为什么要两份：只写纯文本时，粘进阅读模式（那一栏是 tiptap 富文本）就是一堆
+ * `##`、``` 字面量 —— 用户看到的是"没转换格式的源码"，这正是"复制粘进去是代码"的原因。
+ * 两份都写之后：富文本编辑器（阅读模式、Word、飞书…）取 text/html，拿到渲染好的结构；
+ * 源码对照的 CodeMirror、终端、vim 这类只认纯文本的地方取 text/plain，拿到的仍是
+ * Markdown 原文 —— 两种落点都对。
+ *
+ * 渲染走 `mdToHtml` 的同一个 markdown-it 实例（动态 import，不拖面板首屏），
+ * 所以贴出来的结构与该笔记「导出 HTML」看到的一致。
+ * 浏览器不支持 ClipboardItem（或写入被拒）时，退回原来的纯文本复制。
+ */
 async function copyText(text) {
+  const markdown = text || ''
   try {
-    await navigator.clipboard.writeText(text || '')
-    ElMessage.success('已复制')
+    const { renderMarkdownFragment } = await import('../utils/mdToHtml')
+    const html = renderMarkdownFragment(markdown)
+    if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
+      throw new Error('这个浏览器不支持写入富文本剪贴板')
+    }
+    await navigator.clipboard.write([
+      new ClipboardItem({
+        'text/html': new Blob([html], { type: 'text/html' }),
+        'text/plain': new Blob([markdown], { type: 'text/plain' }),
+      }),
+    ])
+    ElMessage.success('已复制，粘贴时保留格式')
   } catch (e) {
-    ElMessage.error('复制失败，请手动选择复制')
+    try {
+      await navigator.clipboard.writeText(markdown)
+      ElMessage.success('已复制')
+    } catch (err) {
+      ElMessage.error('复制失败，请手动选择复制')
+    }
   }
 }
 

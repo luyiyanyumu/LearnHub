@@ -22,7 +22,6 @@ export const CodeBlockCm = Node.create({
         default: '',
         parseHTML: (el) => {
           const c = el.querySelector('code')
-          console.log('[cm] parseHTML el=', el.tagName, 'child=', c ? c.tagName : null, 'textLen=', c ? c.textContent.length : -1)
           return (c ? c.textContent : el.textContent) || ''
         },
       },
@@ -39,7 +38,6 @@ export const CodeBlockCm = Node.create({
   },
 
   addNodeView() {
-    console.log('[cm] addNodeView 被调用')
     return VueNodeViewRenderer(CodeBlockNodeView)
   },
 })

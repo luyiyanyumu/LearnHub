@@ -29,6 +29,7 @@ import { focusMode } from '../composables/useViewMode'
 import { FORMAT_PRESETS, stripInline } from '../utils/richFormat'
 import { findUnsupported, previewHtmlToMd } from '../utils/htmlToMd'
 import { hasRichHtml, sanitizePastedHtml } from '../utils/pasteHtml'
+import { isPasteInEditor } from '../utils/pasteTarget'
 import { stripFontSizeInHtml } from '../utils/fontSize'
 import FormatBar from '../components/FormatBar.vue'
 import CodeBlockEditor from '../components/CodeBlockEditor.vue'
@@ -60,8 +61,7 @@ let toolbarSide = 'preview'
  * 表单指纹：用来判断「有没有未保存的改动」。
  * 加载成功 / 保存成功后都会刷新 savedSnapshot，所以刚打开时不会误报脏数据。
  */
-function formFingerprint() {
-  const f = form.value
+function formFingerprint(f = form.value) {
   return JSON.stringify({
     title: f.title || '',
     content: f.content || '',
@@ -371,9 +371,12 @@ function exitPreviewEdit() {
  * @returns {boolean} 是否成功（失败时已给出提示，且不会改动源码，也不会丢预览里的改动）
  */
 function syncPreviewToSource(silent = false) {
-  // 块编辑器模式（默认）：编辑面就是 Tiptap，改动已由 @update 实时写回 form.content，
-  // 不存在「从预览 DOM 反推」这一步 —— 直接返回成功，避免误报「预览区不存在」。
-  if (useBlockPreview) return true
+  // 块编辑器先即时更新编辑面，Markdown 在输入暂停后才同步。
+  // 保存、切换模式等读取正文的操作必须取到最后一次输入。
+  if (useBlockPreview) {
+    flushBlockContent()
+    return true
+  }
   const el = previewEl()
   if (!el) {
     // 这是异常状态（预览区都没了就无从反推），无论 silent 都要报出来，
@@ -477,6 +480,7 @@ function onAiDialogClose() {
 }
 
 async function aiProcess(mode) {
+  flushBlockContent()
   const content = form.value.content || ''
   if (!content.trim()) {
     ElMessage.warning('正文为空，先写点内容再让 AI 处理')
@@ -533,6 +537,7 @@ const mergeApplyLabel = computed(() => {
  * 改过字就直接放弃并报错，**宁可什么都不做，也不要把改好的节贴到错的位置**。
  */
 function aiApply() {
+  flushBlockContent()
   const patch = mergePatch.value
   if (patch) {
     try {
@@ -625,6 +630,7 @@ async function reloadAfterAgentEdit() {
     } catch { return }
   }
   if (!matchesOpenNote(id.value, expectedId)) return
+  flushBlockContent()
   previewUnsynced.value = false
   previewEditing.value = false
   await loadNote()
@@ -661,6 +667,7 @@ async function wholeMergeLimit() {
  * 结果写进 `mergePatch`，等用户在预览里点确认。
  */
 async function mergeIntoSections({ answer, question }) {
+  flushBlockContent()
   const source = form.value.content || ''
   const title = form.value.title || ''
   const split = splitNoteSections(source)
@@ -747,6 +754,7 @@ async function mergeIntoSections({ answer, question }) {
  * 所以下面每个 reply(false) 分支都必须自己有一句提示，漏一个就是静默失败。
  */
 async function onAgentMerge(e) {
+  flushBlockContent()
   const d = e?.detail || {}
   const noteId = d.noteId || null
   const answer = (d.answer || '').trim()
@@ -891,15 +899,16 @@ async function loadNote() {
  * 尽量不打断 CodeMirror 自己的粘贴（保留它的撤销历史）。
  */
 function onPasteCapture(e) {
-  // 预览编辑模式下，粘贴由预览区的 onPreviewPaste 处理
-  if (previewEditing.value) return
+  const view = editorRef.value?.getEditorView?.()
+  // The preview and its code blocks own their paste events, even when the
+  // source editor is mounted but hidden behind reading mode.
+  if (!isPasteInEditor(e.target, view)) return
 
   if (!e.shiftKey) {
     const html = e.clipboardData?.getData('text/html')
     if (html && hasRichHtml(html)) {
       const { html: cleaned, droppedImages } = sanitizePastedHtml(html)
       const md = fixHtmlQuotes(previewHtmlToMd(cleaned)).replace(/\s+$/, '')
-      const view = editorRef.value?.getEditorView?.()
       if (md && view) {
         e.preventDefault()
         e.stopPropagation()
@@ -919,7 +928,6 @@ function onPasteCapture(e) {
   if (cleaned === raw) return
   e.preventDefault()
   e.stopPropagation()
-  const view = editorRef.value?.getEditorView?.()
   if (view) {
     view.dispatch(view.state.replaceSelection(cleaned))
     view.focus()
@@ -938,6 +946,7 @@ async function save() {
     ElMessage.warning('标题不能为空')
     return
   }
+  flushBlockContent()
   // 预览里还有没反推回源码的改动时，直接保存会把它丢掉 —— 先自动同步（失败则中止保存）
   if (previewUnsynced.value && !useBlockPreview && !syncPreviewToSource(true)) return
   saving.value = true
@@ -949,12 +958,16 @@ async function save() {
       tagIds: form.value.tagIds || [],
     }
     if (isNew.value) {
+      const titleAtSave = form.value.title
       const created = await noteApi.add(payload)
       // 先让表单与刚存下的内容对齐，再刷新指纹，
       // 否则「新建 → 跳转到详情」会被自己的未保存提醒拦下来
-      form.value.title = payload.title
-      savedSnapshot.value = formFingerprint()
-      previewUnsynced.value = false // 内容已经落库，没有"待反推"的东西了
+      if (form.value.title === titleAtSave) form.value.title = payload.title
+      savedSnapshot.value = formFingerprint(payload)
+      // 请求期间继续输入的内容仍是草稿，创建成功也不能把它标记为已保存。
+      if (formFingerprint() === savedSnapshot.value && !blockPreviewRef.value?.hasPendingContent?.()) {
+        previewUnsynced.value = false
+      }
       justCreatedId = String(created.id)
       lastSavedAt.value = new Date()
       ElMessage.success('笔记已创建')
@@ -971,7 +984,9 @@ async function save() {
       // （onBlockPreviewUpdate），而保存路径从来不重置它 —— 于是 `dirty` 永远为真，
       // 顶部弹出「已保存」的同时状态栏一直显示「未保存」，看起来像没保存成功。
       // 只有确认保存后内容没再变（指纹一致）才清，避免把保存期间新打的字一起清掉。
-      if (formFingerprint() === fingerprintAtSave) previewUnsynced.value = false
+      if (formFingerprint() === fingerprintAtSave && !blockPreviewRef.value?.hasPendingContent?.()) {
+        previewUnsynced.value = false
+      }
       lastSavedAt.value = new Date()
       ElMessage.success('已保存')
     }
@@ -990,6 +1005,7 @@ async function exportNote(fmt = 'md') {
     ElMessage.warning('请先填写标题')
     return
   }
+  flushBlockContent()
   const title = form.value.title.trim()
   const safe = title.replace(/[\\/:*?"<>|]/g, '_')
   try {
@@ -1534,6 +1550,7 @@ function captureToolbarContext() {
       applyFormat(format) { restore(); return previewApplyFormat(format) },
     }
   }
+  flushBlockContent()
   const view = cmView(editorScrollEl())
   const doc = view?.state.doc
   const selection = view?.state.selection
@@ -1869,10 +1886,31 @@ const blockLinkBase = computed(() => id.value
   ? new URL(router.resolve({ name: 'noteEdit', params: { id: id.value } }).href, window.location.origin).href
   : '')
 
-/** 块编辑器（?editor=block）编辑回写：Tiptap 反推出的 Markdown 写回源码 */
+/** 输入即时标脏，全文反推等输入暂停后再做。 */
+function onBlockPreviewChange() {
+  previewUnsynced.value = true
+}
+
+function flushBlockContent() {
+  if (useBlockPreview) blockPreviewRef.value?.flushContent?.()
+}
+
+function onSourceFocusIn() {
+  flushBlockContent()
+  scrollSyncSource = 'editor'
+  toolbarSide = 'editor'
+}
+
+function onSourcePointerDown() {
+  flushBlockContent()
+  onScrollIntent('editor')
+}
+
+/** 块编辑器的 Markdown 同步回写。 */
 function onBlockPreviewUpdate(markdown) {
   form.value.content = markdown
   previewUnsynced.value = true
+  publishAgentNote()
 }
 
 function onBlockOutline(text) {
@@ -2152,10 +2190,12 @@ function decorateCodeRowNumbers() {
 // 预览重渲染后补行号（内容变化 / 切换明暗主题都会重渲染，行号要跟着重画）
 // flush: 'post' 很关键：默认 flush 在 DOM 更新**之前**跑，首次加载时预览还是空的，
 // 而笔记内容只设置一次、之后不再变化 —— 那样行号永远画不出来（实测 hasGutter=false）。
-watch(() => [form.value.content, isDark.value], () => nextTick(decorateCodeRowNumbers), {
-  immediate: true,
-  flush: 'post',
-})
+if (!useBlockPreview) {
+  watch(() => [form.value.content, isDark.value], () => nextTick(decorateCodeRowNumbers), {
+    immediate: true,
+    flush: 'post',
+  })
+}
 
 // 行号栏是**注入的装饰节点**，预览一旦被 Vue 重渲染就会连它一起抹掉。
 // 只靠 watch(content) 不够：内容没变但组件重渲染的情况（切模式、主题、异步渲染）
@@ -2166,6 +2206,7 @@ watch(() => [form.value.content, isDark.value], () => nextTick(decorateCodeRowNu
 let rowNumberObserver = null
 
 onMounted(() => {
+  if (useBlockPreview) return
   const attach = () => {
     const host = document.querySelector('.pv-md')
     if (!host) {
@@ -3532,14 +3573,14 @@ onBeforeUnmount(() => {
       ref="editorWrapRef"
       class="editor-wrap"
       :class="{ 'is-preview-editing': previewEditing }"
-      @paste.capture="onPasteCapture"
     >
       <!-- 源码栏 -->
       <section
         v-show="showEditorPane" class="pane pane-editor" :style="editorStyle"
-        @focusin="scrollSyncSource = 'editor'; toolbarSide = 'editor'"
+        @paste.capture="onPasteCapture"
+        @focusin="onSourceFocusIn"
         @wheel.capture.passive="onScrollIntent('editor')"
-        @pointerdown.capture="onScrollIntent('editor')"
+        @pointerdown.capture="onSourcePointerDown"
         @touchstart.capture.passive="onScrollIntent('editor')"
         @keydown.capture="onScrollIntent('editor')"
       >
@@ -3594,7 +3635,9 @@ onBeforeUnmount(() => {
               ref="blockPreviewRef"
               key="block-preview"
               :content="form.content"
+              :source-lines-active="showEditorPane && showPreviewPane"
               :link-base="blockLinkBase"
+              @change="onBlockPreviewChange"
               @update="onBlockPreviewUpdate"
               @outline="onBlockOutline"
             />
