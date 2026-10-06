@@ -13,7 +13,7 @@ import { Details, Summary } from '../utils/detailsNode'
 import { Superscript, Subscript, Highlight, FontStyle } from '../utils/inlineMarks'
 import { Underline } from '@tiptap/extension-underline'
 import markdownItSup from 'markdown-it-sup'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { sanitizePastedHtml } from '../utils/pasteHtml'
 import markdownItSub from 'markdown-it-sub'
 import markdownItMark from 'markdown-it-mark'
@@ -24,6 +24,8 @@ import { TableKit } from '@tiptap/extension-table'
 import MarkdownIt from 'markdown-it'
 import mdCallout from '../utils/mdCallout'
 import mdAnchor from '../utils/mdAnchor'
+import mdMath from '../utils/mdMath'
+import { MathInline, MathBlock } from '../utils/mathNodes'
 import { previewHtmlToMd } from '../utils/htmlToMd'
 import { BlockMeta, isBlockId } from '../utils/blockMeta'
 import { findActionBlock } from '../utils/blockActions'
@@ -222,7 +224,7 @@ const editor = shallowRef(null)
 const previewRoot = ref(null)
 const actions = ref(null)
 const tableContext = ref(null)
-const md = new MarkdownIt({ html: true, linkify: true, breaks: true }).use(mdCallout).use(mdAnchor).use(markdownItSup).use(markdownItSub).use(markdownItMark).use(mdDataLine)
+const md = new MarkdownIt({ html: true, linkify: true, breaks: true }).use(mdCallout).use(mdAnchor).use(mdMath).use(markdownItSup).use(markdownItSub).use(markdownItMark).use(mdDataLine)
 
 /** 上次 emit 出去的 Markdown：用于识别"自己的回显"，避免 setContent 把光标重置 */
 let lastEmitted = ''
@@ -403,7 +405,19 @@ function onDocumentUpdate() {
 function flushOnBlur(event) {
   if (!previewRoot.value?.contains(event.relatedTarget)) flushContent()
 }
-defineExpose({ runTool, applyFormat, captureToolbarTarget, flushContent,
+/**
+ * 工具栏「公式」用：在光标处插入一个数学节点（视觉由 KaTeX 渲染，存的是 LaTeX 源码）。
+ * `display=true` 用块级（独立成行），否则行内。只读渲染下不插入。
+ */
+function insertMath(tex, display = false) {
+  const ed = editor.value
+  const source = String(tex == null ? '' : tex).trim()
+  if (!ed || ed.isDestroyed || props.readonly || !source) return false
+  const node = display ? { type: 'mathBlock', attrs: { tex: source } } : { type: 'mathInline', attrs: { tex: source } }
+  return ed.chain().focus().insertContent(node).run()
+}
+
+defineExpose({ runTool, applyFormat, captureToolbarTarget, flushContent, insertMath,
   hasPendingContent: contentSync.hasPending,
   undo: () => editor.value?.commands.undo(), redo: () => editor.value?.commands.redo() })
 
@@ -437,10 +451,48 @@ function syncDown() {
   emit('update', markdown)
 }
 
+/**
+ * 双击公式 → 弹输入框，用 **LaTeX** 改内容。
+ *
+ * 为什么是弹框而不是把节点就地变成可编辑文本：公式在编辑器里是原子节点（atom），
+ * 就地编辑要自己实现一套"节点内的输入态"（输入光标、撤销、失焦提交、Esc 取消、粘贴…），
+ * 而写作时改公式远不如改正文频繁。弹框一次输入、确定即一次属性替换 ——
+ * 撤销栈里也就是一步。也可以去「源码对照」直接改 `$…$` / `$$…$$`，两条路都保留。
+ * 只读渲染（速查卡、只读预览）不弹。
+ */
+async function openMathEditor(view, node, nodePos) {
+  const name = node?.type?.name
+  if (props.readonly || (name !== 'mathInline' && name !== 'mathBlock')) return false
+  const display = name === 'mathBlock'
+  try {
+    const { value } = await ElMessageBox.prompt(
+      display ? '块级公式：写 $$ 之间的内容' : '行内公式：写 $ 之间的内容',
+      '编辑 LaTeX 公式',
+      {
+        inputValue: node.attrs.tex || '',
+        inputType: 'textarea',
+        inputPlaceholder: display
+          ? String.raw`x = \frac{-b \pm \sqrt{b^2-4ac}}{2a}`
+          : String.raw`E=mc^2`,
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        inputValidator: (v) => (String(v || '').trim() ? true : '公式不能为空；要删除就选中它按退格'),
+      },
+    )
+    const tex = String(value || '').trim()
+    if (!tex || tex === node.attrs.tex) return true
+    const pos = typeof nodePos === 'number' ? nodePos : view.state.selection.from
+    view.dispatch(view.state.tr.setNodeMarkup(pos, undefined, { ...node.attrs, tex }))
+  } catch {
+    /* 取消：不改动 */
+  }
+  return true
+}
+
 onMounted(() => {
   editor.value = new Editor({
     editable: !props.readonly,
-    extensions: [StarterKit.configure({ codeBlock: false, underline: false, link: { openOnClick: false } }), CodeBlockCm, Callout, Details, Summary, Underline, Superscript, Subscript, Highlight, FontStyle, TableKit, ExcelTableNavigation, DataLineAttr, BlockMeta, HeadingAnchorAttr, ToolbarAttrs, InlineImage, TaskList, EditableTaskItem, BlockPaste],
+    extensions: [StarterKit.configure({ codeBlock: false, underline: false, link: { openOnClick: false } }), CodeBlockCm, Callout, Details, Summary, Underline, Superscript, Subscript, Highlight, FontStyle, TableKit, ExcelTableNavigation, DataLineAttr, BlockMeta, HeadingAnchorAttr, ToolbarAttrs, InlineImage, TaskList, EditableTaskItem, MathInline, MathBlock, BlockPaste],
     content: renderContent(props.content),
     editorProps: {
       // 关掉浏览器拼写检查：笔记里全是 StringBuffer / spring_factories / AutoConfiguration 这类
@@ -449,6 +501,8 @@ onMounted(() => {
       // 组件自带该属性，所以在笔记页之外使用也不会重新冒出来（页面根节点另有兜底，见 NoteEdit.vue）。
       attributes: { spellcheck: 'false', autocorrect: 'off', autocapitalize: 'off' },
       handleClick: (_view, _position, event) => jumpToNoteAnchor(event),
+      // 双击公式 → 用 LaTeX 改（块编辑器里公式是原子节点，改内容只能这样或去源码对照改）
+      handleDoubleClickOn: (view, _pos, node, nodePos) => openMathEditor(view, node, nodePos),
     },
     onUpdate: onDocumentUpdate,
     onTransaction: handleTransaction,

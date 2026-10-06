@@ -15,6 +15,9 @@ import githubDarkCss from 'highlight.js/styles/github-dark.css?raw'
 import { fixHtmlQuotes } from './htmlQuotes'
 import mdCallout from './mdCallout'
 import mdAnchor from './mdAnchor'
+import mdMath from './mdMath'
+// 导出的 HTML 要能离线看公式，所以把 katex 的 CSS 也内联进去（与 hljs 的 CSS 同样处理）
+import katexCss from 'katex/dist/katex.min.css?raw'
 
 const md = new MarkdownIt({
   html: true, // 笔记中允许少量原始 HTML（图片/表格微调等），与编辑器预览一致
@@ -44,6 +47,7 @@ const md = new MarkdownIt({
 })
 md.use(mdCallout) // :::名称 … ::: 彩色提示块，与编辑器预览保持一致
 md.use(mdAnchor) // 给标题加 id：手写目录 [小节](#id) 在导出文件里也能跳（与预览同一套规则）
+md.use(mdMath) // 数学公式：$…$ / $$…$$ → KaTeX（与笔记编辑器同一套插件与渲染参数）
 
 /**
  * 任务列表支持：`- [ ] 待办` / `- [x] 已完成` → 带勾选框的列表项
@@ -219,6 +223,7 @@ export function renderNoteHtml({ title = '', content = '', meta = '' } = {}) {
 <title>${safeTitle}</title>
 <style>
 ${githubCss}
+${katexCss}
 ${BODY_CSS}
 ${darkCssBlock}
 </style>

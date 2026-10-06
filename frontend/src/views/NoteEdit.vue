@@ -2325,6 +2325,69 @@ function askUrl(title, initial) {
     .catch(() => null)
 }
 
+/**
+ * 问一段 LaTeX 公式（与 askUrl 同样的理由：原生 prompt 会被 webview 屏蔽、在自动化里会卡死页面）。
+ * 前后带 `$$` 视为块级（独立成行），否则行内。
+ */
+function askLatex() {
+  return ElMessageBox.prompt('用 LaTeX 写公式：行内直接写（如 x^2）；要独立成行就在前后加 $$', '插入公式', {
+    inputType: 'textarea',
+    inputPlaceholder: String.raw`\frac{-b \pm \sqrt{b^2-4ac}}{2a}`,
+    confirmButtonText: '插入',
+    cancelButtonText: '取消',
+  })
+    .then(({ value }) => String(value || '').trim() || null)
+    .catch(() => null)
+}
+
+/**
+ * 工具栏「公式」：用 LaTeX 在光标处插入公式。
+ *
+ * 两条落点各走各的路（靠 captureToolbarContext 判断当前作用于哪一栏，与其它工具一致）：
+ * · 阅读模式（块编辑器）→ 插入数学**节点**（视觉由 KaTeX 渲染，存的是 LaTeX，双击可再改）；
+ * · 源码对照（源码 / md-editor 预览）→ 插入 `$…$` / `$$…$$` 文本，与手写一致。
+ */
+async function onFormulaInsert() {
+  const target = captureToolbarContext()
+  const raw = await askLatex()
+  if (!raw) {
+    target.release?.()
+    return
+  }
+  const block = /^\$\$([\s\S]+?)\$\$$/.exec(raw)
+  const tex = (block ? block[1] : raw.replace(/^\$+|\$+$/g, '')).trim()
+  if (!tex) {
+    target.release?.()
+    return
+  }
+  const display = !!block
+  // 只有「阅读模式」才是块编辑器那一栏；源码对照下（左右两栏）都按 Markdown 文本插入，
+  // 否则会把节点插到当前看不见的那一栏里去。
+  if (readingMode.value && useBlockPreview) {
+    if (blockPreviewRef.value?.insertMath(tex, display) !== false) {
+      ElMessage.success(display ? '已插入块级公式' : '已插入行内公式')
+    }
+  } else {
+    const text = display ? `\n\n$$\n${tex}\n$$\n\n` : `$${tex}$`
+    // 源码栏必须**逐字**插入：走 md-editor 的 insert 会被做 Markdown 转义（实测 `\int` 变 `\\int`、
+    // `_` 变 `\_`，公式直接废掉）。这里用与 runSourceTool 同一套 CodeMirror 原语直接改文档。
+    const view = cmView(editorScrollEl())
+    if (view) {
+      const sel = view.state.selection.main
+      view.dispatch({
+        changes: { from: sel.from, to: sel.to, insert: text },
+        selection: { anchor: sel.from + text.length },
+        scrollIntoView: true,
+      })
+      view.focus()
+    } else {
+      target.runTool('markdown', text)
+    }
+    ElMessage.success(display ? '已插入块级公式' : '已插入行内公式')
+  }
+  target.release?.()
+}
+
 /** 预览区里能作为"块"的标签：块级插入要挂到它的兄弟位置 */
 const BLOCK_SELECTOR = 'p,li,h1,h2,h3,h4,h5,h6,blockquote,pre,table,details,div,hr,ul,ol'
 
@@ -3510,6 +3573,10 @@ onBeforeUnmount(() => {
         </button>
         <button class="tb" type="button" title="表格" @click="mdTool('table')">
           <svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2" /><path d="M4 10.2h16M4 14.6h16M10 5v14M15.2 5v14" /></svg>
+        </button>
+        <button class="tb" type="button" title="公式（LaTeX：行内 $…$，独立成行 $$…$$）" @click="onFormulaInsert">
+          <!-- Lucide `radical`（MIT）：根号带横线，16px 下也一眼是"数学公式"，不是字母 x -->
+          <svg viewBox="0 0 24 24"><path d="M3 12h3l3 7 6-14h6" /></svg>
         </button>
       </template>
     </div>

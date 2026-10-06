@@ -849,7 +849,10 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
         messages.add(msg("system", "笔记编辑工具规则：局部删字、替换文字、插入内容、调整任意文字格式、生成目录，优先 get_note + edit_note；"
                 + "get_note 返回正文 content 和版本 content_hash，edit_note 仅接收定位与操作，无需传回整篇正文。"
                 + "若当前笔记未保存，请先提示保存；重复文字而用户没明确位置时先询问，不要自行选第一处。"
-                + "同一轮多项改动合成一次 edit_note；只有整篇替换才用 update_note。待确认表示尚未写入，不得宣称已经完成。"));
+                + "同一轮多项改动合成一次 edit_note；只有整篇替换才用 update_note。待确认表示尚未写入，不得宣称已经完成。"
+                // 数学公式：三处渲染（笔记/速查卡走 KaTeX 节点，回答走 md-editor 的 katex）都已支持 LaTeX，
+                // 所以别再让模型用纯文本凑公式（如 "x^2"、"sqrt(x)"、图片），那既不准也没法读。
+                + "数学公式一律用 LaTeX：行内写 $…$，独立成行的公式写 $$…$$（界面用 KaTeX 排版，不要用图片或 Unicode 上标凑公式）。"));
 
         // ② 更早内容的压缩摘要（有则带上；P1 只留读取口，压缩逻辑后续接入）
         String summary = sessionService.latestSummary(sessionId);
@@ -3317,7 +3320,11 @@ public class AgentService implements org.dyh.learnhub.service.RagEvalService.Ret
                 + "标题只写名词短语（2~12 字），不要把整句解释/定义写进标题 —— 那句解释放正文第一段。"
                 + "编号必须**沿用这篇笔记已有的体系**：原笔记是 `## 8.标题` + `### 8.1 小节`，"
                 + "新增一节就接着写 `## 9.标题` + `### 9.1 小节`，**不要改用「一、二、」或另起一套编号**；"
-                + "更深一层沿用原文的写法（如 `#### (1) …`）。先看原文再决定编号，不要凭空发明。";
+                + "更深一层沿用原文的写法（如 `#### (1) …`）。先看原文再决定编号，不要凭空发明。"
+                // 数学公式：笔记/速查卡用 KaTeX 节点渲染，回答用 md-editor 的 katex，
+                // 三处都认 LaTeX —— 所以约定模型直接写 LaTeX，而不是用纯文本凑或贴图。
+                + "数学公式一律用 LaTeX：行内 `$…$`，独立成行 `$$…$$`；"
+                + "不要用 Unicode 上标/下标签号根号凑公式，也不要用图片代替公式。";
         ObjectNode editTool = tool("edit_note", "精确编辑已有笔记：插入/更新目录、删除一个或多个字、替换文字、在指定位置插入内容、给任意一个字设置格式。"
                 + "先 get_note 读取全文和 content_hash，再复制原文定位。重复文字必须指定 occurrence 或 prefix/suffix；不可猜测位置。"
                 + "同一轮所有改动放进一个 operations 数组。返回改动片段预览，用户确认后才会写入，正文版本变化则拒绝执行。", List.of());

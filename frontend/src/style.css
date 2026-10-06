@@ -1,3 +1,12 @@
+/* 数学公式（LaTeX/KaTeX）的样式：笔记块编辑器的公式节点视图、速查卡、智能体回答、
+   笔记预览都渲染 KaTeX 的 DOM，样式只有这一份来源 —— 所以放在全局样式的最前面统一引入。
+   @import 必须出现在所有规则之前，故置于文件顶部。 */
+@import 'katex/dist/katex.min.css';
+
+/* 超长公式横向滚动，不要把正文栏撑宽（块级公式的外壳，见 utils/mathNodes.js） */
+.math-block { overflow-x: auto; overflow-y: hidden; }
+.math-inline { max-width: 100%; }
+
 /* ============================================================
    learn-hub 设计系统 —— 语义化 token（浅色/深色双主题）
    品牌色：teal 青绿（活力学习感）

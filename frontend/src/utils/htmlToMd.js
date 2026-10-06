@@ -213,7 +213,16 @@ function normalize(html) {
     d.replaceWith(pre)
   })
 
-  // 3) 公式：md-editor 未装 katex 时保留原始 TeX 源码，直接还原成 $…$
+  // 3) 公式
+  // 块编辑器的数学节点（见 mathNodes.js）：视觉由节点视图渲染，getHTML() 序列化出来只有一层
+  // 带 data-tex 的空壳，所以直接按属性还原成 $…$ / $$…$$（先块级、再行内，避免嵌套时顺序错）。
+  box.querySelectorAll('.math-block[data-tex]').forEach((n) => {
+    n.replaceWith(document.createTextNode(`\n\n$$\n${(n.getAttribute('data-tex') || '').trim()}\n$$\n\n`))
+  })
+  box.querySelectorAll('.math-inline[data-tex]').forEach((n) => {
+    n.replaceWith(document.createTextNode(`$${n.getAttribute('data-tex') || ''}$`))
+  })
+  // md-editor 未装 katex 时保留原始 TeX 源码，直接还原成 $…$
   box.querySelectorAll('.md-editor-katex-inline').forEach((n) => {
     n.replaceWith(document.createTextNode(`$${n.textContent}$`))
   })

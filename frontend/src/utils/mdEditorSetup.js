@@ -1,4 +1,4 @@
-﻿/**
+/**
  * md-editor-v3 的全局初始化（副作用模块）。
  *
  * 为什么单独抽成一个文件，而不是写在 main.js 里：
@@ -22,6 +22,7 @@
 import { config } from 'md-editor-v3'
 import 'md-editor-v3/lib/style.css'
 import hljs from 'highlight.js'
+import katex from 'katex'
 import mdCallout from './mdCallout'
 import mdAnchor from './mdAnchor'
 
@@ -39,6 +40,13 @@ config({
   //   未知语言内部会回落 highlightAuto，不会抛错。
   editorExtensions: {
     highlight: { instance: hljs },
+    // ★ 数学公式（LaTeX）：必须给**本地** katex 实例。md-editor 的默认配置指向
+    //   https://unpkg.com/katex@0.16.33/…（见其 config.mjs），而本应用是自托管/离线部署
+    //   （Docker 内网），线上一拉不到整块公式就不渲染；传了 instance 后它的加载分支
+    //   `if (noKatex || instance) return` 会直接跳过，连 <link> 都不插。
+    //   样式由 style.css 顶部的 `@import 'katex/dist/katex.min.css'` 统一提供
+    //   （笔记的块编辑器节点视图、速查卡、面板回答共用同一份 CSS）。
+    katex: { instance: katex },
   },
 })
 
