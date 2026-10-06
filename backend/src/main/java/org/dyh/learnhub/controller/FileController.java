@@ -216,11 +216,17 @@ public class FileController {
     /**
      * 分段翻译（阅读器用）。**只接受一段**：全文翻译会撞上输出上限被截断，
      * 而且读到哪里翻到哪里更快、也能立刻判断质量。
+     *
+     * <p>走 FileStorageService 而不是直接调 TranslationService：同一段被反复选中时返回落盘的旧译文
+     * （换了翻译档案会自动重译），不再每次都花 token —— 详见其中注释。
      */
     @PostMapping("/{id}/translate")
     public Result<Map<String, Object>> translate(@PathVariable Long id, @RequestBody Map<String, String> body) {
         fileStorageService.detail(id); // 校验资料存在（顺带让日志里能追到是哪份资料）
-        return Result.ok(translationService.translate(body.get("text"), body.get("targetLang")));
+        String text = body.get("text");
+        String lang = body.get("targetLang");
+        return Result.ok(fileStorageService.translateCached(id, text, lang, translationService.cacheIdentity(),
+                () -> translationService.translate(text, lang)));
     }
 /** 保存阅读位置：翻页/缩放时由阅读器防抖调用 */
     @PutMapping("/{id}/reading-state")

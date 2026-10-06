@@ -47,9 +47,20 @@ public class TranslationService {
     private final DeepSeekClient client;
     private final ModelRouting routing;
 
+    /**
+     * 译文缓存的身份标识（跟着 {@link ModelRouting#TASK_TRANSLATE} 走）。
+     *
+     * <p>为什么要这个：译文按「目标语言 + 原文 + 身份」缓存，用户把「阅读器翻译」那一项
+     * 从本地小模型换成云端档案之后，必须**重译**；否则拿回来的还是旧模型翻的句子，
+     * 而他换档的唯一理由就是想看得更好。
+     */
+    public String cacheIdentity() {
+        ModelRouting.ModelTarget t = routing.forTask(ModelRouting.TASK_TRANSLATE);
+        return t.label() + "|" + t.model();
+    }
+
     /** 单段翻译；返回译文与所用模型（界面要显示"谁翻的"，否则不知道质量该怪谁） */
-    public Map<String, Object> translate(String text, String targetLang) {
-        if (!StringUtils.hasText(text)) {
+    public Map<String, Object> translate(String text, String targetLang) {        if (!StringUtils.hasText(text)) {
             throw new IllegalArgumentException("没有要翻译的内容");
         }
         String src = text.trim();

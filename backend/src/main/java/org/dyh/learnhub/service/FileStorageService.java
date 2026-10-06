@@ -451,6 +451,16 @@ public class FileStorageService {
             m.put("pageCount", 0);
             return m;
         }
+        // 版面还原要逐页重建几何（PDF 从字形坐标、Word 从 OOXML），还可能带上公式识别 —— 秒级起步，
+        // 而它只是"把已经上传的文件再看一遍"。按「文件内容版本 + 公式识别结果版本」缓存，见 layoutCachePath。
+        Map<String, Object> cached = readLayoutCache(id, path);
+        if (cached != null) {
+            // 元信息是"活的"：id/ext/textStatus 每次按当前行回填，缓存里只认版面那几项
+            cached.put("id", info.getId());
+            cached.put("ext", info.getExt() == null ? "" : info.getExt());
+            cached.put("textStatus", info.getTextStatus() == null ? "" : info.getTextStatus());
+            return cached;
+        }
         PdfLayoutExtractor.Layout layout;
         try {
             if ("pdf".equals(ext)) {
@@ -473,7 +483,118 @@ public class FileStorageService {
         m.put("pages", layout.pages());
         m.put("chars", layout.chars());
         m.put("pageCount", layout.pageCount());
+        writeLayoutCache(id, path, m);
         return m;
+    }
+
+    /**
+     * 「抽取正文」的结果缓存文件（`uploads/.derived/{id}/layout-{revision}-{formulaStamp}.json`）。
+     *
+     * <p>键里两段都必要：<b>revision</b> 来自文件内容（大小 + mtime 的哈希，见 {@link #sourceRevision}），
+     * 换一份文件或重传同名文件都**不会**复用旧版面；<b>formulaStamp</b> 是公式识别缓存目录里最新的
+     * 修改时间 —— 公式识别是异步补上的，识别结果晚到时要重算，不能把"还没识别的版本"缓存成最终结果。
+     *
+     * <p>目录沿用公式识别那套 `.derived/{id}/`：删除资料时一起清掉，不会留孤儿文件。
+     */
+    private Path layoutCachePath(Long id, Path source) {
+        long formulaStamp = 0L;
+        Path formulaDir = storageDir().resolve(".derived").resolve(String.valueOf(id)).resolve("formula-ocr");
+        if (Files.isDirectory(formulaDir)) {
+            try (var files = Files.list(formulaDir)) {
+                for (Path f : (Iterable<Path>) files::iterator) {
+                    try {
+                        formulaStamp = Math.max(formulaStamp, Files.getLastModifiedTime(f).toMillis());
+                    } catch (IOException ignored) {
+                        // 单个文件读不到时间戳就当它不存在
+                    }
+                }
+            } catch (IOException e) {
+                log.warn("公式识别缓存目录读取失败，本次按无识别结果处理: {}", e.toString());
+            }
+        }
+        return storageDir().resolve(".derived").resolve(String.valueOf(id))
+                .resolve("layout-" + sourceRevision(source) + "-" + formulaStamp + ".json");
+    }
+
+    /** 分段翻译 + **落盘缓存**（阅读器用）。真正翻译由调用方以 supplier 传进来。
+     *
+     * <p>为什么必须缓存：对照阅读时同一段会被反复选中（来回翻页、切模式、重开阅读器），
+     * 每选一次就调一次模型 = 白花 token；译文又是确定性任务，同一段输入结果稳定。
+     * 缓存键 = 「目标语言 + 原文 + 译文身份（档案/模型）」的哈希，落在
+     * `uploads/.derived/{id}/translate/`（与版面/公式缓存同一处，删资料时一起清）。
+     *
+     * <p>键里带译文身份的意义：换了「阅读器翻译」的档案就自动重译，不会拿旧模型的译文糊弄。
+     * 返回体多一个 `cached` 字段，界面想知道这次有没有花钱可以看它。
+     *
+     * <p>翻译器用 supplier 注入而不是构造器依赖：这个类的构造器被好几个测试直接 new，
+     * 为一个缓存再牵一条依赖会把它们全改一遍 —— 代价不值得。
+     */
+    public Map<String, Object> translateCached(Long id, String text, String targetLang, String identity,
+                                              java.util.function.Supplier<Map<String, Object>> compute) {
+        String src = text == null ? "" : text;
+        String lang = (targetLang == null || targetLang.isBlank()) ? "简体中文" : targetLang.trim();
+        String key = sha256Hex(src + "\u0000" + lang + "\u0000" + (identity == null ? "" : identity));
+        Path cache = storageDir().resolve(".derived").resolve(String.valueOf(id)).resolve("translate").resolve(key + ".json");
+        if (Files.isRegularFile(cache)) {
+            try {
+                Map<String, Object> hit = new com.fasterxml.jackson.databind.ObjectMapper().readValue(
+                        cache.toFile(),
+                        new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+                hit.put("cached", true);
+                return hit;
+            } catch (Exception e) {
+                log.warn("译文缓存读取失败，改为重译: {} - {}", cache, e.toString());
+            }
+        }
+        Map<String, Object> out = compute.get();
+        try {
+            Files.createDirectories(cache.getParent());
+            new com.fasterxml.jackson.databind.ObjectMapper().writeValue(cache.toFile(), out);
+        } catch (Exception e) {
+            log.warn("译文缓存写入失败（不影响本次结果）: {} - {}", cache, e.toString());
+        }
+        out.put("cached", false);
+        return out;
+    }
+
+    /** 文本的 SHA-256 十六进制（缓存键只用它，不落原文） */
+    private static String sha256Hex(String text) {
+        try {
+            byte[] bytes = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(bytes.length * 2);
+            for (byte b : bytes) {
+                sb.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return Integer.toHexString(text.hashCode());
+        }
+    }
+
+    /** 读版面缓存；缺失或解析失败都返回 null（→ 上层重算，缓存问题绝不影响阅读） */
+    private Map<String, Object> readLayoutCache(Long id, Path source) {
+        Path cache = layoutCachePath(id, source);
+        if (!Files.isRegularFile(cache)) return null;
+        try {
+            return new com.fasterxml.jackson.databind.ObjectMapper().readValue(
+                    cache.toFile(),
+                    new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+        } catch (Exception e) {
+            log.warn("版面缓存读取失败，改为重算: {} - {}", cache, e.toString());
+            return null;
+        }
+    }
+
+    /** 写版面缓存；失败只记日志（这次读取照样返回新算的结果） */
+    private void writeLayoutCache(Long id, Path source, Map<String, Object> layout) {
+        Path cache = layoutCachePath(id, source);
+        try {
+            Files.createDirectories(cache.getParent());
+            new com.fasterxml.jackson.databind.ObjectMapper().writeValue(cache.toFile(), layout);
+        } catch (Exception e) {
+            log.warn("版面缓存写入失败（不影响本次结果）: {} - {}", cache, e.toString());
+        }
     }
 
     /** 渲染插图的分辨率：150 够看清图里的字，单页位图也就 8MB 左右，不至于把内存吃掉 */
