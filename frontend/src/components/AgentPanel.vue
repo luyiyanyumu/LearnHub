@@ -11,6 +11,8 @@ import {
 } from '../utils/agentNoteMerge'
 import { isDark } from '../composables/useTheme'
 import { AGENT_NOTE_UPDATED_EVENT, matchesOpenNote, parseActionResult } from '../utils/agentNoteEdit'
+import { retrievalChannels, retrievalGroups, retrievalKey, retrievalSourcePath, retrievalTitle, retrievalTooltip } from '../utils/retrievalDisplay'
+import { groundingDisplay } from '../utils/groundingDisplay'
 
 /**
  * Markdown 预览（md-editor-v3）体积很大：整包 + 样式约 310 KB，
@@ -27,6 +29,14 @@ const MdPreview = defineAsyncComponent(() =>
 )
 
 const router = useRouter()
+
+function openRetrievedSource(hit) {
+  const path = retrievalSourcePath(hit)
+  if (!path) return
+  if (router.resolve(path).fullPath === router.currentRoute.value.fullPath && hit.type === 'wiki') {
+    window.dispatchEvent(new CustomEvent('lh-open-wiki', { detail: hit }))
+  } else router.push(path)
+}
 
 /**
  * 嵌入模式：不在抽屉里、而作为**左侧导航的"智能体"页**整页显示。
@@ -404,6 +414,8 @@ async function send(text, ctx) {
     holder.content = res.reply || ''
     holder.events = res.events || []
     holder.retrieved = res.retrieved || []
+    holder.grounding = res.grounding
+    holder.groundingStatus = groundingDisplay(res.grounding, holder.retrieved)
     // 思考过程：thinking 模型才会返回；不拼进正文（正文要能原样存成笔记）
     holder.reasoning = res.reasoning || ''
     holder.toolUsed = res.toolUsed
@@ -849,11 +861,25 @@ function askFromEvent(e) {
                     <div class="think-body">{{ m.reasoning }}</div>
                   </details>
                   <!-- 自动检索透明度：这轮回答参考了你自己的哪些记录（事件里不存它，刷新后不显示） -->
-                  <div v-if="m.retrieved?.length" class="ref-line">
-                    <span class="ref-label">参考了你的记录</span>
-                    <span v-for="(h, j) in m.retrieved" :key="j" class="ref-item">{{ h.title }}</span>
+                  <div v-for="group in retrievalGroups(m.retrieved)" :key="group.key" class="ref-line" :class="'ref-' + group.key">
+                    <span class="ref-label">{{ group.label }}</span>
+                    <component v-for="h in group.items" :key="retrievalKey(h)" :is="retrievalSourcePath(h) ? 'button' : 'span'"
+                      :type="retrievalSourcePath(h) ? 'button' : undefined" class="ref-item" :class="{ 'ref-item-link': !!retrievalSourcePath(h) }"
+                      :title="retrievalTooltip(h)" @click="openRetrievedSource(h)">
+                      <span class="ref-title">{{ retrievalTitle(h) }}</span>
+                      <span v-if="retrievalChannels(h).length" class="ref-channels">{{ retrievalChannels(h).join(' / ') }}</span>
+                    </component>
+                    <span v-if="group.key === 'guide'" class="ref-guide-note">请结合原文核对</span>
                   </div>
                   <div class="md-body"><MdPreview :modelValue="fixHtmlQuotes(m.content || '')" :theme="isDark ? 'dark' : 'light'" previewTheme="github" /></div>
+                  <div v-if="m.groundingStatus" class="grounding-line" :class="m.groundingStatus.status">
+                    <details v-if="m.groundingStatus.note || m.groundingStatus.unsupported.length">
+                      <summary>{{ m.groundingStatus.label }}</summary>
+                      <p v-if="m.groundingStatus.note">{{ m.groundingStatus.note }}</p>
+                      <ul v-if="m.groundingStatus.unsupported.length"><li v-for="claim in m.groundingStatus.unsupported" :key="claim">{{ claim }}</li></ul>
+                    </details>
+                    <span v-else>{{ m.groundingStatus.label }}</span>
+                  </div>
                   <!--
                     每次回答后：询问是否沉淀。
                     在笔记页里打开的面板，主操作是「融入当前笔记」——问的问题本来就是关于这篇的，
@@ -1504,14 +1530,43 @@ html.dark .cfg-tip {
 }
 
 .ref-item {
-  max-width: 200px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
   padding: 2px 7px;
   border: 1px solid var(--app-border);
   border-radius: 999px;
+  font: inherit;
+  color: inherit;
+  background: transparent;
 }
+.ref-item-link { cursor: pointer; }
+.ref-item-link:hover { border-color: var(--app-brand); color: var(--app-brand-deep); }
+.ref-item-link:focus-visible { outline: 2px solid var(--app-brand); outline-offset: 2px; }
+.ref-label { flex-shrink: 0; font-weight: 600; }
+.ref-guide .ref-item { border-style: dashed; }
+.ref-guide-note { color: var(--app-text-2); }
+.ref-title {
+  max-width: 200px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ref-channels {
+  flex-shrink: 0;
+  color: var(--app-brand-deep);
+}
+
+.grounding-line { margin: 8px 0; padding: 6px 9px; border-left: 2px solid var(--app-border); color: var(--app-text-2); font-size: 12px; line-height: 1.6; }
+.grounding-line.verified { border-color: var(--app-brand); }
+.grounding-line.unsupported, .grounding-line.unchecked { border-color: var(--el-color-warning); }
+.grounding-line summary { cursor: pointer; }
+.grounding-line p { margin: 5px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.grounding-line ul { margin: 5px 0 0; padding-left: 20px; }
+.grounding-line li { overflow-wrap: anywhere; }
 
 .typing {
   display: flex;

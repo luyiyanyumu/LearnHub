@@ -1,5 +1,6 @@
 package org.dyh.learnhub.service;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.dyh.learnhub.ai.DeepSeekClient;
@@ -45,8 +46,8 @@ public class GroundingService {
 
     private static final Logger log = LoggerFactory.getLogger(GroundingService.class);
 
-    /** 证据文本上限：只在"判断答案有没有超出材料"这件事上够用即可 */
-    private static final int EVIDENCE_CHARS = 5000;
+    /** 核对器必须看到回答实际使用的完整检索上下文，包括末尾的有效社区摘要。 */
+    private static final int EVIDENCE_CHARS = RetrievalContextService.TOTAL_CHARS;
     /** 答案文本上限 */
     private static final int ANSWER_CHARS = 3000;
 
@@ -102,7 +103,15 @@ public class GroundingService {
         if (!StringUtils.hasText(answer)) {
             return Result.skipped("答案为空");
         }
-        int evLen = Math.min(evidence.length(), EVIDENCE_CHARS);
+        // A prefix cannot establish whether the answer is supported by all material the
+        // assistant read. Keep this budget explicit instead of producing a partial verdict.
+        if (evidence.length() > EVIDENCE_CHARS) {
+            return Result.skipped("本轮证据超过校验预算，未进行完整核对");
+        }
+        if (answer.length() > ANSWER_CHARS) {
+            return Result.skipped("本轮答案超过校验预算，未进行完整核对");
+        }
+        int evLen = evidence.length();
         String system = """
                 你是答案的**依据核对器**。给定用户问题、系统检索到的材料、以及助手的回答，
                 请判断：回答里的关键断言，能不能由材料支撑？
@@ -116,8 +125,8 @@ public class GroundingService {
                 不要输出 JSON 之外的内容。
                 """;
         String user = "【用户问题】\n" + clip(question, 500)
-                + "\n\n【系统检索到的材料】\n" + clip(evidence, EVIDENCE_CHARS)
-                + "\n\n【助手回答】\n" + clip(answer, ANSWER_CHARS);
+                + "\n\n【系统检索到的材料】\n" + evidence
+                + "\n\n【助手回答】\n" + answer;
         ModelRouting.ModelTarget t = routing.forTask(ModelRouting.TASK_GROUNDING);
         try {
             JsonNode node = client.chat(List.of(
@@ -129,13 +138,20 @@ public class GroundingService {
             if (!StringUtils.hasText(content)) {
                 return Result.skipped("核对返回空内容");
             }
-            JsonNode root = objectMapper.readTree(stripFence(content));
-            boolean grounded = root.path("grounded").asBoolean(true);
+            JsonNode root = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                    .readTree(stripFence(content));
+            if (root == null || !root.isObject() || !root.path("grounded").isBoolean()
+                    || !root.path("unsupported").isArray()
+                    || (root.has("note") && !root.get("note").isTextual())) {
+                return Result.skipped("核对响应格式无效，未获得完整核对结果");
+            }
+            boolean grounded = root.get("grounded").booleanValue();
             List<String> unsupported = new ArrayList<>();
-            for (JsonNode n : root.path("unsupported")) {
-                if (n.isTextual() && !n.asText().isBlank()) {
-                    unsupported.add(n.asText().trim());
+            for (JsonNode n : root.get("unsupported")) {
+                if (!n.isTextual() || n.asText().isBlank()) {
+                    return Result.skipped("核对响应格式无效，未获得完整核对结果");
                 }
+                unsupported.add(n.asText().trim());
             }
             String note = root.path("note").asText("");
             boolean ok = grounded && unsupported.isEmpty();

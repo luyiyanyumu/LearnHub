@@ -2,11 +2,11 @@
 
 LearnHub 的 npm 包是 Docker Compose 启动器。Java 后端、前端 nginx 和 MySQL 在 Docker 中运行，用户电脑需要 Node.js 22.14 以上与 Docker Compose 2.20 以上。`npx` 下载的是启动器；它随后拉取对应版本的前后端镜像。
 
-本仓库已准备 `@luyiyanyumu/learnhub` 和 `0.1.0` 的发布流程。npm scope 的发布权限、GHCR 包可见性及实际首发需要维护者在各自账号中配置；仓库内的实现不代表包或镜像已经发布。
+`@luyiyanyumu/learnhub@0.1.1` 和对应的公开前后端镜像已发布，GitHub Actions 的 OIDC 自动发布已验证。GitHub 版本标签固定已发布的代码；后续普通代码提交不会改变现有 npm 包，准备好新的版本号并推送对应标签后才发布新版本。
 
 ## 用户安装与更新
 
-首发完成后：
+安装与更新：
 
 ```sh
 npx @luyiyanyumu/learnhub@latest start
@@ -61,8 +61,10 @@ npx @luyiyanyumu/learnhub@latest update
 后续完整发布先提高 `cli/package.json` 的版本，再在该发布 commit 上创建相同版本的 tag。例如下一版：
 
 ```sh
-git tag v0.1.1
-git push origin v0.1.1
+# 先将 cli/package.json 和 cli/package-lock.json 更新为 0.1.2，
+# 并提交、推送准备发布的代码，再在该提交上创建新标签：
+git tag -a v0.1.2 -m "Release 0.1.2"
+git push origin v0.1.2
 ```
 
 推送版本 tag 触发完整发布；手动完整发布要求选中版本 tag 并设置 `publish=true`、`images_only=false`。工作流按顺序运行：版本检查 → CLI 测试与 npm 打包检查 → Compose 检查 → 后端测试 → MySQL 8.0/8.4 隔离迁移测试 → 前端测试与构建 → 两端多架构镜像 → 使用全新 Docker 配置匿名检查两个版本镜像 → npm 发布。匿名检查失败会阻断 npm 发布；把两包设为 Public 后可只重跑失败的 npm job。完整发布未配置 npm 认证时，会在推送镜像之前终止；`images_only` 模式只跳过 npm 认证和 npm job，仍执行全部构建前检查。

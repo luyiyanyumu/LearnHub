@@ -50,3 +50,12 @@ Thumbs.db
 .settings/
 .git-commit-msg.txt
 milvus-data/
+
+# ===== 本机验证、临时输出和个人记忆 =====
+/output/
+/tmp/
+/memory/
+
+# 原始评测问题、回答和语料快照留在本机；汇总报告可提交。
+/docs/benchmarks/**/*.json
+/docs/benchmarks/**/*.txt

@@ -66,7 +66,7 @@ public class RagAnswerEvalService {
      * 生成/评分 prompt 的版本号。**改了那段 system prompt 就必须改这个号** ——
      * 否则历史里的分数会被误当成"同条件下的变化"。
      */
-    public static final String PROMPT_VERSION = "answer-eval-v1";
+    public static final String PROMPT_VERSION = "answer-eval-v2-wiki-guides";
 
     /** 注入模型的证据文本上限（检索块本身已有预算，wiki/图谱会再加，这里兜总账） */
     private static final int EVIDENCE_CHARS = 8000;
@@ -171,6 +171,15 @@ public class RagAnswerEvalService {
      * @param onlyIds 只评这几条（不传则评全部 enabled=1；传了就**忽略 enabled**，方便试草稿题）
      */
     public Map<String, Object> run(String label, int topK, int limit, String mode, List<Long> onlyIds) {
+        return run(label, topK, limit, mode, onlyIds, null, null);
+    }
+
+    /** Per-run overrides never change shared settings or affect an active conversation. */
+    public Map<String, Object> run(String label, int topK, int limit, String mode, List<Long> onlyIds,
+                                   Boolean wikiOverride, Boolean kgOverride) {
+        if (mode != null && !mode.isBlank() && !Set.of("fused", "keyword", "vector").contains(mode.trim())) {
+            throw new IllegalArgumentException("检索模式必须是 fused、keyword 或 vector");
+        }
         List<RagEval> cases = loadCases(onlyIds);
         if (cases.isEmpty()) {
             throw new IllegalStateException("没有可评测的用例：先往 rag_eval 里写用例（并把 enabled 置 1）");
@@ -184,8 +193,8 @@ public class RagAnswerEvalService {
 
         // 注入臂：报告要的"基础 / +wiki / +图谱 / 组合"四组对照，靠这两个现有开关切换，
         // 结果连同开关状态一起落库，历史里才分得清是哪一组。
-        boolean wiki = settingsService.wikiInjectEnabled();
-        boolean kg = settingsService.kgInjectEnabled();
+        boolean wiki = wikiOverride == null ? settingsService.wikiInjectEnabled() : wikiOverride;
+        boolean kg = kgOverride == null ? settingsService.kgInjectEnabled() : kgOverride;
         ModelRouting.ModelTarget target = routing.forTask(ModelRouting.TASK_CHAT);
 
         long t0 = System.currentTimeMillis();
@@ -208,6 +217,7 @@ public class RagAnswerEvalService {
             boolean gap = RagEvalService.isGapCase(expect);
             RagEvalService.Evidence ev = retriever.evidenceFor(c.getQuestion(), k, m, wiki, kg);
             String evidence = clip(ev.text(), EVIDENCE_CHARS);
+            boolean hasOriginalEvidence = ev.groundingText() != null && !ev.groundingText().isBlank();
             List<String> topRefs = ev.refs();
 
             ObjectNode row = objectMapper.createObjectNode();
@@ -217,6 +227,10 @@ public class RagAnswerEvalService {
             row.put("gap", gap);
             row.put("top", String.join("|", topRefs));
             row.put("evidenceChars", evidence.length());
+            row.put("groundingEvidenceChars", hasOriginalEvidence ? ev.groundingText().length() : 0);
+            // The raw-corpus fingerprint alone cannot detect a regenerated Wiki guide.
+            row.put("contextHash", KgService.sha256(evidence));
+            row.put("groundingHash", KgService.sha256(ev.groundingText() == null ? "" : ev.groundingText()));
 
             // ---- 生成答案（计时 + 记 token）----
             String answer = "";
@@ -279,7 +293,7 @@ public class RagAnswerEvalService {
                 if (coveredAll) {
                     coverageAll++;
                 }
-                if (evidence.isEmpty()) {
+                if (!hasOriginalEvidence) {
                     // 检索什么都没给：此时"拒答"是合理行为，不该算成误拒，
                     // 否则会把"检索失败"错误地记到"答案处理"头上。
                     row.put("noAnswer", "na");
@@ -293,13 +307,13 @@ public class RagAnswerEvalService {
                     row.put("noAnswer", "ok");
                 }
             }
-            if (gap || evidence.isEmpty()) {
+            if (gap || !hasOriginalEvidence) {
                 row.put("grounded", (String) null);
             } else if (!groundingService.enabled()) {
                 row.put("grounded", (String) null);
                 row.put("groundingNote", "未开启答案核对（kb.grounding=0）");
             } else {
-                GroundingService.Result gr = groundingService.check(c.getQuestion(), evidence, answer);
+                GroundingService.Result gr = groundingService.check(c.getQuestion(), ev.groundingText(), answer);
                 if (gr.checked()) {
                     supportChecked++;
                     if (gr.grounded()) {

@@ -4,6 +4,19 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
+import org.commonmark.node.AbstractVisitor;
+import org.commonmark.node.Code;
+import org.commonmark.node.FencedCodeBlock;
+import org.commonmark.node.HardLineBreak;
+import org.commonmark.node.Heading;
+import org.commonmark.node.HtmlBlock;
+import org.commonmark.node.HtmlInline;
+import org.commonmark.node.IndentedCodeBlock;
+import org.commonmark.node.Link;
+import org.commonmark.node.Paragraph;
+import org.commonmark.node.SoftLineBreak;
+import org.commonmark.node.Text;
+import org.commonmark.parser.Parser;
 import org.dyh.learnhub.ai.AgentService;
 import org.dyh.learnhub.ai.DeepSeekClient;
 import org.dyh.learnhub.ai.ModelRouting;
@@ -59,6 +72,8 @@ import java.util.concurrent.Executors;
 public class WikiService {
 
     private static final Logger log = LoggerFactory.getLogger(WikiService.class);
+    /** Query freshness inspects rendered prose, not citation examples inside code or metadata. */
+    private static final Parser RETRIEVAL_MARKDOWN = Parser.builder().build();
 
     /** 自动增量更新的开关（存 app_setting，与 AI 设置同表但不出现在设置面板里：它属于 wiki 页的工具栏） */
     public static final String SETTING_AUTO_REFRESH = "wiki.auto_refresh";
@@ -135,6 +150,7 @@ public class WikiService {
     /** 局部重编译要用"最近变更的素材"做影响分析 */
     private final org.dyh.learnhub.mapper.KbChunkMapper kbChunkMapper;
     private final EntityCompileService entityCompileService;
+    private final WikiDependencyService dependencyService;
     private final DeepSeekClient client;
     private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
 
@@ -161,6 +177,7 @@ public class WikiService {
     @PreDestroy
     public void shutdown() {
         scheduler.shutdownNow();
+        jobRunner.shutdownNow();
     }
 
     // ------------------------------------------------------------------
@@ -170,13 +187,15 @@ public class WikiService {
     /** 主题（分类 / 标签）及其 wiki 状态：有没有生成过、是否过期、几条素材 */
     public List<Map<String, Object>> topics() {
         List<Map<String, Object>> out = new ArrayList<>();
+        List<WikiPage> persisted = mapper.selectList(Wrappers.<WikiPage>lambdaQuery());
+        Map<Long, WikiDependencyService.Freshness> dependencies = dependencyService.freshness(persisted);
 
         List<Map<String, Object>> flatCats = new ArrayList<>();
         flattenCats(categoryService.tree(), "", flatCats);
         for (Map<String, Object> c : flatCats) {
             Long id = (Long) c.get("id");
             Material m = material(new Topic("cat-" + id, "category", id, (String) c.get("label")));
-            out.add(topicInfo("cat-" + id, "category", id, (String) c.get("label"), m));
+            out.add(topicInfo("cat-" + id, "category", id, (String) c.get("label"), m, dependencies));
         }
 
         for (Tag t : tagService.list()) {
@@ -184,12 +203,12 @@ public class WikiService {
             if (m.items().isEmpty()) {
                 continue; // 没挂任何笔记的标签不值得生成
             }
-            out.add(topicInfo("tag-" + t.getId(), "tag", t.getId(), t.getName(), m));
+            out.add(topicInfo("tag-" + t.getId(), "tag", t.getId(), t.getName(), m, dependencies));
         }
 
         // 实体页与索引页（编译产物）：作为伪主题一起列出，让它们在同一个界面里可点可读
-        List<WikiPage> compiled = mapper.selectList(Wrappers.<WikiPage>lambdaQuery()
-                .in(WikiPage::getTopicType, List.of("entity", "index", "lint")));
+        List<WikiPage> compiled = persisted.stream()
+                .filter(p -> List.of("entity", "index", "lint").contains(p.getTopicType())).toList();
         // 索引页的输入就是**实体页清单**，可以用同一套指纹算法重算来判断它是否过期。
         // 实体页的输入是"它用到的来源"，同样在读取时重算（评估报告 P1-2）：
         // 以前这里一律 stale=false —— 编译页永远不提示"待更新"。
@@ -201,7 +220,8 @@ public class WikiService {
         }
         String currentIndexFp = EntityCompileService.indexFingerprint(entityPages);
         // 三类来源的最后修改时间：**一次批量查全**（36 个实体页只在内存里比对，不逐页查库）
-        Map<String, LocalDateTime> sourceTimes = entityPages.isEmpty() ? Map.of() : sourceTimes();
+        boolean legacyEntities = entityPages.stream().anyMatch(p -> dependencyState(p, dependencies).legacy());
+        Map<String, LocalDateTime> sourceTimes = legacyEntities ? sourceTimes() : Map.of();
         for (WikiPage p : compiled) {
             Map<String, Object> o = new LinkedHashMap<>();
             o.put("topicKey", p.getTopicKey());
@@ -214,7 +234,9 @@ public class WikiService {
             // 索引页按"实体页清单"指纹比对（增/删/改名才过期；重生成正文不影响索引内容，不算过期）；
             // 实体页按"来源指纹 + 依赖映射"重算（来源被删 / 被改才过期，无关页不受影响）；
             // 自检页（lint）的输入是"全库扫描结果"，没有稳定的来源清单，保持 false。
-            o.put("stale", compiledStale(p.getTopicType(), p, currentIndexFp, sourceTimes));
+            var state = dependencyState(p, dependencies);
+            o.put("stale", "entity".equals(p.getTopicType()) && !state.legacy()
+                    ? !state.current() : compiledStale(p.getTopicType(), p, currentIndexFp, sourceTimes));
             o.put("chars", p.getContentMd() == null ? 0 : p.getContentMd().length());
             o.put("quality", p.getQuality() == null ? "" : p.getQuality());
             o.put("generatedAt", p.getGeneratedAt() == null ? null
@@ -255,7 +277,7 @@ public class WikiService {
         if ("entity".equals(type)) {
             // 实体页：按落库的来源清单重算（来源被删 / 被改 → 过期；无关页不受影响）
             return EntityCompileService.staleBySources(
-                    EntityCompileService.sourceIdsOf(page.getSourceHash(), page.getContentMd()),
+                    EntityCompileService.sourceIdsOf(page.getSourceHash(), retrievalCitationText(page.getContentMd())),
                     sourceTimes, page.getGeneratedAt());
         }
         // 自检报告（lint）：输入是"全库扫描结果"，没有稳定的来源清单可重算，保持不过期
@@ -267,9 +289,24 @@ public class WikiService {
         if (page == null) {
             return false;
         }
+        if ("entity".equals(type)) {
+            var state = dependencyState(page);
+            if (!state.legacy()) return !state.current();
+        }
         String fp = "index".equals(type) ? currentIndexFingerprint() : null;
         Map<String, LocalDateTime> times = "entity".equals(type) ? sourceTimes() : Map.of();
         return compiledStale(type, page, fp, times);
+    }
+
+    private static WikiDependencyService.Freshness dependencyState(WikiPage page,
+            Map<Long, WikiDependencyService.Freshness> states) {
+        var unknown = new WikiDependencyService.Freshness(WikiDependencyService.Status.UNKNOWN,
+                List.of("dependency_check_failed"), false);
+        return page == null || page.getId() == null || states == null ? unknown : states.getOrDefault(page.getId(), unknown);
+    }
+
+    private WikiDependencyService.Freshness dependencyState(WikiPage page) {
+        return dependencyState(page, page == null ? Map.of() : dependencyService.freshness(List.of(page)));
     }
 
     /** 当前实体页清单的指纹（索引页"是否过期"的比对基准） */
@@ -298,6 +335,117 @@ public class WikiService {
         return out;
     }
 
+    /** Query-only freshness gate. Missing provenance or an incomplete scan is not a fresh page. */
+    public Map<String, Boolean> retrievalFreshness(List<WikiPage> pages) {
+        Map<String, Boolean> out = new LinkedHashMap<>();
+        if (pages == null || pages.isEmpty()) return out;
+        for (WikiPage p : pages) if (p != null && StringUtils.hasText(p.getTopicKey())) out.put(p.getTopicKey(), false);
+        Map<Long, WikiDependencyService.Freshness> dependencies;
+        Map<String, LocalDateTime> times;
+        List<Map<String, Object>> files;
+        try {
+            dependencies = dependencyService.freshness(pages);
+            boolean legacy = pages.stream().anyMatch(p -> p != null && dependencyState(p, dependencies).legacy());
+            times = legacy ? sourceTimes() : Map.of();
+            boolean categories = pages.stream().anyMatch(p -> p != null && "category".equals(p.getTopicType()));
+            files = categories ? mapper.retrievalFileScope(MAX_FILES_FOR_WIKI + 1) : List.of();
+            if (files == null) return out;
+        } catch (Exception e) {
+            log.warn("Wiki 检索无法确认来源新鲜度，跳过页面：{}", e.toString());
+            return out;
+        }
+        Map<String, RetrievalMaterial> materials = new LinkedHashMap<>();
+        for (WikiPage p : pages) {
+            if (p == null || !StringUtils.hasText(p.getTopicKey()) || !StringUtils.hasText(p.getContentMd())
+                    || p.getGeneratedAt() == null) continue;
+            try {
+                var state = dependencyState(p, dependencies);
+                // A tracked page must never fall back to timestamp freshness after a failed check.
+                if (!state.legacy() && !state.current()) continue;
+                String citationText = retrievalCitationText(p.getContentMd());
+                Set<String> refs = new LinkedHashSet<>(EntityCompileService.sourceIdsOf(p.getSourceHash(), citationText));
+                // The compact source_hash is only 64 characters. Always include citations that did not fit.
+                refs.addAll(EntityCompileService.citationsOf(citationText));
+                if ("category".equals(p.getTopicType()) || "tag".equals(p.getTopicType())) {
+                    String expectedKey = ("tag".equals(p.getTopicType()) ? "tag-" : "cat-") + p.getTopicId();
+                    if (p.getTopicId() == null || p.getTopicId() <= 0 || !expectedKey.equals(p.getTopicKey())
+                            || !StringUtils.hasText(p.getSourceHash())) continue;
+                    RetrievalMaterial current = materials.computeIfAbsent(p.getTopicKey(), ignored -> retrievalMaterial(p, files));
+                    if (current == null || !current.hash().equals(p.getSourceHash())) continue;
+                    refs.addAll(current.sourceIds());
+                } else if (!"entity".equals(p.getTopicType()) || !p.getTopicKey().startsWith("entity-")) {
+                    continue;
+                }
+                if (!state.legacy()) {
+                    out.put(p.getTopicKey(), true);
+                    continue;
+                }
+                if (refs.isEmpty()) continue;
+                out.put(p.getTopicKey(), !EntityCompileService.staleBySources(new ArrayList<>(refs), times, p.getGeneratedAt()));
+            } catch (Exception e) {
+                log.warn("Wiki 页面新鲜度未知，跳过 {}：{}", p.getTopicKey(), e.toString());
+            }
+        }
+        return out;
+    }
+
+    /** Preserve prose boundaries so removing inline code cannot join two fragments into a fake citation. */
+    private static String retrievalCitationText(String markdown) {
+        StringBuilder text = new StringBuilder();
+        RETRIEVAL_MARKDOWN.parse(markdown == null ? "" : markdown).accept(new AbstractVisitor() {
+            @Override public void visit(Text node) { text.append(node.getLiteral()); }
+            @Override public void visit(SoftLineBreak node) { text.append('\n'); }
+            @Override public void visit(HardLineBreak node) { text.append('\n'); }
+            @Override public void visit(Paragraph node) { super.visit(node); text.append('\n'); }
+            @Override public void visit(Heading node) { super.visit(node); text.append('\n'); }
+            // A citation label such as [笔记#1](/notes/1) remains prose; its URL is not a dependency.
+            @Override public void visit(Link node) { text.append('['); super.visit(node); text.append(']'); }
+            @Override public void visit(Code node) { text.append('\n'); }
+            @Override public void visit(FencedCodeBlock node) { text.append('\n'); }
+            @Override public void visit(IndentedCodeBlock node) { text.append('\n'); }
+            @Override public void visit(HtmlBlock node) { text.append('\n'); }
+            @Override public void visit(HtmlInline node) { text.append('\n'); }
+        });
+        return text.toString();
+    }
+
+    private record RetrievalMaterial(String hash, List<String> sourceIds) {}
+
+    /** Reproduce the generation fingerprint without reading samples or calling a model. */
+    private RetrievalMaterial retrievalMaterial(WikiPage page, List<Map<String, Object>> files) {
+        boolean tag = "tag".equals(page.getTopicType());
+        var notes = noteService.page(tag ? null : page.getTopicId(), tag ? page.getTopicId() : null, null, 1, MAX_FETCH);
+        if (notes == null || notes.getList() == null || notes.getTotal() > MAX_FETCH
+                || notes.getTotal() != notes.getList().size()
+                || (!tag && files.size() > MAX_FILES_FOR_WIKI)) return null;
+        List<Item> items = new ArrayList<>();
+        for (NoteVO n : notes.getList()) {
+            if (n.getId() == null || n.getUpdatedAt() == null) return null;
+            items.add(new Item("note", n.getId(), "", "", "", n.getUpdatedAt(), 0));
+        }
+        if (!tag) {
+            for (QuickRefVO r : quickRefService.list(page.getTopicId(), null)) {
+                if (r.getId() == null || r.getUpdatedAt() == null) return null;
+                items.add(new Item("ref", r.getId(), "", "", "", r.getUpdatedAt(), 0));
+            }
+            for (Map<String, Object> f : files) {
+                if (!page.getTopicId().equals(asLong(f.get("categoryId")))) continue;
+                Long id = asLong(f.get("id"));
+                if (id == null) return null;
+                items.add(new Item("file", id, "", "", "", null, 0));
+            }
+        }
+        if (items.isEmpty()) return null;
+        items.sort(Comparator.comparing(Item::type).thenComparing(Item::id));
+        StringBuilder fp = new StringBuilder();
+        List<String> refs = new ArrayList<>();
+        for (Item i : items) {
+            fp.append(i.type()).append(i.id()).append('@').append(i.updatedAt()).append(';');
+            refs.add(("ref".equals(i.type()) ? "quick_ref" : i.type()) + "-" + i.id());
+        }
+        return new RetrievalMaterial(KgService.sha256(fp.toString()), List.copyOf(refs));
+    }
+
     /** 结果集里的时间列 → LocalDateTime（驱动一般直接给 LocalDateTime，这里兼容 Timestamp / 字符串） */
     private static LocalDateTime asTime(Object v) {
         if (v instanceof LocalDateTime t) {
@@ -320,7 +468,8 @@ public class WikiService {
         }
     }
 
-    private Map<String, Object> topicInfo(String key, String type, Long id, String title, Material m) {
+    private Map<String, Object> topicInfo(String key, String type, Long id, String title, Material m,
+            Map<Long, WikiDependencyService.Freshness> dependencies) {
         WikiPage page = byKey(key);
         Map<String, Object> o = new LinkedHashMap<>();
         o.put("topicKey", key);
@@ -331,7 +480,7 @@ public class WikiService {
         o.put("sentItems", m.items().size());
         o.put("generated", page != null && StringUtils.hasText(page.getContentMd()));
         o.put("stale", page != null && StringUtils.hasText(page.getContentMd())
-                && !m.hash().equals(page.getSourceHash()));
+                && (!m.hash().equals(page.getSourceHash()) || trackedStale(dependencyState(page, dependencies))));
         if (page != null) {
             o.put("chars", page.getContentMd() == null ? 0 : page.getContentMd().length());
             o.put("generatedAt", page.getGeneratedAt() == null ? null
@@ -339,6 +488,16 @@ public class WikiService {
             o.put("model", page.getModel());
         }
         return o;
+    }
+
+    private static boolean trackedStale(WikiDependencyService.Freshness state) {
+        return !state.legacy() && !state.current();
+    }
+
+    public Map<String, Object> dependencyView(String topicKey) {
+        WikiPage page = byKey(topicKey == null ? "" : topicKey.trim());
+        if (page == null) throw new IllegalArgumentException("知识页不存在：" + topicKey);
+        return dependencyService.evidenceView(page.getId());
     }
 
     // ------------------------------------------------------------------
@@ -391,7 +550,7 @@ public class WikiService {
             return o;
         }
         o.put("generated", StringUtils.hasText(page.getContentMd()));
-        o.put("stale", !m.hash().equals(page.getSourceHash()));
+        o.put("stale", !m.hash().equals(page.getSourceHash()) || trackedStale(dependencyState(page)));
         o.put("contentMd", page.getContentMd() == null ? "" : page.getContentMd());
         o.put("generatedAt", page.getGeneratedAt() == null ? null
                 : String.valueOf(page.getGeneratedAt()).replace('T', ' '));
@@ -612,7 +771,7 @@ public class WikiService {
                 if (key.startsWith("cat-") || key.startsWith("tag-")) {
                     try {
                         Topic topic = resolve(key);
-                        Material m = material(topic);
+                        Material m = generationMaterial(topic);
                         if (!m.items().isEmpty()) {
                             Job sub = new Job(UUID.randomUUID().toString().substring(0, 8), key, "recompile");
                             // 复用与"手动生成"完全相同的流水线：生成 → 质量校验 →（必要时）带反馈重生成 → 落库
@@ -697,7 +856,11 @@ public class WikiService {
      */
     public Map<String, Object> startGenerate(String topicKey, String targetId) {
         Topic topic = resolve(topicKey);
-        Material m = material(topic);
+        if ("entity".equals(topic.type())) return entityCompileService.startRegenerate(topic.key(), targetId);
+        if ("index".equals(topic.type()) || "lint".equals(topic.type())) {
+            throw new IllegalArgumentException("索引和自检页请使用对应的编译或自检入口");
+        }
+        Material m = generationMaterial(topic);
         if (m.items().isEmpty()) {
             throw new IllegalStateException("该主题下还没有笔记或速查卡，先写点东西再来生成。");
         }
@@ -829,11 +992,7 @@ public class WikiService {
         page.setQualityNote(q.summary().isEmpty() ? null : clip(q.summary(), 250));
         page.setTargetId(t.id());
         page.setGeneratedAt(LocalDateTime.now());
-        if (create) {
-            mapper.insert(page);
-        } else {
-            mapper.updateById(page);
-        }
+        dependencyService.saveGenerated(page, m.snapshot());
         log.info("wiki 已生成：{}（模型 {}，素材 {}/{} 条，正文 {} 字，质量 {}）",
                 key, t.model(), m.items().size(), m.total(), q.content().length(), page.getQuality());
     }
@@ -850,12 +1009,16 @@ public class WikiService {
     private void generateQuietly(String topicKey) {
         try {
             Topic topic = resolve(topicKey);
-            Material m = material(topic);
+            if ("entity".equals(topic.type())) {
+                entityCompileService.startRegenerate(topic.key(), null);
+                return;
+            }
+            Material m = generationMaterial(topic);
             if (m.items().isEmpty()) {
                 return;
             }
             Target t = target(null);
-            if (t.apiKey() == null || t.apiKey().isBlank()) {
+            if ((t.apiKey() == null || t.apiKey().isBlank()) && !t.separate()) {
                 return;
             }
             Job job = new Job(UUID.randomUUID().toString().substring(0, 8), topicKey, t.id());
@@ -902,7 +1065,9 @@ public class WikiService {
               .append(" 条，其余因篇幅未提供，请勿臆测其内容");
         }
         sb.append("）：\n");
-        for (Item it : m.items()) {
+        if (m.prompt() != null) {
+            sb.append(m.prompt());
+        } else for (Item it : m.items()) {
             String marker = switch (it.type()) {
                 case "note" -> "[笔记#";
                 case "file" -> "[资料#";
@@ -1294,7 +1459,7 @@ public class WikiService {
                     continue;
                 }
                 Material now = material(resolve(topicKey));
-                if (now.hash().equals(existing.getSourceHash())) {
+                if (now.hash().equals(existing.getSourceHash()) && !trackedStale(dependencyState(existing))) {
                     log.debug("wiki 素材未变化，跳过重生成：{}", topicKey);
                     continue;
                 }
@@ -1321,7 +1486,38 @@ public class WikiService {
         }
     }
 
-    private record Material(List<Item> items, int total, String hash) {
+    private record Material(List<Item> items, int total, String hash, String prompt,
+                            WikiDependencyService.Snapshot snapshot, List<Item> candidates) {
+        Material(List<Item> items, int total, String hash) {
+            this(items, total, hash, null, null, items);
+        }
+    }
+
+    /** Capture before calling the model; the saved dependencies must describe exactly this material. */
+    private Material generationMaterial(Topic topic) {
+        Material preview = material(topic);
+        List<WikiDependencyService.SourceRef> refs = preview.candidates().stream()
+                .map(i -> new WikiDependencyService.SourceRef("ref".equals(i.type()) ? "quick_ref" : i.type(), i.id()))
+                .toList();
+        var captured = dependencyService.captureSnapshot(refs);
+        var sources = captured.sources().stream().map(s -> new WikiMaterialSampler.Source(
+                s.ref().type(), s.ref().id(), s.title(), s.fullContent())).toList();
+        var sampled = WikiMaterialSampler.sample("", List.of(), sources, MAX_MATERIAL_CHARS);
+        if (sampled.chunks().isEmpty()) throw new IllegalStateException("该主题暂无可读取的原文片段，未覆盖已有知识页。");
+        var snapshot = WikiDependencyService.selectChunks(captured, sampled.chunks().stream()
+                .map(c -> new WikiDependencyService.ChunkRef(c.sourceType(), c.sourceId(), c.seq())).toList());
+        Map<String, Item> metadata = new LinkedHashMap<>();
+        for (Item it : preview.candidates()) metadata.put(("ref".equals(it.type()) ? "quick_ref" : it.type()) + ":" + it.id(), it);
+        List<Item> actual = new ArrayList<>();
+        for (var source : snapshot.sources()) {
+            Item original = metadata.get(source.ref().key());
+            String text = source.chunks().stream().map(WikiDependencyService.SourceChunk::text)
+                    .collect(java.util.stream.Collectors.joining("\n"));
+            actual.add(new Item("quick_ref".equals(source.ref().type()) ? "ref" : source.ref().type(),
+                    source.ref().id(), source.title(), original == null ? "" : original.category(), text,
+                    original == null ? null : original.updatedAt(), source.fullContent().length()));
+        }
+        return new Material(List.copyOf(actual), preview.total(), preview.hash(), sampled.prompt(), snapshot, preview.candidates());
     }
 
     private Topic resolve(String topicKey) {
@@ -1447,7 +1643,8 @@ public class WikiService {
             picked.add(it);
             chars += cost;
         }
-        return new Material(picked, all.size(), KgService.sha256(fp.toString()));
+        return new Material(picked, all.size(), KgService.sha256(fp.toString()), null, null,
+                List.copyOf(all.subList(0, Math.min(all.size(), MAX_ITEMS))));
     }
 
     private WikiPage byKey(String topicKey) {

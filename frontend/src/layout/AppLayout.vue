@@ -1,5 +1,5 @@
 <script setup>
-import { computed, defineAsyncComponent, ref } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { isDark, toggleTheme } from '../composables/useTheme'
 import { focusMode } from '../composables/useViewMode'
@@ -62,6 +62,12 @@ const navItems = [
 
 /** 侧栏折叠：收起后只剩图标（64px 图标栏），状态持久化到 localStorage */
 const collapsed = ref(localStorage.getItem('lh-sidebar-collapsed') === '1')
+const narrowViewport = window.matchMedia('(max-width: 680px)')
+const narrowScreen = ref(narrowViewport.matches)
+const sidebarCollapsed = computed(() => collapsed.value || narrowScreen.value)
+const syncNarrowScreen = event => { narrowScreen.value = event.matches }
+onMounted(() => narrowViewport.addEventListener('change', syncNarrowScreen))
+onBeforeUnmount(() => narrowViewport.removeEventListener('change', syncNarrowScreen))
 function toggleCollapse() {
   collapsed.value = !collapsed.value
   localStorage.setItem('lh-sidebar-collapsed', collapsed.value ? '1' : '0')
@@ -70,13 +76,13 @@ function toggleCollapse() {
 
 <template>
   <div class="layout">
-    <aside class="side" :class="{ collapsed }" v-show="!focusMode">
+    <aside class="side" :class="{ collapsed: sidebarCollapsed }" v-show="!focusMode">
       <div class="logo">
         <!-- 品牌图：展开时用「图标 + 字标」组合标，折叠时只留图标。
              深色模式换一份"把文字提亮"的变体（图标本体两张一样），
              这样位图商标在两种主题下都不会变成一块白底。 -->
         <img
-          v-if="!collapsed"
+          v-if="!sidebarCollapsed"
           class="logo-lockup"
           :src="isDark ? '/brand-logo-dark.png' : '/brand-logo.png'"
           alt="学习工作台"
@@ -92,7 +98,8 @@ function toggleCollapse() {
           :to="n.index"
           class="tn-item"
           :class="{ on: activeMenu === n.index }"
-          :title="collapsed ? n.name : undefined"
+          :title="sidebarCollapsed ? n.name : undefined"
+          :aria-label="n.name"
           :aria-current="activeMenu === n.index ? 'page' : undefined"
         >
           <span class="tn-node" aria-hidden="true"></span>
@@ -105,23 +112,23 @@ function toggleCollapse() {
       </nav>
 
       <div class="side-foot">
-        <button class="theme-btn collapse-btn" type="button" :title="collapsed ? '展开侧栏' : '收起侧栏'" @click="toggleCollapse">
-          <svg v-if="!collapsed" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <button v-if="!narrowScreen" class="theme-btn collapse-btn" type="button" :title="sidebarCollapsed ? '展开侧栏' : '收起侧栏'" :aria-label="sidebarCollapsed ? '展开侧栏' : '收起侧栏'" @click="toggleCollapse">
+          <svg v-if="!sidebarCollapsed" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <path d="M14 6l-6 6 6 6" />
           </svg>
           <svg v-else viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <path d="M10 6l6 6-6 6" />
           </svg>
-          <span v-show="!collapsed">收起侧栏</span>
+          <span v-show="!sidebarCollapsed">收起侧栏</span>
         </button>
-        <button class="theme-btn" type="button" title="设置" @click="openSettings">
+        <button class="theme-btn" type="button" title="设置" aria-label="设置" @click="openSettings">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="3.2"></circle>
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"></path>
           </svg>
-          <span v-show="!collapsed">设置</span>
+          <span v-show="!sidebarCollapsed">设置</span>
         </button>
-        <button class="theme-btn" type="button" :title="isDark ? '切换到浅色模式' : '切换到深色模式'" @click="toggleTheme">
+        <button class="theme-btn" type="button" :title="isDark ? '切换到浅色模式' : '切换到深色模式'" :aria-label="isDark ? '浅色模式' : '深色模式'" @click="toggleTheme">
           <svg v-if="isDark" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
             <circle cx="12" cy="12" r="4.2"></circle>
             <path d="M12 2.5v2.4M12 19.1v2.4M2.5 12h2.4M19.1 12h2.4M5 5l1.7 1.7M17.3 17.3L19 19M19 5l-1.7 1.7M6.7 17.3L5 19"></path>
@@ -129,9 +136,9 @@ function toggleCollapse() {
           <svg v-else viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <path d="M20.5 14.2A8.5 8.5 0 0 1 9.8 3.5a8.5 8.5 0 1 0 10.7 10.7Z"></path>
           </svg>
-          <span v-show="!collapsed">{{ isDark ? '浅色模式' : '深色模式' }}</span>
+          <span v-show="!sidebarCollapsed">{{ isDark ? '浅色模式' : '深色模式' }}</span>
         </button>
-        <div class="foot-note" v-show="!collapsed">Keep learning, keep growing</div>
+        <div class="foot-note" v-show="!sidebarCollapsed">Keep learning, keep growing</div>
       </div>
     </aside>
 
@@ -335,6 +342,7 @@ function toggleCollapse() {
 
 .content {
   flex: 1;
+  min-width: 0;
   overflow: auto;
   background: var(--app-bg);
   transition: background-color var(--dur) ease;

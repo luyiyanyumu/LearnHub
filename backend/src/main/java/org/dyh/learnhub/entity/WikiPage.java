@@ -41,6 +41,9 @@ public class WikiPage {
     /** 生成时素材的指纹 */
     private String sourceHash;
 
+    /** 2 表示采用独立的生成来源依赖；即使依赖行全部缺失，也不能回落为旧页检查。 */
+    private Integer dependencyVersion;
+
     /** 生成时的条目数 */
     private Integer itemCount;
 

@@ -134,6 +134,7 @@ CREATE TABLE IF NOT EXISTS wiki_page (
     title        VARCHAR(200) NOT NULL COMMENT '主题标题（取分类名）',
     content_md   MEDIUMTEXT   NULL COMMENT '模型生成的结构化 wiki 正文(Markdown)',
     source_hash  VARCHAR(64)  NULL COMMENT '生成时素材的指纹，用于判断过期',
+    dependency_version INT   NULL COMMENT '2=独立生成来源依赖；NULL=旧页',
     item_count   INT          NOT NULL DEFAULT 0 COMMENT '生成时的条目数',
     model        VARCHAR(64)  NULL COMMENT '生成用的模型名，便于排查',
     generated_at DATETIME     NULL COMMENT '最近一次生成时间',
@@ -203,6 +204,37 @@ SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS
            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'kb_chunk' AND COLUMN_NAME = 'heading');
 SET @ddl := IF(@c = 0,
     'ALTER TABLE kb_chunk ADD COLUMN heading VARCHAR(255) NULL COMMENT ''该块所属小节标题（上下文化嵌入用：检索时与标题一起拼进嵌入输入）'' AFTER title',
+    'SELECT 1');
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- Generation-time Wiki source locators (2026-10-07). This is provenance,
+-- not a semantic claim-verification result. Old pages remain unknown until regenerated.
+CREATE TABLE IF NOT EXISTS wiki_source_dependency (
+    page_id           BIGINT      NOT NULL,
+    source_type       VARCHAR(16) NOT NULL COMMENT 'note/quick_ref/file',
+    source_id         BIGINT      NOT NULL,
+    seq               INT         NOT NULL COMMENT 'TextChunker ordinal, zero based',
+    source_title      TEXT        NOT NULL,
+    heading           TEXT        NOT NULL,
+    chunk_text        MEDIUMTEXT  NOT NULL COMMENT 'Exact raw chunk sent to generation',
+    chunk_hash        CHAR(64)    NOT NULL COMMENT 'SHA-256 of raw chunk text',
+    full_content_hash CHAR(64)    NOT NULL COMMENT 'SHA-256 of complete source content at capture',
+    source_chars      INT         NOT NULL,
+    source_chunk_count INT        NOT NULL,
+    page_md_hash      CHAR(64)    NOT NULL COMMENT 'Binds dependencies to this generated Wiki body',
+    snapshot_hash     CHAR(64)    NOT NULL,
+    captured_at       DATETIME    NOT NULL,
+    PRIMARY KEY (page_id, source_type, source_id, seq),
+    KEY idx_wiki_dependency_source (source_type, source_id),
+    CONSTRAINT fk_wiki_dependency_page FOREIGN KEY (page_id) REFERENCES wiki_page(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Wiki generation source dependencies; no semantic verification';
+
+-- Mark new generations on the page itself so losing every dependency row cannot
+-- accidentally turn them into legacy pages. This also upgrades existing databases.
+SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS
+           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wiki_page' AND COLUMN_NAME = 'dependency_version');
+SET @ddl := IF(@c = 0,
+    'ALTER TABLE wiki_page ADD COLUMN dependency_version INT NULL COMMENT ''2=independent generation source dependencies; NULL=legacy'' AFTER source_hash',
     'SELECT 1');
 PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
@@ -330,6 +362,34 @@ CREATE TABLE IF NOT EXISTS kg_relation (
   KEY idx_kg_rel_head (head_id, relation),
   KEY idx_kg_rel_tail (tail_id, relation)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='知识图谱三元组（头实体-关系-尾实体）';
+
+-- GraphRAG 的社区层：概念图（kg_node + kg_relation）按 Leiden 划分出来的社区归属。
+-- 为什么单独一张表而不是给 kg_node 加列：社区是"整图一次算出来的一批结果"，重算即整批替换
+-- （与 kg_edge 的 origin 整批替换同一思路）；单独一张表替换代价小，也不会动到节点表的既有列。
+CREATE TABLE IF NOT EXISTS kg_community (
+  node_id VARCHAR(24) NOT NULL COMMENT 'kg_node.id',
+  community_id INT NOT NULL COMMENT '社区编号（同一次划分内唯一，从 0 起）',
+  level INT NOT NULL DEFAULT 0 COMMENT '层级：0=最细；后续做分层社区时往上加',
+  size INT NOT NULL DEFAULT 1 COMMENT '该社区成员数（冗余，便于查询与页面着色）',
+  modularity DOUBLE NOT NULL DEFAULT 0 COMMENT '本次划分的整体模块度',
+  computed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '划分时间',
+  PRIMARY KEY (node_id),
+  KEY idx_kg_community_group (community_id, level)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='GraphRAG 社区归属（每个节点属于一个社区）';
+
+-- GraphRAG 的"全局视角"：每个社区一段摘要。
+-- 为什么按社区单独一张表：kg_community 是**每节点一行**，摘要挂在成员行上会重复 N 份；
+-- member_hash 是"成员集合 + 写作模型"的指纹 —— 成员没变就不重写，这条是"不重复花钱"的依据。
+CREATE TABLE IF NOT EXISTS kg_community_summary (
+  community_id INT NOT NULL COMMENT 'kg_community.community_id',
+  level INT NOT NULL DEFAULT 0 COMMENT '层级：0=最细；与 kg_community.level 对齐',
+  member_hash CHAR(64) NOT NULL COMMENT '成员集合 + 模型身份的 sha256 指纹',
+  model VARCHAR(96) NULL COMMENT '写这段摘要的「档案|模型」，换档案会重写',
+  summary TEXT NOT NULL COMMENT '这一簇概念整体在讲什么（全局检索的召回单元）',
+  size INT NOT NULL DEFAULT 0 COMMENT '成员数（冗余，便于按规模排序/筛选）',
+  computed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (community_id, level)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='GraphRAG 社区摘要';
 -- =====================================================================
 -- 7) 检索评测集 + 索引状态（2026-09 新增）
 --    动机：检索的改动（切块带上下文、融合打分、重排）如果没有指标，

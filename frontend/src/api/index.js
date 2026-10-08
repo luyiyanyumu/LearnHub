@@ -14,13 +14,13 @@ request.interceptors.response.use(
     if (body && body.code === 200) {
       return body.data
     }
-    ElMessage.error((body && body.msg) || '请求失败')
+    if (!resp.config?.silentError) ElMessage.error((body && body.msg) || '请求失败')
     return Promise.reject(new Error((body && body.msg) || '请求失败'))
   },
   (err) => {
     const data = err.response?.data
     const msg = (data && data.msg) || err.message || '网络错误'
-    ElMessage.error(msg)
+    if (!err.config?.silentError) ElMessage.error(msg)
     // 把后端的可读信息回填到 .message：阅读器翻译、公式识别等直接显示 err.message
     // 的面板会因此看到「翻译调用失败（档案：xxx）」而不是 axios 的英文默认文案
     // （实测：上游 llama.cpp 引擎崩了后端回 500 + 可读 msg，但面板只会显示
@@ -68,7 +68,8 @@ export const statsApi = {
 
 export const knowledgeApi = {
   /** 统一检索：{ keyword, total, items:[{type:'note'|'quick_ref', id, title, snippet, categoryName, updatedAt}] }；kw 空则返回最近知识 */
-  search: (kw) => request.get('/knowledge/search', { params: { kw } }),
+  // The knowledge page owns latest-request errors; other callers keep the global toast.
+  search: (kw, { silentError = false } = {}) => request.get('/knowledge/search', { params: { kw }, silentError }),
 }
 
 // AI 相关请求的统一超时：思考模式（DeepSeek V4 / Kimi K3 / GLM-5.3 等）会让长文处理
@@ -305,7 +306,8 @@ export const codeApi = {
   importFolder: (data) => request.post('/code/import-folder', data, { timeout: 120000 }),
 }
 
-export const kgApi = {  graph: () => request.get('/kg/graph'),
+export const kgApi = {
+  graph: () => request.get('/kg/graph'),
   /** 版本指纹：前端按秒轮询，变了才重画图（"实时"的实现方式） */
   version: () => request.get('/kg/version'),
   rebuild: () => request.post('/kg/rebuild', {}, { timeout: AI_TIMEOUT }),
@@ -313,6 +315,14 @@ export const kgApi = {  graph: () => request.get('/kg/graph'),
   // ---------------- 概念层（真正的知识图谱：实体 + 三元组） ----------------
   /** 概念图：实体 + 三元组 + 本体（关系词表与传递/对称属性） */
   concept: () => request.get('/kg/concept'),
+  // GraphRAG 社区层：划分是纯本地计算（Leiden），不花 token
+  communities: () => request.get('/kg/communities'),
+  groupedCommunities: () => request.get('/kg/communities/grouped'),
+  recomputeCommunities: () => request.post('/kg/communities/recompute', {}, { params: { ifStale: false } }),
+  communityStatus: () => request.get('/kg/communities/status'),
+  graphSearch: (q, mode = 'auto') => request.get('/kg/communities/search', { params: { q, mode, limit: 6, synthesize: false } }),
+  /** 按用户选择生成最多三段摘要；普通浏览与检索不会调用模型 */
+  summarizeCommunities: () => request.post('/kg/communities/summarize', {}, { params: { limit: 3 }, timeout: 390000 }),
   /** 跑构建流水线：素材 → 抽三元组 → 链接入库 → 规则推理 → 实体向量化 */
   buildConcept: () => request.post('/kg/concept/build', {}, { timeout: 60000 }),
   /** 构建进度（阶段/百分比/已抽三元组数） */
@@ -336,6 +346,8 @@ export const kgApi = {  graph: () => request.get('/kg/graph'),
 export const wikiApi = {
   topics: () => request.get('/wiki/topics'),
   page: (topicKey) => request.get(`/wiki/pages/${topicKey}`),
+  /** Actual generation chunks and their current hash state; this is not claim verification. */
+  dependencies: (topicKey) => request.get('/wiki/dependencies', { params: { topicKey }, silentError: true }),
   /** 可选生成目标（主模型 / 本地或自建）+ 当前选择 */
   models: () => request.get('/wiki/models'),
   /** 发起生成：立刻返回任务（含 jobId），进度用 job() 轮询 */
@@ -431,7 +443,7 @@ export const kbApi = {
    * —— **没有 snippet 字段**，命中片段要用 text 自己截；也没有 updatedAt。
    * 注意：q 不能为空（后端空 q 直接 500），空查询要的是"最近知识"时走 knowledgeApi.search。
    */
-  search: (q, topK = 10) => request.get('/kb/search', { params: { q, topK }, timeout: 60000 }),
+  search: (q, topK = 10, { silentError = false } = {}) => request.get('/kb/search', { params: { q, topK }, timeout: 60000, silentError }),
 }
 
 /** 触发浏览器保存文件 */

@@ -34,7 +34,7 @@ public class AiChatVO {
     private boolean toolUsed;
 
     /**
-     * 本轮自动检索命中的记录（{type,id,title}，按相关度排序，最多 5 条）。
+     * 本轮实际注入及成功工具读取的来源（{type,id,title,passageKey,channels}）。
      * <p>
      * 为什么返回给前端：这是**透明度** —— 用户能一眼看出这次回答有没有站在他自己的笔记上，
      * 而不是只能猜。顺带也让它可被测试断言，不必去翻服务端日志。
@@ -48,8 +48,8 @@ public class AiChatVO {
     private List<Map<String, Object>> pendingActions = new ArrayList<>();
 
     /**
-     * 答案级校验结果（没开启 / 没检索到材料时为 null）。
-     * <p>字段：{@code grounded} 是否全部有证据支撑、{@code unsupported} 不被支撑的断言、
+     * 答案级校验结果（没开启时为 null；材料缺失或无法完整核验时 checked=false）。
+     * <p>字段：{@code checked} 是否完整核验、{@code grounded} 是否全部有证据支撑、{@code unsupported} 不被支撑的断言、
      * {@code note} 说明、{@code evidenceChars} 本轮证据字数。
      * <p>为什么要回报给界面：检索只能保证"材料在上下文里"，不能保证"模型按材料说话"。
      * 把核对结论亮出来，用户才知道这句回答是"你记过的"还是"它自己补的"。

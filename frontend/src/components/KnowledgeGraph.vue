@@ -1,663 +1,334 @@
 <script setup>
-/**
- * 知识图谱：零依赖的 SVG 力导向图。
- *
- * <h3>为什么自己写而不是引 echarts / d3</h3>
- * 本项目的依赖刻意保持精简（MCP server 都是零依赖手写的）。图只有"几十个节点、
- * 几十条边"的量级，一个斥力 + 弹簧 + 向心力的简化模拟就够用，包体不增、配色也能直接
- * 用项目令牌（深色主题自动跟随）。换成图库反而要额外处理主题、按需引入与包体。
- *
- * <h3>三个容易踩的坑（都已处理）</h3>
- * <ol>
- *   <li><b>刷新时不能重排</b>：版本号一变就重新拉数据，若重建模拟，整张图会跳一下。
- *       所以位置按节点 id 存在 Map 里，老节点沿用旧坐标，只有新节点才随机落点。</li>
- *   <li><b>点击与拖拽要区分</b>：拖完节点会触发 click，于是拖一下就把节点选中了。
- *       这里用位移阈值（<4px 才算点击）区分。</li>
- *   <li><b>模拟要能停</b>：常驻 rAF 会一直占 CPU。用 alpha 衰减，静止后自动停，
- *       拖动或数据变化时重新加能量。</li>
- * </ol>
- */
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, useId, watch } from 'vue'
+import { createGraphLayout, fitGraphBounds, placeGraphLabels, reconcileGraphLayout, stepGraphLayout } from '../utils/knowledgeGraphLayout.js'
 
 const props = defineProps({
   nodes: { type: Array, default: () => [] },
   edges: { type: Array, default: () => [] },
   activeId: { type: String, default: '' },
+  layoutRootId: { type: String, default: '' },
+  communities: { type: Object, default: () => ({}) },
 })
 const emit = defineEmits(['select', 'open'])
-
 const wrapRef = ref(null)
 const view = reactive({ w: 900, h: 540, x: 0, y: 0, k: 1 })
-const hoverId = ref('')
-const dragging = ref(null)
-
-/** id → 运行时状态；跨数据刷新保留坐标，避免整图跳动 */
+const hoverId = ref(''), dragging = ref(''), frame = ref(0)
+const arrowId = `kg-arrow-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`
 const sim = new Map()
-const frame = ref(0) // 每帧自增，用来驱动重渲染
+let layout = createGraphLayout(), alpha = 1, raf = 0, ro = null, fitTimer = 0
+let userAdjusted = false, needsFit = false, panFrom = null, dragFrom = null, moved = 0
 
-let alpha = 1
-let raf = 0
-let ro = null
-
-const NODE_R = { category: 13, tag: 9, note: 7, ref: 6, file: 8, concept: 8 }
-
-function nodeRadius(n) {
-  const base = NODE_R[n.type] ?? 7
-  return base + Math.min(6, (n.degree || 0) * 0.5)
-}
-
-/** 用项目令牌派生一套同色系阶梯，深色主题自动跟随（不硬编码颜色） */
-function nodeFill(n) {
-  switch (n.type) {
-    case 'category':
-      return 'var(--app-brand)'
-    case 'note':
-      return 'color-mix(in srgb, var(--app-brand) 62%, var(--app-text-1))'
-    case 'ref':
-      return 'color-mix(in srgb, var(--app-brand) 34%, var(--app-text-2))'
-    case 'file':
-      // 资料：更深的青灰，与笔记/速查卡拉开距离（同一色系、不同明度）
-      return 'color-mix(in srgb, var(--app-brand-deep) 72%, var(--app-text-2))'
-    case 'concept':
-      // 概念：实心一点，和文档层的"点"区分开
-      return 'color-mix(in srgb, var(--app-brand) 78%, var(--app-text-1))'
-    default:
-      return 'var(--app-brand-soft)'
-  }
-}
-function nodeStroke(n) {
-  if (n.type === 'tag') return 'var(--app-brand)'
-  if (n.type === 'category') return 'var(--app-brand-deep)'
-  if (n.type === 'concept') return 'var(--app-brand-soft)'
-  return 'transparent'
-}
-
+const nodeTypes = { category: '分类', tag: '标签', note: '笔记', ref: '速查卡', file: '资料', concept: '概念' }
+const nodeById = computed(() => new Map(props.nodes.map((node) => [node.id, node])))
 const degreeMap = computed(() => {
-  const m = new Map()
+  const degrees = new Map()
   for (const e of props.edges) {
-    m.set(e.source, (m.get(e.source) || 0) + 1)
-    m.set(e.target, (m.get(e.target) || 0) + 1)
+    degrees.set(e.source, (degrees.get(e.source) || 0) + 1)
+    degrees.set(e.target, (degrees.get(e.target) || 0) + 1)
   }
-  return m
+  return degrees
 })
-
-/** 悬停高亮：只点亮与它相邻的节点/边，其余降透明度 */
+const physicsNodes = computed(() => props.nodes.map((n) => {
+  const degree = degreeMap.value.get(n.id) || 0
+  const base = { category: 13, tag: 8, note: 7, ref: 6, file: 8, concept: 8 }[n.type] || 7
+  return { ...n, degree, r: base + Math.min(5, Math.sqrt(degree) * 1.4) }
+}))
+const focusId = computed(() => {
+  const id = hoverId.value || props.activeId
+  return nodeById.value.has(id) ? id : ''
+})
 const neighbors = computed(() => {
-  const id = hoverId.value || props.activeId
-  if (!id) return null
-  const set = new Set([id])
+  if (!focusId.value) return null
+  const ids = new Set([focusId.value])
   for (const e of props.edges) {
-    if (e.source === id) set.add(e.target)
-    if (e.target === id) set.add(e.source)
+    if (e.source === focusId.value) ids.add(e.target)
+    if (e.target === focusId.value) ids.add(e.source)
   }
-  return set
+  return ids
 })
-
-function dimmed(id) {
-  return neighbors.value ? !neighbors.value.has(id) : false
-}
-function edgeDimmed(e) {
-  if (!neighbors.value) return false
-  const id = hoverId.value || props.activeId
-  return e.source !== id && e.target !== id
-}
-
 const renderNodes = computed(() => {
-  frame.value // 建立依赖：每帧重算
-  return props.nodes.map((n) => {
-    const s = sim.get(n.id)
-    return { ...n, x: s?.x ?? 0, y: s?.y ?? 0, r: nodeRadius(n) }
-  })
-})
-
-const renderEdges = computed(() => {
   frame.value
+  return physicsNodes.value.map((n) => ({ ...n, x: sim.get(n.id)?.x || 0, y: sim.get(n.id)?.y || 0,
+    r: Math.max(n.r, (3.3 + Math.min(2.5, Math.sqrt(n.degree) * 0.5)) / view.k) }))
+})
+const renderEdges = computed(() => {
   const byId = new Map(renderNodes.value.map((n) => [n.id, n]))
-  return props.edges.map((e, i) => {
-    const a = byId.get(e.source)
-    const b = byId.get(e.target)
-    if (!a || !b) return null
-    return {
-      key: e.source + '>' + e.target + '#' + i,
-      x1: a.x, y1: a.y, x2: b.x, y2: b.y,
-      semantic: e.kind === 'semantic',
-      // 概念层：derived = 按本体规则推出来的隐含事实，用虚线画出来，
-      // 这样"看到的"和"推出来的"在图上就是一眼可分的两回事
-      derived: e.origin === 'derived',
-      // 概念层标记：这里"边"就是主角（它表达的是关系本身），
-      // 文档层那套浅灰细线在这层太淡了，几乎看不见（实测 stroke #E8EAED / 1.2px）
-      concept: e.origin === 'llm' || e.origin === 'derived',
-      relation: e.relation,
-      relationLabel: e.label,
-      reason: e.reason,
-      weight: e.weight,
-    }
+  return props.edges.map((e, index) => {
+    const a = byId.get(e.source), b = byId.get(e.target)
+    if (!a || !b || a.id === b.id) return null
+    const dx = b.x - a.x, dy = b.y - a.y, distance = Math.max(1, Math.hypot(dx, dy))
+    const directed = e.kind === 'semantic' || e.origin === 'llm' || e.origin === 'derived'
+    const ux = dx / distance, uy = dy / distance
+    return { ...e, key: `${e.source}>${e.target}#${index}`,
+      x1: a.x + ux * (a.r + 2), y1: a.y + uy * (a.r + 2),
+      x2: b.x - ux * (b.r + (directed ? 6 : 2)), y2: b.y - uy * (b.r + (directed ? 6 : 2)),
+      semantic: e.kind === 'semantic', concept: e.origin === 'llm' || e.origin === 'derived',
+      directed, derived: e.origin === 'derived',
+      focused: !!focusId.value && (e.source === focusId.value || e.target === focusId.value) }
   }).filter(Boolean)
 })
-
-// ------------------------------------------------------------------
-// 力导向模拟：斥力 + 弹簧 + 向心力
-// ------------------------------------------------------------------
-function ensureState() {
-  const cx = view.w / 2
-  const cy = view.h / 2
-  for (const n of props.nodes) {
-    if (!sim.has(n.id)) {
-      const a = Math.random() * Math.PI * 2
-      const r = 60 + Math.random() * 120
-      sim.set(n.id, { x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r, vx: 0, vy: 0 })
-    }
-  }
-  // 清掉已删除节点的残留坐标
-  const ids = new Set(props.nodes.map((n) => n.id))
-  for (const id of [...sim.keys()]) {
-    if (!ids.has(id)) sim.delete(id)
-  }
-}
-
-function tick() {
-  const ns = props.nodes
-  const cx = view.w / 2
-  const cy = view.h / 2
-  const REPULSE = 5200
-  const SPRING = 0.045
-  const SPRING_LEN = 96
-  const CENTER = 0.006
-  const DAMP = 0.86
-
-  for (const a of ns) {
-    const sa = sim.get(a.id)
-    if (!sa) continue
-    // 斥力：O(n²)，几十个节点无压力；上千节点再换空间划分
-    for (const b of ns) {
-      if (a.id === b.id) continue
-      const sb = sim.get(b.id)
-      if (!sb) continue
-      let dx = sa.x - sb.x
-      let dy = sa.y - sb.y
-      let d2 = dx * dx + dy * dy
-      if (d2 < 1) {
-        dx = Math.random() - 0.5
-        dy = Math.random() - 0.5
-        d2 = 1
-      }
-      const f = (REPULSE / d2) * alpha
-      const d = Math.sqrt(d2)
-      sa.vx += (dx / d) * f
-      sa.vy += (dy / d) * f
-    }
-    // 向心力：防孤岛飘走
-    sa.vx += (cx - sa.x) * CENTER * alpha
-    sa.vy += (cy - sa.y) * CENTER * alpha
-  }
-
-  for (const e of props.edges) {
-    const a = sim.get(e.source)
-    const b = sim.get(e.target)
-    if (!a || !b) continue
-    const dx = b.x - a.x
-    const dy = b.y - a.y
-    const d = Math.max(1, Math.hypot(dx, dy))
-    const target = e.kind === 'semantic' ? SPRING_LEN * 1.5 : SPRING_LEN
-    const f = (d - target) * SPRING * alpha
-    const ux = (dx / d) * f
-    const uy = (dy / d) * f
-    a.vx += ux
-    a.vy += uy
-    b.vx -= ux
-    b.vy -= uy
-  }
-
-  for (const n of ns) {
-    const s = sim.get(n.id)
-    if (!s) continue
-    if (dragging.value === n.id) {
-      s.vx = 0
-      s.vy = 0
-      continue
-    }
-    s.vx *= DAMP
-    s.vy *= DAMP
-    s.x += Math.max(-14, Math.min(14, s.vx))
-    s.y += Math.max(-14, Math.min(14, s.vy))
-
-    // 软边界：靠近边缘就回推，越过就直接夹住。
-    // 边距必须按**节点自己的半径**算：分类节点半径 19，标签画在圆心下方 r+11 处，
-    // 再加下降部与呼吸空间。用固定值 34 时分类标签的下缘正好压在画布边上（实测只差 1px），
-    // 看起来就是"底部被切掉了"。
-    const margin = nodeRadius(n) + 28
-    const minX = margin
-    const maxX = view.w - margin
-    const minY = margin
-    const maxY = view.h - margin
-    if (s.x < minX) s.vx += (minX - s.x) * 0.25
-    else if (s.x > maxX) s.vx -= (s.x - maxX) * 0.25
-    if (s.y < minY) s.vy += (minY - s.y) * 0.25
-    else if (s.y > maxY) s.vy -= (s.y - maxY) * 0.25
-    s.x = Math.min(maxX, Math.max(minX, s.x))
-    s.y = Math.min(maxY, Math.max(minY, s.y))
-  }
-  frame.value++
-}
-
-function loop() {
-  tick()
-  alpha *= 0.985
-  // 冷却到静止时，如果期间数据变过就自动缩放一次（兜底；主触发是下面按时间的定时器）
-  if (alpha <= 0.02 && needsFit) {
-    needsFit = false
-    fitView()
-  }
-  if (alpha > 0.02 || dragging.value) {
-    raf = requestAnimationFrame(loop)
-  } else {
-    raf = 0
-  }
-}
-
-function reheat(a = 0.9) {
-  alpha = a
-  if (!raf) {
-    raf = requestAnimationFrame(loop)
-  }
-}
-
-/**
- * 把整张图缩放到画布内（留 6% 边距），并居中。
- * <p>
- * 不只是"防止超出"：画布比图大时它会把图**放大**填满（上限 1.6 倍），
- * 否则一张小图缩在宽画布中间，四周全是空白，看起来就像"图的下半部分没画出来"。
- */
-function fitView() {
-  const pts = [...sim.values()]
-  if (!pts.length) return
-  let minX = Infinity
-  let minY = Infinity
-  let maxX = -Infinity
-  let maxY = -Infinity
-  for (const p of pts) {
-    minX = Math.min(minX, p.x)
-    minY = Math.min(minY, p.y)
-    maxX = Math.max(maxX, p.x)
-    maxY = Math.max(maxY, p.y)
-  }
-  const pad = 36 // 节点半径 + 标签的余量
-  const w = Math.max(1, maxX - minX + pad * 2)
-  const h = Math.max(1, maxY - minY + pad * 2)
-  const k = Math.max(0.35, Math.min(1.6, Math.min(view.w / w, view.h / h) * 0.94))
-  view.k = k
-  view.x = (view.w - w * k) / 2 - (minX - pad) * k
-  view.y = (view.h - h * k) / 2 - (minY - pad) * k
-}
-
-let needsFit = false
-/** 用户自己缩放/平移过之后就不再自动抢视图（实时刷新每几秒一次，抢视图会很烦） */
-let userAdjusted = false
-let fitTimer = 0
-
-/**
- * 触发一次"适应视图"。
- * <p>
- * 刻意用**定时器**而不是等模拟冷却：alpha 是按帧数衰减的，
- * 浏览器后台标签页 / 无头环境会把 rAF 节流，几十秒都到不了阈值（实测就这样漏掉了）。
- * 按时间触发与帧率无关，行为可预期。
- */
-function scheduleFit(delay = 2200) {
-  clearTimeout(fitTimer)
-  fitTimer = setTimeout(() => {
-    if (needsFit && !userAdjusted) {
-      needsFit = false
-      fitView()
-    }
-  }, delay)
-}
-
-watch(() => [props.nodes, props.edges], () => {
-  ensureState()
-  needsFit = true
-  reheat(0.7)
-  scheduleFit()
-  frame.value++
+const renderLabels = computed(() => placeGraphLabels(renderNodes.value, view, {
+  focusId: focusId.value, neighborIds: neighbors.value || new Set(),
+  maxLabels: view.k < 0.75 ? 18 : view.k < 1.5 ? 28 : 48,
+}))
+const focusNodeLabel = computed(() => nodeById.value.get(focusId.value)?.label || '')
+const relationCaption = computed(() => {
+  if (!focusId.value) return ''
+  const edges = renderEdges.value.filter((e) => e.focused)
+  const labels = [...new Set(edges.map((e) => e.label || e.relation).filter(Boolean))]
+  return `${edges.length} 条关系${labels.length ? ` · ${labels.slice(0, 3).join(' / ')}${labels.length > 3 ? ' …' : ''}` : ''}`
 })
 
-// ------------------------------------------------------------------
-// 交互：拖拽 / 缩放 / 平移
-// ------------------------------------------------------------------
-let panFrom = null
-let dragFrom = null
-let moved = 0
+function nodeFill(n) {
+  const community = props.communities[n.id]
+  if (n.type === 'concept' && community != null) return `hsl(${Math.round(Number(community) * 137.508 % 360)} 46% 48%)`
+  const fills = { category: 'var(--app-brand)', tag: 'var(--app-brand-soft)',
+    note: 'color-mix(in srgb, var(--app-brand) 62%, var(--app-text-1))',
+    ref: 'color-mix(in srgb, var(--app-brand) 34%, var(--app-text-2))',
+    file: 'color-mix(in srgb, var(--app-brand-deep) 72%, var(--app-text-2))',
+    concept: 'color-mix(in srgb, var(--app-brand) 78%, var(--app-text-1))' }
+  return fills[n.type] || 'var(--app-brand)'
+}
+function edgeTitle(e) {
+  const source = nodeById.value.get(e.source)?.label || e.source
+  const target = nodeById.value.get(e.target)?.label || e.target
+  return `${source} → ${e.label || e.relation || '关联'} → ${target}${e.derived ? '（规则推导）' : ''}${e.reason ? `：${e.reason}` : ''}`
+}
+function rebuildState() {
+  const next = reconcileGraphLayout(physicsNodes.value, props.edges, props.communities, sim, layout,
+    { aspectRatio: view.w / view.h, rootId: props.layoutRootId })
+  if (next === layout) return false
+  layout = next
+  if (raf) cancelAnimationFrame(raf)
+  raf = 0
+  clearTimeout(fitTimer)
+  needsFit = false
+  userAdjusted = false
+  hoverId.value = ''
+  onWindowCancel()
+  frame.value++
+  return true
+}
+function loop() {
+  stepGraphLayout(physicsNodes.value, props.edges, sim, layout, { alpha, pinnedId: dragging.value })
+  frame.value++
+  alpha *= 0.97
+  if (alpha > 0.02 || dragging.value) raf = requestAnimationFrame(loop)
+  else {
+    raf = 0
+    if (needsFit && !userAdjusted) { needsFit = false; fitView() }
+  }
+}
+function reheat(value = 0.7) {
+  if (layout.fixed) { frame.value++; return }
+  alpha = value
+  if (!raf) raf = requestAnimationFrame(loop)
+}
+function fitView() {
+  // Camera fitting must not depend on the previous zoom's minimum screen-size circles.
+  const nodes = physicsNodes.value.map(n => ({ ...n, ...sim.get(n.id) }))
+  Object.assign(view, fitGraphBounds(nodes, view.w, view.h))
+}
+function scheduleFit() {
+  clearTimeout(fitTimer)
+  if (layout.fixed) { needsFit = false; if (!userAdjusted) fitView(); return }
+  needsFit = true
+  fitTimer = setTimeout(() => { if (!userAdjusted) fitView() }, 400)
+}
+function resetView() { userAdjusted = false; fitView() }
+function focusNode(id) {
+  const state = sim.get(id)
+  if (!state) return
+  // Search already narrows the props to the selected neighborhood. Fit that entire
+  // neighborhood so its neighbors remain reachable instead of forcing 125% zoom.
+  resetView()
+  scheduleFit()
+}
+watch(() => [props.nodes, props.edges, props.communities, props.layoutRootId], () => {
+  if (rebuildState()) { reheat(); scheduleFit() }
+})
 
 function svgPoint(evt) {
-  const rect = wrapRef.value?.getBoundingClientRect()
-  if (!rect) return { x: 0, y: 0 }
-  // 屏幕坐标 → 画布坐标（去掉缩放与平移）
-  return {
-    x: (evt.clientX - rect.left - view.x) / view.k,
-    y: (evt.clientY - rect.top - view.y) / view.k,
-  }
+  const rect = wrapRef.value.getBoundingClientRect()
+  return { x: (evt.clientX - rect.left - view.x) / view.k, y: (evt.clientY - rect.top - view.y) / view.k }
 }
-
-function onNodeDown(evt, n) {
-  evt.stopPropagation()
-  dragging.value = n.id
-  dragFrom = svgPoint(evt)
-  moved = 0
-  reheat(1)
+function listenPointer() {
   window.addEventListener('pointermove', onWindowMove)
   window.addEventListener('pointerup', onWindowUp)
+  window.addEventListener('pointercancel', onWindowCancel)
 }
-
-/**
- * 约束平移范围：内容矩形必须与画布保持至少三分之一的重叠。
- * <p>
- * 允许自由平移，但**不允许把整张图拖出视野**。起因是用户两次反馈"下面不见了"——
- * 背景拖拽很容易一下子把图拖没，而界面上唯一的恢复手段（右下角 ⟳）不够显眼。
- */
-function clampView() {
-  const pts = [...sim.values()]
-  if (!pts.length || !view.w || !view.h) return
-  let minX = Infinity
-  let minY = Infinity
-  let maxX = -Infinity
-  let maxY = -Infinity
-  for (const p of pts) {
-    minX = Math.min(minX, p.x)
-    minY = Math.min(minY, p.y)
-    maxX = Math.max(maxX, p.x)
-    maxY = Math.max(maxY, p.y)
-  }
-  const left = view.x + minX * view.k
-  const right = view.x + maxX * view.k
-  const top = view.y + minY * view.k
-  const bottom = view.y + maxY * view.k
-  const need = 0.34
-  if (right < view.w * need) view.x += view.w * need - right
-  if (left > view.w * (1 - need)) view.x -= left - view.w * (1 - need)
-  if (bottom < view.h * need) view.y += view.h * need - bottom
-  if (top > view.h * (1 - need)) view.y -= top - view.h * (1 - need)
+function removePointer() {
+  window.removeEventListener('pointermove', onWindowMove)
+  window.removeEventListener('pointerup', onWindowUp)
+  window.removeEventListener('pointercancel', onWindowCancel)
 }
-
+function onNodeDown(evt, node) {
+  if (evt.button !== 0) return
+  evt.stopPropagation()
+  dragging.value = node.id; dragFrom = svgPoint(evt); moved = 0
+  listenPointer()
+}
+function onBackgroundDown(evt) {
+  if (evt.button !== 0 || evt.target.closest('.kg-node, .kg-controls, .kg-focus-card')) return
+  panFrom = { sx: evt.clientX, sy: evt.clientY }; moved = 0
+  listenPointer()
+}
 function onWindowMove(evt) {
   if (panFrom) {
-    view.x += evt.clientX - panFrom.sx
-    view.y += evt.clientY - panFrom.sy
-    panFrom.sx = evt.clientX
-    panFrom.sy = evt.clientY
+    const dx = evt.clientX - panFrom.sx, dy = evt.clientY - panFrom.sy
+    moved += Math.hypot(dx, dy)
+    view.x += dx; view.y += dy
+    panFrom = { sx: evt.clientX, sy: evt.clientY }
+    if (moved > 4) userAdjusted = true
     clampView()
     return
   }
   if (!dragging.value) return
-  const p = svgPoint(evt)
-  const s = sim.get(dragging.value)
-  if (!s) return
-  moved += Math.hypot(p.x - dragFrom.x, p.y - dragFrom.y)
-  s.x = p.x
-  s.y = p.y
-  dragFrom = p
-  reheat(0.55)
+  const position = svgPoint(evt), state = sim.get(dragging.value)
+  if (!state) return
+  moved += Math.hypot(position.x - dragFrom.x, position.y - dragFrom.y) * view.k
+  if (moved > 4) userAdjusted = true
+  state.x = position.x; state.y = position.y
+  dragFrom = position
+  reheat(0.4)
 }
-
-function onWindowUp(evt) {
-  window.removeEventListener('pointermove', onWindowMove)
-  window.removeEventListener('pointerup', onWindowUp)
-  const wasDrag = moved > 4
-  const id = dragging.value
-  dragging.value = null
-  panFrom = null
-  if (id && !wasDrag) {
-    const node = props.nodes.find((n) => n.id === id)
-    if (node) emit('select', node)
-  } else if (!id) {
-    // 空白处点击：清除选中
-    emit('select', null)
-  }
+function onWindowUp() {
+  const id = dragging.value, wasPan = !!panFrom
+  removePointer(); dragging.value = ''; panFrom = null
+  if (moved <= 4 && (id || wasPan)) emit('select', id ? nodeById.value.get(id) || null : null)
 }
-
-function onBackgroundDown(evt) {
-  if (evt.target.closest('.kg-node')) return
+function onWindowCancel() { removePointer(); dragging.value = ''; panFrom = null }
+function clampView() {
+  const nodes = renderNodes.value
+  if (!nodes.length) return
+  const left = view.x + Math.min(...nodes.map((n) => n.x)) * view.k
+  const right = view.x + Math.max(...nodes.map((n) => n.x)) * view.k
+  const top = view.y + Math.min(...nodes.map((n) => n.y)) * view.k
+  const bottom = view.y + Math.max(...nodes.map((n) => n.y)) * view.k
+  if (right < view.w * 0.2) view.x += view.w * 0.2 - right
+  if (left > view.w * 0.8) view.x -= left - view.w * 0.8
+  if (bottom < view.h * 0.2) view.y += view.h * 0.2 - bottom
+  if (top > view.h * 0.8) view.y -= top - view.h * 0.8
+}
+function applyZoom(factor, x = view.w / 2, y = view.h / 2) {
   userAdjusted = true
-  panFrom = { sx: evt.clientX, sy: evt.clientY }
-  window.addEventListener('pointermove', onWindowMove)
-  window.addEventListener('pointerup', onWindowUp)
+  const scale = Math.max(0.08, Math.min(4, view.k * factor))
+  view.x = x - (x - view.x) / view.k * scale
+  view.y = y - (y - view.y) / view.k * scale
+  view.k = scale
 }
-
 function onWheel(evt) {
   evt.preventDefault()
-  userAdjusted = true
-  const rect = wrapRef.value?.getBoundingClientRect()
-  const mx = evt.clientX - rect.left
-  const my = evt.clientY - rect.top
-  const k2 = Math.max(0.3, Math.min(2.6, view.k * (evt.deltaY < 0 ? 1.12 : 0.89)))
-  // 以光标为锚点缩放
-  view.x = mx - ((mx - view.x) / view.k) * k2
-  view.y = my - ((my - view.y) / view.k) * k2
-  view.k = k2
+  const rect = wrapRef.value.getBoundingClientRect()
+  applyZoom(evt.deltaY < 0 ? 1.12 : 0.89, evt.clientX - rect.left, evt.clientY - rect.top)
 }
-
-function zoomBy(f) {
-  userAdjusted = true
-  const cx = view.w / 2
-  const cy = view.h / 2
-  const k2 = Math.max(0.3, Math.min(2.6, view.k * f))
-  view.x = cx - ((cx - view.x) / view.k) * k2
-  view.y = cy - ((cy - view.y) / view.k) * k2
-  view.k = k2
+function zoomBy(factor) { applyZoom(factor) }
+function onNodeKey(evt, node) {
+  if (evt.key === 'Enter' || evt.key === ' ') { evt.preventDefault(); emit('select', node); focusNode(node.id) }
+  if (evt.key === 'Escape') { hoverId.value = ''; emit('select', null) }
 }
-
-function resetView() {
-  userAdjusted = false
-  fitView()
+function onNodeFocus(evt, node) {
+  hoverId.value = node.id
+  if (evt.target.matches(':focus-visible')) focusNode(node.id)
 }
-
-defineExpose({ resetView, zoomBy, reheat, fitView })
-
+defineExpose({ resetView, zoomBy, reheat, fitView, focusNode })
 onMounted(() => {
-  const el = wrapRef.value
-  if (!el) return
-  const apply = () => {
-    view.w = Math.max(480, el.clientWidth)
-    view.h = Math.max(320, el.clientHeight)
-    ensureState()
-    // 这里必须自己排一次"适应视图"：父组件用的是 v-if="nodes.length"，
-    // 本组件是在**数据到位之后**才创建的 —— props 从第一帧起就是最终值，
-    // 那个 watch 永远不会触发（实测漏掉过：自动缩放一次都没跑，手动点按钮却正常）。
-    needsFit = true
-    reheat(0.8)
-    scheduleFit()
+  const element = wrapRef.value
+  view.w = Math.max(240, element.clientWidth); view.h = Math.max(320, element.clientHeight)
+  rebuildState()
+  const resize = () => {
+    view.w = Math.max(240, element.clientWidth); view.h = Math.max(320, element.clientHeight)
+    if (!userAdjusted) {
+      if (layout.fixed) rebuildState()
+      fitView()
+    }
   }
-  apply()
-  ro = new ResizeObserver(apply)
-  ro.observe(el)
+  resize(); reheat(); scheduleFit()
+  ro = new ResizeObserver(resize); ro.observe(element)
 })
-
 onBeforeUnmount(() => {
   if (raf) cancelAnimationFrame(raf)
-  clearTimeout(fitTimer)
-  ro?.disconnect()
-  window.removeEventListener('pointermove', onWindowMove)
-  window.removeEventListener('pointerup', onWindowUp)
+  clearTimeout(fitTimer); ro?.disconnect(); removePointer()
 })
-
-function label(n) {
-  const t = n.label || ''
-  return t.length > 12 ? t.slice(0, 12) + '…' : t
-}
-
-/**
- * 标签纵坐标：默认画在节点下方；**贴近画布下沿时翻到上方**。
- * <p>
- * 软边界管的是"节点圆心"，而标签还占 ~15px；用户把图放大/平移之后，
- * 节点仍可能来到下沿附近，此时标签会被画布裁掉（实测就是"下面不见了"的观感）。
- * 翻转比"再多留白"更彻底：无论怎么拖拽缩放，标签都不会被切。
- */
-function labelY(n) {
-  const below = n.y + n.r + 11
-  return n.y + n.r + 16 > view.h ? n.y - n.r - 6 : below
-}
 </script>
 
 <template>
   <div ref="wrapRef" class="kg-wrap" @pointerdown="onBackgroundDown" @wheel="onWheel">
-    <svg class="kg-svg" :width="view.w" :height="view.h">
+    <svg class="kg-svg" :width="view.w" :height="view.h" aria-label="知识关联图谱，可拖拽、滚轮缩放，Tab 聚焦节点，Enter 选择">
       <defs>
-        <!-- 语义边用箭头区分方向（前置/易混是有向的） -->
-        <marker id="kg-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <marker :id="arrowId" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" :markerWidth="7 / view.k" :markerHeight="7 / view.k" orient="auto">
           <path d="M0,0 L10,5 L0,10 z" fill="var(--app-brand)" />
         </marker>
       </defs>
       <g :transform="`translate(${view.x},${view.y}) scale(${view.k})`">
-        <line
-          v-for="e in renderEdges"
-          :key="e.key"
-          :x1="e.x1" :y1="e.y1" :x2="e.x2" :y2="e.y2"
-          class="kg-edge"
-          :class="{ 'kg-edge-semantic': e.semantic, 'kg-edge-concept': e.concept, 'kg-edge-derived': e.derived, 'kg-edge-dim': edgeDimmed(e) }"
-          :marker-end="e.semantic ? 'url(#kg-arrow)' : ''"
-        >
-          <title v-if="e.derived">{{ e.relationLabel || e.relation }}（规则推导）</title>
-          <title v-else-if="e.relationLabel">{{ e.relationLabel }}（{{ e.relation }}）{{ e.reason ? '：' + e.reason : '' }}</title>
-          <title v-else-if="e.reason">{{ e.reason }}（{{ e.relation }}）</title>
+        <line v-for="edge in renderEdges" :key="edge.key"
+          :x1="edge.x1" :y1="edge.y1" :x2="edge.x2" :y2="edge.y2"
+          class="kg-edge" :class="{ 'kg-edge-semantic': edge.semantic, 'kg-edge-concept': edge.concept,
+            'kg-edge-derived': edge.derived, 'kg-edge-focus': edge.focused, 'kg-edge-dim': focusId && !edge.focused }"
+          vector-effect="non-scaling-stroke"
+          :marker-end="edge.directed && (edge.focused || view.k >= 0.8) ? `url(#${arrowId})` : undefined">
+          <title>{{ edgeTitle(edge) }}</title>
         </line>
-
-        <g
-          v-for="n in renderNodes"
-          :key="n.id"
-          class="kg-node"
-          :class="{ 'kg-node-dim': dimmed(n.id), 'kg-node-active': n.id === activeId || n.id === hoverId }"
-          @pointerdown="onNodeDown($event, n)"
-          @mouseenter="hoverId = n.id"
-          @mouseleave="hoverId = ''"
-        >
-          <circle
-            :cx="n.x" :cy="n.y" :r="n.r"
-            :fill="nodeFill(n)"
-            :stroke="nodeStroke(n)"
-            stroke-width="1.5"
-          />
-          <text
-            :x="n.x" :y="labelY(n)"
-            class="kg-label"
-            :class="{
-              'kg-label-strong': n.type === 'category',
-              'kg-label-tag': n.type === 'tag',
-            }"
-            text-anchor="middle"
-          >{{ label(n) }}</text>
-          <title>{{ n.label }}（{{ n.type }}，{{ n.degree || 0 }} 条关联）</title>
+        <g v-for="node in renderNodes" :key="node.id" class="kg-node" role="button" tabindex="0"
+          :aria-label="`${node.label}，${nodeTypes[node.type] || node.type}，${node.degree} 条关联`"
+          :aria-pressed="node.id === activeId"
+          :class="{ 'kg-node-dim': neighbors && !neighbors.has(node.id), 'kg-node-active': node.id === focusId }"
+          @pointerdown="onNodeDown($event, node)" @dblclick="emit('open', node)"
+          @mouseenter="hoverId = node.id" @mouseleave="hoverId = ''"
+          @focus="onNodeFocus($event, node)" @blur="hoverId = ''" @keydown="onNodeKey($event, node)">
+          <circle :cx="node.x" :cy="node.y" :r="node.r" :fill="nodeFill(node)"
+            :stroke="node.type === 'tag' ? 'var(--app-brand)' : 'var(--app-card)'" stroke-width="1.8" vector-effect="non-scaling-stroke" />
+          <title>{{ node.label }}（{{ nodeTypes[node.type] || node.type }}，{{ node.degree }} 条关联）</title>
+        </g>
+        <g v-for="label in renderLabels" :key="`label:${label.id}`" class="kg-label" :class="{ 'kg-label-strong': label.strong }" aria-hidden="true">
+          <line v-if="label.leader" v-bind="label.leader" class="kg-label-leader" vector-effect="non-scaling-stroke" />
+          <rect :x="label.x" :y="label.y" :width="label.width" :height="label.height" :rx="4 / view.k" />
+          <text :x="label.x + 7 / view.k" :y="label.y + 14 / view.k" :font-size="label.fontSize">{{ label.text }}</text>
         </g>
       </g>
     </svg>
-
-    <div class="kg-zoom">
-      <button type="button" title="放大" @click="zoomBy(1.2)">＋</button>
-      <button type="button" title="缩小" @click="zoomBy(0.83)">－</button>
-      <button type="button" title="适应视图" @click="resetView">⟳</button>
+    <div v-if="hoverId && focusNodeLabel && hoverId !== activeId" class="kg-focus-card" aria-live="polite">
+      <strong>{{ focusNodeLabel }}</strong><span>{{ relationCaption }}</span>
     </div>
+    <div class="kg-controls" aria-label="图谱视图控制" @pointerdown.stop>
+      <button type="button" title="缩小" aria-label="缩小图谱" @click="zoomBy(0.83)">−</button>
+      <span class="kg-scale">{{ Math.round(view.k * 100) }}%</span>
+      <button type="button" title="放大" aria-label="放大图谱" @click="zoomBy(1.2)">+</button>
+      <span class="kg-control-divider" />
+      <button type="button" class="kg-fit" title="显示完整图谱" @click="resetView">适应视图</button>
+    </div>
+    <div class="kg-hint">拖拽移动 · 滚轮缩放 · 选中查看关系</div>
   </div>
 </template>
 
 <style scoped>
-.kg-wrap {
-  position: relative;
-  width: 100%;
-  height: 100%;
-  min-height: 320px;
-  overflow: hidden;
-  border-radius: var(--radius);
-  background: var(--app-bg);
-  cursor: grab;
-  touch-action: none;
-}
-.kg-wrap:active {
-  cursor: grabbing;
-}
-.kg-svg {
-  display: block;
-}
-.kg-edge {
-  stroke: var(--app-border);
-  stroke-width: 1.2;
-  transition: opacity var(--dur-fast) ease;
-}
-.kg-edge-semantic {
-  stroke: color-mix(in srgb, var(--app-brand) 55%, transparent);
-  stroke-width: 1.6;
-  stroke-dasharray: 5 4;
-}
-/* 推导边：虚线 + 更淡。它是"按规则推出来的"，不是哪条记录里直接写着的 ——
-   画成和直接事实一样的实线，会让人把推断当成原文。 */
-/* 概念层的边：加深、加粗。文档层靠"点"表达内容、边只是辅助；
-   概念层反过来 —— 关系本身就是内容，浅灰细线等于没画。 */
-.kg-edge-concept {
-  stroke: color-mix(in srgb, var(--app-brand) 42%, var(--app-text-3));
-  stroke-width: 1.4;
-  opacity: 0.85;
-}
-.kg-edge-concept.kg-edge-dim {
-  opacity: 0.12;
-}
-.kg-edge-derived {
-  stroke-dasharray: 4 4;
-  opacity: 0.75;
-}
-.kg-edge-dim {
-  opacity: 0.15;
-}
-.kg-node {
-  cursor: pointer;
-}
-.kg-node circle {
-  transition: opacity var(--dur-fast) ease;
-}
-.kg-node-dim {
-  opacity: 0.22;
-}
-.kg-node-active circle {
-  stroke: var(--app-brand-deep);
-  stroke-width: 2.5;
-}
-.kg-label {
-  font-size: 10.5px;
-  fill: var(--app-text-2);
-  pointer-events: none;
-  user-select: none;
-}
-.kg-label-strong {
-  font-size: 11.5px;
-  font-weight: 600;
-  fill: var(--app-text-1);
-}
-/* 标签节点：空心小环 + 小一号淡字。
-   之前刻意不画标签文字，结果图上是几个"空白圆圈"，看不出是什么（用户直接来问）。
-   小一号 + 更淡是为了保持层次，不是省略。 */
-.kg-label-tag {
-  font-size: 10px;
-  font-weight: 500;
-  fill: var(--app-text-3);
-}
-.kg-zoom {
-  position: absolute;
-  right: 10px;
-  bottom: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.kg-zoom button {
-  width: 26px;
-  height: 26px;
-  border: 1px solid var(--app-border);
-  border-radius: 7px;
-  background: var(--app-card);
-  color: var(--app-text-2);
-  font-size: 13px;
-  line-height: 1;
-  cursor: pointer;
-  transition: all var(--dur-fast) ease;
-}
-.kg-zoom button:hover {
-  color: var(--app-brand-deep);
-  border-color: var(--app-brand);
-  background: var(--app-brand-soft);
-}
+.kg-wrap { position: relative; width: 100%; height: 100%; min-height: 320px; overflow: hidden; border-radius: var(--radius); background: var(--app-card); cursor: grab; touch-action: none; }
+.kg-wrap:active { cursor: grabbing; }
+.kg-svg { display: block; }
+.kg-edge { stroke: var(--app-border); stroke-width: 1.2; opacity: .7; transition: opacity var(--dur-fast) ease; }
+.kg-edge-concept, .kg-edge-semantic { stroke: color-mix(in srgb, var(--app-brand) 55%, var(--app-text-3)); opacity: .45; }
+.kg-edge-derived, .kg-edge-semantic { stroke-dasharray: 5 4; }
+.kg-edge-focus { stroke: var(--app-brand); stroke-width: 2.3; opacity: .95; }
+.kg-edge-dim { opacity: .07; }
+.kg-node { cursor: pointer; outline: none; }
+.kg-node circle { transition: opacity var(--dur-fast) ease; }
+.kg-node-dim { opacity: .16; }
+.kg-node-active circle, .kg-node:focus-visible circle { stroke: var(--app-text-1); stroke-width: 2.5; }
+.kg-node:focus-visible circle { stroke-dasharray: 3 2; }
+.kg-label { pointer-events: none; user-select: none; }
+.kg-label rect { fill: var(--app-card); fill-opacity: .92; }
+.kg-label-leader { stroke: var(--app-text-3); stroke-width: .8; opacity: .6; }
+.kg-label text { fill: var(--app-text-2); }
+.kg-label-strong text { fill: var(--app-text-1); font-weight: 650; }
+.kg-focus-card { position: absolute; left: 16px; top: 16px; display: flex; flex-direction: column; gap: 4px; max-width: min(420px, calc(100% - 32px)); padding: 10px 14px; border: 1px solid var(--app-border); border-radius: 10px; background: var(--app-card); box-shadow: 0 5px 18px #00000008; pointer-events: none; }
+.kg-focus-card strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--app-text-1); }
+.kg-focus-card span { font-size: 12px; color: var(--app-text-3); }
+.kg-controls { position: absolute; left: 16px; bottom: 16px; display: flex; align-items: center; gap: 4px; padding: 4px; border: 1px solid var(--app-border); border-radius: 10px; background: var(--app-card); box-shadow: 0 4px 14px #00000008; cursor: default; }
+.kg-controls button { width: 30px; height: 30px; border: 0; border-radius: 6px; color: var(--app-text-2); background: transparent; font-size: 19px; cursor: pointer; }
+.kg-controls button:hover, .kg-controls button:focus-visible { color: var(--app-brand-deep); background: var(--app-brand-soft); outline: 2px solid var(--app-brand); outline-offset: 1px; }
+.kg-controls .kg-fit { width: auto; padding: 0 10px; font-size: 12px; }
+.kg-scale { min-width: 38px; text-align: center; font-size: 11px; color: var(--app-text-3); font-variant-numeric: tabular-nums; }
+.kg-control-divider { height: 18px; width: 1px; background: var(--app-border); margin: 0 3px; }
+.kg-hint { position: absolute; left: 250px; bottom: 29px; color: var(--app-text-3); font-size: 11px; pointer-events: none; }
+@media (max-width: 640px) { .kg-hint { display: none; } .kg-controls { left: 10px; bottom: 10px; } }
 </style>

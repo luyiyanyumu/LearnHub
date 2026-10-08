@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { MdPreview } from 'md-editor-v3'
 import '../utils/mdEditorSetup'
@@ -8,21 +8,62 @@ import { fileApi, kbApi, knowledgeApi, kgApi, saveBlob, wikiApi } from '../api'
 import { fixHtmlQuotes } from '../utils/htmlQuotes'
 import { isDark } from '../composables/useTheme'
 import KnowledgeGraph from '../components/KnowledgeGraph.vue'
+import KnowledgeSearchPanel from '../components/KnowledgeSearchPanel.vue'
+import WikiTopicNavigator from '../components/WikiTopicNavigator.vue'
+import { Search, Share, Reading, Setting, ArrowRight } from '@element-plus/icons-vue'
+import { knowledgeWorkspaceQuery, knowledgeWorkspaceTab } from '../utils/knowledgeWorkspace'
+
+import { expandGraphIds, filterConceptGraph, findGraphNodes, graphSource } from '../utils/knowledgeGraphView'
+import { retrievalSourcePath } from '../utils/retrievalDisplay'
+import { createKnowledgeSearchLoader } from '../utils/knowledgeSearch'
+import { findWikiHeading, wikiHeadingId, wikiRouteTarget } from '../utils/wikiNavigation'
+import { createWikiDependencyLoader, wikiDependencyView } from '../utils/wikiDependencyDisplay'
 
 /**
  * 知识库：三个视图
  * <ul>
  *   <li><b>知识图谱</b>：结构关系（分类/标签）实时现算 + 模型推断的语义关联；按版本号轮询，变了才重画</li>
  *   <li><b>LLM Wiki</b>：按主题（分类/标签）由模型整理成结构化长文，落库缓存，素材变了自动增量重生成</li>
- *   <li><b>检索</b>：默认走**融合检索**（词面 + 语义，跨笔记/速查卡/资料），可切回词面精确匹配</li>
+ *   <li><b>检索</b>：默认走**融合检索**（关键词 + 语义 + 图谱，跨笔记/速查卡/资料），可切回词面精确匹配</li>
  * </ul>
  */
 const router = useRouter()
+const route = useRoute()
 
-const tab = ref('graph')
+const tab = ref(knowledgeWorkspaceTab(route.query))
+const maintenanceOpen = ref(false)
+const workspaceButtons = ref([])
+const workspaces = [
+  { key: 'search', title: '检索知识', description: '从问题找到原文', icon: Search },
+  { key: 'graph', title: '探索图谱', description: 'GraphRAG · 概念与关系', icon: Share },
+  { key: 'wiki', title: '阅读 Wiki', description: '按主题整理知识', icon: Reading },
+]
+
+function chooseTab(next, topic = '') {
+  tab.value = next
+  const query = knowledgeWorkspaceQuery(route.query, next, topic || (next === 'wiki' ? activeTopic.value : ''))
+  if (topic && router.resolve({ query }).fullPath === route.fullPath) openTopic(topic)
+  else router.replace({ query })
+}
+
+function moveWorkspaceTab(event, index) {
+  const keys = ['ArrowLeft', 'ArrowRight', 'Home', 'End']
+  if (!keys.includes(event.key)) return
+  event.preventDefault()
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? 2 : (index + (event.key === 'ArrowRight' ? 1 : -1) + 3) % 3
+  chooseTab(workspaces[next].key)
+  nextTick(() => workspaceButtons.value[next]?.focus())
+}
+
+function selectWikiTopic(key) {
+  const query = knowledgeWorkspaceQuery(route.query, 'wiki', key)
+  if (router.resolve({ query }).fullPath === route.fullPath) openTopic(key)
+  else router.replace({ query })
+}
+
 
 // ------------------------------------------------------------------
-// 一、检索：默认「融合检索」（词面 + 语义，后端 /api/kb/search），可切回「词面检索」
+// 一、检索：默认「融合检索」（关键词 + 语义 + 图谱，后端 /api/kb/search），可切回「词面检索」
 //
 // 为什么默认融合：词面走的是 SQL LIKE，要求你用的词和资料里的字面完全一致。
 // 实测搜「大量字符串拼接用哪个类性能更好」词面 0 命中，而融合检索能找回
@@ -30,7 +71,7 @@ const tab = ref('graph')
 // 但精确找一个类名/关键字时词面更利落（且不依赖向量索引是否重建过），所以保留为可切换项。
 // ------------------------------------------------------------------
 const MODE_KEY = 'lh-kb-search-mode'
-/** 检索方式：fusion=融合（默认，词面+语义） / keyword=词面（精确匹配） */
+/** 检索方式：fusion=融合（默认，关键词+语义+图谱） / keyword=词面（精确匹配） */
 const searchMode = ref(localStorage.getItem(MODE_KEY) === 'keyword' ? 'keyword' : 'fusion')
 const kw = ref('')
 const loading = ref(false)
@@ -42,40 +83,7 @@ const lastMode = ref('fusion')
 /** 检索失败的可见原因（为空表示没出错） */
 const searchError = ref('')
 
-/** 命中片段截断长度：后端不返回 snippet，只给整段 text，太长会把列表撑成一屏一条 */
-const SNIPPET_MAX = 120
-const SOURCE_LABEL = { note: '笔记', quick_ref: '速查卡', file: '资料' }
-const sourceLabel = (t) => SOURCE_LABEL[t] || t
 const modeLabel = (m) => (m === 'fusion' ? '融合检索' : '词面检索')
-const modeDesc = (m) =>
-  m === 'fusion' ? '用一句话描述也能找回（词面 + 语义合并排序）' : '按字符串精确匹配，适合搜类名 / 关键字'
-
-/** 融合模式下输入为空 → 已回落到词面的「最近知识」（后端拒绝空 q，直接 500） */
-const emptyFallback = computed(() => searchMode.value === 'fusion' && lastMode.value === 'keyword' && !kw.value.trim())
-
-/**
- * 结果分组：融合是一张**排序好的混合列表**（保持后端的相关度排名，不能再按类型分组），
- * 词面模式沿用原来的「笔记 / 资料 / 速查卡」三组。
- */
-const resultGroups = computed(() => {
-  if (lastMode.value === 'fusion') {
-    return items.value.length ? [{ key: 'fusion', label: '融合检索', items: items.value }] : []
-  }
-  return [
-    { key: 'note', label: '笔记', items: items.value.filter((i) => i.type === 'note') },
-    { key: 'file', label: '资料', items: items.value.filter((i) => i.type === 'file') },
-    { key: 'quick_ref', label: '速查卡', items: items.value.filter((i) => i.type === 'quick_ref') },
-  ].filter((g) => g.items.length)
-})
-
-/**
- * 命中片段：后端融合检索只回整段 `text`（无 snippet 字段），这里截到 ~120 字；
- * 顺手把换行/连续空白压平 —— PDF 抽出来的正文满屏换行，不压平两行只显示得下几个字。
- */
-function hitSnippet(r) {
-  const flat = String(r?.snippet ?? r?.text ?? '').replace(/\s+/g, ' ').trim()
-  return flat.length > SNIPPET_MAX ? flat.slice(0, SNIPPET_MAX) + '…' : flat
-}
 
 /** 切换检索方式：记住选择，并**立刻按新方式重搜一次**，避免"切了没反应" */
 function switchMode(m) {
@@ -89,73 +97,33 @@ function switchMode(m) {
   doSearch()
 }
 
-async function doSearch() {
-  const q = kw.value.trim()
-  loading.value = true
-  searchError.value = ''
-  searched.value = true
-  try {
-    if (searchMode.value === 'fusion' && q) {
-      lastMode.value = 'fusion'
-      // 字段名按后端实测：sourceType / sourceId / title / category / text / score（没有 snippet、updatedAt）
-      const list = await kbApi.search(q, 10)
-      items.value = (list || []).map((r) => ({
-        type: r.sourceType,
-        id: r.sourceId,
-        title: r.title,
-        snippet: hitSnippet(r),
-        categoryName: r.category,
-        score: typeof r.score === 'number' ? r.score : null,
-      }))
-      keyword.value = q
-    } else {
-      // 词面检索：用户选了词面，或融合模式下查询为空（空 q 后端会 500，这里回落到"最近知识"）
-      lastMode.value = 'keyword'
-      const res = await knowledgeApi.search(kw.value)
-      items.value = res.items || []
-      keyword.value = res.keyword || ''
-    }
-  } catch (e) {
-    // 不静默失败：页面上留一条错误说明，同时弹一次可见提示
-    items.value = []
-    keyword.value = q
-    lastMode.value = searchMode.value === 'fusion' && q ? 'fusion' : 'keyword'
-    searchError.value = e?.response?.data?.msg || e?.message || '未知错误'
-    ElMessage.error(
-      `${modeLabel(lastMode.value)}失败：${searchError.value}` +
-        (searchMode.value === 'fusion' ? ' —— 可切到「词面」再试' : ''),
-    )
-  } finally {
-    loading.value = false
-  }
+const searchLoader = createKnowledgeSearchLoader({
+  loadFusion: (q, topK) => kbApi.search(q, topK, { silentError: true }),
+  loadKeyword: q => knowledgeApi.search(q, { silentError: true }),
+  onState(state) {
+    loading.value = state.loading
+    searched.value = state.searched
+    searchError.value = state.error
+    if ('items' in state) items.value = state.items
+    if ('keyword' in state) keyword.value = state.keyword
+    if ('lastMode' in state) lastMode.value = state.lastMode
+  },
+  onError(message, mode) {
+    ElMessage.error(`${modeLabel(mode)}失败：${message}` + (mode === 'fusion' ? ' —— 可切到「词面」再试' : ''))
+  },
+})
+
+function doSearch() {
+  return searchLoader.search({ query: kw.value, mode: searchMode.value })
 }
 
-/**
- * 打开一条结果：跳回原文。
- * 项目现有路由只有列表页（速查卡 /refs、资料 /files，都不带"打开某一条"的参数），
- * 所以能精确定位的只有笔记（/notes/:id）。
- */
+/** 打开检索命中的具体笔记、速查卡或资料，便于核对证据。 */
 function open(item) {
-  if (item.type === 'note') {
-    router.push(`/notes/${item.id}`)
-    return
-  }
-  if (item.type === 'quick_ref') {
-    router.push('/refs')
-    return
-  }
-  // 资料：跳到资料库（原来的行为是直接下载，现在统一"跳回来源"；行尾仍保留「下载」）
-  router.push('/files')
-}
-
-/** 把关键词高亮成 <mark>：先整体转义再替换，避免用户输入被当 HTML 执行 */
-function hl(text) {
-  const safe = String(text ?? '')
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  const k = keyword.value.trim()
-  if (!k) return safe
-  const pattern = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return safe.replace(new RegExp(pattern, 'gi'), (m) => `<mark>${m}</mark>`)
+  const path = retrievalSourcePath(item)
+  if (!path) return
+  if (router.resolve(path).fullPath === route.fullPath && item.type === 'wiki') {
+    openWikiFromReference({ detail: item })
+  } else router.push(path)
 }
 
 function clearSearch() {
@@ -167,6 +135,7 @@ function clearSearch() {
 // 一.5 语义索引状态与体检（"资料能不能问什么都知道"的可验证依据）
 // ------------------------------------------------------------------
 const kb = ref(null)
+const kbLoading = ref(true)
 const kbJob = ref(null)
 const kbBusy = ref(false)
 const probeQ = ref('')
@@ -214,7 +183,8 @@ async function runLint() {
     const r = await wikiApi.lint()
     ElMessage.success(`自检完成：代码问题 ${r.codeIssues} 条，模型发现 ${r.modelIssues} 条`)
     await loadTopicsQuiet()
-    await openTopic('lint')
+    maintenanceOpen.value = false
+    chooseTab('wiki', 'lint')
   } catch (e) {
     /* 拦截器已提示 */
   } finally {
@@ -223,10 +193,13 @@ async function runLint() {
 }
 
 async function loadKb() {
+  kbLoading.value = true
   try {
     kb.value = await kbApi.status()
   } catch (e) {
     kb.value = null
+  } finally {
+    kbLoading.value = false
   }
 }
 
@@ -280,19 +253,33 @@ async function runProbe() {
 const graph = ref({ nodes: [], edges: [], stat: {} })
 const graphLoading = ref(false)
 const selected = ref(null)
-const detailRef = ref(null)
 const rebuilding = ref(false)
 const kgVersion = ref('')
 const semanticEdges = ref(0)
 
 // 概念层（知识图谱）：与文档层是两套数据、两个选中态，切层时互不干扰
-const layer = ref('doc')
+const layer = ref('concept')
 const concept = ref({ nodes: [], edges: [], ontology: [], stat: null, rule: null })
 const conceptLoading = ref(false)
 const conceptSelected = ref(null)
-const relationFilter = ref([])
+const relationFilter = ref(null)
+const originFilter = ref('direct')
+const communityFilter = ref('')
+const showIsolated = ref(false)
+const graphQuery = ref('')
+const graphRef = ref(null)
+const inspectorTab = ref('explore')
+const graphProbeQuestion = ref('')
+const graphProbeMode = ref('auto')
+const graphProbeBusy = ref(false)
+const graphProbeResult = ref(null)
+const graphProbeError = ref('')
+const summaryStatus = ref(null)
+const summaryBusy = ref(false)
 /** 聚焦集合：展开 N 跳后只显示这一片；null = 显示全图 */
 const focus = ref(null)
+// Reading another node's details must not move the neighborhood's layout center.
+const focusRootId = ref('')
 const kgBuilding = ref(false)
 const kgJob = ref(null)
 const kgBusy = ref(false)
@@ -369,35 +356,14 @@ async function rebuild() {
   }
 }
 
-/**
- * 详情栏现在在画布**上方**，所以只需要处理"它被滚到视口上方看不见"这一种情况。
- * <p>
- * 图谱 tab 是整列撑满的布局（.graph-fill + 画布 flex:1），正常情况下整屏可见、不需要滚动；
- * 只有当详情栏的关系列表很长、把整列顶出视口时才会用到这里。
- */
-function ensureDetailVisible() {
-  nextTick(() => {
-    const el = detailRef.value
-    if (!el) return
-    const scroller = el.closest('.content') || document.scrollingElement
-    if (!scroller) return
-    const er = el.getBoundingClientRect()
-    const sr = scroller.getBoundingClientRect()
-    if (er.top < sr.top + 8) {
-      scroller.scrollTop -= sr.top + 8 - er.top
-    }
-  })
-}
-
+/** 选中节点时在独立滚动的侧栏显示证据，不改变画布高度。 */
 function onSelectNode(n) {
   if (layer.value === 'concept') {
     conceptSelected.value = n
   } else {
     selected.value = n
   }
-  if (n) {
-    ensureDetailVisible()
-  }
+  if (n) inspectorTab.value = 'explore'
 }
 
 // ------------------------------------------------------------------
@@ -412,23 +378,84 @@ const canvasEdges = computed(() => (layer.value === 'doc' ? graph.value.edges : 
 const selectedNode = computed(() => (layer.value === 'doc' ? selected.value : conceptSelected.value))
 
 /** 概念层：先按关系过滤，再按"聚焦集合"裁剪（展开邻居后只显示关注的那一片） */
-const shownConceptEdges = computed(() => {
-  const all = concept.value.edges || []
-  const byRel = relationFilter.value?.length
-    ? all.filter((e) => relationFilter.value.includes(e.relation))
-    : all
-  if (!focus.value) return byRel
-  return byRel.filter((e) => focus.value.has(e.source) && focus.value.has(e.target))
-})
+const visibleConceptGraph = computed(() => filterConceptGraph(concept.value.nodes || [], concept.value.edges || [], {
+  relations: relationFilter.value, origin: originFilter.value, community: communityFilter.value,
+  communities: communityOf.value, focus: focus.value, showIsolated: showIsolated.value,
+}))
+const shownConceptEdges = computed(() => visibleConceptGraph.value.edges)
+const shownConceptNodes = computed(() => visibleConceptGraph.value.nodes)
+const graphMatches = computed(() => findGraphNodes(layer.value === 'concept' ? concept.value.nodes || [] : graph.value.nodes || [], graphQuery.value))
+const visibleDerivedCount = computed(() => shownConceptEdges.value.filter(e => e.origin === 'derived').length)
+const communityOptions = computed(() => communityGroups.value.map(g => ({ ...g,
+  title: (g.nodeIds || []).map(id => concept.value.nodes.find(n => n.id === id)).filter(Boolean)
+    .sort((a, b) => (b.degree || 0) - (a.degree || 0)).slice(0, 2).map(n => n.label).join(' / ') || `社区 #${g.communityId}`,
+})))
 
-const shownConceptNodes = computed(() => {
-  const wanted = new Set()
-  for (const e of shownConceptEdges.value) {
-    wanted.add(e.source)
-    wanted.add(e.target)
+function resetGraphFilters() {
+  focus.value = null
+  communityFilter.value = ''
+  relationFilter.value = (concept.value.ontology || []).map(r => r.id)
+  originFilter.value = 'direct'
+  showIsolated.value = false
+  graphQuery.value = ''
+  conceptSelected.value = null
+  selected.value = null
+  nextTick(() => graphRef.value?.resetView())
+}
+
+function locateNode(node) {
+  if (layer.value === 'concept') {
+    communityFilter.value = ''
+    relationFilter.value = (concept.value.ontology || []).map(r => r.id)
+    const edges = (concept.value.edges || []).filter(e => originFilter.value === 'all' || (originFilter.value === 'derived' ? e.origin === 'derived' : e.origin !== 'derived'))
+    focus.value = expandGraphIds(node.id, edges, 1)
+    focusRootId.value = node.id
   }
-  return (concept.value.nodes || []).filter((n) => wanted.has(n.id))
-})
+  onSelectNode(node)
+  graphQuery.value = ''
+  nextTick(() => graphRef.value?.focusNode(node.id))
+}
+
+function focusCommunity(id) {
+  communityFilter.value = String(id)
+  focus.value = null
+  conceptSelected.value = null
+  graphQuery.value = ''
+  nextTick(() => graphRef.value?.resetView())
+}
+
+function sourceLinks(sources) {
+  const values = Array.isArray(sources) ? sources : String(sources || '').split(/[,，]/)
+  return values.map(s => graphSource(s)).filter(Boolean)
+}
+
+async function runGraphProbe() {
+  const q = graphProbeQuestion.value.trim()
+  if (!q || graphProbeBusy.value) return
+  graphProbeBusy.value = true
+  graphProbeResult.value = null
+  graphProbeError.value = ''
+  try { graphProbeResult.value = await kgApi.graphSearch(q, graphProbeMode.value) }
+  catch { graphProbeError.value = '检索失败，请检查服务后重试。' }
+  finally { graphProbeBusy.value = false }
+}
+
+async function generateCommunitySummaries() {
+  summaryBusy.value = true
+  try {
+    if (summaryStatus.value?.communitiesStale) {
+      await kgApi.recomputeCommunities()
+      await loadCommunities()
+    }
+    const result = await kgApi.summarizeCommunities()
+    const message = `已生成 ${result.written} 段，复用 ${result.cached} 段摘要${result.failed ? `，${result.failed} 段生成失败` : ''}`
+    if (result.failed) ElMessage.warning(message)
+    else ElMessage.success(message)
+    summaryStatus.value = await kgApi.communityStatus()
+    if (graphProbeResult.value) await runGraphProbe()
+  } catch { /* 请求拦截器显示错误 */ }
+  finally { summaryBusy.value = false }
+}
 
 /** 选中概念的关系清单（入边 + 出边，标出哪条是推导来的） */
 const conceptRelList = computed(() => {
@@ -436,7 +463,7 @@ const conceptRelList = computed(() => {
   if (!cur || layer.value !== 'concept') return []
   const byId = new Map((concept.value.nodes || []).map((n) => [n.id, n]))
   const out = []
-  for (const e of concept.value.edges || []) {
+  for (const e of shownConceptEdges.value) {
     if (e.source === cur.id) {
       out.push({ ...e, out: true, other: byId.get(e.target)?.label || e.target })
     } else if (e.target === cur.id) {
@@ -452,15 +479,82 @@ async function loadConcept() {
   conceptLoading.value = true
   try {
     concept.value = await kgApi.concept()
+    await loadCommunities()
     // 默认只勾选"有代数性质"的关系会让图太空，所以默认全选 —— 过滤是给人收窄用的
-    if (!relationFilter.value?.length) {
+    if (relationFilter.value == null) {
       relationFilter.value = (concept.value.ontology || []).map((r) => r.id)
     }
+    if (conceptSelected.value) conceptSelected.value = concept.value.nodes.find(n => n.id === conceptSelected.value.id) || null
   } catch (e) {
     /* 拦截器已提示 */
   } finally {
     conceptLoading.value = false
   }
+}
+
+// ---- GraphRAG 社区层 ----
+const communityOf = ref({})            // 节点 id → 社区编号（给图谱着色）
+const communityGroups = ref([])        // 按社区聚合（规模 + 成员，给侧栏用）
+const communityModularity = ref(0)
+const communityLoading = ref(false)
+
+/**
+ * 读社区划分。**失败不打断概念图**：社区是叠加信息，拿不到就按节点类型着色，
+ * 不该让整页因为"社区算过没有"而空着。
+ */
+async function loadCommunities() {
+  try {
+    const rows = await kgApi.communities()
+    const map = {}
+    let modularity = 0
+    for (const r of rows || []) {
+      map[r.nodeId] = r.communityId
+      modularity = Number(r.modularity) || modularity
+    }
+    communityOf.value = map
+    communityModularity.value = modularity
+    communityGroups.value = await kgApi.groupedCommunities()
+    try { summaryStatus.value = await kgApi.communityStatus() } catch { summaryStatus.value = null }
+  } catch (e) {
+    /* 拦截器已提示；保持原样着色 */
+  }
+}
+
+/** 与 KnowledgeGraph 内同一套色相算法（黄金角步进），图例色块才和节点颜色对得上 */
+function communityColor(id) {
+  return `hsl(${Math.round((Number(id) * 137.508) % 360)} 46% 48%)`
+}
+
+/** 重算社区：纯本地计算（Leiden），不花 token，所以可以放心给按钮 */
+async function recomputeCommunities() {
+  communityLoading.value = true
+  try {
+    const r = await kgApi.recomputeCommunities()
+    await loadCommunities()
+    ElMessage.success(`社区已重算：${r.communities} 个社区 · 模块度 ${Number(r.modularity).toFixed(3)} · ${r.ms}ms`)
+  } catch (e) {
+    /* 拦截器已提示 */
+  } finally {
+    communityLoading.value = false
+  }
+}
+
+/** 点社区里的某个成员 → 选中它（右栏就展开它的关系） */
+function selectCommunityMember(nodeId) {
+  const node = concept.value.nodes.find((n) => n.id === nodeId)
+  if (node) locateNode(node)
+}
+
+/**
+ * 社区接口只给节点 id；侧栏要给人看名字。
+ *
+ * <p>要查**两份**：`canvasNodes` 只是"当前关系过滤后仍在图上"的节点，社区成员常常被过滤掉，
+ * 只查它就会退化成显示 id（实测踩到：侧栏整列都是 e-7debe…）。完整列表在 `concept.nodes`。
+ */
+function shortName(nodeId) {
+  const inCanvas = canvasNodes.value.find((n) => n.id === nodeId)
+  const inAll = inCanvas || (concept.value?.nodes || []).find((n) => n.id === nodeId)
+  return inAll?.name || inAll?.label || String(nodeId).slice(0, 6)
 }
 
 /** 重建概念图谱：素材 → 抽三元组 → 链接入库 → 规则推理 → 实体向量化 */
@@ -489,7 +583,7 @@ async function pollConceptJob(jobId) {
     if (j.status !== 'running') {
       kgBuilding.value = false
       if (j.status === 'done') {
-        ElMessage.success(`概念图谱已重建：实体 ${j.entities} 个 · 新增三元组 ${j.triples} 条`)
+        ElMessage.success(`GraphRAG 已重建：实体 ${j.entities} 个 · 新增三元组 ${j.triples} 条`)
         focus.value = null
         await loadConcept()
       } else {
@@ -517,27 +611,11 @@ async function reasonConcept() {
 
 /** 展开 N 跳：把可达子图设为"聚焦集合"，画布只显示这一片（这就是多跳遍历的可视化） */
 async function expandConcept(id, hops) {
-  kgBusy.value = true
-  try {
-    const r = await kgApi.neighbors(id, hops)
-    if (!r.found) {
-      ElMessage.warning('图谱里没有这个概念')
-      return
-    }
-    const set = new Set([id])
-    for (const t of r.triples) {
-      const from = (concept.value.nodes || []).find((n) => n.label === t.from)
-      const to = (concept.value.nodes || []).find((n) => n.label === t.to)
-      if (from) set.add(from.id)
-      if (to) set.add(to.id)
-    }
-    focus.value = set
-    ElMessage.info(`已聚焦 ${set.size} 个概念（${hops} 跳可达 ${r.reachable} 个）—— 点「显示全部」回到全图`)
-  } catch (e) {
-    /* 拦截器已提示 */
-  } finally {
-    kgBusy.value = false
-  }
+  communityFilter.value = ''
+  const edges = filterConceptGraph(concept.value.nodes, concept.value.edges, { relations: relationFilter.value, origin: originFilter.value }).edges
+  focus.value = expandGraphIds(id, edges, hops)
+  focusRootId.value = id
+  nextTick(() => graphRef.value?.resetView())
 }
 
 /** 删除概念：连同它的三元组一起删（删的是图的结论，原始笔记一行不动） */
@@ -546,7 +624,7 @@ async function removeConceptNode(n) {
     await ElMessageBox.confirm(
       `删除概念「${n.label}」？<br><br>` +
         '<span style="color:#6b7280">· 它的所有三元组会一起删掉<br>' +
-        '· 原始笔记 / 速查卡 / 资料一行不动，但**不会自动重建** —— 除非你重新点「重建概念图谱」</span>',
+        '· 原始笔记 / 速查卡 / 资料一行不动，但**不会自动重建** —— 除非你重新点「重建 GraphRAG」</span>',
       '删除概念',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消', dangerouslyUseHTMLString: true }
     )
@@ -571,14 +649,13 @@ async function removeConceptNode(n) {
 
 /** 从概念跳到它的 wiki 概念页（图上看到关系，长文在那边） */
 function openConceptWiki(wikiKey) {
-  tab.value = 'wiki'
-  nextTick(() => openTopic(wikiKey))
+  chooseTab('wiki', wikiKey)
 }
 
 /** 带着概念名去问智能体 */
 function askAgentConcept(name) {
   window.dispatchEvent(new CustomEvent('lh-ask-agent', {
-    detail: { message: `「${name}」这个概念和王库里相关概念之间是什么关系？按「属于/前置/易混」讲清楚。` },
+    detail: { message: `「${name}」这个概念和知识库里相关概念之间是什么关系？按「属于/前置/易混」讲清楚，并给出原文依据。` },
   }))
 }
 
@@ -607,9 +684,9 @@ function parseNodeId(nodeId) {
 function openNode(n) {
   if (!n) return
   if (n.type === 'note') router.push(`/notes/${parseNodeId(n.id).id}`)
-  else if (n.type === 'ref') router.push('/refs')
+  else if (n.type === 'ref') router.push(`/refs?read=${parseNodeId(n.id).id}`)
   else if (n.type === 'category') router.push('/notes')
-  else if (n.type === 'file') downloadFile(parseNodeId(n.id).id, n.label)
+  else if (n.type === 'file') router.push(`/files?read=${parseNodeId(n.id).id}`)
 }
 
 /** 资料节点/检索项的下载（没有在线预览，落地后用本机程序打开） */
@@ -623,7 +700,7 @@ async function downloadFile(id, name) {
 }
 
 function nodeTypeLabel(t) {
-  return { note: '笔记', ref: '速查卡', category: '分类', tag: '标签', file: '资料' }[t] || t
+  return { note: '笔记', ref: '速查卡', category: '分类', tag: '标签', file: '资料', concept: '概念' }[t] || t
 }
 
 // ------------------------------------------------------------------
@@ -631,9 +708,27 @@ function nodeTypeLabel(t) {
 // ------------------------------------------------------------------
 const topics = ref([])
 const topicsLoading = ref(false)
+const topicsReady = ref(false)
 const activeTopic = ref('')
 const wikiPage = ref(null)
 const wikiLoading = ref(false)
+const wikiBody = ref(null)
+const pendingWikiLocation = ref(null)
+let wikiLoadGeneration = 0
+const wikiDependencyState = ref({ topicKey: '', loading: false, error: '', data: null })
+const wikiDependencies = computed(() => wikiDependencyView(wikiDependencyState.value.data))
+const wikiDependencyVisible = computed(() => !!wikiPage.value?.contentMd
+  && !['index', 'lint'].includes(wikiPage.value?.topicType))
+const wikiDependencyLoader = createWikiDependencyLoader({
+  load: key => wikiApi.dependencies(key),
+  onState: state => { wikiDependencyState.value = state },
+})
+
+function loadWikiDependencies() {
+  if (wikiDependencyVisible.value && wikiPage.value?.topicKey === activeTopic.value) {
+    wikiDependencyLoader.read(activeTopic.value)
+  }
+}
 
 /** 生成任务（进度）与可选模型目标 */
 const job = ref(null)
@@ -648,11 +743,15 @@ async function loadTopics() {
   topicsLoading.value = true
   try {
     topics.value = await wikiApi.topics()
+    topicsReady.value = true
+    // A retrieval deep link or a manual page load already selected its exact topic.
+    if (activeTopic.value && (wikiLoading.value || wikiPage.value?.topicKey === activeTopic.value
+      || wikiRouteTarget(route.query)?.topicKey === activeTopic.value)) return
     const cur = topics.value.find((t) => t.topicKey === activeTopic.value)
     if (!cur && topics.value.length) {
       // 默认选第一个"有条目"的主题
       const first = topics.value.find((t) => t.itemCount > 0) || topics.value[0]
-      if (first) await openTopic(first.topicKey)
+      if (first) selectWikiTopic(first.topicKey)
     } else if (cur) {
       await openTopic(cur.topicKey, true)
     }
@@ -661,20 +760,59 @@ async function loadTopics() {
   }
 }
 
-async function openTopic(key, silent = false) {
+async function openTopic(key, silent = false, location = null) {
   if (!key) return
+  const generation = ++wikiLoadGeneration
+  if (location) pendingWikiLocation.value = location
+  else if (pendingWikiLocation.value?.topicKey !== key) pendingWikiLocation.value = null
+  if (wikiPage.value?.topicKey !== key) wikiPage.value = null
   activeTopic.value = key
   wikiLoading.value = true
+  wikiDependencyLoader.clear()
   stopStaleWatch()
   try {
-    wikiPage.value = await wikiApi.page(key)
+    const page = await wikiApi.page(key)
+    if (generation !== wikiLoadGeneration) return
+    wikiPage.value = page
+    loadWikiDependencies()
     // 过期且开着自动更新：后台会自己重生成，这里盯一会儿把结果取回来
     if (wikiPage.value.stale && autoRefresh.value && !silent) {
       startStaleWatch(key)
     }
+    nextTick(locateWikiSection)
+  } catch (error) {
+    if (generation === wikiLoadGeneration) ElMessage.error('知识页加载失败，请重试')
   } finally {
-    wikiLoading.value = false
+    if (generation === wikiLoadGeneration) wikiLoading.value = false
   }
+}
+
+async function locateWikiSection() {
+  await nextTick()
+  const target = pendingWikiLocation.value
+  if (!target || target.topicKey !== wikiPage.value?.topicKey) return
+  if (target.sectionKey === 'section-0' && wikiBody.value) {
+    pendingWikiLocation.value = null
+    wikiBody.value.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    return
+  }
+  const heading = findWikiHeading(wikiBody.value?.querySelectorAll('h1, h2, h3, h4, h5, h6'), target)
+  if (!heading) return
+  pendingWikiLocation.value = null
+  wikiBody.value?.querySelectorAll('.wiki-section-target').forEach(item => item.classList.remove('wiki-section-target'))
+  heading.classList.add('wiki-section-target')
+  heading.scrollIntoView({ block: 'start', behavior: 'smooth' })
+}
+
+function openWikiFromReference(event) {
+  const hit = event?.detail
+  const target = wikiRouteTarget({ tab: 'wiki', topic: hit?.topicKey, section: hit?.sectionKey, heading: hit?.heading })
+  if (!target) return
+  const query = { ...knowledgeWorkspaceQuery(route.query, 'wiki', target.topicKey), section: target.sectionKey || undefined, heading: target.heading || undefined }
+  if (router.resolve({ query }).fullPath === route.fullPath) {
+    tab.value = 'wiki'
+    openTopic(target.topicKey, false, target)
+  } else router.push({ query })
 }
 
 /** 自动更新是后端后台跑的，前端轮询等它落地（最多约 1 分钟） */
@@ -688,8 +826,10 @@ function startStaleWatch(key) {
     }
     try {
       const p = await wikiApi.page(key)
+      if (activeTopic.value !== key) return
       if (!p.stale) {
         wikiPage.value = p
+        loadWikiDependencies()
         stopStaleWatch()
         loadTopicsQuiet()
         ElMessage.success('wiki 已按最新内容自动更新')
@@ -709,6 +849,7 @@ function stopStaleWatch() {
 async function loadTopicsQuiet() {
   try {
     topics.value = await wikiApi.topics()
+    topicsReady.value = true
   } catch (e) {
     /* 静默 */
   }
@@ -722,10 +863,11 @@ async function loadTopicsQuiet() {
  */
 async function generate() {
   if (!activeTopic.value) return
+  const topicKey = activeTopic.value
   generating.value = true
   job.value = null
   try {
-    const started = await wikiApi.generate(activeTopic.value, wikiTarget.value || undefined)
+    const started = await wikiApi.generate(topicKey, wikiTarget.value || undefined)
     job.value = started
     // 轮询直到结束：1 秒一次，失败/完成即停
     for (let i = 0; i < 320; i++) {
@@ -737,11 +879,11 @@ async function generate() {
     const last = job.value
     if (last?.status === 'done') {
       if (last.quality === 'warn') {
-        ElMessage.warning('wiki 已生成，但质量校验有提示（已自动重生成一次）')
+        ElMessage.warning('wiki 已生成，结构与引用检查有提示')
       } else {
-        ElMessage.success('wiki 已生成并通过校验')
+        ElMessage.success('wiki 已生成，结构与引用检查通过')
       }
-      await openTopic(activeTopic.value, true)
+      if (activeTopic.value === topicKey) await openTopic(topicKey, true)
       await loadTopicsQuiet()
       if (last.chars) wikiGenerationChars.value = last.chars
     } else if (last?.status === 'failed') {
@@ -779,7 +921,8 @@ async function compileEntities() {
     if (entJob.value?.status === 'done') {
       ElMessage.success(`知识页编译完成：${entJob.value.pages} 页`)
       await loadTopicsQuiet()
-      await openTopic('index')
+      maintenanceOpen.value = false
+      chooseTab('wiki', 'index')
     } else if (entJob.value?.status === 'failed') {
       ElMessage.error('编译失败：' + (entJob.value.error || ''))
     }
@@ -838,16 +981,14 @@ async function toggleAutoRefresh(v) {
  * 自检页的 itemCount 是**问题条数**、索引页是**收录页数**、实体页是**来源证据数**。
  * 统称"N 条素材"会让数字说谎，所以按类型分别措辞。
  */
-const isCompiledPage = computed(() => ['entity', 'index', 'lint'].includes(wikiPage.value?.topicType))
-
 const wikiCountLabel = computed(() => {
   const p = wikiPage.value
   if (!p) return ''
   const n = p.itemCount ?? 0
   if (p.topicType === 'lint') return `检测到 ${n} 条问题`
   if (p.topicType === 'index') return `收录 ${n} 个页面`
-  if (p.topicType === 'entity') return n > 0 ? `${n} 条来源证据` : '跨页编译生成'
-  return `${n} 条素材`
+  if (p.topicType === 'entity') return n > 0 ? `${n} 个关联来源` : '跨页编译生成'
+  return `当前 ${n} 条来源`
 })
 
 /**
@@ -861,29 +1002,11 @@ const generatedTopicCount = computed(() => topics.value.filter((t) => t.generate
  * 侧栏按**类型分组**：以前是一锅平铺的列表，`cat-0`（早期版本写歪的索引页）和真正的索引页
  * 会以同样的"知识索引"标题并排出现，根本分不清谁是谁。分组后类型一眼可见。
  */
-const TYPE_ORDER = ['category', 'tag', 'entity', 'index', 'lint']
 const TYPE_LABEL = { category: '分类', tag: '标签', entity: '实体', index: '索引', lint: '自检' }
 
 function typeLabel(t) {
   return TYPE_LABEL[t] || '主题'
 }
-
-const topicGroups = computed(() => {
-  const groups = []
-  for (const type of TYPE_ORDER) {
-    const items = topics.value.filter((t) => (t.topicType || 'category') === type)
-    if (items.length) {
-      groups.push({ type, label: TYPE_LABEL[type] || type, items })
-    }
-  }
-  // 兜底：出现未知类型时也别忘了显示，否则页面会"消失"
-  const known = new Set(TYPE_ORDER)
-  const rest = topics.value.filter((t) => !known.has(t.topicType || 'category'))
-  if (rest.length) {
-    groups.push({ type: 'other', label: '其他', items: rest })
-  }
-  return groups
-})
 
 /** 正在删除的 topicKey（用于按钮 loading），空串表示没有 */
 const deletingKey = ref('')
@@ -895,6 +1018,7 @@ const deletingKey = ref('')
 async function removeTopic(t) {
   if (!t || !t.topicKey) return
   const isCompiled = ['entity', 'index', 'lint'].includes(t.topicType)
+  const safeTitle = String(t.title || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
   // 实测：抽取本身不确定，同一份素材两次跑选出的概念集合就不同 ——
   // 所以实体页删掉之后**不保证**下次还抽得到它。这里必须说实话，别让用户以为删了没代价。
   const backHint = t.topicType === 'lint'
@@ -907,7 +1031,7 @@ async function removeTopic(t) {
   try {
     // 用 HTML 换行：纯文本里的 \n 会被元素折叠成一个空格，三行说明会糊成一段
     await ElMessageBox.confirm(
-      `删除「${t.title}」这一页编译结果？<br><br>` +
+      `删除「${safeTitle}」这一页编译结果？<br><br>` +
         '<span style="color:#6b7280">· 原始笔记 / 速查卡 / 资料一行都不会动<br>' +
         `· ${backHint}<br>` +
         '· 指向它的 [[双链]] 会变成红链，下次「自检」会列出来</span>',
@@ -930,8 +1054,12 @@ async function removeTopic(t) {
     ElMessage.success(n ? `已删除「${t.title}」` : `「${t.title}」本来就不存在`)
     // 删的是当前打开的页 → 清空右侧，避免显示一个已经不存在的页
     if (activeTopic.value === t.topicKey) {
+      wikiLoadGeneration++
       activeTopic.value = ''
       wikiPage.value = null
+      pendingWikiLocation.value = null
+      wikiDependencyLoader.clear()
+      await router.replace({ query: knowledgeWorkspaceQuery(route.query, 'wiki') })
     }
     await loadTopics()
   } catch (e) {
@@ -965,20 +1093,28 @@ function onWikiClick(e) {
   e.preventDefault()
   const href = a.getAttribute('href')
   if (href.startsWith('#note-')) {
-    router.push(`/notes/${href.slice(6)}`)
+    const path = retrievalSourcePath({ type: 'note', id: href.slice(6) })
+    if (path) router.push(path)
   } else if (href.startsWith('#file-')) {
-    downloadFile(Number(href.slice(6)), `资料-${href.slice(6)}`)
+    const path = retrievalSourcePath({ type: 'file', id: href.slice(6) })
+    if (path) router.push(path)
   } else if (href.startsWith('#entity-') || href === '#index') {
     // 双链跳转：切到那个知识页（页面 key 就是 topicKey，去掉 # 即可）
-    openTopic(href.slice(1))
+    selectWikiTopic(href.slice(1))
   } else {
-    router.push('/refs')
+    const path = retrievalSourcePath({ type: 'ref', id: href.slice(5) })
+    if (path) router.push(path)
   }
 }
 
 // ------------------------------------------------------------------
 // 生命周期
 // ------------------------------------------------------------------
+const staleTopicCount = computed(() => topics.value.filter(t => t.stale).length)
+const maintenanceBusy = computed(() => kbBusy.value || kgBuilding.value || rebuilding.value || entBusy.value || reBusy.value || lintBusy.value || summaryBusy.value || kgBusy.value || communityLoading.value)
+const indexState = computed(() => kbLoading.value ? '读取索引…' : !kb.value ? '索引状态不可用' : kb.value.stale ? '索引待更新' : kb.value.chunks ? '索引可用' : '等待建立索引')
+const formatCount = value => value == null ? '—' : Number(value).toLocaleString('zh-CN')
+
 watch(tab, (v) => {
   if (v === 'graph') {
     if (!graph.value.nodes.length) loadGraph()
@@ -986,13 +1122,22 @@ watch(tab, (v) => {
   } else {
     stopPoll()
   }
-  if (v === 'wiki' && !topics.value.length) loadTopics()
+  if (v === 'wiki' && (!topics.value.length || !activeTopic.value)) loadTopics()
+  else if (v === 'wiki' && !wikiLoading.value) loadWikiDependencies()
 })
 
+watch(() => [route.query.tab, route.query.topic, route.query.section, route.query.heading], () => {
+  const target = wikiRouteTarget(route.query)
+  tab.value = knowledgeWorkspaceTab(route.query)
+  if (target) openTopic(target.topicKey, false, target)
+}, { immediate: true })
+
 onMounted(() => {
+  window.addEventListener('lh-open-wiki', openWikiFromReference)
   doSearch()
-  loadGraph()
-  startPoll()
+  if (tab.value === 'graph') { loadGraph(); startPoll() }
+  if (tab.value === 'wiki') loadTopics()
+  else loadTopicsQuiet()
   loadAutoRefresh()
   loadWikiTargets()
   loadKb()
@@ -1007,208 +1152,208 @@ watch(layer, (v) => {
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('lh-open-wiki', openWikiFromReference)
+  wikiLoadGeneration++
+  wikiDependencyLoader.dispose()
+  searchLoader.dispose()
   stopPoll()
   stopStaleWatch()
 })
 </script>
 
 <template>
-  <div class="page">
-    <div class="head">
-      <div>
-        <h2 class="page-h2">知识库</h2>
-        <p class="head-sub">笔记、速查卡与资料，一处检索、一张图谱、一页 wiki。</p>
+  <div class="page knowledge-page" :class="{ 'knowledge-page-graph': tab === 'graph' }">
+    <header class="knowledge-header">
+      <div class="knowledge-heading">
+        <h1>知识库</h1>
+        <div class="knowledge-header-actions">
+          <span class="index-indicator" :class="{ stale: kb?.stale, unavailable: !kb && !kbLoading }"><i />{{ indexState }}</span>
+          <el-button size="small" :icon="Setting" @click="maintenanceOpen = true">知识库维护<span v-if="maintenanceBusy" class="maintenance-running">进行中</span></el-button>
+        </div>
       </div>
-      <div class="tabs">
-        <button type="button" :class="{ on: tab === 'graph' }" @click="tab = 'graph'">知识图谱</button>
-        <button type="button" :class="{ on: tab === 'wiki' }" @click="tab = 'wiki'">LLM Wiki</button>
-        <button type="button" :class="{ on: tab === 'search' }" @click="tab = 'search'">检索</button>
+      <div class="knowledge-navigation">
+        <nav class="workspace-tabs" role="tablist" aria-label="知识库工作区">
+          <button v-for="(workspace, index) in workspaces" :id="'knowledge-tab-' + workspace.key" :key="workspace.key" :ref="el => workspaceButtons[index] = el" type="button" role="tab" :title="workspace.description" :aria-selected="tab === workspace.key" :aria-controls="'knowledge-panel-' + workspace.key" :tabindex="tab === workspace.key ? 0 : -1" :class="{ active: tab === workspace.key }" @click="chooseTab(workspace.key)" @keydown="moveWorkspaceTab($event, index)">
+            <el-icon><component :is="workspace.icon" /></el-icon><b>{{ workspace.title }}</b>
+          </button>
+        </nav>
+        <dl class="knowledge-summary" aria-label="知识库概况">
+          <div><dt>原文来源</dt><dd>{{ formatCount(kb?.currentSources) }}<small>份</small></dd></div>
+          <div><dt>索引片段</dt><dd>{{ formatCount(kb?.chunks) }}<small>块</small></dd></div>
+          <div><dt>图谱概念</dt><dd>{{ formatCount(concept.stat?.nodes) }}<small>个</small></dd></div>
+          <div><dt>已生成 Wiki</dt><dd>{{ topicsReady ? formatCount(generatedTopicCount) : '—' }}<small>页</small><span v-if="staleTopicCount" class="summary-stale">{{ staleTopicCount }} 待更新</span></dd></div>
+        </dl>
       </div>
-    </div>
-
+    </header>
+    <div :id="'knowledge-panel-' + tab" class="workspace-content" role="tabpanel" :aria-labelledby="'knowledge-tab-' + tab">
     <!-- ============ 知识图谱 ============ -->
     <template v-if="tab === 'graph'">
       <div class="graph-fill">
-        <div class="bar">
-          <!-- 两层是两件事：文档层是相似度图（哪几篇相关），概念层才是知识图谱（概念之间是什么关系） -->
-          <div class="layer">
+        <div class="graph-toolbar">
+          <div class="layer" aria-label="图谱层级">
+            <button type="button" :class="{ on: layer === 'concept' }" @click="layer = 'concept'">概念层<template v-if="concept.stat">（{{ concept.stat.nodes }}）</template></button>
             <button type="button" :class="{ on: layer === 'doc' }" @click="layer = 'doc'">文档层</button>
-            <button type="button" :class="{ on: layer === 'concept' }" @click="layer = 'concept'">
-              概念层<template v-if="concept.stat">（{{ concept.stat.nodes }}）</template>
-            </button>
           </div>
-
-          <template v-if="layer === 'doc'">
-            <span class="legend"><i class="dot dot-cat" />分类</span>
-            <span class="legend"><i class="dot dot-note" />笔记</span>
-            <span class="legend"><i class="dot dot-ref" />速查卡</span>
-            <span class="legend"><i class="dot dot-file" />资料</span>
-            <span class="legend"><i class="dot dot-tag" />标签</span>
-            <span class="legend"><i class="line" />结构关系</span>
-            <span class="legend"><i class="line line-sem" />语义关联（模型推断）</span>
-          </template>
-          <template v-else>
-            <span class="legend"><i class="line line-sem" />模型抽取</span>
-            <span class="legend"><i class="line line-derived" />规则推导（隐含事实）</span>
-          </template>
-
-          <div class="spacer" />
-          <template v-if="layer === 'doc'">
-            <span class="hint">{{ graph.stat?.nodes || 0 }} 个节点 · {{ graph.stat?.edges || 0 }} 条边（语义 {{ semanticEdges }}）</span>
-            <el-button size="small" :loading="rebuilding" @click="rebuild">重建关联</el-button>
-          </template>
-          <template v-else>
-            <span class="hint">
-              {{ shownConceptNodes.length }}/{{ concept.nodes?.length || 0 }} 个概念 · {{ shownConceptEdges.length }} 条三元组
-              <template v-if="concept.stat">（推导 {{ concept.stat.derived }}）</template>
-            </span>
+          <span class="graph-description">{{ layer === 'concept' ? '从概念出发，沿关系找到原文依据' : '查看笔记、资料与速查卡之间的联系' }}</span>
+          <div class="graph-actions">
+            <el-button size="small" @click="resetGraphFilters">重置视图</el-button>
+<el-button size="small" @click="maintenanceOpen = true">管理图谱</el-button>
+          </div>
+        </div>
+        <div v-if="layer === 'concept'" class="graph-filters">
+          <label class="graph-select-label">社区
+            <!-- 与检索方式同样的问题：原生 <select> 的弹层由系统绘制，主题色/圆角都进不去 -->
             <el-select
-              v-model="relationFilter"
-              multiple
-              collapse-tags
-              collapse-tags-tooltip
+              v-model="communityFilter"
+              aria-label="筛选社区"
+              :placeholder="'全部社区（' + communityGroups.length + '）'"
               size="small"
-              placeholder="按关系过滤"
               style="width: 190px"
+              @change="focus = null; conceptSelected = null"
             >
+              <el-option :label="'全部社区（' + communityGroups.length + '）'" :value="''" />
               <el-option
-                v-for="r in (concept.ontology || [])"
-                :key="r.id"
-                :label="r.label"
-                :value="r.id"
+                v-for="g in communityOptions"
+                :key="g.communityId"
+                :label="g.title + ' · ' + g.size + ' 个概念'"
+                :value="String(g.communityId)"
               />
             </el-select>
-            <el-button v-if="focus" size="small" @click="focus = null">显示全部</el-button>
-            <el-button size="small" :loading="kgBusy" @click="reasonConcept">规则推理</el-button>
-            <el-button size="small" type="primary" :loading="kgBuilding" @click="buildConcept">重建概念图谱</el-button>
-          </template>
+          </label>
+          <el-select v-model="relationFilter" aria-label="筛选关系" multiple collapse-tags collapse-tags-tooltip size="small" placeholder="选择关系" class="graph-relation-filter">
+            <el-option v-for="r in concept.ontology || []" :key="r.id" :label="r.label" :value="r.id" />
+          </el-select>
+          <label class="graph-select-label">依据
+            <el-select v-model="originFilter" aria-label="筛选关系依据" size="small" style="width: 130px">
+              <el-option label="原文抽取" value="direct" />
+              <el-option label="抽取 + 推导" value="all" />
+              <el-option label="仅规则推导" value="derived" />
+            </el-select>
+          </label>
+          <label class="graph-checkbox"><input v-model="showIsolated" type="checkbox" />显示孤立概念</label>
+          <button v-if="focus" type="button" class="text-action" @click="focus = null">退出邻域聚焦</button>
         </div>
-
-        <!-- 构建进度：抽三元组要花 token，必须让人看得见它在干什么 -->
         <div v-if="layer === 'concept' && kgBuilding && kgJob" class="kb-progress">
           <el-progress :percentage="kgJob.percent || 0" :stroke-width="6" :show-text="false" />
           <div class="hint">{{ kgJob.stage }} · {{ kgJob.detail }}</div>
         </div>
 
-        <!-- 选中节点的详情栏：放在画布**上面**。
-             以前在画布下面：点节点后要往下找才能看到"我点的是什么"，而且它一出现就把画布往上顶，
-             画布高度是视口算出来的、不由容器决定，于是底部空出一大块（实测空 107px）。 -->
-        <div v-if="selectedNode" ref="detailRef" class="kg-detail">
-          <div class="kg-detail-main">
-            <span class="kg-kind">{{ nodeTypeLabel(selectedNode.type) }}</span>
-            <b class="kg-name">{{ selectedNode.label }}</b>
-            <span class="hint">{{ selectedNode.degree || 0 }} 条关联<template v-if="selectedNode.updatedAt"> · 更新于 {{ selectedNode.updatedAt }}</template></span>
-            <span v-if="layer === 'concept' && selectedNode.aliases?.length" class="hint">
-              别名：{{ selectedNode.aliases.join('、') }}
-            </span>
-          </div>
-          <div class="kg-detail-acts">
-            <template v-if="layer === 'doc'">
-              <el-button v-if="selectedNode.type === 'note'" size="small" @click="openNode(selectedNode)">打开笔记</el-button>
-              <el-button v-if="selectedNode.type === 'file'" size="small" @click="openNode(selectedNode)">下载资料</el-button>
-              <el-button
-                v-if="selectedNode.type === 'note' || selectedNode.type === 'ref' || selectedNode.type === 'file'"
-                size="small"
-                type="primary"
-                @click="askAgent(selectedNode.type, parseNodeId(selectedNode.id).id, selectedNode.label)"
-              >问智能体</el-button>
-            </template>
-            <template v-else>
-              <el-button v-if="selectedNode.wikiKey" size="small" @click="openConceptWiki(selectedNode.wikiKey)">读概念页</el-button>
-              <el-button size="small" @click="expandConcept(selectedNode.id, 2)">展开 2 跳</el-button>
-              <el-button size="small" @click="askAgentConcept(selectedNode.label)">问智能体</el-button>
-              <el-button
-                size="small"
-                :loading="deletingConcept === selectedNode.id"
-                @click="removeConceptNode(selectedNode)"
-              >删除概念</el-button>
-            </template>
-          </div>
-          <p v-if="layer === 'concept' && selectedNode.brief" class="kg-brief">{{ selectedNode.brief }}</p>
-          <ul v-if="layer === 'doc' && selectedLinks.length" class="kg-links">
-            <li v-for="(l, i) in selectedLinks" :key="i">
-              <span class="rel">{{ l.relation }}</span>
-              <span class="rel-title">{{ l.title }}</span>
-              <span class="rel-reason">{{ l.reason }}</span>
-            </li>
-          </ul>
-          <ul v-else-if="layer === 'concept' && conceptRelList.length" class="kg-links">
-            <li v-for="(t, i) in conceptRelList" :key="i">
-              <span class="rel" :class="{ 'rel-derived': t.origin === 'derived' }">{{ t.label }}</span>
-              <span class="rel-title">{{ t.out ? '→ ' + t.other : '← ' + t.other }}</span>
-              <span class="rel-reason">{{ t.origin === 'derived' ? '按本体规则推导（不是直接写着的事实）' : (t.evidence || '') }}</span>
-            </li>
-          </ul>
-        </div>
+        <div class="graph-workspace">
+          <section class="graph-stage" aria-label="知识图谱">
+            <div class="graph-stage-head">
+              <div><b>{{ focus ? '概念邻域' : communityFilter !== '' ? '社区视图' : '知识地图' }}</b><span class="hint">{{ canvasNodes.length }} 个{{ layer === 'concept' ? '概念' : '节点' }} · {{ canvasEdges.length }} 条关系</span></div>
+              <span v-if="layer === 'concept'" class="hint">{{ visibleDerivedCount ? `包含 ${visibleDerivedCount} 条推导` : '仅展示原文抽取' }}</span>
+            </div>
+            <div class="kg-box" v-loading="layer === 'doc' ? graphLoading : conceptLoading">
+              <KnowledgeGraph v-if="canvasNodes.length" ref="graphRef" :key="layer" :nodes="canvasNodes" :edges="canvasEdges" :communities="layer === 'concept' ? communityOf : {}" :active-id="selectedNode?.id || ''" :layout-root-id="layer === 'concept' && focus ? focusRootId : ''" @select="onSelectNode" @open="openNode" />
+              <el-empty v-else :description="layer === 'doc' ? '还没有内容，先写几篇笔记' : concept.nodes.length ? '当前筛选下没有关联，可调整筛选或显示孤立概念' : '还没有概念，重建 GraphRAG 后即可探索'" />
+            </div>
+            <div class="graph-stage-foot">
+              <template v-if="layer === 'concept'"><span class="legend"><i class="line line-direct" />原文抽取</span><span class="legend"><i class="line line-derived" />规则推导</span><span class="hint">颜色表示社区 · 点选查看依据</span></template>
+              <template v-else><span v-for="t in ['category', 'note', 'ref', 'file', 'tag']" :key="t" class="legend"><i class="dot" :class="`dot-${t === 'category' ? 'cat' : t}`" />{{ nodeTypeLabel(t) }}</span></template>
+            </div>
+          </section>
 
-        <!-- 画布：吃掉剩余高度，下边界始终贴着页面底部 -->
-        <div class="kg-box" v-loading="layer === 'doc' ? graphLoading : conceptLoading">
-          <KnowledgeGraph
-            v-if="canvasNodes.length"
-            :nodes="canvasNodes"
-            :edges="canvasEdges"
-            :active-id="selectedNode?.id || ''"
-            @select="onSelectNode"
-          />
-          <el-empty
-            v-else
-            :description="layer === 'doc'
-              ? '还没有内容，先写几篇笔记'
-              : '概念图谱还是空的 —— 点「重建概念图谱」从你的笔记与资料里抽三元组'"
-          />
+          <aside class="graph-inspector" aria-label="图谱探索与检索依据">
+            <div class="inspector-tabs">
+              <button type="button" :class="{ on: inspectorTab === 'explore' }" @click="inspectorTab = 'explore'">探索图谱</button>
+              <button type="button" :class="{ on: inspectorTab === 'retrieve' }" @click="inspectorTab = 'retrieve'">检索验证</button>
+            </div>
+            <div class="inspector-scroll">
+              <template v-if="inspectorTab === 'explore'">
+                <input v-model="graphQuery" class="graph-search" :placeholder="layer === 'concept' ? '搜索概念或别名…' : '搜索文档或标签…'" aria-label="搜索图谱节点" @keydown.enter="graphMatches[0] && locateNode(graphMatches[0])" />
+                <template v-if="!selectedNode || graphQuery">
+                  <div class="inspector-label">{{ graphQuery ? '匹配结果' : '从一个概念开始' }}</div>
+                  <p v-if="!graphMatches.length" class="hint">没有匹配的节点，请换一个关键词。</p>
+                  <div class="graph-node-list">
+                    <button v-for="n in graphMatches" :key="n.id" type="button" @click="locateNode(n)"><span>{{ n.label }}</span><small>{{ n.degree || 0 }} 条关联 →</small></button>
+                  </div>
+                </template>
+
+                <div v-if="selectedNode" class="node-inspector">
+                  <div class="node-inspector-heading"><span class="kg-kind">{{ nodeTypeLabel(selectedNode.type) }}</span><button class="text-action" type="button" @click="onSelectNode(null)">关闭详情</button></div>
+                  <h3>{{ selectedNode.label }}</h3>
+                  <p v-if="selectedNode.aliases?.length" class="hint">别名：{{ selectedNode.aliases.join('、') }}</p>
+                  <p v-if="selectedNode.brief" class="kg-brief">{{ selectedNode.brief }}</p>
+                  <div class="node-actions">
+                    <template v-if="layer === 'concept'">
+                      <el-button size="small" @click="expandConcept(selectedNode.id, 1)">1 跳邻域</el-button><el-button size="small" @click="expandConcept(selectedNode.id, 2)">2 跳邻域</el-button>
+                      <el-button v-if="selectedNode.wikiKey" size="small" @click="openConceptWiki(selectedNode.wikiKey)">读知识页</el-button>
+                      <el-button size="small" @click="askAgentConcept(selectedNode.label)">问智能体</el-button>
+                    </template>
+                    <template v-else>
+                      <el-button v-if="['note', 'ref', 'file'].includes(selectedNode.type)" size="small" @click="openNode(selectedNode)">打开原文</el-button>
+                      <el-button v-if="['note', 'ref', 'file'].includes(selectedNode.type)" size="small" @click="askAgent(selectedNode.type, parseNodeId(selectedNode.id).id, selectedNode.label)">问智能体</el-button>
+                    </template>
+                  </div>
+                  <div class="inspector-label">{{ layer === 'concept' ? `关联与证据 · ${conceptRelList.length}` : '文档关联' }}</div>
+                  <template v-if="layer === 'concept'">
+                    <article v-for="(r, i) in conceptRelList" :key="r.id || i" class="graph-evidence-card">
+                      <div class="evidence-heading"><span class="evidence-kind" :class="{ derived: r.origin === 'derived' || !r.evidence }">{{ r.origin === 'derived' ? '规则推导' : r.evidence ? '原文抽取' : '待核对' }}</span><span>{{ r.label }}</span></div>
+                      <button type="button" class="related-node" @click="selectCommunityMember(r.out ? r.target : r.source)">{{ r.out ? '→ ' : '← ' }}{{ r.other }}</button>
+                      <p>{{ r.evidence || (r.origin === 'derived' ? '根据本体规则推导，请结合原文核对。' : '暂缺原文证据，这条关系不会作为自动回答依据。') }}</p>
+                      <div class="evidence-sources"><router-link v-for="s in sourceLinks(r.sources)" :key="s.type + s.id" :to="s.path">{{ s.label }} ↗</router-link></div>
+                    </article>
+                    <p v-if="!conceptRelList.length" class="hint">这个概念暂时没有关联。</p>
+                    <details class="graph-maintenance"><summary>管理这个概念</summary><el-button size="small" :loading="deletingConcept === selectedNode.id" @click="removeConceptNode(selectedNode)">删除概念</el-button></details>
+                  </template>
+                  <article v-for="(l, i) in layer === 'doc' ? selectedLinks : []" :key="i" class="graph-evidence-card"><b>{{ l.title }}</b><p>{{ l.reason }}</p></article>
+                </div>
+
+                <template v-if="layer === 'concept' && !selectedNode && !graphQuery">
+                  <div class="inspector-label">按社区探索 <span>{{ communityGroups.length }}</span></div>
+                  <div class="community-list">
+                    <button v-for="g in communityOptions.slice(0, 8)" :key="g.communityId" type="button" :class="{ active: String(g.communityId) === communityFilter }" @click="focusCommunity(g.communityId)"><i :style="{ background: communityColor(g.communityId) }" /><span>{{ g.title }}</span><small>{{ g.size }}</small></button>
+                  </div>
+                  <p class="hint">顶部筛选可选择全部社区。</p>
+                </template>
+              </template>
+
+              <template v-else>
+                <h3 class="probe-heading">看看图谱找到了什么</h3>
+                <p class="hint">具体问题查看概念关系；整体问题查看社区摘要。这里只检索材料。</p>
+                <form class="graph-probe-form" @submit.prevent="runGraphProbe">
+                  <textarea v-model="graphProbeQuestion" aria-label="GraphRAG 检索问题" placeholder="例如：ReAct 和 Planning 有什么关系？" rows="3" />
+                  <!-- 检索方式用**分段按钮**而不是原生 <select>：原生弹层由操作系统绘制，
+                       直角、默认蓝底、无留白，改不动，跟主体的青绿圆角完全是两套东西；
+                       而 Element 的分段按钮直接继承 --el-color-primary（本仓库已主题化），零额外 CSS。 -->
+                  <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
+                    <el-radio-group v-model="graphProbeMode" size="small" aria-label="GraphRAG 检索方式">
+                      <el-radio-button label="auto">自动选择</el-radio-button>
+                      <el-radio-button label="local">局部检索</el-radio-button>
+                      <el-radio-button label="global">全局概览</el-radio-button>
+                    </el-radio-group>
+                    <el-button type="primary" size="small" native-type="submit" :disabled="!graphProbeQuestion.trim()" :loading="graphProbeBusy">检索材料</el-button>
+                  </div>
+                </form>
+                <div class="probe-examples"><button type="button" @click="graphProbeQuestion = 'ReAct 和 Planning 有什么关系？'; runGraphProbe()">概念关系</button><button type="button" @click="graphProbeQuestion = '知识库整体涵盖哪些学习方向？'; runGraphProbe()">学习概览</button></div>
+                <p v-if="graphProbeError" class="probe-empty" role="alert">{{ graphProbeError }}</p>
+                <template v-if="graphProbeResult">
+                  <div class="probe-result-head"><b>{{ graphProbeResult.mode === 'global' ? '全局概览' : '局部检索' }}</b><span class="hint">{{ graphProbeResult.conceptHits || 0 }} 个概念命中</span></div>
+                  <p class="hint">{{ graphProbeResult.routeReason }}</p>
+                  <div v-if="graphProbeResult.emptyReason" class="probe-empty">{{ graphProbeResult.emptyReason }}<button v-if="graphProbeResult.fallback === 'document_search'" type="button" class="text-action" @click="kw = graphProbeQuestion; chooseTab('search'); doSearch()">转到正文检索 →</button></div>
+                  <div v-if="graphProbeResult.concepts?.length" class="probe-concepts"><button v-for="n in graphProbeResult.concepts" :key="n.id" type="button" @click="layer = 'concept'; selectCommunityMember(n.id)">{{ n.name }}</button></div>
+                  <article v-for="(r, i) in graphProbeResult.relations || []" :key="r.id || i" class="graph-evidence-card"><div class="evidence-heading"><span class="evidence-kind" :class="{ derived: r.origin === 'derived' }">{{ r.origin === 'derived' ? '规则推导' : '原文抽取' }}</span></div><b>{{ r.headName }} → {{ r.label || r.relation }} → {{ r.tailName }}</b><p>{{ r.evidence || '规则推导，请核对前提。' }}</p><div class="evidence-sources"><router-link v-for="s in sourceLinks(r.sources)" :key="s.type + s.id" :to="s.path">{{ s.label }} ↗</router-link></div></article>
+                  <article v-for="s in graphProbeResult.summaries || []" :key="s.communityId" class="graph-evidence-card"><div class="evidence-heading"><b>社区 #{{ s.communityId }}</b><span class="hint">{{ s.size }} 个概念</span></div><p>{{ s.summary }}</p><div class="evidence-sources"><router-link v-for="src in sourceLinks(s.sources)" :key="src.type + src.id" :to="src.path">{{ src.label }} ↗</router-link></div></article>
+                  <p v-if="graphProbeResult.truncated" class="hint">已按材料预算截断，未展示全部关系。</p>
+                </template>
+
+              </template>
+
+            </div>
+          </aside>
         </div>
       </div>
     </template>
 
     <!-- ============ LLM Wiki ============ -->
     <template v-else-if="tab === 'wiki'">
-      <!-- 工具条：以前三个按钮 + 自动开关全挤在侧栏标题行里，挤成一团；现在单独占一行 -->
-      <div class="wiki-bar">
-        <span class="wiki-bar-title">知识页</span>
-        <span class="hint">
-          共 {{ topics.length }} 个主题，已生成 {{ generatedTopicCount }} 页 · 删除只清这一页，原始笔记/速查卡/资料一行不动
-        </span>
-        <span class="wiki-bar-gap" />
-        <el-button size="small" :loading="entBusy" @click="compileEntities">编译知识页</el-button>
-        <el-button size="small" :loading="reBusy" @click="recompileAffected">重建受影响页</el-button>
-        <el-button size="small" :loading="lintBusy" @click="runLint">自检</el-button>
-        <span class="wiki-bar-sep" />
-        <span class="hint">改完笔记自动重生成</span>
-        <el-switch v-model="autoRefresh" size="small" @change="toggleAutoRefresh" />
+      <div class="wiki-view-header">
+        <div><h2>主题知识页</h2><p>把笔记与资料整理成可阅读、可追溯的知识导览。</p></div>
+        <span>{{ topics.length }} 个主题 · {{ generatedTopicCount }} 页已生成<template v-if="staleTopicCount"> · {{ staleTopicCount }} 页待更新</template></span>
       </div>
-
       <div class="wiki">
-        <aside class="wiki-side" v-loading="topicsLoading">
-          <div v-for="g in topicGroups" :key="g.type" class="wiki-group">
-            <div class="wiki-group-head">
-              <span class="topic-dot" :class="'dot-' + g.type" />
-              <span class="wiki-group-name">{{ g.label }}</span>
-              <span class="wiki-group-count">{{ g.items.length }}</span>
-            </div>
-            <div
-              v-for="t in g.items"
-              :key="t.topicKey"
-              class="topic"
-              :class="{ on: t.topicKey === activeTopic }"
-              @click="openTopic(t.topicKey)"
-            >
-              <span class="topic-name" :title="t.title + ' · ' + t.topicKey">{{ t.title }}</span>
-              <span class="topic-status">
-                <span v-if="t.stale" class="badge badge-stale">待更新</span>
-                <span v-else-if="!t.generated" class="topic-nogene">未生成</span>
-              </span>
-              <span class="topic-count">{{ t.itemCount }}</span>
-              <button
-                class="topic-del"
-                type="button"
-                :title="'删除「' + t.title + '」这一页'"
-                @click.stop="removeTopic(t)"
-              >✕</button>
-            </div>
-          </div>
-          <p v-if="!topics.length && !topicsLoading" class="hint side-hint">还没有分类或标签，先去写笔记</p>
-        </aside>
-
+        <WikiTopicNavigator :topics="topics" :active-topic="activeTopic" :loading="topicsLoading" :deleting-key="deletingKey" @select="selectWikiTopic" @delete="removeTopic" />
         <section class="wiki-main" v-loading="wikiLoading">
           <div v-if="reBusy && reJob" class="kb-progress">
             <el-progress :percentage="reJob.percent || 0" :stroke-width="6" :show-text="false" />
@@ -1234,46 +1379,17 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="page-meta">
                   <span class="meta-chip">{{ wikiCountLabel }}</span>
-                  <template v-if="!isCompiledPage && wikiPage.sentItems < wikiPage.itemCount">
-                    <span class="meta-chip">送模型 {{ wikiPage.sentItems }} 条</span>
-                  </template>
                   <span v-if="wikiPage.generatedAt" class="meta-chip">生成于 {{ wikiPage.generatedAt }}</span>
                   <span v-if="wikiPage.model" class="meta-chip">{{ wikiPage.model }}</span>
                   <el-tooltip
                     v-if="wikiPage.quality"
-                    :content="wikiPage.qualityNote || '已通过质量校验（引用有效、结构完整）'"
+                    :content="wikiPage.qualityNote || '结构与引用标记检查通过；生成内容仍需结合原文核对。'"
                     placement="top"
                   >
                     <span class="badge" :class="wikiPage.quality === 'ok' ? 'badge-ok' : 'badge-warn'">
-                      {{ wikiPage.quality === 'ok' ? '已校验' : '校验有提示' }}
+                      {{ wikiPage.quality === 'ok' ? '结构与引用检查通过' : '结构与引用检查有提示' }}
                     </span>
                   </el-tooltip>
-                  <!-- 素材覆盖率：直接回答"这份 wiki 到底覆盖了源文档多少"。
-                       低于 60% 时标出来并悬浮展示逐条明细（实测大文档/长笔记只有个位数百分点）。 -->
-                  <el-tooltip
-                    v-if="wikiPage.coveragePercent != null"
-                    placement="top"
-                    :content="'本页素材实际用了 ' + (wikiPage.materialChars || 0) + ' 字，源文档合计约 ' + (wikiPage.sourceChars || 0) + ' 字'"
-                  >
-                    <span
-                      class="badge"
-                      :class="wikiPage.coveragePercent < 60 ? 'badge-warn' : 'badge-ok'"
-                    >素材覆盖 {{ wikiPage.coveragePercent }}%</span>
-                  </el-tooltip>
-                  <el-popover v-if="wikiPage.coverage?.length" placement="bottom-end" :width="360" trigger="click">
-                    <template #reference>
-                      <span class="cov-more">明细</span>
-                    </template>
-                    <div class="cov-list">
-                      <div v-for="c in wikiPage.coverage" :key="c.type + '-' + c.id" class="cov-row">
-                        <span class="cov-name">{{ c.title }}</span>
-                        <span class="cov-num">
-                          {{ c.usedChars }} / {{ c.sourceChars || '?' }} 字<template v-if="c.percent != null">（{{ c.percent }}%）</template>
-                        </span>
-                      </div>
-                      <p class="hint cov-hint">「用/源」= 这次生成实际送进模型多少字 / 该条源文档共多少字。</p>
-                    </div>
-                  </el-popover>
                 </div>
               </div>
               <div class="page-acts">
@@ -1290,9 +1406,9 @@ onBeforeUnmount(() => {
                   size="small"
                   type="primary"
                   :loading="generating"
-                  :disabled="!wikiPage.itemCount"
+                  :disabled="wikiPage.topicType !== 'entity' && !wikiPage.itemCount"
                   @click="generate"
-                >{{ wikiPage.generated ? '重新生成' : '生成 wiki' }}</el-button>
+                >{{ wikiPage.topicType === 'entity' ? '重新生成此页' : wikiPage.generated ? '重新生成' : '生成 wiki' }}</el-button>
                 <el-button
                   size="small"
                   :loading="deletingKey === wikiPage.topicKey"
@@ -1314,8 +1430,60 @@ onBeforeUnmount(() => {
               </div>
             </div>
 
-            <div v-if="wikiPage.contentMd" class="wiki-body md-doc" @click="onWikiClick">
-              <MdPreview :modelValue="wikiMd" :theme="isDark ? 'dark' : 'light'" previewTheme="github" />
+            <details v-if="wikiDependencyVisible" :key="wikiPage.topicKey" class="wiki-dependencies">
+              <summary>
+                <span class="dependency-title">来源依赖</span>
+                <span v-if="wikiDependencyState.loading" class="hint">正在读取…</span>
+                <template v-else-if="!wikiDependencyState.error">
+                  <span class="dependency-status" :class="wikiDependencies.status">{{ wikiDependencies.statusLabel }}</span>
+                  <span class="hint dependency-summary">{{ wikiDependencies.summary }}</span>
+                </template>
+                <span v-else class="hint">读取失败</span>
+              </summary>
+              <div class="dependency-body">
+                <p class="dependency-notice">以下是生成时实际读取的原文片段。来源指纹用于检测内容变化，不代表结论已通过语义核验。</p>
+                <p v-if="wikiDependencyState.loading" class="hint">正在读取来源依赖…</p>
+                <div v-else-if="wikiDependencyState.error" class="dependency-error" role="status">
+                  <span>{{ wikiDependencyState.error }}</span>
+                  <el-button size="small" @click="loadWikiDependencies">重试</el-button>
+                </div>
+                <template v-else>
+                  <p v-for="reason in wikiDependencies.reasons" :key="reason" class="dependency-reason">{{ reason }}</p>
+                  <p v-if="wikiDependencies.material" class="dependency-material">
+                    {{ wikiDependencies.material }}
+                    <span v-if="wikiDependencies.partialMaterial"> · 使用了部分素材</span>
+                  </p>
+                  <div v-if="wikiDependencies.sourceCoverage.length" class="dependency-coverage">
+                    <div v-for="source in wikiDependencies.sourceCoverage" :key="source.key" class="dependency-coverage-row">
+                      <span>{{ source.label }}</span><span>{{ source.material }}</span>
+                    </div>
+                    <p class="hint">以上范围记录本次生成实际读取的素材。字数包含片段重叠，不作正文覆盖率。</p>
+                  </div>
+                  <ul v-if="wikiDependencies.rows.length" class="dependency-list">
+                    <li v-for="dependency in wikiDependencies.rows" :key="dependency.key" class="dependency-row">
+                      <div class="dependency-row-head">
+                        <span class="dependency-source">{{ dependency.sourceLabel }}<template v-if="dependency.title"> · {{ dependency.title }}</template></span>
+                        <el-tooltip v-if="dependency.hashDescription" :content="dependency.hashDescription" placement="top" popper-class="dependency-hash-tooltip">
+                          <span class="dependency-status" :class="dependency.tone">{{ dependency.status }}</span>
+                        </el-tooltip>
+                        <span v-else class="dependency-status" :class="dependency.tone">{{ dependency.status }}</span>
+                        <router-link v-if="dependency.path" :to="dependency.path" class="dependency-link">查看原文 ↗</router-link>
+                      </div>
+                      <p v-if="dependency.position || dependency.heading" class="dependency-position">
+                        {{ [dependency.position, dependency.heading].filter(Boolean).join(' · ') }}
+                      </p>
+                      <details v-if="dependency.chunkText" class="dependency-excerpt">
+                        <summary>生成时读取的片段</summary>
+                        <pre>{{ dependency.chunkText }}</pre>
+                      </details>
+                    </li>
+                  </ul>
+                </template>
+              </div>
+            </details>
+            <p v-if="wikiPage.contentMd" class="wiki-guide-note">模型生成的知识导览，关键结论请点击来源核对原文。</p>
+            <div v-if="wikiPage.contentMd" ref="wikiBody" class="wiki-body md-doc" @click="onWikiClick">
+              <MdPreview :modelValue="wikiMd" :theme="isDark ? 'dark' : 'light'" previewTheme="github" :mdHeadingId="wikiHeadingId" @onHtmlChanged="locateWikiSection" />
             </div>
             <div v-else class="wiki-empty">
               <p>这个主题还没有 wiki 页。</p>
@@ -1330,8 +1498,13 @@ onBeforeUnmount(() => {
       </div>
     </template>
 
-    <!-- ============ 检索（原样保留） ============ -->
-    <template v-else>
+    <KnowledgeSearchPanel v-else v-model:query="kw" :mode="searchMode" :loading="loading" :searched="searched" :items="items" :keyword="keyword" :last-mode="lastMode" :error="searchError" @mode="switchMode" @search="doSearch" @clear="clearSearch" @open="open" @download="item => downloadFile(item.id ?? item.sourceId, item.title)" />
+    </div>
+
+    <el-drawer v-model="maintenanceOpen" title="知识库维护" size="min(580px, 100vw)" append-to-body class="knowledge-maintenance-drawer">
+      <div class="maintenance-content">
+        <p class="maintenance-intro">查看索引状态，更新知识结构，验证检索效果。已开始的任务会在关闭面板后继续。</p>
+        <details open class="maintenance-section"><summary><el-icon><Search /></el-icon><span>检索索引与体检</span></summary><div class="maintenance-section-body">
       <!-- 语义索引状态：资料能不能"问什么都知道"取决于索引新不新 -->
       <div class="kb-bar">
         <span class="kb-title">语义索引</span>
@@ -1359,6 +1532,7 @@ onBeforeUnmount(() => {
         <el-input
           v-model="probeQ"
           class="search-input"
+          aria-label="检索体检问题"
           placeholder="体检用：写一个「换一种说法」的问句，例如 撤销暂存区的改动"
           clearable
           @keyup.enter="runProbe"
@@ -1383,131 +1557,84 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <div class="search-card" v-loading="loading">
-        <el-input
-          v-model="kw"
-          class="search-input"
-          :placeholder="searchMode === 'fusion'
-            ? '用一句话描述你要找什么，例如 大量字符串拼接用哪个类性能更好（留空看最近知识）'
-            : '搜字符串，例如 StringBuilder（留空看最近知识）'"
-          clearable
-          @keyup.enter="doSearch"
-          @clear="clearSearch"
-        >
-          <template #suffix>
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-              <circle cx="11" cy="11" r="7" />
-              <path d="m20 20-3.8-3.8" />
-            </svg>
-          </template>
-        </el-input>
-        <el-button type="primary" @click="doSearch">检索</el-button>
-        <!-- 融合 / 词面 切换：默认融合（语义能找回词面 0 命中的内容）；要精确搜字符串时切词面 -->
-        <div class="mode" role="group" aria-label="检索方式">
-          <button type="button" :class="{ on: searchMode === 'fusion' }" @click="switchMode('fusion')">融合</button>
-          <button type="button" :class="{ on: searchMode === 'keyword' }" @click="switchMode('keyword')">词面</button>
-        </div>
+
+        </div></details>
+        <details class="maintenance-section"><summary><el-icon><Share /></el-icon><span>图谱与社区</span><small>{{ formatCount(concept.stat?.nodes) }} 个概念</small></summary><div class="maintenance-section-body">
+          <p class="hint">重建 GraphRAG 使用已配置的模型抽取概念和关系。规则推理与社区划分在本地执行。</p>
+          <div class="maintenance-actions"><el-button :loading="kgBuilding" @click="buildConcept">重建 GraphRAG</el-button><el-button :loading="rebuilding" @click="rebuild">重建文档关联</el-button></div>
+          <div v-if="kgBuilding && kgJob" class="kb-progress"><el-progress :percentage="kgJob.percent || 0" :stroke-width="6" /><p class="hint">{{ kgJob.stage }} · {{ kgJob.detail }}</p></div>
+          <div class="maintenance-metrics"><span>{{ communityGroups.length }} 个社区</span><span>模块度 {{ communityModularity.toFixed(3) }}</span></div>
+          <div class="maintenance-actions"><el-button :loading="communityLoading" @click="recomputeCommunities">重算社区</el-button><el-button :loading="kgBusy" @click="reasonConcept">规则推理</el-button></div>
+<div class="summary-status" v-if="summaryStatus"><b>社区摘要</b><p class="hint">{{ summaryStatus.fresh || 0 }} 段可用 · {{ summaryStatus.stale || 0 }} 段过期 · {{ summaryStatus.missing || 0 }} 段待生成</p><p v-if="summaryStatus.communitiesStale" class="hint">图谱已变化，生成前会先更新社区划分。</p><el-button size="small" :loading="summaryBusy" @click="generateCommunitySummaries">生成 / 更新摘要（最多 3 段）</el-button><p class="hint">按需调用已配置的模型；输入变化后重新生成。</p></div>
+        </div></details>
+        <details class="maintenance-section"><summary><el-icon><Reading /></el-icon><span>Wiki 更新与自检</span><small>{{ staleTopicCount }} 页待更新</small></summary><div class="maintenance-section-body">
+          <p class="hint">批量编译和自检会调用模型。单页的生成、模型选择与删除在 Wiki 阅读区操作。</p>
+          <div class="maintenance-actions"><el-button :loading="entBusy" @click="compileEntities">编译知识页</el-button><el-button :loading="reBusy" @click="recompileAffected">重建受影响页</el-button><el-button :loading="lintBusy" @click="runLint">自检</el-button></div>
+          <div v-if="entBusy && entJob" class="kb-progress"><el-progress :percentage="entJob.percent || 0" :stroke-width="6" /><p class="hint">{{ entJob.stage }} · {{ entJob.done }}/{{ entJob.total }} · 已写 {{ entJob.pages }} 页</p></div>
+          <div v-if="reBusy && reJob" class="kb-progress"><el-progress :percentage="reJob.percent || 0" :stroke-width="6" /><p class="hint">{{ reJob.stage }} · {{ reJob.detail }}</p></div>
+          <div class="maintenance-toggle"><div><b>自动更新知识页</b><p class="hint">原文变化后，自动重新生成受影响的页面。</p></div><el-switch v-model="autoRefresh" aria-label="原文变化后自动更新 Wiki" @change="toggleAutoRefresh" /></div>
+          <el-button @click="maintenanceOpen = false; chooseTab('wiki')">前往 Wiki 阅读区<el-icon><ArrowRight /></el-icon></el-button>
+        </div></details>
       </div>
-
-      <!-- 状态必须可见：现在用的是哪种方式、上面这批结果是谁出的 -->
-      <div class="search-status">
-        <span class="hint">当前：<b>{{ modeLabel(searchMode) }}</b> · {{ modeDesc(searchMode) }}</span>
-        <span v-if="searched && !loading" class="hint">
-          本次结果来自「{{ modeLabel(lastMode) }}」，共 {{ items.length }} 条<template v-if="lastMode === 'fusion' && items.length"> · 按相关度从高到低</template>
-        </span>
-        <span v-if="emptyFallback" class="hint">输入为空：融合检索需要一句话，已回落到词面的「最近知识」</span>
-      </div>
-
-      <div v-if="searchError" class="search-error">
-        <b>{{ modeLabel(lastMode) }}失败</b>
-        <span class="hint">
-          {{ searchError }} —— 可切到「{{ searchMode === 'fusion' ? '词面' : '融合' }}」，或点「检索」重试
-        </span>
-      </div>
-
-      <template v-if="resultGroups.length">
-        <section v-for="g in resultGroups" :key="g.key" class="group">
-          <h3 class="group-title">{{ g.label }}<span class="count">{{ g.items.length }}</span></h3>
-          <div
-            v-for="it in g.items"
-            :key="g.key + '-' + it.type + '-' + it.id"
-            class="kitem"
-            role="button"
-            tabindex="0"
-            @click="open(it)"
-            @keydown.enter.prevent="open(it)"
-            @keydown.space.prevent="open(it)"
-          >
-            <div class="kitem-main">
-              <div class="kitem-title">
-                <!-- 融合是一张混合列表，来源类型必须每条都标出来 -->
-                <span v-if="lastMode === 'fusion'" class="ktag ktag-type" :class="'kt-' + it.type">{{ sourceLabel(it.type) }}</span>
-                <span v-html="hl(it.title)"></span>
-              </div>
-              <div class="kitem-snippet" v-html="hl(it.snippet)"></div>
-            </div>
-            <div class="kitem-meta">
-              <span v-if="it.categoryName" class="ktag">{{ it.categoryName }}</span>
-              <span v-if="it.type === 'file' && it.ext" class="ktag">{{ it.ext }}<template v-if="it.textChars"> · {{ it.textChars }} 字</template></span>
-              <span v-if="it.score != null" class="ktag" title="融合得分：词面与向量两路合并后的相关度">相关度 {{ it.score.toFixed(3) }}</span>
-              <span v-if="it.updatedAt" class="ktime">{{ it.updatedAt }}</span>
-              <span v-if="it.type === 'file'" class="klink" title="下载到本机打开" @click.stop="downloadFile(it.id, it.title)">下载</span>
-            </div>
-          </div>
-        </section>
-      </template>
-
-      <el-empty
-        v-else-if="searched && !loading && !searchError"
-        :description="keyword ? `没有与「${keyword}」相关的知识` : '工作台还是空的，先写一篇笔记吧'"
-      />
-    </template>
+    </el-drawer>
   </div>
 </template>
 
 <style scoped>
-/* ---- 顶栏与视图切换（沿用编辑页的分段按钮，避免 EP 组件高度不一致） ---- */
-.head {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 20px;
-}
-.head-sub {
-  margin: 5px 0 0;
-  font-size: 13px;
-  color: var(--app-text-3);
-}
-.tabs {
-  display: flex;
-  gap: 2px;
-  padding: 3px;
-  background: var(--app-bg);
-  border: 1px solid var(--app-border-weak);
-  border-radius: var(--radius);
-  flex-shrink: 0;
-}
-.tabs button {
-  border: 0;
-  background: transparent;
-  color: var(--app-text-2);
-  font-size: 13px;
-  padding: 5px 12px;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: all var(--dur-fast) ease;
-}
-.tabs button:hover {
-  color: var(--app-text-1);
-}
-.tabs button.on {
-  background: var(--app-card);
-  color: var(--app-brand-deep);
-  font-weight: 600;
-  box-shadow: var(--shadow-sm);
-}
-
+.knowledge-page { min-width: 0; max-width: 1800px; margin: 0 auto; padding: 16px 24px; }
+.knowledge-page-graph { display: flex; flex-direction: column; height: 100%; min-height: 640px; box-sizing: border-box; }
+.knowledge-header { flex-shrink: 0; margin-bottom: 12px; }
+.knowledge-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; }
+.knowledge-heading h1 { margin: 0; font-size: 22px; line-height: 32px; letter-spacing: -.4px; font-weight: 700; }
+.knowledge-header-actions { display: flex; align-items: center; gap: 12px; flex-shrink: 0; margin-left: auto; }
+.index-indicator { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--app-text-2); }
+.index-indicator i { width: 6px; height: 6px; border-radius: 50%; background: var(--app-brand); }
+.index-indicator.stale i { background: #c58519; }
+.index-indicator.unavailable i { background: var(--app-text-3); }
+.maintenance-running { margin-left: 8px; font-size: 12px; color: var(--app-brand-deep); }
+.knowledge-navigation { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; margin-top: 8px; border-bottom: 1px solid var(--app-border); }
+.knowledge-summary { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 0; padding: 0 0 4px; }
+.knowledge-summary > div { display: flex; align-items: baseline; gap: 5px; white-space: nowrap; }
+.knowledge-summary dt { color: var(--app-text-3); font-size: 12px; }
+.knowledge-summary dd { margin: 0; font-size: 14px; font-weight: 650; line-height: 1.5; font-variant-numeric: tabular-nums; color: var(--app-text-1); }
+.knowledge-summary small { margin-left: 4px; font-weight: 400; color: var(--app-text-3); font-size: 12px; }
+.summary-stale { font-size: 11px; font-weight: 400; color: var(--app-text-3); margin-left: 6px; }
+.workspace-tabs { display: flex; align-items: stretch; gap: 4px; flex-shrink: 0; }
+.workspace-tabs button { position: relative; display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 8px 14px; border: 0; border-radius: 6px 6px 0 0; background: transparent; text-align: left; color: var(--app-text-2); font: inherit; cursor: pointer; transition: background var(--dur-fast); }
+.workspace-tabs button:hover { background: var(--app-card); }
+.workspace-tabs button.active { color: var(--app-brand-deep); background: color-mix(in srgb, var(--app-brand-soft) 55%, transparent); }
+.workspace-tabs button.active::after { content: ''; position: absolute; bottom: -1px; left: 12px; right: 12px; height: 2px; border-radius: 2px 2px 0 0; background: var(--app-brand); }
+.workspace-tabs .el-icon { font-size: 17px; }
+.workspace-tabs b { font-size: 13px; font-weight: 600; white-space: nowrap; }
+.workspace-content { min-width: 0; }
+.knowledge-page-graph .workspace-content { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.wiki-view-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.wiki-view-header h2 { margin: 0; font-size: 20px; }
+.wiki-view-header p { margin: 4px 0 0; font-size: 12px; color: var(--app-text-3); }
+.wiki-view-header > span { color: var(--app-text-3); font-size: 12px; }
+.maintenance-intro { margin: 0 0 24px; color: var(--app-text-2); line-height: 1.8; font-size: 14px; }
+.maintenance-section { border: 1px solid var(--app-border); border-radius: var(--radius-lg); margin-bottom: 16px; color: var(--app-text-1); background: var(--app-card); }
+.maintenance-section > summary { display: flex; align-items: center; gap: 10px; padding: 16px; font-weight: 600; cursor: pointer; list-style: none; }
+.maintenance-section > summary::-webkit-details-marker { display: none; }
+.maintenance-section > summary::after { content: '+'; color: var(--app-text-3); margin-left: auto; font-size: 18px; font-weight: 400; }
+.maintenance-section[open] > summary::after { content: '−'; }
+.maintenance-section > summary .el-icon { color: var(--app-brand-deep); font-size: 18px; }
+.maintenance-section > summary small { font-size: 12px; font-weight: 400; color: var(--app-text-3); }
+.maintenance-section-body { border-top: 1px solid var(--app-border-weak); padding: 16px; }
+.maintenance-section-body > .hint { line-height: 1.8; margin-top: 0; }
+.maintenance-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.maintenance-actions .el-button + .el-button { margin-left: 0; }
+.maintenance-metrics { display: flex; gap: 20px; margin: 20px 0 8px; color: var(--app-text-3); font-size: 12px; }
+.maintenance-toggle { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 0; margin-top: 20px; border-top: 1px solid var(--app-border); }
+.maintenance-toggle b { font-size: 14px; }
+.maintenance-toggle p { margin: 4px 0 0; line-height: 1.7; }
+.maintenance-content .kb-bar { align-items: flex-start; flex-direction: column; gap: 10px; padding: 0; margin-bottom: 20px; }
+.maintenance-content .kb-bar .hint { line-height: 1.8; overflow-wrap: anywhere; }
+.maintenance-content .probe-bar { gap: 8px; flex-wrap: wrap; padding: 0; }
+.maintenance-content .probe-bar .search-input { flex: 1 1 100%; }
+.maintenance-content .probe-result { margin-top: 12px; grid-template-columns: 1fr; gap: 16px; }
+.maintenance-content .summary-status { margin-bottom: 0; }
+.maintenance-content .el-button .el-icon { margin-left: 8px; }
 /* ---- 图谱 ---- */
 .bar {
   display: flex;
@@ -1625,11 +1752,7 @@ onBeforeUnmount(() => {
    用 flex 而不是 calc(100vh - 某个数)：减数要等于"页面上下 padding + 标题 + 标题下边距"，
    而这些值会随字号/换行变。实测按 100vh-48 算时画布反而溢出 45px（把标题那块 69px 漏掉了），
    整列就会滚动。让 .page 自己撑满视口、图谱区 flex:1，就不存在要维护的魔法数字。 */
-.page:has(.graph-fill) {
-  display: flex;
-  flex-direction: column;
-  min-height: 100vh;
-}
+
 .graph-fill {
   display: flex;
   flex-direction: column;
@@ -1713,10 +1836,11 @@ onBeforeUnmount(() => {
   display: grid;
   /* 侧栏 210 → 236px：固定列对齐后名字列只剩 68px，"Spring Boot" 都会被截断；
      加宽后名字能完整显示（主区是 1fr，让出 26px 无感） */
-  grid-template-columns: 236px 1fr;
+  grid-template-columns: 280px minmax(0, 1fr);
   gap: 16px;
   align-items: start;
 }
+.wiki > .wiki-navigator { position: sticky; top: 16px; height: calc(100dvh - 32px); max-height: 960px; overflow: hidden; border: 1px solid var(--app-border); border-radius: var(--radius-lg); background: var(--app-card); }
 .wiki-side {
   border: 1px solid var(--app-border-weak);
   border-radius: var(--radius);
@@ -1930,38 +2054,6 @@ onBeforeUnmount(() => {
   border-color: color-mix(in srgb, #b45309 35%, transparent);
   background: color-mix(in srgb, #b45309 10%, transparent);
 }
-/* 素材覆盖明细（点「明细」弹出） */
-.cov-more {
-  font-size: 11px;
-  color: var(--app-brand-deep);
-  cursor: pointer;
-  border-bottom: 1px dashed color-mix(in srgb, var(--app-brand) 45%, transparent);
-}
-.cov-list {
-  max-height: 300px;
-  overflow: auto;
-}
-.cov-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 3px 0;
-  font-size: 12px;
-  border-bottom: 1px dashed var(--app-border-weak);
-}
-.cov-name {
-  color: var(--app-text-1);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.cov-num {
-  color: var(--app-text-3);
-  flex-shrink: 0;
-}
-.cov-hint {
-  margin: 8px 0 0;
-}
 /* 生成进度：本地小模型出一页 20~35 秒，这段反馈很关键 */
 .wiki-progress {
   margin: 10px 0 4px;
@@ -1981,7 +2073,8 @@ onBeforeUnmount(() => {
   border: 1px solid var(--app-border-weak);
   border-radius: var(--radius);
   background: var(--app-card);
-  padding: 16px 18px;
+  padding: 24px;
+  min-width: 0;
   min-height: 320px;
 }
 /* 页头：左边"标题 + 类型 + 元信息"两行，右边动作整块垂直居中。
@@ -2069,6 +2162,36 @@ onBeforeUnmount(() => {
 .wiki-body {
   padding-top: 4px;
 }
+.wiki-dependencies { margin: 12px 0; border: 1px solid var(--app-border-weak); border-radius: 8px; font-size: 12px; }
+.wiki-dependencies > summary { padding: 10px 12px; cursor: pointer; color: var(--app-text-2); line-height: 1.8; }
+.dependency-title { margin-right: 8px; font-weight: 600; color: var(--app-text-1); }
+.dependency-summary { margin-left: 8px; }
+.dependency-status { display: inline-block; border-radius: 4px; padding: 1px 6px; background: var(--app-bg); color: var(--app-text-3); line-height: 1.6; }
+.dependency-status.current { background: var(--app-brand-soft); color: var(--app-brand-deep); }
+.dependency-status.stale, .dependency-status.changed, .dependency-status.missing { background: color-mix(in srgb, #d97706 10%, transparent); color: #b45309; }
+.dependency-body { padding: 0 12px 12px; border-top: 1px solid var(--app-border-weak); }
+.dependency-notice { color: var(--app-text-2); line-height: 1.7; margin: 10px 0; }
+.dependency-reason { color: var(--app-text-2); line-height: 1.7; margin: 8px 0; }
+.dependency-material { margin: 8px 0; color: var(--app-text-3); }
+.dependency-coverage { margin: 10px 0; padding: 8px 10px; border-radius: 5px; background: var(--app-bg); }
+.dependency-coverage-row { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; padding: 5px 0; line-height: 1.6; color: var(--app-text-2); overflow-wrap: anywhere; }
+.dependency-coverage-row > span:last-child { color: var(--app-text-3); }
+.dependency-coverage > p { margin: 7px 0 0; line-height: 1.7; }
+.dependency-list { list-style: none; padding: 0; margin: 10px 0 0; }
+.dependency-row { padding: 10px 0; border-top: 1px solid var(--app-border-weak); }
+.dependency-row-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
+.dependency-source { min-width: 0; overflow-wrap: anywhere; font-weight: 600; color: var(--app-text-1); }
+.dependency-link { color: var(--app-brand-deep); text-decoration: none; margin-left: auto; white-space: nowrap; }
+.dependency-link:hover { text-decoration: underline; }
+.dependency-position { margin: 6px 0; color: var(--app-text-3); overflow-wrap: anywhere; }
+.dependency-excerpt { margin-top: 7px; color: var(--app-text-2); }
+.dependency-excerpt > summary { cursor: pointer; }
+.dependency-excerpt pre { margin: 8px 0 0; padding: 10px; background: var(--app-bg); border-radius: 5px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; font-size: 12px; line-height: 1.65; max-height: 240px; overflow-y: auto; }
+.dependency-error { display: flex; align-items: center; gap: 12px; margin-top: 10px; color: var(--app-text-2); }
+:global(.dependency-hash-tooltip) { white-space: pre-wrap; overflow-wrap: anywhere; max-width: min(520px, 85vw); }
+.wiki-guide-note, .kitem-guide-note { color: var(--app-text-2); font-size: 12px; line-height: 1.6; }
+.wiki-guide-note { margin: 8px 0; }
+.wiki-body :deep(.wiki-section-target) { scroll-margin-top: 24px; background: var(--app-brand-soft); border-radius: 4px; }
 /* 来源引用（[笔记#3] / [速查卡#8] / [资料#2]）渲染成锚点后要看得出来能点：
    md-editor 默认不给 # 锚点加样式，实测看着跟纯文本一样，用户不知道能跳回原文核对 */
 .wiki-body :deep(a[href^='#note-']),
@@ -2139,225 +2262,125 @@ onBeforeUnmount(() => {
   padding: 2px 0;
   border-bottom: 1px dashed var(--app-border-weak);
 }
-.search-card {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 14px;
+/* Graph exploration: the canvas stays stable while evidence scrolls independently. */
+
+.graph-fill { min-height: 0; gap: 8px; }
+.head { flex-shrink: 0; }
+.graph-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex-shrink: 0; }
+.graph-description { font-size: 12px; color: var(--app-text-3); }
+.graph-actions { display: flex; gap: 8px; margin-left: auto; }
+.graph-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 6px 10px; border: 1px solid var(--app-border-weak); border-radius: 8px; background: var(--app-card); flex-shrink: 0; }
+.graph-fill > .kb-progress { flex-shrink: 0; }
+.graph-select-label { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--app-text-3); min-width: 0; }
+.graph-select-label select { max-width: 235px; }
+.graph-filters select, .graph-probe-form select { height: 28px; padding: 2px 24px 2px 8px; color: var(--app-text-1); border: 1px solid var(--app-border); border-radius: 6px; background: var(--app-card); font-size: 12px; }
+.graph-relation-filter { width: 164px; }
+.graph-checkbox { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--app-text-2); cursor: pointer; }
+.graph-checkbox input { accent-color: var(--app-brand); }
+.text-action { border: 0; padding: 2px 0; background: none; color: var(--app-brand-deep); font-size: 12px; cursor: pointer; }
+.text-action:hover { text-decoration: underline; }
+.graph-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 12px; flex: 1; min-height: 410px; }
+.graph-stage { display: flex; flex-direction: column; min-width: 0; min-height: 0; border: 1px solid var(--app-border-weak); border-radius: 12px; background: var(--app-card); overflow: hidden; }
+.graph-stage-head { padding: 8px 12px; border-bottom: 1px solid var(--app-border-weak); display: flex; align-items: center; gap: 6px; justify-content: space-between; flex-wrap: wrap; flex-shrink: 0; }
+.graph-stage-head > div { display: flex; gap: 12px; align-items: center; }
+.graph-stage-head b { font-size: 13px; color: var(--app-text-1); }
+.graph-stage .kg-box { border: 0; border-radius: 0; min-height: 320px; flex: 1 1 0; }
+.graph-stage-foot { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; border-top: 1px solid var(--app-border-weak); padding: 6px 12px; flex-shrink: 0; }
+.line-direct { border-top-color: var(--app-brand); }
+.line-derived { border-top-color: var(--app-text-3); }
+.graph-inspector { display: flex; flex-direction: column; min-width: 0; min-height: 0; border: 1px solid var(--app-border-weak); border-radius: 12px; background: var(--app-card); overflow: hidden; }
+.inspector-tabs { display: flex; padding: 7px; gap: 4px; border-bottom: 1px solid var(--app-border-weak); }
+.inspector-tabs button { flex: 1; border: 0; border-radius: 6px; background: transparent; padding: 8px; color: var(--app-text-3); cursor: pointer; font-size: 12px; }
+.inspector-tabs button.on { background: var(--app-brand-soft); color: var(--app-brand-deep); font-weight: 600; }
+.inspector-scroll { padding: 14px; overflow-y: auto; flex: 1; min-height: 0; overscroll-behavior: contain; }
+.graph-search { width: 100%; box-sizing: border-box; border: 1px solid var(--app-border); border-radius: 8px; color: var(--app-text-1); background: var(--app-bg); padding: 9px 11px; font: inherit; font-size: 12px; }
+.graph-search:focus, .graph-probe-form textarea:focus { outline: 2px solid var(--app-brand); outline-offset: 2px; }
+.inspector-label { display: flex; justify-content: space-between; color: var(--app-text-3); font-size: 11px; margin: 18px 0 9px; }
+.graph-node-list { display: flex; flex-direction: column; gap: 3px; }
+.graph-node-list button { display: flex; gap: 8px; align-items: center; justify-content: space-between; width: 100%; min-height: 38px; border: 0; border-radius: 6px; background: transparent; color: var(--app-text-1); font-size: 13px; text-align: left; padding: 8px; cursor: pointer; }
+.graph-node-list button:hover { background: var(--app-brand-soft); }
+.graph-node-list span { overflow-wrap: anywhere; }
+.graph-node-list small { white-space: nowrap; color: var(--app-text-3); font-size: 10px; }
+.node-inspector { margin-top: 16px; }
+.node-inspector-heading { display: flex; align-items: center; justify-content: space-between; }
+.node-inspector h3 { margin: 12px 0 8px; font-size: 19px; line-height: 1.4; color: var(--app-text-1); overflow-wrap: anywhere; }
+.node-inspector .hint { line-height: 1.6; overflow-wrap: anywhere; }
+.node-actions { display: flex; flex-wrap: wrap; gap: 7px; margin: 12px 0; }
+.node-actions .el-button + .el-button { margin-left: 0; }
+.graph-evidence-card { padding: 11px 12px; margin: 8px 0; border: 1px solid var(--app-border-weak); border-radius: 8px; background: var(--app-bg); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.graph-evidence-card b { color: var(--app-text-1); font-size: 12px; }
+.evidence-heading { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 7px; color: var(--app-text-3); font-size: 11px; }
+.evidence-kind { color: var(--app-brand-deep); background: var(--app-brand-soft); padding: 1px 5px; border-radius: 4px; }
+.evidence-kind.derived { border: 1px dashed var(--app-border); background: transparent; color: var(--app-text-3); }
+.related-node { display: block; border: 0; background: none; color: var(--app-text-1); font-weight: 600; font-size: 13px; text-align: left; padding: 0; cursor: pointer; }
+.related-node:hover { color: var(--app-brand-deep); }
+.graph-evidence-card p { color: var(--app-text-2); margin: 6px 0; white-space: pre-wrap; }
+.evidence-sources { display: flex; flex-wrap: wrap; gap: 5px 10px; margin-top: 7px; }
+.evidence-sources a { font-size: 11px; color: var(--app-brand-deep); text-decoration: none; }
+.evidence-sources a:hover { text-decoration: underline; }
+.community-list { display: flex; flex-direction: column; gap: 5px; }
+.community-list button { display: grid; grid-template-columns: 8px 1fr auto; align-items: center; gap: 8px; border: 1px solid transparent; border-radius: 7px; padding: 8px; background: var(--app-bg); text-align: left; font-size: 12px; color: var(--app-text-2); cursor: pointer; }
+.community-list button:hover, .community-list button.active { border-color: var(--app-brand); }
+.community-list i { width: 8px; height: 8px; border-radius: 50%; }
+.community-list span { overflow-wrap: anywhere; }
+.community-list small { font-size: 11px; color: var(--app-text-3); }
+.graph-maintenance { border-top: 1px solid var(--app-border-weak); margin-top: 20px; padding-top: 12px; color: var(--app-text-3); font-size: 12px; }
+.graph-maintenance summary { cursor: pointer; }
+.graph-maintenance .hint { line-height: 1.6; }
+.probe-heading { font-size: 15px; margin: 0 0 8px; color: var(--app-text-1); }
+.probe-heading + p { line-height: 1.7; margin-bottom: 14px; }
+.graph-probe-form textarea { width: 100%; box-sizing: border-box; resize: vertical; min-height: 82px; padding: 9px; border: 1px solid var(--app-border); border-radius: 8px; color: var(--app-text-1); background: var(--app-bg); font: inherit; font-size: 12px; line-height: 1.6; }
+.graph-probe-form > div { display: flex; justify-content: space-between; gap: 10px; margin-top: 8px; }
+.probe-examples { display: flex; gap: 8px; margin: 10px 0; }
+.probe-examples button, .probe-concepts button { font-size: 11px; padding: 4px 8px; border: 1px solid var(--app-border); border-radius: 5px; background: transparent; color: var(--app-text-2); cursor: pointer; }
+.probe-examples button:hover, .probe-concepts button:hover { border-color: var(--app-brand); color: var(--app-brand-deep); }
+.probe-concepts { display: flex; gap: 5px; flex-wrap: wrap; margin: 10px 0; }
+.probe-result-head { display: flex; align-items: center; justify-content: space-between; margin: 18px 0 6px; font-size: 13px; }
+.probe-empty { background: var(--app-bg); border-radius: 8px; padding: 12px; color: var(--app-text-2); font-size: 12px; line-height: 1.7; }
+.probe-empty button { display: block; margin-top: 8px; }
+.summary-status { padding-top: 16px; margin-top: 16px; border-top: 1px solid var(--app-border-weak); font-size: 12px; }
+.summary-status .hint { line-height: 1.7; }
+@media (min-width: 1600px) { .graph-workspace { grid-template-columns: minmax(0, 1fr) 350px; } }
+@media (max-width: 1050px) { .graph-description { display: none; } .graph-workspace { grid-template-columns: minmax(0, 1fr) 280px; gap: 10px; } .graph-select-label select { max-width: 180px; } .graph-stage-head .hint { font-size: 11px; } }
+@media (max-width: 1100px) {
+  .knowledge-header-actions { gap: 8px; }
+  .wiki { grid-template-columns: 260px minmax(0, 1fr); }
+  .page-head { grid-template-columns: 1fr; }
+  .page-acts { flex-wrap: wrap; }
+  .wiki-view-header { flex-wrap: wrap; }
 }
-/* 融合 / 词面 切换：沿用图谱"层切换"的分段控件观感，让当前方式一眼可见 */
-.mode {
-  display: inline-flex;
-  padding: 2px;
-  border-radius: 8px;
-  background: var(--app-bg);
-  border: 1px solid var(--app-border-weak);
-  flex-shrink: 0;
+@media (max-width: 860px) {
+  .knowledge-page { padding: 14px 18px; }
+  .knowledge-page-graph { height: auto; min-height: 100%; }
+  .knowledge-navigation { gap: 6px; }
+  .knowledge-summary { width: 100%; padding-bottom: 8px; }
+  .graph-workspace { grid-template-columns: 1fr; flex: none; }
+  .graph-stage { height: 500px; }
+  .graph-inspector { height: 460px; }
+  .graph-toolbar, .graph-filters { gap: 8px; }
+  .graph-stage-foot { gap: 10px; }
+  .wiki { grid-template-columns: 1fr; }
+  .wiki > .wiki-navigator { position: static; height: auto; max-height: 520px; }
+  .wiki > .wiki-navigator :deep(.navigator-list) { max-height: 300px; }
 }
-.mode button {
-  border: 0;
-  background: transparent;
-  padding: 3px 10px;
-  border-radius: 6px;
-  font-size: 12px;
-  color: var(--app-text-2);
-  cursor: pointer;
-  transition: all var(--dur-fast) ease;
-}
-.mode button:hover {
-  color: var(--app-text-1);
-}
-.mode button.on {
-  background: var(--app-card);
-  color: var(--app-brand-deep);
-  font-weight: 600;
-  box-shadow: 0 1px 2px color-mix(in srgb, var(--app-text-1) 10%, transparent);
-}
-/* 检索方式状态行：说明"现在用的是哪种、上面的结果是谁出的" */
-.search-status {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  flex-wrap: wrap;
-  margin: 0 0 20px;
-}
-.search-status b {
-  color: var(--app-text-2);
-}
-/* 出错时不静默：列表位置留一条可见说明（同时还会弹 ElMessage） */
-.search-error {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  flex-wrap: wrap;
-  padding: 10px 14px;
-  margin-bottom: 18px;
-  border: 1px solid color-mix(in srgb, #b45309 38%, transparent);
-  background: color-mix(in srgb, #b45309 7%, transparent);
-  border-radius: var(--radius);
-  font-size: 12.5px;
-  color: var(--app-text-1);
-}
-/* 行尾的次要动作（资料下载） */
-.klink {
-  font-size: 12px;
-  color: var(--app-brand-deep);
-  cursor: pointer;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-.search-input {
-  flex: 1;
-  /* 与同一行的「检索」按钮同高。EP 给 input 的高度取 --el-component-size，
-     而按需引入后 EP 组件 CSS 在 style.css 之后注入、会把它设回 40px，
-     于是输入框 40px、旁边的按钮 32px，一行里错开一截（实测 40 vs 32）。
-     详见 style.css 中 .toolbar .el-input 的同款说明。 */
-  --el-component-size: var(--control-h-inline);
-}
-.search-input :deep(.el-input__wrapper) {
-  border-radius: var(--radius);
-  box-shadow: 0 0 0 1px var(--app-border) inset;
-}
-.search-input :deep(.el-input__wrapper.is-focus) {
-  box-shadow: 0 0 0 1.5px var(--el-color-primary) inset;
+@media (max-width: 560px) {
+  .knowledge-page { padding: 12px 14px; }
+  .knowledge-heading h1 { font-size: 20px; }
+  .knowledge-summary { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; }
+  .knowledge-summary dt, .knowledge-summary small { font-size: 11px; }
+  .workspace-tabs { gap: 0; width: 100%; }
+  .workspace-tabs button { flex: 1; justify-content: center; padding: 8px 6px; gap: 5px; }
+  .workspace-tabs .el-icon { font-size: 16px; }
+  .graph-stage-head > div { flex-wrap: wrap; gap: 4px 12px; }
+  .graph-actions { margin-left: 0; }
+  .graph-stage-foot { padding: 6px 10px; }
+  .graph-filters .graph-select-label { flex-wrap: wrap; }
+  .graph-stage { height: 440px; }
+  .wiki-main { padding: 16px; }
+  .page-acts { gap: 8px; }
+  .page-acts .el-button + .el-button { margin-left: 0; }
+  .page-title { overflow-wrap: anywhere; }
+  .maintenance-section > summary small { display: none; }
 }
 
-.group {
-  margin-bottom: 26px;
-}
-.group-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  color: var(--app-text-3);
-  margin: 0 0 10px 2px;
-}
-.group-title .count {
-  font-weight: 500;
-  font-size: 11px;
-  color: var(--app-text-3);
-  background: var(--app-brand-soft);
-  border-radius: 99px;
-  padding: 1px 8px;
-}
-
-.kitem {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  padding: 14px 16px;
-  background: var(--app-card);
-  border: 1px solid var(--app-border-weak);
-  border-radius: var(--radius);
-  cursor: pointer;
-  transition:
-    border-color var(--dur-fast) var(--ease),
-    transform var(--dur-fast) var(--ease),
-    box-shadow var(--dur-fast) var(--ease);
-}
-.kitem + .kitem {
-  margin-top: 8px;
-}
-.kitem:hover {
-  border-color: color-mix(in srgb, var(--app-brand) 22%, var(--app-border));
-  transform: translateY(-1px);
-  box-shadow: var(--shadow-sm);
-}
-.kitem:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--app-brand) 55%, transparent);
-  outline-offset: 2px;
-}
-.kitem:active {
-  transform: scale(0.995);
-}
-
-.kitem-title {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--app-text-1);
-  letter-spacing: -0.01em;
-}
-/* 来源类型标签（融合列表每条都要有）：与图谱图例同一套配色，笔记/速查卡/资料一眼分开。
-   .ktag.ktag-type 提高一级特异性：.ktag 的 padding/font-size 在样式表更靠后，不然会被压回去 */
-.ktag.ktag-type {
-  display: inline-flex;
-  align-items: center;
-  margin-right: 8px;
-  vertical-align: 1px;
-  font-size: 11px;
-  font-weight: 500;
-  padding: 1px 7px;
-}
-.kt-note {
-  color: var(--app-brand-deep);
-  background: var(--app-brand-soft);
-  border-color: color-mix(in srgb, var(--app-brand) 30%, transparent);
-}
-.kt-quick_ref {
-  color: var(--app-text-1);
-  background: color-mix(in srgb, var(--app-brand) 13%, transparent);
-  border-color: transparent;
-}
-.kt-file {
-  color: var(--app-text-2);
-  background: var(--app-bg);
-  border-color: var(--app-border-weak);
-}
-.kitem-snippet {
-  margin-top: 4px;
-  font-size: 13px;
-  line-height: 1.7;
-  color: var(--app-text-2);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.kitem :deep(mark) {
-  background: color-mix(in srgb, var(--app-brand) 16%, transparent);
-  color: var(--app-brand-deep);
-  border-radius: 3px;
-  padding: 0 1px;
-}
-
-.kitem-meta {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.ktag {
-  font-size: 12px;
-  color: var(--app-text-2);
-  background: var(--app-bg);
-  border: 1px solid var(--app-border-weak);
-  border-radius: 6px;
-  padding: 2px 8px;
-  max-width: 120px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.ktime {
-  font-size: 12px;
-  color: var(--app-text-3);
-  font-variant-numeric: tabular-nums;
-}
-
-@media (max-width: 1000px) {
-  .wiki {
-    grid-template-columns: 1fr;
-  }
-  .wiki-side {
-    position: static;
-  }
-}
-
-html.dark .kitem :deep(mark) {
-  color: var(--app-brand);
-}
 </style>

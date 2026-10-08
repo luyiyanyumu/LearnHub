@@ -7,6 +7,7 @@ import org.dyh.learnhub.ai.ModelRouting;
 import org.dyh.learnhub.service.LintService;
 import java.util.ArrayList;
 import org.dyh.learnhub.service.WikiService;
+import org.dyh.learnhub.service.WikiRetrievalService;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -15,7 +16,6 @@ import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.LinkedHashMap;
@@ -37,6 +37,20 @@ import java.util.Map;
 public class WikiController {
 
     private final WikiService wikiService;
+    private final WikiRetrievalService wikiRetrievalService;
+
+    @GetMapping("/search")
+    public Result<Map<String, Object>> search(@RequestParam String q,
+                                             @RequestParam(defaultValue = "6") int limit) {
+        return Result.ok(wikiRetrievalService.searchView(q, limit));
+    }
+
+    @GetMapping("/read")
+    public Result<Map<String, Object>> read(@RequestParam String topicKey,
+                                           @RequestParam(required = false) String sectionKey,
+                                           @RequestParam(defaultValue = "4000") int maxChars) {
+        return Result.ok(wikiRetrievalService.readPage(topicKey, sectionKey, maxChars));
+    }
     /** 实体/概念页编译（LLM Wiki 的"跨页编译"那一半） */
     private final EntityCompileService entityCompileService;
     /** ④ 语义自检 */
@@ -52,6 +66,11 @@ public class WikiController {
     @GetMapping("/pages/{topicKey}")
     public Result<Map<String, Object>> page(@PathVariable String topicKey) {
         return Result.ok(wikiService.page(topicKey));
+    }
+
+    @GetMapping("/dependencies")
+    public Result<Map<String, Object>> dependencies(@RequestParam String topicKey) {
+        return Result.ok(wikiService.dependencyView(topicKey));
     }
 
     /**

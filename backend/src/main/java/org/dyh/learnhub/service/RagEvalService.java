@@ -66,7 +66,8 @@ public class RagEvalService {
      * @param refs 按相关度降序的 {@code type:id}（判"必要来源是否全部召回"用）
      * @param text 拼好、可直接注入模型的证据文本（为空表示什么都没检索到）
      */
-    public record Evidence(List<String> refs, String text) {
+    public record Evidence(List<String> refs, String text, String groundingText) {
+        public Evidence(List<String> refs, String text) { this(refs, text, text); }
         public static Evidence empty() {
             return new Evidence(List.of(), "");
         }

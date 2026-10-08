@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute } from 'vue-router'
 import { categoryApi, fileApi, saveBlob } from '../api'
@@ -8,6 +8,7 @@ import DocTextView from '../components/DocTextView.vue'
 import OriginalDocumentView from '../components/OriginalDocumentView.vue'
 import ReaderTranslation from '../components/ReaderTranslation.vue'
 import { documentKind } from '../utils/documentKind'
+import { createSourceRouteReader } from '../utils/sourceRouteReader'
 
 const loading = ref(false)
 const route = useRoute()
@@ -267,6 +268,7 @@ const paragraphs = computed(() =>
   splitParas(readerText.value).map((p, i) => ({ key: i, text: p })))
 
 async function openReader(row) {
+  readRoute.cancel()
   const seq = ++readerSeq
   reader.value = row
   readerTab.value = 'doc'
@@ -294,6 +296,7 @@ async function openReader(row) {
 }
 
 function closeReader() {
+  readRoute.cancel()
   ++readerSeq
   reader.value = null
 }
@@ -410,17 +413,21 @@ async function onChangeCategory(row, categoryId) {
   load()
 }
 
+const readRoute = createSourceRouteReader({
+  load: id => fileApi.detail(id),
+  onOpen: openReader,
+  // API errors already use the request interceptor's readable notification.
+})
+watch(() => route.query.read, value => readRoute.open(value), { immediate: true, flush: 'sync' })
+
 onMounted(async () => {
   window.addEventListener('lh-meta-changed', loadCats)
   await loadCats()
   await load()
-  const requestedFile = route.query.read
-  if (typeof requestedFile === 'string' && /^\d+$/.test(requestedFile)) {
-    try { await openReader(await fileApi.detail(requestedFile)) } catch { /* 请求拦截器显示加载失败 */ }
-  }
 })
 
 onBeforeUnmount(() => {
+  readRoute.dispose()
   ++readerSeq
   window.removeEventListener('lh-meta-changed', loadCats)
 })
@@ -430,7 +437,7 @@ onBeforeUnmount(() => {
   <div class="page">
     <div class="toolbar">
       <h2 class="page-h2">资料库</h2>
-      <span class="tip">PDF / Word / Excel / PPT / 代码 / 文本 上传即**抽正文**，正文会进入知识库检索、主题 wiki 与知识图谱</span>
+      <span class="tip">PDF / Word / Excel / PPT / 代码 / 文本 上传即**抽正文**，正文会进入知识库检索、主题 wiki 与 GraphRAG</span>
       <div class="spacer"></div>
       <el-input
         v-model="query.kw"

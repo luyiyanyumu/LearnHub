@@ -57,6 +57,9 @@ public class ModelRouting {
     public static final String TASK_TRANSLATE = "translate";
     /** 按原图转写公式：需要具备图片输入能力的档案，避免把 PDF 碎字交给文本模型猜。 */
     public static final String TASK_FORMULA = "formula";
+
+    /** GraphRAG 社区摘要：把一簇概念整体讲成一段话，供"全局视角"的检索用 */
+    public static final String TASK_COMMUNITY = "community";
     /** 答案级核对：判断回答有没有超出证据 */
     public static final String TASK_GROUNDING = "grounding";
 
@@ -96,6 +99,9 @@ public class ModelRouting {
                 "读取公式高清截图并转写 LaTeX，保留多行、上下标与编号；请选择支持图片输入的模型档案"));
         META.put(TASK_REWRITE, new TaskMeta(TASK_REWRITE, "检索词扩展（兜底）", LOCAL,
                 "只在词面 0 命中时触发，便宜、可以慢"));
+        META.put(TASK_COMMUNITY, new TaskMeta(TASK_COMMUNITY, "社区摘要（GraphRAG）", MAIN,
+                "把一簇概念**整体**讲清楚，直接决定「全局提问」的回答质量，所以默认不在本地跑 —— "
+                        + "本地小模型容易把一簇概念写成几条并列短语，那就等于没有全局视角"));
     }
 
     /**

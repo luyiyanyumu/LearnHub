@@ -49,6 +49,8 @@ public class KgPipelineService {
     private final KbChunkMapper kbChunkMapper;
     private final WikiPageMapper wikiMapper;
     private final KgGraphService graph;
+    /** 构建完顺手刷新社区划分（GraphRAG 社区层）—— 只走 ifStale，没变化就一步返回 */
+    private final KgCommunityService communityService;
     private final TripleExtractor extractor;
 
     private final ExecutorService runner = Executors.newSingleThreadExecutor(r -> {
@@ -59,11 +61,13 @@ public class KgPipelineService {
     private final Map<String, Job> jobs = new ConcurrentHashMap<>();
 
     public KgPipelineService(KbChunkMapper kbChunkMapper, WikiPageMapper wikiMapper,
-                             KgGraphService graph, TripleExtractor extractor) {
+                             KgGraphService graph, TripleExtractor extractor,
+                             KgCommunityService communityService) {
         this.kbChunkMapper = kbChunkMapper;
         this.wikiMapper = wikiMapper;
         this.graph = graph;
         this.extractor = extractor;
+        this.communityService = communityService;
     }
 
     /** 任务进度（界面轮询） */
@@ -252,6 +256,20 @@ public class KgPipelineService {
         job.finishedAt = System.currentTimeMillis();
         log.info("概念图谱构建完成：实体 {} 个、新增三元组 {} 条、耗时 {}ms",
                 graph.nodes().size(), job.triples, job.finishedAt - job.startedAt);
+        // 图变了就顺手把社区划分刷新一遍（GraphRAG 的社区层靠它保持跟手，而不是等用户去图谱页点按钮）。
+        // 只走 ifStale：新建的实体/三元组会让脏标记为真、这里必然重算；没有任何变化时它一步就返回。
+        // 摘要不在这一步生成（那要花钱，且按成员指纹判重），所以这里不会产生模型调用。
+        if (note == null) {
+            try {
+                Map<String, Object> community = communityService.recompute(false);
+                job.detail = "社区：" + (Boolean.TRUE.equals(community.get("skipped"))
+                        ? "无变化，未重算"
+                        : community.get("communities") + " 个（模块度 " + String.format("%.3f", (Double) community.get("modularity")) + "）");
+            } catch (Exception e) {
+                // 社区划分失败不该把"图谱构建成功"变成失败：图已经入库了，社区可以下次再算
+                log.warn("构建后重算社区失败（不影响图谱本身）：{}", e.toString());
+            }
+        }
     }
 
     /** 素材：笔记 + 速查卡 + 资料正文，各自带来源标注前缀 */

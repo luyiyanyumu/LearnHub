@@ -1,13 +1,16 @@
 <script setup>
-import { nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRoute } from 'vue-router'
 // 正文渲染不再走 md-editor（老版预览），改用笔记页那套块编辑器（tiptap）的只读模式：
 // 代码块、提示块、折叠块、表格、任务列表…与笔记里看到的是同一套渲染与同一套样式。
 import BlockPreview from '../components/BlockPreview.vue'
 import { categoryApi, quickRefApi } from '../api'
 import { fixHtmlQuotes } from '../utils/htmlQuotes'
+import { createSourceRouteReader } from '../utils/sourceRouteReader'
 
 const loading = ref(false)
+const route = useRoute()
 const list = ref([])
 const categories = ref([])
 const query = ref({ categoryId: undefined, kw: '' })
@@ -26,6 +29,7 @@ const viewVisible = ref(false)
 const viewRow = ref(null)
 
 function openView(row) {
+  readRoute.cancel()
   viewRow.value = row
   viewVisible.value = true
 }
@@ -115,6 +119,7 @@ function resetFilter() {
 }
 
 function openAdd() {
+  readRoute.cancel()
   editingId.value = null
   form.title = ''
   form.content = ''
@@ -123,6 +128,7 @@ function openAdd() {
 }
 
 function openEdit(row) {
+  readRoute.cancel()
   editingId.value = row.id
   form.title = row.title
   form.content = row.content || ''
@@ -159,14 +165,23 @@ async function onDelete(row) {
   load()
 }
 
+const readRoute = createSourceRouteReader({
+  load: id => quickRefApi.detail(id),
+  onOpen: openView,
+  onMissing: () => ElMessage.info('这条速查卡已不存在'),
+  // API errors already use the request interceptor's readable notification.
+})
+watch(() => route.query.read, value => readRoute.open(value), { immediate: true, flush: 'sync' })
+
 onMounted(async () => {
   window.addEventListener('lh-meta-changed', loadCats)
   window.addEventListener('resize', measureClipped)
   await loadCats()
-  load()
+  await load()
 })
 
 onBeforeUnmount(() => {
+  readRoute.dispose()
   window.removeEventListener('lh-meta-changed', loadCats)
   window.removeEventListener('resize', measureClipped)
 })
@@ -254,6 +269,7 @@ onBeforeUnmount(() => {
       destroy-on-close
       append-to-body
       class="ref-view-dialog"
+      @close="readRoute.cancel()"
     >
       <div class="view-meta">
         <el-tag v-if="viewRow?.categoryName" size="small" type="info">{{ viewRow.categoryName }}</el-tag>

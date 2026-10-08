@@ -506,14 +506,27 @@ public class KgGraphService {
     /**
      * 实体识别（查询期第一步）：在问题文本里找出已知实体。
      * <p>先按名字/别名做**长串优先**的精确匹配（"DeepSeek Harness" 命中就不该再命中 "Harness"），
-     * 命中不足时用向量兜底（见 {@link #recognizeByVector}）。
+     * 英文名保留词边界；向量候选识别另见 {@link #recognizeByVector}，不会在这里隐式兜底。
      */
     public List<KgNode> recognize(String text, int limit) {
         List<KgNode> out = new ArrayList<>();
         if (text == null || text.isBlank()) {
             return out;
         }
-        String normText = EntityLinker.normalize(text);
+        // Query normalization retains parentheses and original character offsets.
+        // Identity normalization removes them, and plain contains("ann") would
+        // mistakenly recognize ANN inside Planning.
+        String queryText = java.text.Normalizer.normalize(text, java.text.Normalizer.Form.NFKC)
+                .toLowerCase(java.util.Locale.ROOT);
+        StringBuilder compact = new StringBuilder();
+        List<Integer> offsets = new ArrayList<>();
+        for (int i = 0; i < queryText.length(); i++) {
+            char c = queryText.charAt(i);
+            if (Character.isWhitespace(c) || c == '\u00a0' || c == '_' || c == '-' || c == '·' || c == '・') continue;
+            compact.append(c);
+            offsets.add(i);
+        }
+        String normText = compact.toString();
         // 候选：显示名 + 所有别名，长的先试
         List<Map.Entry<String, KgNode>> cands = new ArrayList<>();
         for (KgNode n : nodes()) {
@@ -524,22 +537,40 @@ public class KgGraphService {
         }
         cands.sort(Comparator.comparingInt((Map.Entry<String, KgNode> e) -> e.getKey().length()).reversed());
         Set<String> taken = new LinkedHashSet<>();
-        Set<String> consumed = new LinkedHashSet<>();
+        List<int[]> consumed = new ArrayList<>();
         for (Map.Entry<String, KgNode> e : cands) {
             if (out.size() >= limit) {
                 break;
             }
             String norm = EntityLinker.normalize(e.getKey());
             // 归一化名太短（1 个字）容易误命中，要求至少 2 个字符
-            if (norm.length() < 2 || consumed.contains(norm)) {
+            if (norm.length() < 2 || taken.contains(e.getValue().getId())) {
                 continue;
             }
-            if (normText.contains(norm) && taken.add(e.getValue().getId())) {
-                out.add(e.getValue());
-                consumed.add(norm);
+            for (int start = normText.indexOf(norm); start >= 0; start = normText.indexOf(norm, start + 1)) {
+                int end = start + norm.length();
+                int originalStart = offsets.get(start), originalEnd = offsets.get(end - 1) + 1;
+                boolean leftBoundary = !asciiWord(norm.charAt(0)) || originalStart == 0
+                        || !asciiWord(queryText.charAt(originalStart - 1));
+                boolean rightBoundary = !asciiWord(norm.charAt(norm.length() - 1)) || originalEnd == queryText.length()
+                        || !asciiWord(queryText.charAt(originalEnd));
+                boolean overlap = false;
+                for (int[] span : consumed) {
+                    if (start < span[1] && end > span[0]) { overlap = true; break; }
+                }
+                if (leftBoundary && rightBoundary && !overlap) {
+                    taken.add(e.getValue().getId());
+                    out.add(e.getValue());
+                    consumed.add(new int[] { start, end });
+                    break;
+                }
             }
         }
         return out;
+    }
+
+    private static boolean asciiWord(char c) {
+        return c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_' || c == '$';
     }
 
     /**

@@ -4,11 +4,13 @@ import lombok.RequiredArgsConstructor;
 import org.dyh.learnhub.common.Result;
 import org.dyh.learnhub.service.GroundingService;
 import org.dyh.learnhub.service.KnowledgeService;
+import org.dyh.learnhub.service.KnowledgeRetrievalService;
 import org.dyh.learnhub.service.RagAnswerEvalService;
 import org.dyh.learnhub.service.RagEvalService;
 import org.dyh.learnhub.service.RerankService;
 import org.dyh.learnhub.service.SettingsService;
 import org.dyh.learnhub.service.VectorIndexService;
+import org.dyh.learnhub.service.RetrievalContextService;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -32,11 +34,13 @@ public class VectorController {
 
     private final VectorIndexService vectorIndexService;
     private final KnowledgeService knowledgeService;
+    private final KnowledgeRetrievalService knowledgeRetrievalService;
     private final RagEvalService ragEvalService;
     private final RagAnswerEvalService ragAnswerEvalService;
     private final RerankService rerankService;
     private final SettingsService settingsService;
     private final GroundingService groundingService;
+    private final RetrievalContextService retrievalContextService;
 
     /** 索引状态（块数、字数、模型、是否与当前内容一致） */
     @GetMapping("/status")
@@ -111,9 +115,26 @@ public class VectorController {
                                                      @RequestParam(required = false) Integer topK,
                                                      @RequestParam(required = false) Integer limit,
                                                      @RequestParam(required = false) String mode,
-                                                     @RequestParam(required = false) String ids) {
+                                                     @RequestParam(required = false) String ids,
+                                                     @RequestParam(required = false) Boolean wiki,
+                                                     @RequestParam(required = false) Boolean kg) {
         return Result.ok(ragAnswerEvalService.run(label, topK == null ? 5 : topK,
-                limit == null ? RagAnswerEvalService.DEFAULT_LIMIT : limit, mode, parseIds(ids)));
+                limit == null ? RagAnswerEvalService.DEFAULT_LIMIT : limit, mode, parseIds(ids), wiki, kg));
+    }
+
+    /** Inspect the exact online context and its provenance without running answer generation. */
+    @GetMapping("/context")
+    public Result<Map<String, Object>> context(@RequestParam String q,
+                                               @RequestParam(defaultValue = "8") int topK,
+                                               @RequestParam(defaultValue = "fused") String mode,
+                                               @RequestParam(required = false) Boolean wiki,
+                                               @RequestParam(required = false) Boolean kg) {
+        var context = retrievalContextService.build(q, topK, mode,
+                wiki == null ? settingsService.wikiInjectEnabled() : wiki,
+                kg == null ? settingsService.kgInjectEnabled() : kg);
+        return Result.ok(Map.of("text", context.text(), "groundingText", context.groundingText(),
+                "refs", context.refs(), "retrieved", context.retrieved(),
+                "chars", context.text().length(), "budget", RetrievalContextService.TOTAL_CHARS));
     }
 
     /** 答案级评测历史 */
@@ -261,7 +282,7 @@ public class VectorController {
         if (query.isEmpty()) {
             return Result.ok(List.of());
         }
-        return Result.ok(vectorIndexService.search(query, topK == null ? 10 : topK));
+        return Result.ok(knowledgeRetrievalService.search(query, topK == null ? 10 : topK));
     }
 
     // ---------------- 向量后端（2026-09-29：可切 Milvus，默认仍是 MySQL 全扫） ----------------

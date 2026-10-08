@@ -1,5 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import AppLayout from '../layout/AppLayout.vue'
+import { installRouteLoadRecovery } from '../utils/routeLoadRecovery'
 
 const routes = [
   {
@@ -22,6 +24,18 @@ const routes = [
 const router = createRouter({
   history: createWebHistory(),
   routes,
+})
+
+installRouteLoadRecovery(router, {
+  location: window.location,
+  // Access sessionStorage inside the recovery handler's try/catch: some
+  // browser privacy settings throw even when reading the storage property.
+  storage: {
+    getItem: (key) => window.sessionStorage.getItem(key),
+    setItem: (key, value) => window.sessionStorage.setItem(key, value),
+    removeItem: (key) => window.sessionStorage.removeItem(key),
+  },
+  notify: (message) => ElMessage.error({ message, duration: 6000, showClose: true }),
 })
 
 router.afterEach((to) => {
