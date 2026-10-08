@@ -11,7 +11,8 @@ ARG DOCKER_REGISTRY=docker.1ms.run
 
 # ---------- 构建阶段 ----------
 # Vite 8 requires >=20.19 or >=22.12; pdfjs-dist 6 requires >=22.13.
-FROM ${DOCKER_REGISTRY}/node:22-alpine AS build
+# Build static assets on the builder's native CPU; nginx keeps each target platform.
+FROM --platform=$BUILDPLATFORM ${DOCKER_REGISTRY}/node:22-alpine AS build
 WORKDIR /app
 # 用 npm ci：锁文件在库里（frontend/package-lock.json），依赖版本可复现
 COPY frontend/package.json frontend/package-lock.json ./
