@@ -1,0 +1,21 @@
+{
+  "name": "@luyiyanyumu/learnhub",
+  "version": "0.1.0",
+  "description": "Install and update the LearnHub knowledge workspace with Docker Compose",
+  "type": "module",
+  "bin": { "learnhub": "bin/learnhub.mjs" },
+  "engines": { "node": ">=22.14.0" },
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/luyiyanyumu/LearnHub.git",
+    "directory": "cli"
+  },
+  "files": ["bin/", "src/", "templates/", "README.md", "LICENSE"],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "prepare-package": "node scripts/prepare-package.mjs",
+    "prepack": "npm run prepare-package"
+  },
+  "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org/" }
+}

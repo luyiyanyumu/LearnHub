@@ -19,11 +19,20 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
   sql:
     init:
-      mode: always
-      schema-locations: classpath:schema.sql
-      data-locations: classpath:data.sql
-      encoding: utf-8
-      continue-on-error: false
+      # 数据库仅由 Flyway 管理，避免旧 schema.sql/data.sql 每次启动重复执行。
+      mode: never
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    encoding: UTF-8
+    # 已有 LearnHub 库没有历史表时，从 0 接入，V1 的兼容补列仍然必须执行。
+    baseline-on-migrate: true
+    baseline-version: 0
+    validate-on-migrate: true
+    validate-migration-naming: true
+    fail-on-missing-locations: true
+    clean-disabled: true
+    out-of-order: false
 
 mybatis-plus:
   configuration:

@@ -372,15 +372,9 @@ cd deploy
 docker compose up -d --build
 ```
 
-**表结构变更注意**：`schema.sql` 全是 `CREATE TABLE IF NOT EXISTS`，项目也**没有** Flyway/Liquibase。
-含义是「新增表」会自动建，但「给已有表加列/加索引」**不会自动生效**，后端查询会报
-`Unknown column`。遇到这种更新，先备份再手工执行一次 `ALTER`：
+**数据库迁移**：当前后端通过 Flyway 执行版本迁移。新库自动初始化，已有 LearnHub 库从版本 0 接入并补齐兼容列和索引，保留业务数据。升级前备份数据库与上传资料；迁移失败会阻止后端启动。后续表结构变化应新增 `backend/src/main/resources/db/migration/V<N>__<说明>.sql`，不要修改已经发布的迁移文件。见[数据库迁移说明](../docs/database-migrations.md)。
 
-```bash
-docker compose exec mysql sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE"' <<'SQL'
-ALTER TABLE note ADD COLUMN your_new_column VARCHAR(255) NULL;
-SQL
-```
+**发布镜像与 npx 更新**：`deploy/docker-compose.release.yml` 使用版本镜像，不在用户机器上构建。安装器的 `adopt --from <原 deploy 目录>` 可以登记原实例并固定数据卷，随后 `update` 负责备份、数据库迁移和健康检查。npm 与镜像首次公开发布前先本地验证，见[npx 安装与更新](../docs/npx-install.md)。
 
 ---
 

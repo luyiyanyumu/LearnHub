@@ -4,6 +4,24 @@
 
 ![License](https://img.shields.io/badge/license-PolyForm_NC_1.0.0-orange)
 
+## 一条命令安装与更新
+
+安装 Node.js 22.14+，并启动 Docker Desktop（含 Docker Compose 2.20+）后：
+
+```bash
+npx @luyiyanyumu/learnhub@latest start
+```
+
+网页默认为 <http://localhost:8888>。启动器下载已构建的版本镜像，数据库、上传资料和技能保存在 Docker 数据卷中，实例配置默认保存到 `~/.learnhub`。
+
+```bash
+npx @luyiyanyumu/learnhub@latest update
+npx @luyiyanyumu/learnhub@latest status
+npx @luyiyanyumu/learnhub@latest stop
+```
+
+`start` 保持已安装版本；`update` 下载新版、暂停写入、备份数据，再执行数据库迁移并启动。已有源码 Compose 部署需要先显式 `adopt`。完整说明见 [npx 安装、接管、备份与恢复](docs/npx-install.md)。
+
 
 
 
@@ -61,7 +79,7 @@
 | 后端   | Spring Boot 3.5.16 + MyBatis-Plus 3.5.17 + Validation        |
 | 数据库 | MySQL 8（ Docker 里是容器 `learn-hub-mysql`）                |
 | AI     | DeepSeek API（OpenAI 兼容协议，手写客户端，无 SDK 依赖），兼容其他大模型 |
-| 环境   | JDK 21 (Temurin) + Maven 3.9+ + Node 18+                     |
+| 环境   | JDK 21 (Temurin) + Maven 3.9+ + Node 22.14+                  |
 | 部署   | **Docker Compose 一键起全套**（见 `deploy/`）；也支持宿主机直接跑 jar + Vite/nginx |
 
 ## 目录结构
@@ -80,8 +98,9 @@ learn-hub/
 │   │   └── config/       # MyBatis-Plus 分页插件、启动摘要回填
 │   └── src/main/resources/
 │       ├── application.yml  # 端口 18080、数据源（localhost:3307）、AI 兜底配置
-│       ├── schema.sql    # 建表(幂等，启动自动执行)
-│       └── data.sql      # 种子数据(INSERT IGNORE 幂等)
+│       ├── db/migration/ # Flyway 版本迁移，启动时检查并执行
+│       ├── schema.sql    # 历史建表参考，不再自动执行
+│       └── data.sql      # 历史种子数据参考，不再自动执行
 ├── frontend/    # Vue3 前端
 │   ├── Dockerfile        # 一键部署用的前端镜像（构建 → nginx 托管 + /api 反代）
 │   └── vite.config.js    # 开发/预览都固定端口，并把 /api 代理到后端
@@ -98,7 +117,7 @@ learn-hub/
 | | **① Docker Compose（仓库唯一推荐的部署方式）** | **② 本机运行（开发者自己的机器）** |
 | --- | --- | --- |
 | 适合谁 | 服务器、另一台电脑、任何"只想要个能用的服务"的场景 | 改代码的人；或有历史数据绑在某个本机 MySQL 上的场景 |
-| 依赖 | **只要 Docker**（含 `docker compose` v2） | JDK 21 / Maven / Node 18+ / 一个 MySQL 8 |
+| 依赖 | **只要 Docker**（含 `docker compose` v2） | JDK 21 / Maven / Node 22.14+ / 一个 MySQL 8 |
 | 起法 | `cd deploy && cp .env.example .env && docker compose up -d --build` | 后端 `java -jar`，前端 `npm run dev` |
 | 地址 | 网页 **8888**（`deploy/.env` 可改） | 前端 **5174**、后端 **18080** |
 | 数据库 | 容器 `learn-hub-mysql`，数据在具名卷 `deploy_mysql-data` | 你自己起的 MySQL（本仓库历史部署用 3307 的那个） |
@@ -138,8 +157,7 @@ learn-hub/
 | 技能提示词 | `skills/`（镜像里 `/app/skills`，改完即生效不用重启） | `skills/`（同上） |
 
 > **更新**：① = `git pull` → `docker compose up -d --build`；② = `git pull` → 停后端 → `mvn package` → 起。
-> 两者都要留意：`schema.sql` 全是 `CREATE TABLE IF NOT EXISTS` 且没有迁移框架，
-> **给已有表加列不会自动生效**，得手工 `ALTER`（[docs/deploy.md](docs/deploy.md) 与 [deploy/README.md](deploy/README.md) 都写了）。
+> 数据库现在由 Flyway 执行版本迁移；更新前备份数据库与上传目录。历史库会先验证结构再登记为版本 0，新库自动建表。迁移不能随镜像自动回滚，恢复旧版需要同时恢复备份（见 [数据库迁移说明](docs/database-migrations.md)）。
 
 ## 快速开始（② 本机运行的精简版）
 
@@ -153,7 +171,7 @@ learn-hub/
 | --- | --- | --- |
 | JDK | 21 | 编译并运行后端 |
 | Maven | 3.9+ | `mvn package` 打出可执行 jar |
-| Node.js | 18+ | 前端 dev server / 构建 |
+| Node.js | 22.14+ | 前端 dev server / 构建 |
 | MySQL | 8 | 数据库（下面第 1 步用容器起一个最省事，也可以是你已有的实例） |
 
 > **① Docker 那条路这些都不用装**（JDK 与 Node 只在镜像构建阶段用到，见镜像里的多阶段构建）——

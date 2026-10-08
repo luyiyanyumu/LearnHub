@@ -1,0 +1,193 @@
+name: Validate and release LearnHub
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish images and npm (select an existing version tag)
+        type: boolean
+        default: false
+      images_only:
+        description: Push versioned images only (first release before npm authentication)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: learnhub-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      image_prefix: ${{ steps.version.outputs.image_prefix }}
+      publish: ${{ steps.version.outputs.publish }}
+      publish_images: ${{ steps.version.outputs.publish_images }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Validate version and publication intent
+        id: version
+        env:
+          MANUAL_PUBLISH: ${{ inputs.publish }}
+          MANUAL_IMAGES_ONLY: ${{ inputs.images_only }}
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const pkg = JSON.parse(fs.readFileSync('cli/package.json', 'utf8'));
+          if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(pkg.version)) {
+            throw new Error('cli/package.json must have a stable X.Y.Z version');
+          }
+          const isTag = process.env.GITHUB_REF_TYPE === 'tag';
+          const imagesOnly = process.env.GITHUB_EVENT_NAME === 'workflow_dispatch'
+            && process.env.MANUAL_IMAGES_ONLY === 'true';
+          if (imagesOnly && process.env.MANUAL_PUBLISH === 'true') {
+            throw new Error('Choose either publish or images_only, not both');
+          }
+          const publish = (process.env.GITHUB_EVENT_NAME === 'push' && isTag)
+            || (process.env.GITHUB_EVENT_NAME === 'workflow_dispatch' && process.env.MANUAL_PUBLISH === 'true');
+          if (isTag && process.env.GITHUB_REF_NAME !== `v${pkg.version}`) {
+            throw new Error('Release tag must equal v + cli/package.json version');
+          }
+          if (publish && !isTag) throw new Error('Publishing requires selecting a version tag');
+          const imagePrefix = `ghcr.io/${process.env.GITHUB_REPOSITORY.toLowerCase()}`;
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,
+            `version=${pkg.version}\nimage_prefix=${imagePrefix}\npublish=${publish}\npublish_images=${publish || imagesOnly}\n`);
+          NODE
+      - name: Check configured npm publishing method
+        if: steps.version.outputs.publish == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          TRUSTED_PUBLISHING: ${{ vars.NPM_TRUSTED_PUBLISHING }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ] && [ "$TRUSTED_PUBLISHING" != "true" ]; then
+            echo 'Configure NPM_TOKEN for the first release, or set NPM_TRUSTED_PUBLISHING=true after configuring npm trusted publishing.' >&2
+            exit 1
+          fi
+      - name: Test CLI
+        run: npm --prefix cli test
+      - name: Verify packaged templates and executable
+        working-directory: cli
+        run: |
+          # Prepare first: lifecycle script stdout otherwise contaminates pack --json.
+          npm run prepare-package
+          npm pack --dry-run --ignore-scripts --json > "$RUNNER_TEMP/learnhub-pack.json"
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          const [pack] = JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP, 'learnhub-pack.json'), 'utf8'));
+          const files = new Set(pack.files.map(file => file.path));
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          for (const filename of ['templates/compose.yml', ...Object.values(pkg.bin)]) {
+            if (!files.has(filename.replace(/^\.\//, ''))) throw new Error(`npm package is missing ${filename}`);
+          }
+          NODE
+      - name: Validate release Compose
+        env:
+          LEARNHUB_VERSION: ${{ steps.version.outputs.version }}
+          MYSQL_ROOT_PASSWORD: ci-only-unused-password
+        run: docker compose -f deploy/docker-compose.release.yml config --quiet
+      - name: Backend tests and package
+        run: mvn -B -f backend/pom.xml verify
+      - name: Database migration checks on isolated MySQL containers
+        env:
+          LEARNHUB_MIGRATION_TESTS: 'true'
+        run: |
+          LEARNHUB_MIGRATION_TEST_IMAGE=mysql:8.0 mvn -B -f backend/pom.xml -Dtest=DatabaseMigrationTest test
+          LEARNHUB_MIGRATION_TEST_IMAGE=mysql:8.4 mvn -B -f backend/pom.xml -Dtest=DatabaseMigrationTest test
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Frontend tests
+        working-directory: frontend
+        run: node --test src/utils/*.test.js
+      - name: Frontend production build
+        working-directory: frontend
+        run: npm run build
+
+  images:
+    needs: validate
+    if: needs.validate.outputs.publish_images == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        if: needs.validate.outputs.publish_images == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build versioned application image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.component }}/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ needs.validate.outputs.publish_images == 'true' }}
+          tags: ${{ needs.validate.outputs.image_prefix }}-${{ matrix.component }}:${{ needs.validate.outputs.version }}
+          build-args: DOCKER_REGISTRY=docker.io
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.validate.outputs.version }}
+
+  npm:
+    needs: [validate, images]
+    if: needs.validate.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify both versioned images are accessible anonymously
+        env:
+          IMAGE_PREFIX: ${{ needs.validate.outputs.image_prefix }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          anonymous_config="$(mktemp -d "$RUNNER_TEMP/learnhub-anonymous-docker.XXXXXX")"
+          for component in backend frontend; do
+            if ! docker --config "$anonymous_config" manifest inspect "$IMAGE_PREFIX-$component:$VERSION" >/dev/null; then
+              echo "Image $IMAGE_PREFIX-$component:$VERSION is not accessible anonymously. Set both GHCR packages to Public and retry this npm job." >&2
+              exit 1
+            fi
+          done
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      # Node 22 ships npm 10; OIDC publishing requires npm >=11.5.1.
+      - name: Install npm with trusted publishing support
+        run: npm install --global npm@11
+      - name: Publish launcher after both images are available
+        working-directory: cli
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance

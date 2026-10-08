@@ -1,0 +1,115 @@
+# Published LearnHub images. This file is bundled in the npm launcher.
+# Keep LEARNHUB_VERSION and MYSQL_IMAGE in the instance .env; start never selects latest.
+name: ${LEARNHUB_PROJECT_NAME:-learn-hub}
+
+services:
+  mysql:
+    image: ${MYSQL_IMAGE:-mysql:8.4}
+    container_name: ${MYSQL_CONTAINER_NAME:-${LEARNHUB_PROJECT_NAME:-learn-hub}-mysql}
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in the instance .env}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-learn_hub}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${MYSQL_HOST_PORT:-3307}:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysql -h 127.0.0.1 -uroot -e 'SELECT 1' >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    networks: [learn-hub]
+
+  backend:
+    image: ${LEARNHUB_IMAGE_PREFIX:-ghcr.io/luyiyanyumu/learnhub}-backend:${LEARNHUB_VERSION:?Set an explicit LearnHub version in the instance .env}
+    container_name: ${BACKEND_CONTAINER_NAME:-${LEARNHUB_PROJECT_NAME:-learn-hub}-backend}
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: >-
+        jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-learn_hub}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in the instance .env}
+      # Flyway owns schema changes. Any migration failure must keep the backend unhealthy.
+      SPRING_SQL_INIT_MODE: never
+      SPRING_SQL_INIT_CONTINUE_ON_ERROR: "false"
+      SPRING_CONFIG_ADDITIONAL_LOCATION: optional:file:/app/backend/config/
+      LEARNHUB_SKILLS_DIR: /app/skills
+      KB_EMBED_BASE_URL: ${KB_EMBED_BASE_URL:-http://ollama:11434}
+      KB_EMBED_MODEL: ${KB_EMBED_MODEL:-bge-m3}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      JAVA_OPTS: ${JAVA_OPTS:--XX:MaxRAMPercentage=75}
+    volumes:
+      - uploads:/app/backend/uploads
+      # Docker seeds this volume from the image on first creation. Later releases
+      # preserve edited prompts; merge new bundled skills explicitly when needed.
+      - skills-data:/app/skills
+      - type: bind
+        source: ${CONFIG_DIR:-./config}
+        target: /app/backend/config
+        read_only: true
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${BACKEND_HOST_PORT:-18080}:18080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:18080/api/files?page=1&size=1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    networks: [learn-hub]
+
+  frontend:
+    image: ${LEARNHUB_IMAGE_PREFIX:-ghcr.io/luyiyanyumu/learnhub}-frontend:${LEARNHUB_VERSION:?Set an explicit LearnHub version in the instance .env}
+    container_name: ${FRONTEND_CONTAINER_NAME:-${LEARNHUB_PROJECT_NAME:-learn-hub}-frontend}
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${WEB_HOST_PORT:-8888}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks: [learn-hub]
+
+  ollama:
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    container_name: ${OLLAMA_CONTAINER_NAME:-${LEARNHUB_PROJECT_NAME:-learn-hub}-ollama}
+    profiles: [ollama]
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${OLLAMA_HOST_PORT:-11434}:11434"
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks: [learn-hub]
+
+volumes:
+  mysql-data:
+    name: ${MYSQL_VOLUME_NAME:-${LEARNHUB_PROJECT_NAME:-learn-hub}_mysql-data}
+  uploads:
+    name: ${UPLOADS_VOLUME_NAME:-${LEARNHUB_PROJECT_NAME:-learn-hub}_uploads}
+  ollama-models:
+    name: ${OLLAMA_VOLUME_NAME:-${LEARNHUB_PROJECT_NAME:-learn-hub}_ollama-models}
+  skills-data:
+    name: ${SKILLS_VOLUME_NAME:-${LEARNHUB_PROJECT_NAME:-learn-hub}_skills-data}
+
+networks:
+  learn-hub:

@@ -68,7 +68,7 @@ docker run -d --name learn-hub-mysql \
 CREATE DATABASE learn_hub CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 ```
 
-表结构和种子数据**不用手工导入** —— 后端每次启动都会跑 `schema.sql`（幂等）+ `data.sql`（`INSERT IGNORE`）。
+表结构和种子数据**不用手工导入** —— 后端由 Flyway 管理版本迁移，新库初始化表结构与种子，已有 LearnHub 数据库首次接入保留原数据并补齐缺列/索引。历史 `schema.sql` / `data.sql` 不再由启动器执行，后续变化应新增迁移文件。升级前先备份，见[数据库迁移说明](database-migrations.md)。
 
 ---
 
