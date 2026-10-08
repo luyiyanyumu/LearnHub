@@ -28,7 +28,6 @@ const HELP = `LearnHub ${pkg.version}
   --help / --version
 
 需要 Node.js 22.14+ 与已启动的 Docker / Compose 2.20+。
-发布包尚未首发时，可用 node cli/bin/learnhub.mjs <命令> 本地验证。
 `;
 
 export function parseArgs(argv) {

@@ -165,7 +165,17 @@ npx @luyiyanyumu/learnhub@latest update
 
 发布者先把 `cli/package.json` 的版本更新为稳定的 `X.Y.Z`，执行验证后推送对应的 `vX.Y.Z` 标签。GitHub Actions 先通过测试，再发布相同版本号的后端、前端镜像，最后发布 npm 启动器，保证用户拿到启动器时配套镜像已经可用。
 
-首次发布需要配置 npm 的发布权限。镜像和 npm 包应对目标用户可读取。更换 npm 包名或镜像仓库时，同时更新包配置、发布设置和本文命令；自建镜像仓库可以在首次启动时通过 `--image-prefix` 指定。
+npm 首发包存在后，由有包写权限且已启用 2FA 的维护者使用 npm CLI 11.15.0 或更新版本配置 GitHub Actions 的可信发布：[官方 `npm trust` 说明](https://docs.npmjs.com/cli/v11/commands/npm-trust/)。
+
+```bash
+npm trust github @luyiyanyumu/learnhub --repo=luyiyanyumu/LearnHub --file=release.yml --allow-publish --yes
+```
+
+用 `npm trust list @luyiyanyumu/learnhub` 确认仓库、工作流和发布权限配置成功后，在 GitHub 仓库的 Settings → Secrets and variables → Actions → Variables 中设置 `NPM_TRUSTED_PUBLISHING=true`，再推送版本标签以启用 OIDC 自动发布。
+
+新建的可信发布配置必须在 2 天内完成第一次成功的 OIDC 发布，才能绑定仓库的不可变身份；超过 2 天未成功发布会过期，需删除过期配置并重新创建，再在 2 天内完成首发。创建或重建配置需要维护者本人完成 npm 2FA 确认，`--yes` 不代替 2FA：[配置到期规则](https://docs.npmjs.com/trusted-publishers/#trusted-publisher-configuration-expiry)。
+
+镜像和 npm 包应对目标用户可读取。更换 npm 包名或镜像仓库时，同时更新包配置、发布设置和本文命令；自建镜像仓库可以在首次启动时通过 `--image-prefix` 指定。
 
 本地验证启动器：
 
