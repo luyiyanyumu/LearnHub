@@ -1,6 +1,6 @@
 {
   "name": "@luyiyanyumu/learnhub",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Install and update the LearnHub knowledge workspace with Docker Compose",
   "type": "module",
   "bin": { "learnhub": "bin/learnhub.mjs" },
