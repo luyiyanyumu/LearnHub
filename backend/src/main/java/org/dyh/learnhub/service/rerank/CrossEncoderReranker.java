@@ -112,14 +112,9 @@ public class CrossEncoderReranker implements Reranker {
         body.put("query", question == null ? "" : question);
         ArrayNode docs = body.putArray("documents");
         for (Item it : items) {
-            // 与 LLM 后端喂**同一套文本规则**（标题 + 截到 kb.rerank_snippet 字的摘要），
-            // 默认都截 120 字；调大这个值时两者的反应方向相反（cross 通常更好、listwise 更糊），
-            // 所以它是个被显式测量的自变量，而不是写死的常量。
-            String snip = it.snippet() == null ? "" : it.snippet().replaceAll("\\s+", " ").trim();
-            int limit = snippetLimit();
-            if (snip.length() > limit) {
-                snip = snip.substring(0, limit);
-            }
+            // Both backends preserve the section label and a question-centered source
+            // excerpt within the same configured character budget.
+            String snip = QueryAwareExcerpt.rerankExcerpt(question, it.snippet(), snippetLimit());
             docs.add((it.title() == null ? "" : it.title()) + (snip.isEmpty() ? "" : "｜" + snip));
         }
         JsonNode data;

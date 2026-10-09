@@ -39,6 +39,9 @@ import java.util.UUID;
 @Service
 public class ModelProfileService {
 
+    public static final String PURPOSE_CHAT = "chat";
+    public static final String PURPOSE_EMBEDDING = "embedding";
+
     private static final Logger log = LoggerFactory.getLogger(ModelProfileService.class);
 
     /** 当前激活档案（对话默认用它）写在这个设置键里 */
@@ -48,16 +51,19 @@ public class ModelProfileService {
     private final SettingsService settings;
     /** 探测用（只在这里发一次最小请求）；用 ObjectProvider 延迟取，避免与调用方成环 */
     private final org.springframework.beans.factory.ObjectProvider<org.dyh.learnhub.ai.DeepSeekClient> callerProvider;
+    private final org.springframework.beans.factory.ObjectProvider<org.dyh.learnhub.ai.EmbeddingClient> embeddingProvider;
     /** 老配置里可能没有 key（key 写在 application.yml / .env）——迁移时要带上，否则界面显示"未配置" */
     private final org.dyh.learnhub.config.AiProperties aiProps;
 
     public ModelProfileService(ModelProfileMapper mapper, SettingsService settings,
                                org.dyh.learnhub.config.AiProperties aiProps,
-                               org.springframework.beans.factory.ObjectProvider<org.dyh.learnhub.ai.DeepSeekClient> callerProvider) {
+                               org.springframework.beans.factory.ObjectProvider<org.dyh.learnhub.ai.DeepSeekClient> callerProvider,
+                               org.springframework.beans.factory.ObjectProvider<org.dyh.learnhub.ai.EmbeddingClient> embeddingProvider) {
         this.mapper = mapper;
         this.settings = settings;
         this.aiProps = aiProps;
         this.callerProvider = callerProvider;
+        this.embeddingProvider = embeddingProvider;
     }
 
     /** 设置表里的 key，没有就退回 application.yml / .env 里那份（与 DeepSeekClient.apiKey 同一条回退链） */
@@ -112,6 +118,7 @@ public class ModelProfileService {
                                               String model, String note) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("provider", provider);
+        m.put("purpose", PURPOSE_CHAT);
         m.put("name", name);
         m.put("baseUrl", baseUrl);
         m.put("model", model);
@@ -124,6 +131,33 @@ public class ModelProfileService {
         return mapper.selectList(Wrappers.<ModelProfile>lambdaQuery()
                 .orderByAsc(ModelProfile::getSortOrder)
                 .orderByAsc(ModelProfile::getCreatedAt));
+    }
+
+    public static boolean isEmbedding(ModelProfile profile) {
+        return profile != null && PURPOSE_EMBEDDING.equals(profile.getPurpose());
+    }
+
+    public static boolean isChat(ModelProfile profile) {
+        return profile != null && (profile.getPurpose() == null || PURPOSE_CHAT.equals(profile.getPurpose()));
+    }
+
+    public List<ModelProfile> chatProfiles() {
+        return all().stream().filter(ModelProfileService::isChat).toList();
+    }
+
+    /** Strict lookup: embedding requests never fall back to a chat profile. */
+    public ModelProfile embeddingProfile(String id) {
+        ModelProfile profile = StringUtils.hasText(id) ? mapper.selectById(id.trim()) : null;
+        if (!isEmbedding(profile)) {
+            throw new IllegalArgumentException("所选嵌入档案不存在或用途不是向量嵌入");
+        }
+        return profile;
+    }
+
+    public void requireChatProfile(String id) {
+        if (StringUtils.hasText(id) && !isChat(mapper.selectById(id.trim()))) {
+            throw new IllegalArgumentException("对话只能选择对话模型档案");
+        }
     }
 
     /** 给界面用的清单：脱敏 + 标注哪个是当前激活 */
@@ -142,11 +176,12 @@ public class ModelProfileService {
         m.put("id", p.getId());
         m.put("name", p.getName());
         m.put("provider", p.getProvider());
+        m.put("purpose", isEmbedding(p) ? PURPOSE_EMBEDDING : PURPOSE_CHAT);
         m.put("baseUrl", p.getBaseUrl());
         m.put("model", p.getModel());
         m.put("note", p.getNote());
         m.put("sortOrder", p.getSortOrder());
-        m.put("active", p.getId().equals(activeId));
+        m.put("active", isChat(p) && p.getId().equals(activeId));
         m.put("hasKey", StringUtils.hasText(p.getApiKey()));
         m.put("keyHint", mask(p.getApiKey()));
         // 生成参数：null = 跟随全局默认（界面显示为"未设置/跟随默认"）
@@ -182,6 +217,9 @@ public class ModelProfileService {
         if (p == null) {
             throw new IllegalArgumentException("档案不存在：" + id);
         }
+        if (!isChat(p)) {
+            throw new IllegalArgumentException("嵌入模型不能设为对话默认档案");
+        }
         settings.update(SETTING_ACTIVE, id);
         return view(p, id);
     }
@@ -196,6 +234,7 @@ public class ModelProfileService {
         p.setId(UUID.randomUUID().toString().substring(0, 8));
         p.setName(str(body.get("name"), "未命名档案"));
         p.setProvider(str(body.get("provider"), "custom"));
+        p.setPurpose(str(body.get("purpose"), PURPOSE_CHAT));
         p.setBaseUrl(str(body.get("baseUrl"), ""));
         p.setModel(str(body.get("model"), ""));
         p.setNote(str(body.get("note"), null));
@@ -209,7 +248,8 @@ public class ModelProfileService {
         validate(p);
         mapper.insert(p);
         // 第一个档案自动激活：否则新装完没有任何档案是"当前"的
-        if (activeId() == null || mapper.selectById(activeId()) == null) {
+        String active = activeId();
+        if (isChat(p) && (!StringUtils.hasText(active) || !isChat(mapper.selectById(active)))) {
             activate(p.getId());
         }
         log.info("新增模型档案：{}（{} / {}）", p.getName(), p.getBaseUrl(), p.getModel());
@@ -227,6 +267,13 @@ public class ModelProfileService {
         }
         if (body.containsKey("provider")) {
             p.setProvider(str(body.get("provider"), p.getProvider()));
+        }
+        if (body.containsKey("purpose")) {
+            String purpose = str(body.get("purpose"), PURPOSE_CHAT);
+            if (PURPOSE_EMBEDDING.equals(purpose) && id.equals(activeId())) {
+                throw new IllegalArgumentException("请先激活另一个对话档案，再将当前默认档案改为向量嵌入");
+            }
+            p.setPurpose(purpose);
         }
         if (body.containsKey("baseUrl")) {
             p.setBaseUrl(str(body.get("baseUrl"), p.getBaseUrl()));
@@ -272,6 +319,7 @@ public class ModelProfileService {
                 .eq(ModelProfile::getId, p.getId())
                 .set(ModelProfile::getName, p.getName())
                 .set(ModelProfile::getProvider, p.getProvider())
+                .set(ModelProfile::getPurpose, p.getPurpose())
                 .set(ModelProfile::getBaseUrl, p.getBaseUrl())
                 .set(ModelProfile::getModel, p.getModel())
                 .set(ModelProfile::getNote, p.getNote())
@@ -297,7 +345,7 @@ public class ModelProfileService {
         mapper.deleteById(id);
         boolean wasActive = id.equals(activeId());
         if (wasActive) {
-            List<ModelProfile> rest = all();
+            List<ModelProfile> rest = chatProfiles();
             if (rest.isEmpty()) {
                 settings.update(SETTING_ACTIVE, "");
             } else {
@@ -319,15 +367,21 @@ public class ModelProfileService {
         ModelProfile p = null;
         if (StringUtils.hasText(profileId)) {
             p = mapper.selectById(profileId.trim());
+            if (p != null && !isChat(p)) {
+                throw new IllegalArgumentException("向量嵌入档案不能用于对话或生成任务");
+            }
         }
         if (p == null) {
             String active = activeId();
             if (StringUtils.hasText(active)) {
                 p = mapper.selectById(active);
+                if (!isChat(p)) {
+                    p = null;
+                }
             }
         }
         if (p == null) {
-            List<ModelProfile> all = all();
+            List<ModelProfile> all = chatProfiles();
             p = all.isEmpty() ? null : all.get(0);
         }
         if (p == null) {
@@ -344,6 +398,9 @@ public class ModelProfileService {
     /** 本地档案（基址指向本机）—— 给"便宜/免费"类任务选默认值时用 */
     public Target firstLocal() {
         for (ModelProfile p : all()) {
+            if (!isChat(p)) {
+                continue;
+            }
             String u = p.getBaseUrl() == null ? "" : p.getBaseUrl().toLowerCase();
             if (u.contains("localhost") || u.contains("127.0.0.1") || u.contains("host.docker.internal")
                     || "ollama".equals(p.getProvider()) || "lmstudio".equals(p.getProvider())
@@ -366,6 +423,13 @@ public class ModelProfileService {
         ModelProfile p = mapper.selectById(id);
         if (p == null) {
             throw new IllegalArgumentException("档案不存在：" + id);
+        }
+        if (isEmbedding(p)) {
+            var embedding = embeddingProvider.getIfAvailable();
+            if (embedding == null) {
+                throw new IllegalStateException("嵌入客户端尚未就绪");
+            }
+            return embedding.probe(embedding.snapshotForProfile(id));
         }
         Map<String, Object> o = new LinkedHashMap<>();
         o.put("name", p.getName());
@@ -514,6 +578,12 @@ public class ModelProfileService {
     }
 
     private static void validate(ModelProfile p) {
+        if (p.getPurpose() == null) {
+            p.setPurpose(PURPOSE_CHAT);
+        }
+        if (!PURPOSE_CHAT.equals(p.getPurpose()) && !PURPOSE_EMBEDDING.equals(p.getPurpose())) {
+            throw new IllegalArgumentException("模型用途只能是 chat 或 embedding");
+        }
         if (!StringUtils.hasText(p.getName())) {
             throw new IllegalArgumentException("档案名不能为空");
         }
@@ -522,6 +592,9 @@ public class ModelProfileService {
         }
         if (!StringUtils.hasText(p.getModel())) {
             throw new IllegalArgumentException("模型名不能为空");
+        }
+        if (isEmbedding(p)) {
+            org.dyh.learnhub.ai.EmbeddingClient.Snapshot.of(p.getModel(), p.getBaseUrl(), p.getProvider(), p.getApiKey());
         }
     }
 

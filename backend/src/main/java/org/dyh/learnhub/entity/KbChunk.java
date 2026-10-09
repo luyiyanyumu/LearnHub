@@ -48,6 +48,9 @@ public class KbChunk {
     /** 嵌入模型名：换模型后旧向量不可比，需要重建 */
     private String model;
 
+    /** 协议、实际接口和模型共同确定的空间；历史 NULL 向量需重建后才可检索。 */
+    private String embeddingSpace;
+
     private LocalDateTime updatedAt;
 
     private LocalDateTime createdAt;

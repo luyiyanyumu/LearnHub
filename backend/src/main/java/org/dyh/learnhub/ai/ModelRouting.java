@@ -34,7 +34,7 @@ import java.util.Map;
  *   <tr><td>rerank 检索重排</td><td><b>本地档案（若有）</b></td><td>只排一个列表、输入很短，本地够用且免费（每次提问都要跑）</td></tr>
  *   <tr><td>grounding 答案核对</td><td>当前激活档案</td><td>判断"这句话有没有依据"属于判断类</td></tr>
  *   <tr><td>rewrite 检索词扩展</td><td><b>本地档案（若有）</b></td><td>只在词面 0 命中时兜底，便宜、可以慢</td></tr>
- *   <tr><td>embed 向量</td><td>本地（固定）</td><td>必须与索引里的向量同模型，换模型要重建索引，所以不走路由</td></tr>
+ *   <tr><td>embed 向量</td><td>未配置</td><td>只选择嵌入档案；切换向量空间后需重建索引</td></tr>
  * </table>
  */
 @Slf4j
@@ -43,6 +43,9 @@ import java.util.Map;
 public class ModelRouting {
 
     public static final String TASK_CHAT = "chat";
+    public static final String TASK_EMBED = "embed";
+    public static final String EMBED_DISABLED = "disabled";
+    public static final String EMBED_LEGACY = "legacy";
     public static final String TASK_WIKI = "wiki";
     public static final String TASK_ENTITY = "entity";
     public static final String TASK_IMPACT = "impact";
@@ -74,6 +77,8 @@ public class ModelRouting {
     }
 
     static {
+        META.put(TASK_EMBED, new TaskMeta(TASK_EMBED, "向量嵌入", EMBED_DISABLED,
+                "可选：将资料转为语义向量。未配置时使用关键词检索；更换嵌入服务或模型后需重建索引"));
         META.put(TASK_CHAT, new TaskMeta(TASK_CHAT, "对话问答", MAIN,
                 "你要等的那个环节：工具调用纪律与回答质量都靠它"));
         META.put(TASK_WIKI, new TaskMeta(TASK_WIKI, "主题 wiki 生成", LOCAL,
@@ -143,6 +148,9 @@ public class ModelRouting {
     public List<ModelTarget> targets() {
         List<ModelTarget> list = new ArrayList<>();
         for (ModelProfile p : profiles.all()) {
+            if (!ModelProfileService.isChat(p)) {
+                continue;
+            }
             list.add(new ModelTarget(p.getId(), p.getName(), p.getBaseUrl(), p.getApiKey(), p.getModel(),
                     isLocal(p.getBaseUrl(), p.getProvider())));
         }
@@ -157,6 +165,15 @@ public class ModelRouting {
     /** 该任务当前用哪个档案（返回档案 id） */
     public String targetIdOf(String task) {
         String v = settingsService.effective(SettingsService.modelForTaskKey(task));
+        if (TASK_EMBED.equals(task)) {
+            if (v == null || v.isBlank() || EMBED_DISABLED.equals(v.trim())) {
+                return EMBED_DISABLED;
+            }
+            String id = v.trim();
+            return EMBED_LEGACY.equals(id) || profiles.all().stream()
+                    .anyMatch(p -> p.getId().equals(id) && ModelProfileService.isEmbedding(p))
+                    ? id : EMBED_DISABLED;
+        }
         TaskMeta m = META.get(task);
         String kind = m == null ? MAIN : m.defaultKind();
         if (v != null && !v.isBlank()) {
@@ -170,7 +187,7 @@ public class ModelRouting {
                 return activeIdOrFirst();
             }
             // 指向的档案被删了 → 回退默认，别让任务卡死
-            if (!profiles.all().stream().anyMatch(p -> p.getId().equals(id))) {
+            if (!profiles.all().stream().anyMatch(p -> p.getId().equals(id) && ModelProfileService.isChat(p))) {
                 log.debug("任务 {} 指向的档案 {} 已不存在，回退默认", task, id);
                 return LOCAL.equals(kind) ? localOrActive() : activeIdOrFirst();
             }
@@ -181,7 +198,7 @@ public class ModelRouting {
 
     private String activeIdOrFirst() {
         String active = profiles.activeId();
-        List<ModelProfile> all = profiles.all();
+        List<ModelProfile> all = profiles.all().stream().filter(ModelProfileService::isChat).toList();
         if (active != null && all.stream().anyMatch(p -> p.getId().equals(active))) {
             return active;
         }
@@ -205,6 +222,9 @@ public class ModelRouting {
 
     /** 解析出可用的模型目标 */
     public ModelTarget forTask(String task) {
+        if (TASK_EMBED.equals(task)) {
+            throw new IllegalArgumentException("向量嵌入需通过 EmbeddingClient 的配置快照调用");
+        }
         String id = targetIdOf(task);
         for (ModelTarget t : targets()) {
             if (t.id().equals(id)) {
@@ -217,6 +237,9 @@ public class ModelRouting {
     /** 按档案 id 解析（会话级覆盖用它：会话可以自己指定模型） */
     public ModelTarget forProfile(String profileId) {
         if (profileId != null && !profileId.isBlank()) {
+            if (profiles.all().stream().anyMatch(p -> p.getId().equals(profileId.trim()) && ModelProfileService.isEmbedding(p))) {
+                throw new IllegalArgumentException("向量嵌入档案不能用于对话或生成任务");
+            }
             for (ModelTarget t : targets()) {
                 if (t.id().equals(profileId.trim())) {
                     return t;
@@ -246,6 +269,11 @@ public class ModelRouting {
             // 前端 SettingsDialog 用它 PUT，**不要再自己拼** —— 详见 SettingsController 的注释：
             // 这份映射由 SettingsController 派生，加新任务时只改 META 即可。
             o.put("field", SettingsService.modelForTaskField(m.task()));
+            if (TASK_EMBED.equals(m.task())) {
+                addEmbeddingRow(o);
+                out.add(o);
+                continue;
+            }
             String id = targetIdOf(m.task());
             o.put("target", id);
             ModelTarget t = forTask(m.task());
@@ -255,6 +283,58 @@ public class ModelRouting {
             out.add(o);
         }
         return out;
+    }
+
+    private void addEmbeddingRow(Map<String, Object> row) {
+        String id = targetIdOf(TASK_EMBED);
+        List<Map<String, Object>> options = new ArrayList<>();
+        options.add(embeddingOption(EMBED_DISABLED, "未配置（仅关键词检索）", "", false));
+        String legacyModel = legacyValue(SettingsService.KEY_EMBED_MODEL, EmbeddingClient.DEFAULT_MODEL);
+        options.add(embeddingOption(EMBED_LEGACY, "兼容旧嵌入配置", legacyModel, true));
+        EmbeddingClient.Snapshot snapshot = EmbeddingClient.Snapshot.disabled("未配置向量嵌入模型，使用关键词检索");
+        String label = "未配置（仅关键词检索）";
+        boolean local = false;
+        ModelProfile selected = null;
+        for (ModelProfile profile : profiles.all()) {
+            if (!ModelProfileService.isEmbedding(profile)) continue;
+            boolean isLocal = isLocal(profile.getBaseUrl(), profile.getProvider());
+            options.add(embeddingOption(profile.getId(), profile.getName(), profile.getModel(), isLocal));
+            if (profile.getId().equals(id)) {
+                selected = profile;
+                label = profile.getName();
+                local = isLocal;
+            }
+        }
+        try {
+            if (EMBED_LEGACY.equals(id)) {
+                snapshot = EmbeddingClient.Snapshot.of(legacyModel,
+                        legacyValue(SettingsService.KEY_EMBED_BASE_URL, EmbeddingClient.DEFAULT_BASE_URL), "ollama", null);
+                label = "兼容旧嵌入配置";
+                local = true;
+            }
+            if (selected != null)
+                snapshot = EmbeddingClient.Snapshot.of(selected.getModel(), selected.getBaseUrl(), selected.getProvider(), selected.getApiKey());
+        } catch (IllegalArgumentException e) {
+            snapshot = EmbeddingClient.Snapshot.disabled(e.getMessage());
+        }
+        row.put("target", id);
+        row.put("targetLabel", label);
+        row.put("configured", snapshot.configured());
+        row.put("model", snapshot.model());
+        row.put("effectiveModel", snapshot.model());
+        row.put("reason", snapshot.reason());
+        row.put("local", local);
+        row.put("targets", options);
+    }
+
+    private String legacyValue(String key, String fallback) {
+        String value = settingsService.effective(key);
+        return value == null || value.isBlank() ? fallback : value.trim();
+    }
+
+    private static Map<String, Object> embeddingOption(String id, String label, String model, boolean local) {
+        return Map.of("id", id, "label", label, "model", model == null ? "" : model,
+                "purpose", ModelProfileService.PURPOSE_EMBEDDING, "local", local);
     }
 
     /** 是否云端（用于日志/界面提示"这一步会花 token"） */

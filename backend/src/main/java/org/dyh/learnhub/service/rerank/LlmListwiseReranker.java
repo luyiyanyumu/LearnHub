@@ -114,12 +114,10 @@ public class LlmListwiseReranker implements Reranker {
             return part.stream().map(Item::key).toList();
         }
         StringBuilder list = new StringBuilder();
+        int snippetLimit = snippetLimit();
         for (int i = 0; i < part.size(); i++) {
             Item it = part.get(i);
-            String snip = it.snippet() == null ? "" : it.snippet().replaceAll("\\s+", " ").trim();
-            if (snip.length() > snippetLimit()) {
-                snip = snip.substring(0, snippetLimit());
-            }
+            String snip = QueryAwareExcerpt.rerankExcerpt(question, it.snippet(), snippetLimit);
             list.append(i + 1).append(". ").append(it.title())
                     .append(snip.isEmpty() ? "" : "｜" + snip).append('\n');
         }

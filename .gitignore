@@ -1,7 +1,8 @@
 # ===== 密钥与环境 =====
 # 任何 .env 都只留在本地，绝不提交（密钥写在 backend/.env）
 **/.env
-.env.local
+**/.env.*
+!**/.env.example
 *.pem
 
 # ===== Java / Maven =====
@@ -12,6 +13,10 @@ backend/target/
 # 其中的文件无法再被反选」，所以这条死规则曾经误导过人。29M 的 jar 不进仓库，
 # clone 后用 mvn -DskipTests package 现场构建（见 README 快速开始）。
 hs_err_pid*
+# `jar xf` 抽单个 class 出来做 javap/反编译核对时，fat jar 的内部布局会原样落到
+# 项目根（BOOT-INF/classes/...）。它是旧版本编译产物、不在 .classpath 里，但类名与
+# 源码同名，一旦被 -cp 或 find 收进 classpath 就会遮蔽新代码 —— 出现即删，别提交。
+backend/BOOT-INF/
 
 # ===== Node / Vite =====
 frontend/node_modules/
@@ -56,6 +61,11 @@ milvus-data/
 /tmp/
 /memory/
 
-# 原始评测问题、回答和语料快照留在本机；汇总报告可提交。
+# 原始评测问题、回答和语料快照留在本机。
 /docs/benchmarks/**/*.json
 /docs/benchmarks/**/*.txt
+# 本机报告包含真实知识库统计与运行标识；保留原文件，不公开提交。
+/docs/benchmarks/2026-10-09/
+
+# 含真实资料的工作截图保留本地；公开项目介绍使用 readme-* 示例截图。
+/docs-shots/*-2026-10-08.png

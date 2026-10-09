@@ -239,6 +239,123 @@ class RetrievalContextServiceTest {
         assertFalse(context.groundingText().contains("仅有生成导览"));
     }
 
+    @Test void sameSectionDefinitionAndCodeShareOneEntryWithoutDisplacingOtherSeeds() {
+        var seed = hit(1, "启动事件由监听器接收。");
+        var code = neighbor(1, 1, "```java\napplication.addListeners(new StartupListener());\n```");
+        var other = hit(2, "另一主题的独立依据");
+        when(retrieval.search("启动事件如何注册", 24, "fused", false)).thenReturn(List.of(seed, other));
+        when(retrieval.relatedSections(List.of(seed, other), 2)).thenReturn(Map.of(seed.key(),
+                new KnowledgeRetrievalService.SectionNeighbors("启动流程 > 监听器", List.of(code))));
+
+        var context = service.build("启动事件如何注册", 2, "fused", false, false);
+
+        assertEquals(2, context.injectedHits().size(), "A neighbor enriches its parent, not an extra topK slot");
+        assertEquals(List.of("note:1", "note:2"), context.refs());
+        var window = context.injectedHits().getFirst();
+        assertEquals(-1, window.seq());
+        assertTrue(window.key().contains(":window:"));
+        assertNotEquals(seed.key(), window.key());
+        assertTrue(window.text().contains("启动事件由监听器接收"));
+        assertTrue(window.text().contains("application.addListeners(new StartupListener())"));
+        assertTrue(context.text().contains("同小节窗口：启动流程 > 监听器"));
+        assertTrue(context.text().contains("片段 seq=[0, 1]"));
+        assertTrue(context.text().contains("另一主题的独立依据"));
+        var metadata = context.retrieved().getFirst();
+        assertEquals(window.key(), metadata.get("passageKey"));
+        assertEquals(List.of(seed.key(), code.key()), metadata.get("originalPassageKeys"));
+        assertEquals(List.of(0, 1), metadata.get("expandedSeqs"));
+        assertEquals("启动流程 > 监听器", metadata.get("sectionHeading"));
+        assertEquals(List.of("keyword", "section-neighbor"), metadata.get("channels"));
+        assertTrue(context.text().length() <= RetrievalContextService.TOTAL_CHARS);
+    }
+
+    @Test void expansionUsesFreshOriginalSeedsAndNeverIncludesAnotherSourceOrDuplicateSeed() {
+        var seed = hit(1, "种子");
+        var other = hit(2, "独立证据");
+        var foreign = neighbor(99, 1, "其他文档的邻居不得注入");
+        when(retrieval.search("q", 24, "fused", false)).thenReturn(List.of(seed, other));
+        when(retrieval.relatedSections(List.of(seed, other), 2)).thenReturn(Map.of(seed.key(),
+                new KnowledgeRetrievalService.SectionNeighbors("小节", List.of(foreign, other))));
+
+        var context = service.build("q", 2, "fused", false, false);
+
+        assertEquals(List.of("note:1", "note:2"), context.refs());
+        assertFalse(context.text().contains("其他文档的邻居不得注入"));
+        assertEquals(seed.key(), context.retrieved().getFirst().get("passageKey"));
+        assertFalse(context.retrieved().getFirst().containsKey("expandedSeqs"));
+    }
+
+    @Test void neighborsHaveARoundRobinBudgetAndRetainExactInjectedExcerpts() {
+        String q = "代码注册";
+        var seeds = hits(5, 800);
+        Map<String, KnowledgeRetrievalService.SectionNeighbors> related = new java.util.LinkedHashMap<>();
+        for (var seed : seeds) {
+            var next = neighbor(seed.sourceId(), 1, "解释".repeat(550) + " 代码注册=" + seed.sourceId());
+            var prev = neighbor(seed.sourceId(), -2, "不合法的seq不得注入");
+            related.put(seed.key(), new KnowledgeRetrievalService.SectionNeighbors("注册", List.of(next, prev)));
+        }
+        when(retrieval.search(q, 24, "fused", false)).thenReturn(seeds);
+        when(retrieval.relatedSections(seeds, 2)).thenReturn(related);
+
+        var context = service.build(q, 5, "fused", false, false);
+
+        assertEquals(5, context.injectedHits().size());
+        assertEquals(5, context.refs().size());
+        assertTrue(context.injectedHits().get(0).text().contains("代码注册=1"));
+        assertTrue(context.injectedHits().get(1).text().contains("代码注册=2"),
+                "A second source can expand before the first receives another neighbor");
+        assertFalse(context.text().contains("不合法的seq不得注入"));
+        assertTrue(context.text().length() <= RetrievalContextService.TOTAL_CHARS);
+        for (var hit : context.injectedHits()) assertTrue(context.text().contains(hit.text()));
+        assertTrue(context.retrieved().stream().anyMatch(m -> m.containsKey("memberExcerpts")));
+    }
+
+    @Test void adjacentLookupFailurePreservesSeedEvidenceAndBudget() {
+        var seed = hit(1, "已有原文不能因扩展失败而消失");
+        when(retrieval.search("q", 24, "keyword", false)).thenReturn(List.of(seed));
+        when(retrieval.relatedSections(List.of(seed), 2)).thenThrow(new IllegalStateException("unavailable"));
+
+        var context = service.build("q", 1, "keyword", false, false);
+
+        assertEquals(List.of("note:1"), context.refs());
+        assertEquals(seed.key(), context.retrieved().getFirst().get("passageKey"));
+        assertTrue(context.text().contains(seed.text()));
+    }
+
+    @Test void neighborWindowThatCannotFitLeavesNoClaimOfExpandedEvidence() {
+        var seed = hit(1, "已经注入的定义");
+        var code = neighbor(1, 1, "未展示的注册代码");
+        when(retrieval.search("q", 24, "fused", false)).thenReturn(List.of(seed));
+        when(retrieval.relatedSections(List.of(seed), 2)).thenReturn(Map.of(seed.key(),
+                new KnowledgeRetrievalService.SectionNeighbors("过长小节标题".repeat(2000), List.of(code))));
+
+        var context = service.build("q", 1, "fused", false, false);
+
+        assertEquals(seed.key(), context.retrieved().getFirst().get("passageKey"));
+        assertFalse(context.retrieved().getFirst().containsKey("originalPassageKeys"));
+        assertFalse(context.retrieved().getFirst().containsKey("expandedSeqs"));
+        assertFalse(context.text().contains(code.text()));
+        assertEquals(seed.text(), context.injectedHits().getFirst().text());
+        assertTrue(context.text().length() <= RetrievalContextService.TOTAL_CHARS);
+    }
+
+    @Test void oversizePassageIncludesLateQueryMatchAndLookupReceivesTheUnclippedSeed() {
+        String q = "注册监听器";
+        var seed = hit(1, "前面无关的说明。".repeat(220) + "\n注册监听器：application.addListeners(listener);\n");
+        when(retrieval.search(q, 24, "keyword", false)).thenReturn(List.of(seed));
+
+        var context = service.build(q, 1, "keyword", false, false);
+
+        assertTrue(context.injectedHits().getFirst().text().contains("application.addListeners(listener)"));
+        assertTrue(context.injectedHits().getFirst().text().length() <= 1200);
+        verify(retrieval).relatedSections(List.of(seed), 2);
+    }
+
+    private static RetrievalHit neighbor(long id, int seq, String text) {
+        return new RetrievalHit("note", id, "标题" + id, "", text, 1, seq,
+                List.of("keyword", "section-neighbor"), List.of());
+    }
+
     private static WikiRetrievalService.Section section(String text) {
         return new WikiRetrievalService.Section(11L, "entity-react", "ReAct", "section-1", "循环机制",
                 text, List.of("note:7"), List.of("Planning"), 9);

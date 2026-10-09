@@ -31,6 +31,9 @@ public class ModelProfile {
     /** deepseek / openai / kimi / ark / ollama / lmstudio / vllm / custom */
     private String provider;
 
+    /** chat（对话/生成）或 embedding（向量嵌入）；历史档案默认 chat。 */
+    private String purpose;
+
     /** OpenAI 兼容基址 */
     private String baseUrl;
 

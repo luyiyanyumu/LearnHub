@@ -51,7 +51,7 @@ public class ModelDiscoveryService {
 
     /** 嵌入模型的名字特征：这些不能用来对话，界面上单独标出来，免得被选成对话模型 */
     private static final List<String> EMBEDDING_MARKERS =
-            List.of("embed", "bge-", "bge:", "m3e", "gte-", "e5-", "rerank", "nomic-embed");
+            List.of("embed", "bge-", "bge:", "m3e", "gte-", "e5-", "nomic-embed");
 
     private static final Set<String> LOOPBACK_HOSTS = Set.of("localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]");
 
@@ -297,6 +297,7 @@ public class ModelDiscoveryService {
                 m.put("ownedBy", n.get("owned_by").asText());
             }
             m.put("embedding", isEmbedding(id));
+            m.put("purpose", isEmbedding(id) ? ModelProfileService.PURPOSE_EMBEDDING : ModelProfileService.PURPOSE_CHAT);
             out.add(m);
         }
         // 对话模型在前、嵌入模型在后；各自按名字排
@@ -307,6 +308,7 @@ public class ModelDiscoveryService {
 
     static boolean isEmbedding(String id) {
         String s = id.toLowerCase(Locale.ROOT);
+        if (s.contains("rerank")) return false;
         return EMBEDDING_MARKERS.stream().anyMatch(s::contains);
     }
 

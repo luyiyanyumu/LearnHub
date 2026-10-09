@@ -38,7 +38,7 @@ import java.util.Set;
  *
  * <h3>关键取舍</h3>
  * <ul>
- *   <li><b>集合按模型分</b>（{@code kb_chunk_bge_m3}）：换嵌入模型天生不冲突，
+ *   <li><b>集合按嵌入空间分</b>（{@code kb_chunk_<sha256>}）：协议、接口或模型变化均隔离，
  *       不会出现"新旧向量维度/语义不同却混在一个索引里"。</li>
  *   <li><b>主键用 MySQL 的块 id</b>：检索回来直接 {@code selectBatchIds} 补文本，
  *       不用再维护一套"块 id ↔ 主键 id"的映射表。</li>
@@ -81,6 +81,8 @@ public class MilvusVectorStore implements VectorStore {
     private volatile long lastHealthAt;
     private volatile boolean lastHealthy;
     private volatile String lastHealthError = "";
+    private volatile String cachedUri = "";
+    private final Map<String, Integer> dimensions = new java.util.concurrent.ConcurrentHashMap<>();
 
     @Override
     public String name() {
@@ -92,9 +94,13 @@ public class MilvusVectorStore implements VectorStore {
     // ------------------------------------------------------------------
 
     @Override
-    public void ensure(String model, int dim) {
-        String coll = collection(model);
+    public void ensure(String space, int dim) {
+        refreshConnectionCache();
+        if (dim <= 0) throw new IllegalArgumentException("嵌入向量维度必须大于零");
+        String coll = collection(space);
         if (hasCollection(coll)) {
+            int existing = dimensions.computeIfAbsent(coll, this::collectionDimension);
+            if (existing != dim) throw new IllegalStateException("嵌入空间的向量维度已变化，需要重建索引");
             return;
         }
         ObjectNode schema = JsonNodeFactory.instance.objectNode();
@@ -127,24 +133,31 @@ public class MilvusVectorStore implements VectorStore {
         // 不 load 的话集合不可查（Milvus 语义）
         call("/v2/vectordb/collections/load", object("collectionName", coll));
         listCache.put(coll, new Exists(true, System.currentTimeMillis()));
+        dimensions.put(coll, dim);
         log.info("Milvus 集合已创建：{}（dim={}, metric=COSINE, AUTOINDEX）", coll, dim);
     }
 
     @Override
-    public boolean hasVectors() {
-        return hasCollection(collection(embedder.model()));
+    public boolean hasVectors(String space) {
+        return space != null && !space.isBlank() && hasCollection(collection(space));
     }
 
     @Override
-    public void replaceSource(String sourceType, Long sourceId, List<VecItem> items) {
+    public void replaceSource(String space, String sourceType, Long sourceId, List<VecItem> items) {
         if (items.isEmpty()) {
-            deleteSource(sourceType, sourceId);
+            deleteSource(space, sourceType, sourceId);
             return;
         }
-        String coll = collection(embedder.model());
-        ensure(embedder.model(), items.get(0).vec().length);
+        String coll = collection(space);
+        int dim = items.get(0).vec().length;
+        for (VecItem item : items) {
+            if (item.vec().length != dim) throw new IllegalArgumentException("同一空间向量维度不一致");
+            for (float value : item.vec()) if (!Float.isFinite(value))
+                throw new IllegalArgumentException("嵌入向量包含无效值");
+        }
+        ensure(space, dim);
         // 先删该来源：重新索引会分配新的块 id，只插不删会留下查不到正文的孤儿向量
-        deleteSource(sourceType, sourceId);
+        deleteSource(space, sourceType, sourceId);
         int done = 0;
         for (int i = 0; i < items.size(); i += INSERT_BATCH) {
             List<VecItem> batch = items.subList(i, Math.min(items.size(), i + INSERT_BATCH));
@@ -168,8 +181,9 @@ public class MilvusVectorStore implements VectorStore {
     }
 
     @Override
-    public void deleteSource(String sourceType, Long sourceId) {
-        String coll = collection(embedder.model());
+    public void deleteSource(String space, String sourceType, Long sourceId) {
+        if (space == null || space.isBlank()) return;
+        String coll = collection(space);
         if (!hasCollection(coll)) {
             return;
         }
@@ -180,13 +194,14 @@ public class MilvusVectorStore implements VectorStore {
     }
 
     @Override
-    public void clear() {
-        String coll = collection(embedder.model());
+    public void clear(String space) {
+        String coll = collection(space);
         if (!hasCollection(coll)) {
             return;
         }
         call("/v2/vectordb/collections/drop", object("collectionName", coll));
         listCache.remove(coll);
+        dimensions.remove(coll);
         log.info("Milvus 集合已清空（drop）：{}", coll);
     }
 
@@ -195,11 +210,11 @@ public class MilvusVectorStore implements VectorStore {
     // ------------------------------------------------------------------
 
     @Override
-    public List<VecHit> search(String model, float[] query, int pool) {
-        if (query == null || query.length == 0) {
+    public List<VecHit> search(String space, float[] query, int pool) {
+        if (space == null || space.isBlank() || query == null || query.length == 0) {
             return List.of();
         }
-        String coll = collection(model);
+        String coll = collection(space);
         if (!hasCollection(coll)) {
             // 集合不存在 = 这个模型的向量还没建（或换了嵌入模型但没重建）。
             // 这里**不抛异常**：抛出去只会让调用方多做一次无意义的降级；
@@ -227,7 +242,7 @@ public class MilvusVectorStore implements VectorStore {
         for (JsonNode n : arr) {
             long id = n.path("id").asLong(n.path("entity").path("id").asLong(-1));
             double score = n.path("distance").asDouble(n.path("score").asDouble(Double.NaN));
-            if (id <= 0 || Double.isNaN(score)) {
+            if (id <= 0 || !Double.isFinite(score)) {
                 continue;
             }
             ids.add(new long[]{id});
@@ -245,7 +260,8 @@ public class MilvusVectorStore implements VectorStore {
         List<VecHit> hits = new ArrayList<>(keys.size());
         for (int i = 0; i < keys.size(); i++) {
             KbChunk c = byId.get(keys.get(i));
-            if (c == null) {
+            if (c == null || !space.equals(c.getEmbeddingSpace()) || c.getDim() == null
+                    || c.getDim() != query.length) {
                 continue;   // 向量有、块行没了（删除竞态）：跳过，不返回半条结果
             }
             hits.add(new VecHit(c.getId(), c.getSourceType(), c.getSourceId(),
@@ -261,6 +277,7 @@ public class MilvusVectorStore implements VectorStore {
 
     /** 是否可用（带 30 秒缓存）。调用方据此决定降级，避免每轮都等连接超时。 */
     public boolean healthy() {
+        refreshConnectionCache();
         long now = System.currentTimeMillis();
         if (now - lastHealthAt < HEALTH_TTL_MS) {
             return lastHealthy;
@@ -300,7 +317,12 @@ public class MilvusVectorStore implements VectorStore {
         o.put("backend", name());
         o.put("uri", uri());
         o.put("healthy", healthy());
-        String coll = collection(embedder.model());
+        EmbeddingClient.Snapshot target = embedder.snapshot();
+        if (!target.configured()) {
+            o.put("collectionExists", false);
+            return o;
+        }
+        String coll = collection(target.spaceFingerprint());
         o.put("collection", coll);
         boolean exists = hasCollection(coll);
         o.put("collectionExists", exists);
@@ -327,7 +349,12 @@ public class MilvusVectorStore implements VectorStore {
      * 所以用 {@code entities/query} 的 {@code count(*)} 来数 —— 这也是两个后端"数量一致"的判据来源。
      */
     public long vectorCount() {
-        String coll = collection(embedder.model());
+        EmbeddingClient.Snapshot target = embedder.snapshot();
+        return target.configured() ? vectorCount(target.spaceFingerprint()) : -1;
+    }
+
+    public long vectorCount(String space) {
+        String coll = collection(space);
         if (!hasCollection(coll)) {
             return -1;
         }
@@ -368,6 +395,7 @@ public class MilvusVectorStore implements VectorStore {
     private final Map<String, Exists> listCache = new java.util.concurrent.ConcurrentHashMap<>();
 
     private boolean hasCollection(String name) {
+        refreshConnectionCache();
         Exists cached = listCache.get(name);
         long now = System.currentTimeMillis();
         // 带 TTL：不让"集合存在与否"这件事永久缓存（否则在别处 drop / 重建后本进程会一直看错）
@@ -393,10 +421,37 @@ public class MilvusVectorStore implements VectorStore {
         listCache.remove(name);
     }
 
-    private String collection(String model) {
-        String m = model == null || model.isBlank() ? "unknown" : model;
-        String slug = m.toLowerCase().replaceAll("[^a-z0-9_]", "_");
-        return "kb_chunk_" + slug;
+    static String collection(String space) {
+        if (space == null || !space.matches("[0-9a-f]{64}"))
+            throw new IllegalArgumentException("缺少有效的嵌入空间标识");
+        return "kb_chunk_" + space;
+    }
+
+    private int collectionDimension(String name) {
+        JsonNode description = call("/v2/vectordb/collections/describe", object("collectionName", name));
+        int dim = description.path("dimension").asInt(0);
+        JsonNode fields = description.path("fields");
+        if (!fields.isArray()) fields = description.path("schema").path("fields");
+        for (JsonNode field : fields) {
+            if (!"vector".equals(field.path("name").asText(field.path("fieldName").asText()))) continue;
+            dim = field.path("params").path("dim").asInt(
+                    field.path("elementTypeParams").path("dim").asInt(dim));
+            for (JsonNode parameter : field.path("params"))
+                if ("dim".equals(parameter.path("key").asText())) dim = parameter.path("value").asInt(dim);
+        }
+        if (dim <= 0) throw new IllegalStateException("无法确认 Milvus 集合向量维度");
+        return dim;
+    }
+
+    private synchronized void refreshConnectionCache() {
+        String current = uri();
+        if (current.equals(cachedUri)) return;
+        cachedUri = current;
+        listCache.clear();
+        dimensions.clear();
+        lastHealthAt = 0;
+        lastHealthy = false;
+        lastHealthError = "";
     }
 
     private String uri() {

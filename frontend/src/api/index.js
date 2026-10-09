@@ -258,21 +258,21 @@ export const settingsApi = {
  * 而"哪一次对话用哪个模型"由会话记住。这两件事是一体的。
  */
 export const modelApi = {
-  /** 档案清单（**不含明文密钥**，只有 hasKey 与 keyHint）+ 提供方预设 + 任务分工 */
+  /** 档案含 purpose=chat|embedding（缺省 chat），不含明文密钥；routing 各行含按用途限定的 targets。 */
   profiles: () => request.get('/model/profiles'),
   createProfile: (body) => request.post('/model/profiles', body),
   /** 更新；body.apiKey 传 '__KEEP__' 表示不改密钥（界面回传的是掩码） */
   updateProfile: (id, body) => request.put(`/model/profiles/${id}`, body),
   removeProfile: (id) => request.delete(`/model/profiles/${id}`),
   activateProfile: (id) => request.post(`/model/profiles/${id}/activate`, {}),
-  /** 连通性探测：真实发一次最小请求，返回 ok / 耗时 / 失败原因与提示 */
+  /** 按档案 purpose 探测；embedding 返回 ok/dimension/ms/model/message，不返回向量或对话文本。 */
   testProfile: (id) => request.post(`/model/profiles/${id}/test`, {}, { timeout: 60000 }),
   /**
    * 按「地址 + 密钥」自动获取模型列表（服务端 GET {baseUrl}/models）。
    * 用 POST：可能带着还没保存的密钥，不能进 URL。编辑已有档案时 apiKey 留空、传 profileId 即用库里那把。
    * 返回 { ok, models:[{id, ownedBy, embedding}], baseUrl, suggestedBaseUrl?, message, hint? }
    */
-  discoverModels: (body) => request.post('/model/discover', body, { timeout: 60000 }),
+  discoverModels: (body) => request.post('/model/discover', body, { timeout: 60000, silentError: true }),
   migrate: () => request.post('/model/profiles/migrate', {}),
   routing: () => request.get('/model/routing'),
 
@@ -428,6 +428,7 @@ export const fileApi = {
 
 /** 语义检索（向量索引）：状态 / 重建（带进度）/ 检索体检 */
 export const kbApi = {
+  /** 只读；含 configured/embeddingChanged/compatibleChunks/embeddingSpace，不会调用模型或自动重建。 */
   status: () => request.get('/kb/status'),
   rebuild: () => request.post('/kb/rebuild', {}, { timeout: 30000 }),
   job: (jobId) => request.get(`/kb/jobs/${jobId}`),

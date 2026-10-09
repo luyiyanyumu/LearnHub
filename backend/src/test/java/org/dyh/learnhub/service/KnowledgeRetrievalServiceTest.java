@@ -1,5 +1,6 @@
 package org.dyh.learnhub.service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.dyh.learnhub.ai.DeepSeekClient;
 import org.dyh.learnhub.ai.ModelRouting;
 import org.dyh.learnhub.mapper.KbChunkMapper;
@@ -248,6 +249,174 @@ class KnowledgeRetrievalServiceTest {
         assertEquals(1, result.passages().size());
         assertTrue(result.wikiSections().isEmpty());
         verify(wiki, never()).sourcePassages(anyString(), anyList(), anyInt());
+    }
+
+    @Test void detailedQuestionUsesGroundingForMissingEvidenceEvenWhenFirstRoundHasHits() throws Exception {
+        String query = "如何注册 Callback，并说明代码示例";
+        when(sources.allNotes()).thenReturn(List.of(
+                source(1, "概念", "Callback 是回调机制。"),
+                source(2, "实践", "用 attachHandler 安装处理函数。")));
+        when(settings.queryRewriteEnabled()).thenReturn(true);
+        when(routing.forTask(ModelRouting.TASK_REWRITE)).thenReturn(
+                new ModelRouting.ModelTarget("rewrite", "rewrite", "http://rewrite", "", "rewrite-model", false));
+        when(routing.forTask(ModelRouting.TASK_GROUNDING)).thenReturn(
+                new ModelRouting.ModelTarget("judge", "judge", "http://grounding", "", "grounding-model", false));
+        when(client.chat(anyList(), isNull(), anyString(), anyString(), anyString(), anyInt(), anyDouble(),
+                anyString(), isNull(), any())).thenReturn(new ObjectMapper().readTree(
+                "{\"content\":\"{\\\"missing\\\":[\\\"注册示例\\\"],\\\"queries\\\":[\\\"attachHandler\\\"]}\"}"));
+
+        List<RetrievalHit> hits = service.search(query, 5, "fused", false);
+
+        assertTrue(hits.stream().anyMatch(hit -> hit.sourceId() == 2L && hit.channels().contains("supplemental")));
+        verify(client, times(1)).chat(anyList(), isNull(), eq("http://grounding"), anyString(), eq("grounding-model"), anyInt(), anyDouble(),
+                anyString(), isNull(), any());
+        verify(routing, times(1)).forTask(ModelRouting.TASK_GROUNDING);
+        verify(routing, never()).forTask(ModelRouting.TASK_REWRITE);
+        verify(vectors).search("attachHandler", 24);
+        verify(reranker, times(1)).rerank(eq(query), anyList());
+    }
+
+    @Test void sufficientEvidenceDoesNotLaunchSupplementalSearchAndPlanningFailureKeepsOriginalHits() throws Exception {
+        String query = "如何使用 Callback 注册回调代码";
+        when(sources.allNotes()).thenReturn(List.of(source(1, "实践", "Callback 提供 register(fn) 注册方法。")));
+        when(settings.queryRewriteEnabled()).thenReturn(true);
+        when(routing.forTask(ModelRouting.TASK_GROUNDING)).thenReturn(
+                new ModelRouting.ModelTarget("test", "test", "http://local", "", "test-model", false));
+        when(client.chat(anyList(), isNull(), anyString(), anyString(), anyString(), anyInt(), anyDouble(),
+                anyString(), isNull(), any())).thenReturn(new ObjectMapper().readTree(
+                "{\"content\":\"{\\\"missing\\\":[],\\\"queries\\\":[]}\"}"));
+        assertEquals(1, service.search(query, 5, "fused", false).size());
+        verify(vectors, times(1)).search(anyString(), eq(24));
+        when(client.chat(anyList(), isNull(), anyString(), anyString(), anyString(), anyInt(), anyDouble(),
+                anyString(), isNull(), any())).thenThrow(new IllegalStateException("offline"));
+        assertEquals(1, service.search(query, 5, "fused", false).size());
+    }
+
+    @Test void emptyEvidenceUsesSimpleRewriteWithOneCallAndAtMostTwoQueries() throws Exception {
+        String query = "如何处理 TopicA 和 TopicB 的关系";
+        when(settings.queryRewriteEnabled()).thenReturn(true);
+        when(routing.forTask(ModelRouting.TASK_REWRITE)).thenReturn(
+                new ModelRouting.ModelTarget("test", "test", "http://local", "", "test-model", false));
+        when(client.chat(anyList(), isNull(), anyString(), anyString(), anyString(), anyInt(), anyDouble(),
+                anyString(), isNull(), any())).thenReturn(new ObjectMapper().createObjectNode().put("content", "Alpha\nBeta\nGamma"));
+        service.search(query, 5, "fused", false);
+        verify(client, times(1)).chat(anyList(), isNull(), anyString(), anyString(), anyString(), anyInt(), anyDouble(),
+                anyString(), isNull(), any());
+        verify(vectors).search("Alpha", 24);
+        verify(vectors).search("Beta", 24);
+        verify(vectors, never()).search("Gamma", 24);
+        verify(routing, times(1)).forTask(ModelRouting.TASK_REWRITE);
+        verify(routing, never()).forTask(ModelRouting.TASK_GROUNDING);
+    }
+
+    @Test void supplementalOnlyEvidenceGetsARerankSlotEvenWhenInitialRoutesFillThePool() throws Exception {
+        String query = "TopicA 如何执行代码示例";
+        List<Map<String, Object>> rows = new java.util.ArrayList<>();
+        List<VectorIndexService.Hit> vectorHits = new java.util.ArrayList<>();
+        for (long id = 1; id <= 20; id++) {
+            String body = "TopicA 常见定义，第" + id + "种说明。";
+            rows.add(source(id, "TopicA", body));
+            vectorHits.add(new VectorIndexService.Hit("note", id, "TopicA", "", body, .9, 0));
+        }
+        rows.add(source(99, "运行实现", "HiddenHandler 提供处理函数调用示例。"));
+        when(sources.allNotes()).thenReturn(rows);
+        when(vectors.search(query, 24)).thenReturn(vectorHits);
+        when(settings.queryRewriteEnabled()).thenReturn(true);
+        when(routing.forTask(ModelRouting.TASK_GROUNDING)).thenReturn(
+                new ModelRouting.ModelTarget("test", "test", "http://local", "", "test-model", false));
+        when(client.chat(anyList(), isNull(), anyString(), anyString(), anyString(), anyInt(), anyDouble(),
+                anyString(), isNull(), any())).thenReturn(new ObjectMapper().readTree(
+                "{\"content\":\"{\\\"missing\\\":[\\\"运行示例\\\"],\\\"queries\\\":[\\\"HiddenHandler\\\"]}\"}"));
+        when(reranker.rerank(eq(query), anyList())).thenReturn(List.of("note:99:0"));
+
+        List<RetrievalHit> hits = service.search(query, 5, "fused", false);
+
+        verify(reranker).rerank(eq(query), argThat(items -> items.size() <= 20
+                && items.stream().anyMatch(item -> item.key().equals("note:99:0"))));
+        assertEquals("note:99:0", hits.getFirst().key(), "the model, rather than a forced score, chooses relevance");
+    }
+
+    @Test void finalRerankCanKeepThreeNecessarySectionsFromOneSource() {
+        String body = "## Topic 定义\nTopic 定义。\n## Topic 用法\nTopic 用法。\n## Topic 示例\nTopic 示例。";
+        when(sources.allNotes()).thenReturn(List.of(source(1, "Topic", body),
+                source(2, "Topic 其他", "Topic 其他内容。")));
+        when(reranker.rerank(eq("Topic"), anyList())).thenReturn(List.of("note:1:0", "note:1:1", "note:1:2", "note:2:0"));
+
+        List<RetrievalHit> hits = service.search("Topic", 3, "fused", false);
+
+        assertEquals(List.of("note:1:0", "note:1:1", "note:1:2"), hits.stream().map(RetrievalHit::key).toList());
+    }
+
+    @Test void reservedSupplementalCandidatePreservesFusedGraphProvenance() {
+        List<RetrievalHit> initial = new java.util.ArrayList<>();
+        for (long id = 1; id <= 20; id++) initial.add(hit(id, 0, "来源正文" + id, "keyword", ""));
+        RetrievalHit merged = new RetrievalHit("note", 20L, "关系说明", "", "完整支持关联的正文", .2, 0,
+                List.of("keyword", "vector", "graph", "supplemental"), List.of("ConceptA —用于→ ConceptB"));
+        initial.set(19, merged);
+        RetrievalHit supplemental = new RetrievalHit("note", 20L, "关系说明", "", merged.text(), .1, 0,
+                List.of("keyword", "supplemental"), List.of());
+
+        List<RetrievalHit> pool = KnowledgeRetrievalService.rerankPool(initial, List.of(supplemental), 16);
+
+        RetrievalHit reserved = pool.stream().filter(hit -> hit.key().equals(merged.key())).findFirst().orElseThrow();
+        assertEquals(16, pool.size());
+        assertEquals(merged.channels(), reserved.channels());
+        assertEquals(merged.graphRelations(), reserved.graphRelations(),
+                "a reserved slot must not turn a verified graph passage into truncatable plain text");
+        assertEquals(merged.text(), reserved.text());
+    }
+
+    @Test void reservedSameSeqFromAnotherVersionCannotInheritGraphProvenance() {
+        List<RetrievalHit> initial = new java.util.ArrayList<>();
+        for (long id = 1; id <= 20; id++) initial.add(hit(id, 0, "来源正文" + id, "keyword", ""));
+        initial.set(19, hit(20, 0, "有图谱支持的当前版本", "graph", "ConceptA —用于→ ConceptB"));
+        RetrievalHit conflicting = hit(20, 0, "同seq的另一个版本", "supplemental", "");
+
+        List<RetrievalHit> pool = KnowledgeRetrievalService.rerankPool(initial, List.of(conflicting), 16);
+
+        assertFalse(pool.stream().anyMatch(hit -> hit.key().equals(conflicting.key())),
+                "a same-key version conflict must not replace or borrow the fused evidence");
+    }
+
+    @Test void rerankCandidatesCarryCurrentHeadingWithoutAlteringSourceText() {
+        when(sources.allNotes()).thenReturn(List.of(source(1, "API 手册", "## Topic 注册\n调用 register(fn)。")));
+        RetrievalHit found = service.search("Topic", 5, "fused", false).getFirst();
+        verify(reranker).rerank(eq("Topic"), argThat(items -> items.getFirst().title().equals("API 手册")
+                && items.getFirst().snippet().equals("小节：Topic 注册\n调用 register(fn)。")));
+        assertEquals("调用 register(fn)。", found.text());
+    }
+
+    @Test void sectionNeighborsAreFreshAndDoNotCrossHeadingOrCopyGraphRelations() {
+        String body = "## Topic\n" + "定义说明。".repeat(110) + "\n\n"
+                + "补充说明。".repeat(110) + "\n\n"
+                + "register(fn) 示例。".repeat(70) + "\n## Different\n不同主题。";
+        when(sources.allNotes()).thenReturn(List.of(source(1, "手册", body)));
+        List<TextChunker.Chunk> chunks = TextChunker.splitWithHeadings(body);
+        assertTrue(chunks.size() >= 4);
+        RetrievalHit first = hit(1, 0, chunks.getFirst().text(), "keyword", "");
+        var neighbors = service.relatedSection(first, 2);
+        assertEquals("Topic", neighbors.heading());
+        assertEquals(List.of(1), neighbors.passages().stream().map(RetrievalHit::seq).toList());
+        assertEquals(List.of("section-neighbor"), neighbors.passages().getFirst().channels());
+        assertTrue(service.relatedSection(hit(1, 0, "旧正文", "vector", ""), 2).passages().isEmpty());
+        assertTrue(service.relatedSection(hit(1, 0, chunks.getFirst().text(), "graph", "verified relation"), 2).passages().isEmpty());
+        int lastTopic = java.util.stream.IntStream.range(0, chunks.size())
+                .filter(i -> chunks.get(i).heading().equals("Topic")).max().orElseThrow();
+        var edge = service.relatedSection(hit(1, lastTopic, chunks.get(lastTopic).text(), "keyword", ""), 2);
+        assertTrue(edge.passages().stream().allMatch(h -> h.seq() < lastTopic));
+    }
+
+    @Test void batchNeighborsReadSourcesOnceAndExcludeAlreadySelectedSeeds() {
+        String body = "## Topic\n" + "定义说明。".repeat(110) + "\n\n" + "补充说明。".repeat(110);
+        when(sources.allNotes()).thenReturn(List.of(source(1, "手册", body)));
+        List<TextChunker.Chunk> chunks = TextChunker.splitWithHeadings(body);
+        List<RetrievalHit> seeds = List.of(hit(1, 0, chunks.get(0).text(), "keyword", ""),
+                hit(1, 1, chunks.get(1).text(), "keyword", ""));
+        var neighbors = service.relatedSections(seeds, 2);
+        assertTrue(neighbors.values().stream().allMatch(group -> group.passages().isEmpty()));
+        verify(sources, times(1)).allNotes();
+        verify(sources, times(1)).allFiles();
+        verify(sources, times(1)).allRefs();
     }
 
     private static WikiRetrievalService.Section section(String heading, String text) {

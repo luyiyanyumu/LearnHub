@@ -1,8 +1,11 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { categoryApi, tagApi, settingsApi, aiApi, wikiApi, modelApi } from '../api'
 import { extractPromptFromMd } from '../utils/promptFromMd'
+import { MODEL_CONFIGURATION_CHANGED_EVENT, canRemoveProfile, chatProfiles, createModelDiscoveryLoader,
+  discoveredModelSelection, embeddingProfileSpaceChanged, isEmbeddingTask, paramProfileSelection,
+  preferredDiscoveredModels, profilePurpose, profileSaveBody, profileTargetsForTask, routingTargetLabel } from '../utils/modelProfileView'
 
 const visible = defineModel({ type: Boolean, default: false })
 
@@ -47,7 +50,10 @@ const profiles = ref([])
 const presets = ref([])
 const probingId = ref('')
 const savingProfile = ref(false)
-const editor = ref({ open: false, id: '', name: '', provider: 'custom', baseUrl: '', apiKey: '', model: '', note: '', hasKey: false, keyHint: '' })
+const editor = ref({ open: false, id: '', name: '', provider: 'custom', purpose: 'chat', baseUrl: '', apiKey: '', model: '', note: '', hasKey: false, keyHint: '' })
+const chatProfileOptions = computed(() => chatProfiles(profiles.value))
+const editorActiveChat = computed(() => !!profiles.value.find(p => p.id === editor.value.id && p.active && profilePurpose(p) === 'chat'))
+const embeddingTarget = computed(() => routing.value.table.find(isEmbeddingTask)?.target || 'disabled')
 
 /**
  * 「获取模型」：按编辑器里**当前填的**地址 + 密钥，让服务自己列出有哪些模型。
@@ -59,9 +65,26 @@ const editor = ref({ open: false, id: '', name: '', provider: 'custom', baseUrl:
  * 成功时若用了修正后的地址，这里直接替用户把 Base URL 改掉并说明原因。
  */
 const discovery = ref({ loading: false, models: [], message: '', hint: '', ok: null })
+const discoveryModels = computed(() => preferredDiscoveredModels(discovery.value.models, editor.value.purpose))
+const discoveryLoader = createModelDiscoveryLoader({
+  load: input => modelApi.discoverModels({ profileId: input.profileId, baseUrl: input.baseUrl, apiKey: input.apiKey }),
+  onState: state => { discovery.value = state },
+  onResult(result, input) {
+    const e = editor.value
+    if (!e.open || (e.id || null) !== input.profileId || profilePurpose(e) !== input.purpose) return
+    if (result.ok && result.suggestedBaseUrl) e.baseUrl = result.suggestedBaseUrl
+    if (result.ok) e.model = discoveredModelSelection(result.models, input.purpose, e.model)
+  },
+})
 
 function resetDiscovery() {
-  discovery.value = { loading: false, models: [], message: '', hint: '', ok: null }
+  discoveryLoader.reset()
+}
+watch(() => editor.value.open, open => { if (!open) resetDiscovery() }, { flush: 'sync' })
+onBeforeUnmount(() => discoveryLoader.dispose())
+
+function notifyModelConfigurationChanged() {
+  window.dispatchEvent(new CustomEvent(MODEL_CONFIGURATION_CHANGED_EVENT))
 }
 
 async function discoverModels() {
@@ -70,35 +93,9 @@ async function discoverModels() {
     ElMessage.warning('先填 Base URL')
     return
   }
-  discovery.value = { ...discovery.value, loading: true, message: '', hint: '', ok: null }
-  try {
-    const r = await modelApi.discoverModels({
-      profileId: e.id || null,
-      baseUrl: e.baseUrl.trim(),
-      // 编辑已有档案时密钥框通常是空的（接口只给掩码）—— 留空即用库里那把
-      apiKey: e.apiKey.trim() || null,
-    })
-    discovery.value = {
-      loading: false,
-      ok: !!r.ok,
-      models: r.models || [],
-      message: r.message || '',
-      hint: r.hint || '',
-    }
-    if (r.ok && r.suggestedBaseUrl && r.suggestedBaseUrl !== e.baseUrl.trim()) {
-      e.baseUrl = r.suggestedBaseUrl
-    }
-    if (r.ok && r.models?.length) {
-      // 当前模型名不在列表里（或还没填）时，自动选第一个对话模型
-      const ids = r.models.map((m) => m.id)
-      if (!e.model.trim() || !ids.includes(e.model.trim())) {
-        const firstChat = r.models.find((m) => !m.embedding) || r.models[0]
-        if (!e.model.trim()) e.model = firstChat.id
-      }
-    }
-  } catch {
-    discovery.value = { loading: false, ok: false, models: [], message: '请求失败（看后端日志）', hint: '' }
-  }
+  await discoveryLoader.request({ profileId: e.id || null, baseUrl: e.baseUrl.trim(),
+    // A blank key on an existing profile means the backend uses its stored key.
+    apiKey: e.apiKey.trim() || null, purpose: profilePurpose(e) })
 }
 
 /** 编辑中的档案：云端地址 + 没有已存密钥 + 这次也没填 = 保存后调用必然 401 */
@@ -120,11 +117,9 @@ async function loadRouting() {
     profiles.value = d.profiles || []
     presets.value = d.presets || []
     // 分工表的目标就是档案列表，一起刷新，避免"档案改了、下拉还是旧的"
-    routing.value = { table: d.routing || [], targets: (d.profiles || []).map((p) => ({ id: p.id, label: p.name, model: p.model })) }
+    routing.value = { table: d.routing || [], targets: d.profiles || [] }
     // 参数页默认落在当前激活档案上；该档案被删了就回退第一个
-    if (!paramProfile.value || !profiles.value.some((pp) => pp.id === paramProfile.value)) {
-      paramProfile.value = d.activeId || profiles.value[0]?.id || ''
-    }
+    paramProfile.value = paramProfileSelection(profiles.value, paramProfile.value, d.activeId)
     loadParamOf(paramProfile.value)
   } catch (e) {
     routing.value = { table: [], targets: [] }
@@ -173,17 +168,21 @@ function openProfileEditor(p, pre) {
   resetDiscovery()
   if (p) {
     editor.value = {
-      open: true, id: p.id, name: p.name, provider: p.provider, baseUrl: p.baseUrl,
+      open: true, id: p.id, name: p.name, provider: p.provider, purpose: profilePurpose(p), baseUrl: p.baseUrl,
       apiKey: '', // **不回填密钥**：接口本来就只给掩码，回填会让用户以为可以改
       model: p.model, note: p.note || '', hasKey: p.hasKey, keyHint: p.keyHint,
     }
   } else {
     editor.value = {
-      open: true, id: '', name: pre ? pre.name : '新档案', provider: pre ? pre.provider : 'custom',
+      open: true, id: '', name: pre ? pre.name : '新档案', provider: pre ? pre.provider : 'custom', purpose: profilePurpose(pre),
       baseUrl: pre ? pre.baseUrl : '', apiKey: '', model: pre ? pre.model : '',
       note: pre ? pre.note : '', hasKey: false, keyHint: '',
     }
   }
+}
+
+function addEmbeddingProfile() {
+  openProfileEditor(null, { name: '向量嵌入', provider: 'custom', purpose: 'embedding', baseUrl: '', model: '' })
 }
 
 async function saveProfile() {
@@ -194,20 +193,19 @@ async function saveProfile() {
   }
   savingProfile.value = true
   try {
-    const body = {
-      name: e.name.trim(), provider: e.provider, baseUrl: e.baseUrl.trim(),
-      model: e.model.trim(), note: e.note ? e.note.trim() : '',
-      // 编辑时留空 = 不改密钥；新增时留空 = 不设置
-      apiKey: e.id ? (e.apiKey.trim() ? e.apiKey.trim() : '__KEEP__') : e.apiKey.trim(),
-    }
+    const previous = profiles.value.find(p => p.id === e.id)
+    const embeddingChanged = embeddingProfileSpaceChanged(previous, e, embeddingTarget.value)
+    const body = profileSaveBody(e)
     if (e.id) {
       await modelApi.updateProfile(e.id, body)
     } else {
       await modelApi.createProfile(body)
     }
     editor.value.open = false
-    ElMessage.success('已保存')
     await loadRouting()
+    notifyModelConfigurationChanged()
+    if (embeddingChanged) ElMessage.warning('嵌入配置已更新，请到知识库维护重建向量索引')
+    else ElMessage.success(profilePurpose(e) === 'embedding' ? '已保存嵌入档案，可在下方“向量嵌入”分工中选择' : '已保存')
   } catch (err) {
     /* 拦截器已提示 */
   } finally {
@@ -221,7 +219,8 @@ async function probeProfile(p) {
   try {
     const r = await modelApi.testProfile(p.id)
     if (r.ok) {
-      ElMessage.success(`${p.name}：${r.message}（${r.ms}ms）`)
+      const dimension = profilePurpose(p) === 'embedding' && r.dimension ? ` · ${r.dimension} 维` : ''
+      ElMessage.success(`${p.name}：${r.message}（${r.ms}ms${dimension}）`)
     } else {
       ElMessage.error(`${p.name} 连不上：${r.message}${r.hint ? '　→ ' + r.hint : ''}`)
     }
@@ -233,21 +232,27 @@ async function probeProfile(p) {
 }
 
 async function activateProfile(p) {
+  if (profilePurpose(p) !== 'chat') return
   try {
     await modelApi.activateProfile(p.id)
     ElMessage.success(`已把「${p.name}」设为对话默认`)
     await loadRouting()
+    notifyModelConfigurationChanged()
   } catch (e) {
     /* 拦截器已提示 */
   }
 }
 
 async function removeProfile(p) {
+  if (!canRemoveProfile(p, profiles.value)) return
   try {
+    const consequence = profilePurpose(p) === 'embedding'
+      ? '使用此档案的向量嵌入会变为未配置，关键词检索仍可用。选择其他嵌入服务或模型后，请重建向量索引。'
+      : '指向它的对话任务会回退到默认对话配置。'
     await ElMessageBox.confirm(
-      `删除档案「${p.name}」？<br><br><span style="color:#6b7280">· 指向它的任务会自动回退到默认档案，不会让任务卡死<br>· 密钥一并删除，且**不可恢复**</span>`,
+      `删除档案「${p.name}」？${consequence}密钥一并删除且不可恢复。`,
       '删除模型档案',
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消', dangerouslyUseHTMLString: true }
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
     )
   } catch {
     return
@@ -256,6 +261,7 @@ async function removeProfile(p) {
     await modelApi.removeProfile(p.id)
     ElMessage.success('已删除')
     await loadRouting()
+    notifyModelConfigurationChanged()
   } catch (e) {
     /* 拦截器已提示 */
   }
@@ -270,6 +276,7 @@ async function migrateProfiles() {
       ElMessage.info('没有可迁移的旧配置（或已经有档案了）')
     }
     await loadRouting()
+    notifyModelConfigurationChanged()
   } catch (e) {
     /* 拦截器已提示 */
   }
@@ -293,7 +300,7 @@ const paramProfileActive = computed(
 const paramProfileHint = computed(() => {
   const p = profiles.value.find((x) => x.id === paramProfile.value)
   if (!p) {
-    return '还没有档案 —— 先去「模型档案与分工」加一个'
+    return '还没有对话档案 —— 先去「模型档案与分工」加一个；嵌入档案不使用生成参数'
   }
   return `${providerLabel(p.provider)} · ${p.baseUrl} · ${p.model}` + (p.hasKey ? ` · 密钥 ${p.keyHint}` : ' · 未配置密钥')
 })
@@ -303,7 +310,7 @@ const paramTempAllowed = computed(() => param.thinking !== 'enabled')
 
 /** 把某个档案的参数读进编辑区 */
 function loadParamOf(id) {
-  const p = profiles.value.find((x) => x.id === id)
+  const p = chatProfileOptions.value.find((x) => x.id === id)
   param.value = {
     maxTokens: p?.maxTokens ?? null,
     temperature: p?.temperature ?? null,
@@ -314,8 +321,8 @@ function loadParamOf(id) {
 
 /** 保存单个参数到所选档案（空值 = 清除 = 跟随全局默认） */
 async function saveParam(key, value) {
-  if (!paramProfile.value) {
-    ElMessage.warning('先选一个模型档案')
+  if (!chatProfileOptions.value.some(p => p.id === paramProfile.value)) {
+    ElMessage.warning('先选一个对话模型档案')
     return
   }
   try {
@@ -329,10 +336,12 @@ async function saveParam(key, value) {
 }
 
 async function activateParamProfile() {
+  if (!chatProfileOptions.value.some(p => p.id === paramProfile.value)) return
   try {
     await modelApi.activateProfile(paramProfile.value)
     await loadRouting()
     ElMessage.success('已设为对话默认档案')
+    notifyModelConfigurationChanged()
   } catch (e) {
     /* 拦截器已提示 */
   }
@@ -340,7 +349,7 @@ async function activateParamProfile() {
 
 /** 用该档案真实发一次最小请求，确认地址/密钥/模型名都对 */
 async function testParamProfile() {
-  if (!paramProfile.value) {
+  if (!chatProfileOptions.value.some(p => p.id === paramProfile.value)) {
     return
   }
   paramTesting.value = true
@@ -374,6 +383,7 @@ function fieldOfTask(row) {
 }
 
 async function setTaskTarget(row, target) {
+  if (row.target === target) return
   routingBusy.value = true
   try {
     const payload = {}
@@ -382,7 +392,11 @@ async function setTaskTarget(row, target) {
     // 当时那个空 catch 把它吞了 → 界面看起来"点了没反应"（实测踩到：任务分工改不动）。
     await settingsApi.update(payload)
     await loadRouting()
-    ElMessage.success('已切换（下一次该任务生效）')
+    notifyModelConfigurationChanged()
+    if (isEmbeddingTask(row)) {
+      if (target === 'disabled') ElMessage.success('已关闭向量嵌入，关键词检索仍可用')
+      else ElMessage.warning('已切换向量嵌入，请到知识库维护重建向量索引')
+    } else ElMessage.success('已切换（下一次该任务生效）')
   } catch (e) {
     // 失败必须说出来：静默失败最难查（这次就是被静默吞掉才没人发现）
     ElMessage.error('切换失败：' + (e?.message || e))
@@ -828,7 +842,9 @@ watch(visible, (v) => {
     loadCategories()
     loadTags()
     loadSkills()
-  loadRouting()
+    loadRouting()
+  } else {
+    resetDiscovery()
   }
 }, { immediate: true })
 
@@ -1074,9 +1090,9 @@ function notifyMetaChanged() {
               <label class="lbl">模型档案</label>
               <div class="inline">
                 <el-select v-model="paramProfile" style="width: 280px" @change="loadParamOf">
-                  <el-option v-for="p in profiles" :key="p.id" :label="p.name + '（' + p.model + '）'" :value="p.id" />
+                  <el-option v-for="p in chatProfileOptions" :key="p.id" :label="p.name + '（' + p.model + '）'" :value="p.id" />
                 </el-select>
-                <el-button size="small" :loading="paramTesting" @click="testParamProfile">测试连接</el-button>
+                <el-button size="small" :loading="paramTesting" :disabled="!paramProfile" @click="testParamProfile">测试连接</el-button>
                 <el-tag v-if="paramProfileActive" size="small" type="success" effect="plain">当前生效</el-tag>
                 <el-button v-else size="small" :disabled="!paramProfile" @click="activateParamProfile">设为生效</el-button>
               </div>
@@ -1084,7 +1100,7 @@ function notifyMetaChanged() {
             </div>
           </section>
 
-          <section class="sec">
+          <section v-if="paramProfile" class="sec">
             <h4 class="sec-title">生成参数</h4>
             <p class="hint net-hint">
               留空 = <b>跟随全局默认</b>；改完立即保存到该档案，不需要点下面的「保存」。
@@ -1164,13 +1180,14 @@ function notifyMetaChanged() {
             <h4 class="sec-title">模型配置档案</h4>
             <p class="hint net-hint">
               每个档案是一套「服务商 + 地址 + 密钥 + 模型」组合，<b>可以加很多个</b>：
-              云端强模型做判断类任务、本地模型做批量摘要，互不影响。
-              点「启用」即把该档案设为对话默认；各任务具体用哪个，在下面的「模型分工」里逐项选。
+              对话档案用于回答与后台生成任务，嵌入档案用于把资料转换成检索向量。
+              点对话档案的「启用」可设为对话默认；各任务具体用哪个，在下面的「模型分工」里逐项选。
             </p>
 
             <div v-for="p in profiles" :key="p.id" class="profile-row" :class="{ 'profile-active': p.active }">
               <div class="profile-main">
                 <b class="profile-name">{{ p.name }}</b>
+                <el-tag size="small" effect="plain" :type="profilePurpose(p) === 'embedding' ? 'success' : 'info'">{{ profilePurpose(p) === 'embedding' ? '向量嵌入' : '对话' }}</el-tag>
                 <span v-if="p.active" class="badge badge-ok">当前生效</span>
                 <span
                   v-if="missingKey(p)"
@@ -1185,9 +1202,9 @@ function notifyMetaChanged() {
               </div>
               <div class="profile-acts">
                 <el-button size="small" @click="openProfileEditor(p)">编辑</el-button>
-                <el-button size="small" :loading="probingId === p.id" @click="probeProfile(p)">测试</el-button>
-                <el-button size="small" :disabled="p.active" @click="activateProfile(p)">启用</el-button>
-                <el-button size="small" :disabled="profiles.length <= 1" @click="removeProfile(p)">删除</el-button>
+                <el-button size="small" :loading="probingId === p.id" @click="probeProfile(p)">测试连接</el-button>
+                <el-button v-if="profilePurpose(p) === 'chat'" size="small" :disabled="p.active" @click="activateProfile(p)">启用</el-button>
+                <el-button size="small" :disabled="!canRemoveProfile(p, profiles)" @click="removeProfile(p)">删除</el-button>
               </div>
             </div>
             <p v-if="!profiles.length" class="hint">
@@ -1195,6 +1212,7 @@ function notifyMetaChanged() {
             </p>
 
             <div class="preset-chips">
+              <button type="button" class="preset-chip" @click="addEmbeddingProfile">＋嵌入档案</button>
               <button v-for="pre in presets" :key="pre.provider + pre.name" type="button" class="preset-chip"
                       @click="openProfileEditor(null, pre)">
                 ＋{{ pre.name }}
@@ -1211,6 +1229,15 @@ function notifyMetaChanged() {
             <div class="form-grid">
               <label class="fl">名称</label>
               <el-input v-model="editor.name" placeholder="如：DeepSeek 云端 / 本地 Ollama" />
+              <label class="fl">用途</label>
+              <div>
+                <el-radio-group v-model="editor.purpose" size="small" @change="resetDiscovery">
+                  <el-radio-button value="chat">对话与生成</el-radio-button>
+                  <el-radio-button value="embedding" :disabled="editorActiveChat">向量嵌入</el-radio-button>
+                </el-radio-group>
+                <p v-if="editorActiveChat" class="hint">当前对话默认档案不能改为嵌入用途，请先启用另一个对话档案。</p>
+                <p v-else-if="editor.purpose === 'embedding'" class="hint">使用服务的嵌入接口，不参与对话。切换已使用的嵌入服务或模型后需要重建索引。</p>
+              </div>
               <label class="fl">服务商</label>
               <el-select v-model="editor.provider" style="width: 100%">
                 <el-option v-for="pre in presets" :key="pre.provider" :label="pre.name" :value="pre.provider" />
@@ -1229,6 +1256,7 @@ function notifyMetaChanged() {
               <el-input
                 v-model="editor.apiKey"
                 :placeholder="editor.hasKey ? '已配置（' + editor.keyHint + '），留空用原密钥' : '本地服务随便填一个非空值即可；中转站填它给你的密钥'"
+                @input="resetDiscovery"
               />
               <template v-if="editorMissingKey">
                 <span />
@@ -1249,13 +1277,13 @@ function notifyMetaChanged() {
                 placeholder="选择模型，或直接输入模型名"
               >
                 <el-option
-                  v-for="m in discovery.models"
+                  v-for="m in discoveryModels"
                   :key="m.id"
                   :label="m.embedding ? m.id + '（嵌入模型）' : m.id"
                   :value="m.id"
                 />
               </el-select>
-              <el-input v-else v-model="editor.model" placeholder="如 deepseek-flash / qwen3:8b；点上面的「获取模型」可自动列出" />
+              <el-input v-else v-model="editor.model" :placeholder="editor.purpose === 'embedding' ? '填写服务支持的嵌入模型名，或点上面的「获取模型」' : '填写对话模型名，或点上面的「获取模型」'" />
               <template v-if="discovery.message">
                 <span />
                 <p class="model-msg" :class="{ bad: !discovery.ok }">
@@ -1277,7 +1305,7 @@ function notifyMetaChanged() {
               <el-button size="small" @click="editor.open = false">取消</el-button>
               <span class="hint">
                 「获取模型」按当前填的地址与密钥列出服务端有哪些模型，并顺手修正「缺 /v1」「容器里写了 localhost」这类地址错误；
-                保存后还可点列表里的「测试」真实发一次请求
+                列表按用途优先展示，未列出的模型也可手填；保存后点「测试连接」会按用途发一次请求，可能产生服务费用。
               </span>
             </div>
           </section>
@@ -1290,24 +1318,26 @@ function notifyMetaChanged() {
               批量摘要类任务（主题 wiki、检索词扩展）优先本地档案——免费且够用。
               <b>检索重排是例外</b>：它要读懂"问题与候选的关系"，97 条用例实测本地 8B 几乎无增益
               （MRR 0.759/0.743，≈不重排），换云端档案是 0.902——所以默认指向当前生效档案。
-              嵌入向量固定用本地（换模型必须重建索引，所以不走这里）。
+              <b>向量嵌入</b>只选嵌入档案，也可设为未配置以使用关键词检索。更换嵌入服务或模型后需手动重建索引。
               <b>对话的模型不在这里选</b>：在智能体界面按会话选 —— 每个会话可固定一个档案，或选「默认」用当前生效档案。
             </p>
             <div v-for="row in routing.table" :key="row.task" class="route-row">
               <div class="route-main">
                 <b class="route-label">{{ row.label }}</b>
                 <span class="hint">{{ row.why }}</span>
+                <span v-if="isEmbeddingTask(row)" class="hint">{{ row.configured ? ('当前嵌入模型：' + (row.effectiveModel || row.model)) : '未配置嵌入模型，关键词检索仍可用' }}{{ row.reason ? ' · ' + row.reason : '' }}</span>
               </div>
               <el-select
-                :model-value="row.target"
+                :model-value="profileTargetsForTask(row, profiles).some(t => t.id === row.target) ? row.target : ''"
                 size="small"
-                :disabled="routingBusy"
+                :placeholder="row.targetLabel || '选择档案'"
+                :disabled="routingBusy || !profileTargetsForTask(row, profiles).length"
                 @change="(v) => setTaskTarget(row, v)"
               >
                 <el-option
-                  v-for="t in routing.targets"
+                  v-for="t in profileTargetsForTask(row, profiles)"
                   :key="t.id"
-                  :label="t.label + '（' + t.model + '）'"
+                  :label="routingTargetLabel(t)"
                   :value="t.id"
                 />
               </el-select>

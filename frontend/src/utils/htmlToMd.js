@@ -86,11 +86,12 @@ function getService() {
   t.use(gfm)
   t.keep(KEEP_TAGS)
 
-  // 管道表无法表示尺寸、合并单元格或单元格内换行/多个块，保留这些表格的 HTML。
+  // 管道表无法表示尺寸、合并单元格、单元格内换行/多个块，或不转义的公式竖线，保留这些表格的 HTML。
   // addRule 内部是 unshift，此规则会排在 gfm 的 table 规则之前，先命中。
   t.addRule('sizedTable', {
     filter: (node) => node.nodeName === 'TABLE' && (
       hasExplicitSize(node)
+      || node.querySelector('[data-lh-math-token]')
       || Array.from(node.querySelectorAll('th,td')).some((cell) =>
         Number(cell.getAttribute('colspan')) > 1 || Number(cell.getAttribute('rowspan')) > 1
         || cell.querySelector('br,ul,ol,pre,blockquote,table')
@@ -159,6 +160,17 @@ function getService() {
     replacement: (_content, node) => `\n\n${metadataBlockHtml(node)}\n\n`,
   })
 
+  // Math is restored after Turndown and whitespace cleanup. Passing TeX through
+  // text nodes would double every backslash and escape subscripts; returning it
+  // directly here would still let the final cleanup change multiline formulas.
+  t.addRule('mathPlaceholder', {
+    filter: (node) => node.nodeType === 1 && node.hasAttribute('data-lh-math-token'),
+    replacement: (_content, node) => {
+      const token = node.getAttribute('data-lh-math-token')
+      return node.nodeName === 'DIV' ? `\n\n${token}\n\n` : token
+    },
+  })
+
   service = t
   return t
 }
@@ -213,34 +225,63 @@ function normalize(html) {
     d.replaceWith(pre)
   })
 
-  // 3) 公式
-  // 块编辑器的数学节点（见 mathNodes.js）：视觉由节点视图渲染，getHTML() 序列化出来只有一层
-  // 带 data-tex 的空壳，所以直接按属性还原成 $…$ / $$…$$（先块级、再行内，避免嵌套时顺序错）。
-  box.querySelectorAll('.math-block[data-tex]').forEach((n) => {
-    n.replaceWith(document.createTextNode(`\n\n$$\n${(n.getAttribute('data-tex') || '').trim()}\n$$\n\n`))
-  })
-  box.querySelectorAll('.math-inline[data-tex]').forEach((n) => {
-    n.replaceWith(document.createTextNode(`$${n.getAttribute('data-tex') || ''}$`))
-  })
-  // md-editor 未装 katex 时保留原始 TeX 源码，直接还原成 $…$
-  box.querySelectorAll('.md-editor-katex-inline').forEach((n) => {
-    n.replaceWith(document.createTextNode(`$${n.textContent}$`))
-  })
-  box.querySelectorAll('.md-editor-katex-block').forEach((n) => {
-    n.replaceWith(document.createTextNode(`\n\n$$\n${n.textContent.trim()}\n$$\n\n`))
-  })
-  // 装了 katex 的情况：从 annotation 取回 TeX 源码
-  box.querySelectorAll('.katex-display').forEach((n) => {
-    const tex = n.querySelector('annotation[encoding="application/x-tex"]')?.textContent
-    if (tex) n.replaceWith(document.createTextNode(`\n\n$$\n${tex}\n$$\n\n`))
-  })
-  box.querySelectorAll('.katex').forEach((n) => {
-    const tex = n.querySelector('annotation[encoding="application/x-tex"]')?.textContent
-    if (tex) n.replaceWith(document.createTextNode(`$${tex}$`))
+  // 3) Protect atomic math from both Markdown escaping and whitespace collapse.
+  // Outer wrappers are visited first so a KaTeX annotation is extracted once.
+  // Keep an HTML version too: retained metadata paragraphs / complex tables do
+  // not parse $ delimiters in their children, and need real math nodes instead.
+  const mathFragments = []
+  let mathPrefix = 'LEARNHUBMATHTOKEN'
+  while (box.innerHTML.includes(mathPrefix)) mathPrefix += 'X'
+  box.querySelectorAll([
+    '.math-block[data-tex]', '.math-inline[data-tex]',
+    '.md-editor-katex-inline', '.md-editor-katex-block',
+    '.katex-display', '.katex',
+  ].join(',')).forEach((node) => {
+    if (!box.contains(node) || node.closest('pre,code')) return
+    const annotation = node.querySelector('annotation[encoding="application/x-tex"]')
+    const isMdEditor = node.classList.contains('md-editor-katex-inline')
+      || node.classList.contains('md-editor-katex-block')
+    const tex = node.hasAttribute('data-tex') ? node.getAttribute('data-tex')
+      : annotation ? annotation.textContent : isMdEditor ? node.textContent : null
+    if (tex == null) return // visual KaTeX without source cannot be reconstructed
+    const display = node.classList.contains('math-block')
+      || node.classList.contains('md-editor-katex-block') || node.classList.contains('katex-display')
+    const token = `${mathPrefix}${mathFragments.length}END`
+    const placeholder = document.createElement(display ? 'div' : 'span')
+    placeholder.setAttribute('data-lh-math-token', token)
+    placeholder.textContent = token // empty math shells would hit Turndown's blank rule
+    const preserved = document.createElement(display ? 'div' : 'span')
+    preserved.className = display ? 'math-block' : 'math-inline'
+    preserved.setAttribute('data-tex', tex)
+    preserved.innerHTML = node.classList.contains('katex') || node.classList.contains('katex-display')
+      ? node.outerHTML : node.innerHTML
+    mathFragments.push({
+      token,
+      placeholderHtml: placeholder.outerHTML,
+      // Blank lines inside an HTML attribute/annotation would terminate a
+      // Markdown raw-HTML block. Entities retain the exact TeX whitespace while
+      // keeping the serialized HTML on one physical line.
+      html: preserved.outerHTML.replace(/\r/g, '&#13;').replace(/\n/g, '&#10;').replace(/\t/g, '&#9;'),
+      markdown: display ? `$$\n${tex}\n$$` : `$${tex}$`,
+    })
+    node.replaceWith(placeholder)
   })
 
   // 4) 表格/列表里 md-editor 可能塞的额外空行节点，清掉纯空白文本节点
-  return box.innerHTML
+  return { html: box.innerHTML, mathFragments }
+}
+
+function restoreMath(markdown, fragments) {
+  let restored = markdown
+  // Raw-HTML rules keep the complete placeholder element. Restore those first
+  // as valid math HTML; only bare tokens emitted by mathPlaceholder become TeX.
+  for (const fragment of fragments) {
+    restored = restored.replaceAll(fragment.placeholderHtml, () => fragment.html)
+  }
+  for (const fragment of fragments) {
+    restored = restored.replaceAll(fragment.token, () => fragment.markdown)
+  }
+  return restored
 }
 
 /** 预览区里是否存在无法反推的内容（mermaid 图、内嵌 HTML 组件等） */
@@ -296,7 +337,8 @@ function splitByFence(md) {
  * @returns {string} Markdown
  */
 export function previewHtmlToMd(html) {
-  const md = getService().turndown(normalize(html))
+  const normalized = normalize(html)
+  const md = getService().turndown(normalized.html)
   const clean = (t) =>
     t
       .replace(/\u00a0/g, ' ') // &nbsp; → 普通空格
@@ -308,10 +350,11 @@ export function previewHtmlToMd(html) {
       .replace(/^(\s*(?:[-*+]|\d+\.)\s+\[[ xX]\])\s{2,}/gm, '$1 ')
       .replace(/^(\s*)([-*+]|\d+\.)\s{2,}/gm, '$1$2 ') // 其它列表项多余缩进
       .replace(/\n{3,}/g, '\n\n') // 连续空行压成一个
-  return splitByFence(md)
+  const cleaned = splitByFence(md)
     .map((p) => (p.code ? p.text : clean(p.text)))
     .join('\n')
     .trim()
+  return restoreMath(cleaned, normalized.mathFragments)
 }
 
 /**

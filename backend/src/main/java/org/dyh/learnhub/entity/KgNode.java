@@ -43,8 +43,11 @@ public class KgNode {
     /** 提到它的素材条数 */
     private Integer sourceCount;
 
-    /** bge-m3 向量（float32 小端），实体级相似度/消歧用；未计算时为 null */
+    /** 实体文本向量（float32 小端）；未计算时为 null */
     private byte[] embedding;
+
+    /** 与 embedding 配对的空间标识，历史 NULL 不与当前查询向量混算。 */
+    private String embeddingSpace;
 
     private LocalDateTime updatedAt;
 

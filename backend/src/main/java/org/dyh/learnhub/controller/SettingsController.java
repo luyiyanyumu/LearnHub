@@ -1,9 +1,10 @@
 package org.dyh.learnhub.controller;
 
-import lombok.RequiredArgsConstructor;
 import org.dyh.learnhub.ai.ModelRouting;
 import org.dyh.learnhub.common.Result;
 import org.dyh.learnhub.service.SettingsService;
+import org.dyh.learnhub.service.ModelProfileService;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -26,10 +27,20 @@ import java.util.Map;
  */
 @RestController
 @RequestMapping("/api/settings")
-@RequiredArgsConstructor
 public class SettingsController {
 
     private final SettingsService settingsService;
+    private final ModelProfileService profiles;
+
+    public SettingsController(SettingsService settingsService) {
+        this(settingsService, null);
+    }
+
+    @Autowired
+    public SettingsController(SettingsService settingsService, ModelProfileService profiles) {
+        this.settingsService = settingsService;
+        this.profiles = profiles;
+    }
 
     @GetMapping
     public Result<Map<String, Object>> get() {
@@ -143,6 +154,21 @@ public class SettingsController {
             String key = FIELD_MAPPING.get(e.getKey());
             if (key == null) {
                 return Result.error(400, "不支持的设置项: " + e.getKey());
+            }
+            if (profiles != null && e.getValue() != null && !e.getValue().isBlank()) {
+                String target = e.getValue().trim();
+                try {
+                    if (SettingsService.modelForTaskKey(ModelRouting.TASK_EMBED).equals(key)) {
+                        if (!ModelRouting.EMBED_DISABLED.equals(target) && !ModelRouting.EMBED_LEGACY.equals(target)) {
+                            profiles.embeddingProfile(target);
+                        }
+                    } else if ("ai.active_profile".equals(key) || (key.startsWith("ai.model_for_")
+                            && !List.of("main", "local", "legacy").contains(target))) {
+                        profiles.requireChatProfile(target);
+                    }
+                } catch (IllegalArgumentException ex) {
+                    return Result.error(400, ex.getMessage());
+                }
             }
             translated.put(key, e.getValue());
         }

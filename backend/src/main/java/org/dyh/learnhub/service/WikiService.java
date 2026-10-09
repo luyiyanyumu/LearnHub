@@ -666,9 +666,9 @@ public class WikiService {
     private final Map<String, Job> jobs = new ConcurrentHashMap<>();
 
     /**
-     * 可选目标列表 = **全部模型档案**。
+     * 可选目标列表 = **对话模型档案**（嵌入档案不能生成文本）。
      * <p>2026-09 改造：原来只有"主模型 + 一个本地目标"两个位置；现在档案可以有很多个，
-     * 所以 wiki 页上的"生成模型"下拉直接列全部档案（与设置里的模型分工用同一份数据）。
+     * 所以 wiki 页上的"生成模型"下拉列出对话档案（与设置里的模型分工用同一份数据）。
      */
     public List<Target> targets() {
         List<Target> list = new ArrayList<>();

@@ -9,6 +9,8 @@ import org.dyh.learnhub.entity.KbIndexState;
 import org.dyh.learnhub.mapper.KbChunkMapper;
 import org.dyh.learnhub.mapper.KbIndexStateMapper;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -55,6 +57,10 @@ public class VectorIndexService {
     private final org.dyh.learnhub.service.vector.MysqlVectorStore mysqlStore;
     /** ANN 后端：按 kb.vector_backend 切换，连不上时**自动降级**回上面的全扫 */
     private final org.dyh.learnhub.service.vector.MilvusVectorStore milvusStore;
+    private final PlatformTransactionManager transactionManager;
+    /** 重启或同步失败后先读 MySQL；完整同步成功才信任指定空间和服务的 ANN。 */
+    private record AnnReadiness(String space, String uri) { }
+    private volatile AnnReadiness annReadiness;
 
     /**
      * 向量后端开关：空/`mysql` = 全量扫描（默认）；`milvus` = ANN。
@@ -69,10 +75,21 @@ public class VectorIndexService {
      * 语义检索是"锦上添花"的一路，不能因为它挂了就让整个对话失败。
      */
     private org.dyh.learnhub.service.vector.VectorStore store() {
+        return store(embedder.snapshot());
+    }
+
+    private boolean annReadyFor(EmbeddingClient.Snapshot target) {
+        AnnReadiness ready = annReadiness;
+        return target != null && target.configured() && ready != null
+                && ready.space().equals(target.spaceFingerprint())
+                && java.util.Objects.equals(ready.uri(), milvusStore.effectiveUri());
+    }
+
+    private org.dyh.learnhub.service.vector.VectorStore store(EmbeddingClient.Snapshot target) {
         if (!"milvus".equalsIgnoreCase(String.valueOf(settingsService.effective(KEY_VECTOR_BACKEND)).trim())) {
             return mysqlStore;
         }
-        return milvusStore.healthy() ? milvusStore : mysqlStore;
+        return annReadyFor(target) && milvusStore.healthy() ? milvusStore : mysqlStore;
     }
 
     /** 当前配置的后端名（不问健康，用于状态展示与写入路径） */
@@ -96,13 +113,19 @@ public class VectorIndexService {
                 ? "mysql" : settingsService.effective(KEY_VECTOR_BACKEND));
         o.put("active", configuredBackend());
         o.put("mysql", mysqlStore.stats());
-        long mysqlChunks = mysqlStore.countAll();
+        EmbeddingClient.Snapshot target = embedder.snapshot();
+        List<KbChunk> stored = mapper.loadAll();
+        long mysqlChunks = stored.stream().filter(c -> target.configured()
+                && target.spaceFingerprint().equals(c.getEmbeddingSpace())).count();
         o.put("mysqlChunks", mysqlChunks);
+        o.put("storedChunks", stored.size());
+        o.put("embeddingConfigured", target.configured());
+        o.put("annReady", annReadyFor(target));
         Map<String, Object> mv = new LinkedHashMap<>();
         mv.put("uri", milvusStore.effectiveUri());
         boolean healthy = milvusStore.healthy();
         mv.put("healthy", healthy);
-        long vecCount = healthy ? milvusStore.vectorCount() : -1;
+        long vecCount = healthy && target.configured() ? milvusStore.vectorCount(target.spaceFingerprint()) : -1;
         mv.put("vectors", vecCount);
         if (!milvusStore.lastError().isBlank()) {
             mv.put("lastError", milvusStore.lastError());
@@ -112,7 +135,11 @@ public class VectorIndexService {
         // （第一版写成 `vecCount < 0 || 相等`，于是"集合还不存在"被显示成"一致"—— 正好是相反的意思。）
         Boolean consistent = !healthy ? null : (vecCount >= 0 && vecCount == mysqlChunks);
         o.put("consistent", consistent);
-        o.put("hint", !healthy ? "Milvus 不可达：检索会自动降级为 MySQL 全扫"
+        o.put("hint", !target.configured() ? "未配置嵌入模型，关键词检索仍可用"
+                : stored.size() > mysqlChunks ? "存在旧嵌入空间的向量，请先重建索引再同步"
+                : "milvus".equalsIgnoreCase(String.valueOf(settingsService.effective(KEY_VECTOR_BACKEND)).trim())
+                  && !annReadyFor(target) ? "当前使用 MySQL 扫描；完整同步到 Milvus 或全量重建成功后启用 ANN"
+                : !healthy ? "Milvus 不可达：检索会自动降级为 MySQL 全扫"
                 : Boolean.TRUE.equals(consistent) ? "两个后端向量数一致"
                 : "Milvus 与 MySQL 向量数不一致（Milvus=" + vecCount + "，MySQL=" + mysqlChunks
                   + "）：POST /api/kb/vector/sync 补齐（向量已在 MySQL，无需重新嵌入）");
@@ -125,35 +152,49 @@ public class VectorIndexService {
      *
      * @return {sources, chunks, ms}
      */
-    public Map<String, Object> syncToMilvus() {
+    public synchronized Map<String, Object> syncToMilvus() {
         long t0 = System.currentTimeMillis();
-        String model = embedder.model();
+        EmbeddingClient.Snapshot target = requireTarget();
+        String space = target.spaceFingerprint();
+        String annUri = milvusStore.effectiveUri();
         List<KbChunk> all = mapper.loadAll();
         Map<String, List<org.dyh.learnhub.service.vector.VectorStore.VecItem>> bySource = new LinkedHashMap<>();
         int dim = 0;
         for (KbChunk c : all) {
-            if (c.getVec() == null || (model != null && c.getModel() != null && !model.equals(c.getModel()))) {
+            if (c.getVec() == null || !space.equals(c.getEmbeddingSpace())) {
                 continue;
             }
             float[] v = EmbeddingClient.toVector(c.getVec());
+            validateVector(v);
+            if (c.getVec().length != v.length * 4 || c.getDim() == null || c.getDim() != v.length
+                    || (dim != 0 && dim != v.length)) throw new IllegalStateException("索引向量维度不一致，需要重建索引");
             dim = v.length;
             bySource.computeIfAbsent(c.getSourceType() + "#" + c.getSourceId(), k -> new ArrayList<>())
                     .add(new org.dyh.learnhub.service.vector.VectorStore.VecItem(
                             c.getId(), c.getSeq() == null ? 0 : c.getSeq(), v));
         }
+        if (!all.isEmpty() && bySource.isEmpty())
+            throw new IllegalStateException("没有当前嵌入空间的向量，请先重建索引");
+        annReadiness = null;
+        assertCurrent(target);
+        milvusStore.clear(space);
         if (dim > 0) {
-            milvusStore.ensure(model, dim);
+            milvusStore.ensure(space, dim);
         }
         int chunks = 0;
         for (Map.Entry<String, List<org.dyh.learnhub.service.vector.VectorStore.VecItem>> e : bySource.entrySet()) {
             int cut = e.getKey().indexOf('#');
             String type = e.getKey().substring(0, cut);
             Long id = Long.parseLong(e.getKey().substring(cut + 1));
-            milvusStore.replaceSource(type, id, e.getValue());
+            milvusStore.replaceSource(space, type, id, e.getValue());
             chunks += e.getValue().size();
         }
         Map<String, Object> o = new LinkedHashMap<>();
-        o.put("model", model);
+        assertCurrent(target);
+        assertAnnUri(annUri);
+        annReadiness = new AnnReadiness(space, annUri);
+        o.put("model", target.model());
+        o.put("embeddingSpace", space);
         o.put("sources", bySource.size());
         o.put("chunks", chunks);
         o.put("ms", System.currentTimeMillis() - t0);
@@ -248,113 +289,166 @@ public class VectorIndexService {
         return o;
     }
 
-    /** 全量重建：清空后按来源逐条分块 + 嵌入 + 落库（进度按来源数推进） */
-    private void rebuild(Job job) {
+    /** 先准备全部向量，再在一个事务内替换，失败时旧索引完整保留。 */
+    private synchronized void rebuild(Job job) {
         try {
-            job.stage = "收集素材";
+            EmbeddingClient.Snapshot target = requireTarget();
+            boolean contextual = contextual();
             List<Source> sources = collectSources();
             job.total = sources.size();
-            if (sources.isEmpty()) {
-                job.stage = "没有可索引的内容";
-                job.status = "done";
-                job.finishedAt = System.currentTimeMillis();
-                return;
-            }
-            job.stage = "清空旧索引";
-            mapper.delete(Wrappers.<KbChunk>lambdaQuery());
-            stateMapper.delete(Wrappers.<KbIndexState>lambdaQuery());
-            invalidateCache();
-            // ANN 后端也要清：否则重建后旧向量还在，检索会命中"查不到正文"的 id
-            try {
-                storeForWrite().clear();
-            } catch (Exception e) {
-                log.warn("清空向量后端失败（{}）：{}", configuredBackend(), e.toString());
-            }
-
-            job.stage = "分块并嵌入";
-            String model = embedder.model();
-            int inserted = 0;
-            for (Source s : sources) {
-                inserted += indexSource(s, model);
-                job.chunks = inserted;
-                job.chars += s.text().length();
+            List<PreparedSource> prepared = new ArrayList<>();
+            job.stage = "分块并嵌入（旧索引保留）";
+            for (Source source : sources) {
+                prepared.add(prepareSource(source, target, contextual));
+                job.chunks += prepared.get(prepared.size() - 1).rows().size();
+                job.chars += source.text().length();
                 job.done++;
             }
-            invalidateCache();
-            job.stage = "完成";
+            validatePrepared(prepared);
+            assertCurrent(target, contextual);
+            job.stage = "替换索引";
+            annReadiness = null;
+            try {
+                new TransactionTemplate(transactionManager).executeWithoutResult(tx -> {
+                    assertCurrent(target, contextual);
+                    mapper.delete(Wrappers.<KbChunk>lambdaQuery());
+                    stateMapper.delete(Wrappers.<KbIndexState>lambdaQuery());
+                    for (PreparedSource source : prepared) persistSource(source, target, contextual);
+                    assertCurrent(target, contextual);
+                });
+            } finally {
+                invalidateCache();
+            }
+            publishPrepared(prepared, target, true, null);
+            job.stage = sources.isEmpty() ? "没有可索引的内容" : "完成";
             job.status = "done";
-            job.finishedAt = System.currentTimeMillis();
-            log.info("语义索引重建完成：{} 个来源 → {} 块，{} 字，模型 {}，耗时 {} ms",
-                    sources.size(), inserted, job.chars, model, job.finishedAt - job.startedAt);
         } catch (Exception e) {
-            log.warn("语义索引重建失败：{}", e.toString());
+            log.warn("语义索引重建失败，保留已提交索引：{}", e.toString());
             job.status = "failed";
             job.error = e.getMessage() == null ? e.toString() : e.getMessage();
             job.stage = "失败";
+        } finally {
             job.finishedAt = System.currentTimeMillis();
         }
     }
 
-    /**
-     * 索引一个来源：切块（**带小节归属**）→ 前置「标题 · 小节」再嵌入 → 落库 → 记指纹。
-     *
-     * @return 写入的块数
-     */
-    private int indexSource(Source s, String model) {
-        mapper.deleteBySource(s.type(), s.id());
-        List<TextChunker.Chunk> chunks = TextChunker.splitWithHeadings(s.text());
-        if (chunks.isEmpty()) {
-            stateMapper.delete(Wrappers.<KbIndexState>lambdaQuery()
-                    .eq(KbIndexState::getSourceType, s.type())
-                    .eq(KbIndexState::getSourceId, s.id()));
-            return 0;
-        }
-        // 嵌入文本 = 上下文 + 正文。注意 chunk_text 存的仍是**正文**（含小节标记会让引用看起来脏），
-        // 上下文只影响向量 —— 这样既不丢检索效果，也不污染给模型看的片段。
-        // 这个开关存在的意义是**做 A/B 实测**："上下文嵌入到底有没有用"不能靠直觉，
-        // 关掉重建一次、跑同一组评测用例，两个 recall@k 一比就知道。
-        boolean contextual = !"0".equals(settingsService.effective(SETTING_CONTEXTUAL_EMBED));
-        List<String> embedInputs = new ArrayList<>(chunks.size());
-        for (TextChunker.Chunk c : chunks) {
-            embedInputs.add(contextual
-                    ? TextChunker.embedText(s.title(), c.heading(), c.text())
-                    : c.text());
-        }
-        List<float[]> vecs = embedder.embedAll(embedInputs);   // 内部按 16 条一批
-        List<org.dyh.learnhub.service.vector.VectorStore.VecItem> items = new ArrayList<>(chunks.size());
+    private record PreparedSource(Source source, List<KbChunk> rows) { }
+
+    private PreparedSource prepareSource(Source source, EmbeddingClient.Snapshot target, boolean contextual) {
+        List<TextChunker.Chunk> chunks = TextChunker.splitWithHeadings(source.text());
+        if (chunks.isEmpty()) return new PreparedSource(source, List.of());
+        List<String> inputs = chunks.stream().map(c -> contextual
+                ? TextChunker.embedText(source.title(), c.heading(), c.text()) : c.text()).toList();
+        List<float[]> vectors = embedder.embedAll(target, inputs);
+        if (vectors == null || vectors.size() != chunks.size())
+            throw new IllegalStateException("嵌入服务返回的向量数量不匹配");
+        List<KbChunk> rows = new ArrayList<>(chunks.size());
         for (int i = 0; i < chunks.size(); i++) {
-            TextChunker.Chunk c = chunks.get(i);
+            float[] vector = vectors.get(i);
+            validateVector(vector);
+            TextChunker.Chunk chunk = chunks.get(i);
             KbChunk row = new KbChunk();
-            row.setSourceType(s.type());
-            row.setSourceId(s.id());
+            row.setSourceType(source.type());
+            row.setSourceId(source.id());
             row.setSeq(i);
-            row.setTitle(clip(s.title(), 250));
-            row.setCategory(clip(s.category(), 250));
-            row.setHeading(clip(c.heading(), 250));
-            row.setChunkText(c.text());
-            row.setCharLen(c.text().length());
-            row.setVec(EmbeddingClient.toBytes(vecs.get(i)));
-            row.setDim(vecs.get(i).length);
-            row.setModel(model);
-            row.setUpdatedAt(LocalDateTime.now());
+            row.setTitle(clip(source.title(), 250));
+            row.setCategory(clip(source.category(), 250));
+            row.setHeading(clip(chunk.heading(), 250));
+            row.setChunkText(chunk.text());
+            row.setCharLen(chunk.text().length());
+            row.setVec(EmbeddingClient.toBytes(vector));
+            row.setDim(vector.length);
+            row.setModel(clip(target.model(), 64));
+            row.setEmbeddingSpace(target.spaceFingerprint());
             row.setCreatedAt(LocalDateTime.now());
-            mapper.insert(row);
-            // MySQL 是权威存储（向量也在里面），块 id 由插入回填 —— ANN 后端用同一个 id 建索引，
-            // 检索回来才不用再维护一张 id 映射表。
-            items.add(new org.dyh.learnhub.service.vector.VectorStore.VecItem(
-                    row.getId(), i, vecs.get(i)));
+            row.setUpdatedAt(row.getCreatedAt());
+            rows.add(row);
         }
-        // 同步到向量后端：MySQL 实现只是作废缓存；Milvus 实现会先删该来源再插入。
-        // 写失败**不阻断**索引（MySQL 那份已经落库），只记日志 —— 否则 Milvus 一抖，
-        // 连"把笔记索引起来"这件事都做不成。漂移由 vectorBackendStatus() 暴露。
+        return new PreparedSource(source, rows);
+    }
+
+    private static void validateVector(float[] vector) {
+        if (vector == null || vector.length == 0 || vector.length > 16383)
+            throw new IllegalStateException("嵌入向量为空或超出存储限制");
+        double norm = 0;
+        for (float value : vector) {
+            if (!Float.isFinite(value)) throw new IllegalStateException("嵌入向量包含无效值");
+            norm += (double) value * value;
+        }
+        if (norm == 0) throw new IllegalStateException("嵌入服务返回零向量");
+    }
+
+    private static void validatePrepared(List<PreparedSource> prepared) {
+        int dimension = 0;
+        for (PreparedSource source : prepared) for (KbChunk row : source.rows()) {
+            if (dimension != 0 && dimension != row.getDim())
+                throw new IllegalStateException("同一嵌入空间的向量维度不一致");
+            dimension = row.getDim();
+        }
+    }
+
+    private EmbeddingClient.Snapshot requireTarget() {
+        EmbeddingClient.Snapshot target = embedder.snapshot();
+        if (target == null || !target.configured())
+            throw new IllegalStateException(target == null ? "未配置嵌入模型，关键词检索仍可用" : target.reason());
+        return target;
+    }
+
+    private boolean contextual() {
+        return !"0".equals(settingsService.effective(SETTING_CONTEXTUAL_EMBED));
+    }
+
+    private void assertCurrent(EmbeddingClient.Snapshot target) {
+        EmbeddingClient.Snapshot current = embedder.snapshot();
+        if (current == null || !current.configured()
+                || !target.spaceFingerprint().equals(current.spaceFingerprint()))
+            throw new IllegalStateException("嵌入模型配置已变更，旧任务已停止，请重新构建索引");
+    }
+
+    private void assertCurrent(EmbeddingClient.Snapshot target, boolean contextual) {
+        assertCurrent(target);
+        if (contextual != contextual())
+            throw new IllegalStateException("上下文嵌入设置已变更，请重新构建索引");
+    }
+
+    /** 仅在调用方的数据库事务内执行。 */
+    private void persistSource(PreparedSource prepared, EmbeddingClient.Snapshot target, boolean contextual) {
+        Source source = prepared.source();
+        mapper.deleteBySource(source.type(), source.id());
+        for (KbChunk row : prepared.rows()) mapper.insert(row);
+        upsertState(source, prepared.rows().size(), target, contextual);
+    }
+
+    private void assertAnnUri(String expected) {
+        if (!java.util.Objects.equals(expected, milvusStore.effectiveUri()))
+            throw new IllegalStateException("Milvus 服务地址已改变，请重新完整同步索引");
+    }
+
+    private void publishPrepared(List<PreparedSource> prepared, EmbeddingClient.Snapshot target,
+                                 boolean clear, AnnReadiness previouslyReady) {
         try {
-            storeForWrite().replaceSource(s.type(), s.id(), items);
+            String annUri = milvusStore.effectiveUri();
+            org.dyh.learnhub.service.vector.VectorStore backend = storeForWrite();
+            if (clear) backend.clear(target.spaceFingerprint());
+            for (PreparedSource source : prepared) {
+                List<org.dyh.learnhub.service.vector.VectorStore.VecItem> items = source.rows().stream()
+                        .map(row -> new org.dyh.learnhub.service.vector.VectorStore.VecItem(
+                                row.getId(), row.getSeq(), EmbeddingClient.toVector(row.getVec()))).toList();
+                backend.replaceSource(target.spaceFingerprint(), source.source().type(), source.source().id(), items);
+            }
+            if (backend == milvusStore) {
+                assertAnnUri(annUri);
+                // 局部成功只能保持此前同空间、同服务的完整状态，不能修复更早的失败。
+                if (clear || (previouslyReady != null
+                        && previouslyReady.space().equals(target.spaceFingerprint())
+                        && java.util.Objects.equals(previouslyReady.uri(), annUri)))
+                    annReadiness = new AnnReadiness(target.spaceFingerprint(), annUri);
+            }
         } catch (Exception e) {
-            log.warn("向量后端写入失败（{}，MySQL 已落库，可用 /api/kb/vector/sync 补）：{}",
-                    configuredBackend(), e.toString());
+            annReadiness = null;
+            milvusStore.markUnhealthy("向量同步失败，可通过 /api/kb/vector/sync 补齐");
+            log.warn("向量后端同步失败，检索使用 MySQL：{}", e.toString());
         }
-        upsertState(s, chunks.size());
-        return chunks.size();
     }
 
     /**
@@ -369,25 +463,27 @@ public class VectorIndexService {
     }
 
     /** 记录/更新该来源已索引内容的指纹（增量索引靠它判断"变了没有"） */
-    private void upsertState(Source s, int chunkCount) {
-        String hash = KgService.sha256((s.title() == null ? "" : s.title())
-                + "\u0000" + (s.text() == null ? "" : s.text()));
-        String key = KbIndexState.key(s.type(), s.id());
-        KbIndexState st = stateMapper.selectById(key);
-        if (st == null) {
-            st = new KbIndexState();
-            st.setId(key);
-            st.setSourceType(s.type());
-            st.setSourceId(s.id());
-            st.setContentHash(hash);
-            st.setChunks(chunkCount);
-            stateMapper.insert(st);
-        } else {
-            st.setContentHash(hash);
-            st.setChunks(chunkCount);
-            st.setIndexedAt(LocalDateTime.now());
-            stateMapper.updateById(st);
+    private static String sourceHash(Source source, String space, boolean contextual) {
+        return KgService.sha256(space + "\u0000" + contextual + "\u0000"
+                + (source.title() == null ? "" : source.title()) + "\u0000"
+                + (source.text() == null ? "" : source.text()));
+    }
+
+    private void upsertState(Source source, int chunks, EmbeddingClient.Snapshot target, boolean contextual) {
+        String key = KbIndexState.key(source.type(), source.id());
+        KbIndexState state = stateMapper.selectById(key);
+        boolean insert = state == null;
+        if (insert) {
+            state = new KbIndexState();
+            state.setId(key);
+            state.setSourceType(source.type());
+            state.setSourceId(source.id());
         }
+        state.setContentHash(sourceHash(source, target.spaceFingerprint(), contextual));
+        state.setEmbeddingSpace(target.spaceFingerprint());
+        state.setChunks(chunks);
+        state.setIndexedAt(LocalDateTime.now());
+        if (insert) stateMapper.insert(state); else stateMapper.updateById(state);
     }
 
     /**
@@ -400,54 +496,97 @@ public class VectorIndexService {
      *
      * @return 重编了多少个来源、删了多少个来源
      */
-    public Map<String, Object> reindexChanged() {
+    public synchronized Map<String, Object> reindexChanged() {
+        return reindexChanged(false);
+    }
+
+    /** 自动增量不得替用户支付切模型后的整库重建成本。 */
+    public synchronized Map<String, Object> reindexAutomatically() {
+        return reindexChanged(true);
+    }
+
+    private Map<String, Object> reindexChanged(boolean automatic) {
+        EmbeddingClient.Snapshot target = embedder.snapshot();
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("configured", target != null && target.configured());
+        result.put("reindexed", 0);
+        result.put("removed", 0);
+        result.put("chunks", 0);
+        if (target == null || !target.configured()) {
+            result.put("reason", target == null ? "未配置嵌入模型，关键词检索仍可用" : target.reason());
+            return result;
+        }
+        if (automatic && (!settingsService.vectorEnabled()
+                || "0".equals(settingsService.effective(SETTING_AUTO_INDEX)))) return result;
+        boolean contextual = contextual();
+        List<KbIndexState> known = stateMapper.selectList(null);
+        if (automatic && (known.stream().anyMatch(state -> !target.spaceFingerprint().equals(state.getEmbeddingSpace()))
+                || mapper.loadAll().stream().anyMatch(row -> !target.spaceFingerprint().equals(row.getEmbeddingSpace())))) {
+            result.put("skipped", true);
+            result.put("reason", "嵌入空间已改变或存在旧索引，请手动重建；自动增量已暂停");
+            return result;
+        }
         List<Source> sources = collectSources();
-        String model = embedder.model();
-        Map<String, KbIndexState> known = new LinkedHashMap<>();
-        for (KbIndexState st : stateMapper.selectList(null)) {
-            known.put(st.getSourceType() + "#" + st.getSourceId(), st);
-        }
-        int reindexed = 0;
-        int removed = 0;
-        int chunks = 0;
+        Map<String, KbIndexState> bySource = new LinkedHashMap<>();
+        for (KbIndexState state : known) bySource.put(KbIndexState.key(state.getSourceType(), state.getSourceId()), state);
         Set<String> alive = new LinkedHashSet<>();
-        for (Source s : sources) {
-            String key = s.type() + "#" + s.id();
+        List<PreparedSource> prepared = new ArrayList<>();
+        for (Source source : sources) {
+            String key = KbIndexState.key(source.type(), source.id());
             alive.add(key);
-            String hash = KgService.sha256((s.title() == null ? "" : s.title())
-                    + "\u0000" + (s.text() == null ? "" : s.text()));
-            KbIndexState st = known.get(key);
-            if (st != null && hash.equals(st.getContentHash())) {
-                continue;   // 没变，跳过（这就是省下来的时间）
-            }
-            chunks += indexSource(s, model);
-            reindexed++;
+            KbIndexState state = bySource.get(key);
+            if (state != null && target.spaceFingerprint().equals(state.getEmbeddingSpace())
+                    && sourceHash(source, target.spaceFingerprint(), contextual).equals(state.getContentHash())) continue;
+            prepared.add(prepareSource(source, target, contextual));
         }
-        for (Map.Entry<String, KbIndexState> e : known.entrySet()) {
-            if (!alive.contains(e.getKey())) {
-                KbIndexState st = e.getValue();
-                mapper.deleteBySource(st.getSourceType(), st.getSourceId());
-                stateMapper.deleteById(st.getId());
-                removed++;
-                // ANN 后端也要删：资料/笔记被删掉后，孤儿向量会继续被检索到，
-                // 而补正文时查不到块行 → 结果是"凭空少几条"（没有报错，最难查的那种）。
-                try {
-                    storeForWrite().deleteSource(st.getSourceType(), st.getSourceId());
-                } catch (Exception ex) {
-                    log.warn("向量后端删除来源失败（{}#{}）：{}", st.getSourceType(), st.getSourceId(), ex.toString());
-                }
+        List<KbIndexState> removed = known.stream().filter(state -> !alive.contains(state.getId())).toList();
+        validatePrepared(prepared);
+        if (!prepared.isEmpty()) {
+            int dimension = prepared.stream().flatMap(source -> source.rows().stream())
+                    .mapToInt(KbChunk::getDim).findFirst().orElse(0);
+            Set<String> replacing = new LinkedHashSet<>();
+            for (PreparedSource source : prepared) replacing.add(KbIndexState.key(source.source().type(), source.source().id()));
+            for (KbChunk row : mapper.loadAll()) {
+                if (dimension != 0 && target.spaceFingerprint().equals(row.getEmbeddingSpace())
+                        && !replacing.contains(KbIndexState.key(row.getSourceType(), row.getSourceId()))
+                        && (row.getDim() == null || row.getDim() != dimension))
+                    throw new IllegalStateException("嵌入维度已变化，请全量重建索引");
             }
         }
-        if (reindexed > 0 || removed > 0) {
-            invalidateCache();
-            log.info("增量索引：重编 {} 个来源（{} 块），清理 {} 个已删除来源", reindexed, chunks, removed);
+        assertCurrent(target, contextual);
+        if (!prepared.isEmpty() || !removed.isEmpty()) {
+            AnnReadiness previouslyReady = annReadiness;
+            annReadiness = null;
+            try {
+                new TransactionTemplate(transactionManager).executeWithoutResult(tx -> {
+                    assertCurrent(target, contextual);
+                    for (PreparedSource source : prepared) persistSource(source, target, contextual);
+                    for (KbIndexState state : removed) {
+                        mapper.deleteBySource(state.getSourceType(), state.getSourceId());
+                        stateMapper.deleteById(state.getId());
+                    }
+                    assertCurrent(target, contextual);
+                });
+            } finally {
+                invalidateCache();
+            }
+            // 删去当前空间的孤儿；其它历史空间也会在 MySQL 回查时被严格排除。
+            try {
+                for (KbIndexState state : removed) if (state.getEmbeddingSpace() != null)
+                    storeForWrite().deleteSource(state.getEmbeddingSpace(), state.getSourceType(), state.getSourceId());
+                publishPrepared(prepared, target, false, previouslyReady);
+            } catch (Exception e) {
+                annReadiness = null;
+                milvusStore.markUnhealthy("向量同步失败，可通过 /api/kb/vector/sync 补齐");
+            }
         }
-        Map<String, Object> o = new LinkedHashMap<>();
-        o.put("sources", sources.size());
-        o.put("reindexed", reindexed);
-        o.put("removed", removed);
-        o.put("chunks", chunks);
-        return o;
+        result.put("sources", sources.size());
+        result.put("reindexed", prepared.size());
+        result.put("removed", removed.size());
+        result.put("chunks", prepared.stream().mapToInt(source -> source.rows().size()).sum());
+        result.put("model", target.model());
+        result.put("embeddingSpace", target.spaceFingerprint());
+        return result;
     }
 
     private record Source(String type, Long id, String title, String category, String text) {
@@ -478,7 +617,9 @@ public class VectorIndexService {
     private volatile long lastAutoRunAt = 0;
 
     public boolean autoIndexEnabled() {
-        return !"0".equals(settingsService.effective(SETTING_AUTO_INDEX));
+        EmbeddingClient.Snapshot target = embedder.snapshot();
+        return settingsService.vectorEnabled() && target != null && target.configured()
+                && !"0".equals(settingsService.effective(SETTING_AUTO_INDEX));
     }
 
     /**
@@ -508,10 +649,15 @@ public class VectorIndexService {
 
     private void runAutoIndex() {
         autoQueued.set(false);
+        if (!autoIndexEnabled()) return;
         try {
             long t0 = System.currentTimeMillis();
-            Map<String, Object> r = reindexChanged();
+            Map<String, Object> r = reindexAutomatically();
             lastAutoRunAt = System.currentTimeMillis();
+            if (Boolean.TRUE.equals(r.get("skipped"))) {
+                log.info("自动增量索引跳过：{}", r.get("reason"));
+                return;
+            }
             log.info("自动增量索引：重编 {} 个来源、清理 {} 个，耗时 {} ms",
                     r.get("reindexed"), r.get("removed"), lastAutoRunAt - t0);
         } catch (Exception e) {
@@ -549,7 +695,7 @@ public class VectorIndexService {
      * 这里保留一个转发是为了让"数据变了就作废"这件事在调用点仍然一眼可见。
      */
     private void invalidateCache() {
-        mysqlStore.clear();
+        mysqlStore.clear(null);
     }
 
     /**
@@ -563,20 +709,28 @@ public class VectorIndexService {
         if (query == null || query.isBlank() || !settingsService.vectorEnabled()) {
             return List.of();
         }
+        EmbeddingClient.Snapshot target = embedder.snapshot();
+        if (target == null || !target.configured()) return List.of();
+        try {
+            if (!mysqlStore.hasVectors(target.spaceFingerprint())) return List.of();
+        } catch (Exception e) {
+            log.warn("读取向量索引失败，本轮无语义召回：{}", e.toString());
+            return List.of();
+        }
         // 没有任何向量就别调嵌入了（"还没建索引"与"Milvus 刚清空"都会走到这里）。
         // 注意：探活失败时会走 MySQL，所以这个判断要问**当前生效的那个后端**。
-        org.dyh.learnhub.service.vector.VectorStore active = store();
+        org.dyh.learnhub.service.vector.VectorStore active = store(target);
         try {
-            if (!active.hasVectors()) {
-                return List.of();
-            }
+            if (!active.hasVectors(target.spaceFingerprint())) active = mysqlStore;
+            if (!active.hasVectors(target.spaceFingerprint())) return List.of();
         } catch (Exception e) {
             log.warn("向量后端（{}）状态检查失败，转用 MySQL：{}", active.name(), e.toString());
             active = mysqlStore;
         }
         float[] qv;
         try {
-            qv = embedder.embed(query);
+            qv = embedder.embed(target, query);
+            validateVector(qv);
         } catch (Exception e) {
             // 嵌入失败不能影响对话：退化成"这轮没有语义命中"
             log.warn("查询嵌入失败（本轮无语义召回）：{}", e.toString());
@@ -590,7 +744,9 @@ public class VectorIndexService {
         // 是最难定位的那类 bug）。ANN 需要比 topK 更大的池子，因为相对带还会筛掉一批。
         List<org.dyh.learnhub.service.vector.VectorStore.VecHit> candidates;
         try {
-            candidates = active.search(embedder.model(), qv, Math.max(topK * 4, 64));
+            candidates = active.search(target.spaceFingerprint(), qv, Math.max(topK * 4, 64));
+            if (active == milvusStore && candidates.isEmpty())
+                candidates = mysqlStore.search(target.spaceFingerprint(), qv, Integer.MAX_VALUE);
         } catch (Exception e) {
             log.warn("向量后端（{}）检索失败，本轮退化为 MySQL 全扫：{}", configuredBackend(), e.toString());
             // 立刻标记不可用：否则 Milvus 真的挂了之后，每轮对话都要先等一次连接超时才降级
@@ -598,7 +754,7 @@ public class VectorIndexService {
                 milvusStore.markUnhealthy(e.getMessage());
             }
             try {
-                candidates = mysqlStore.search(embedder.model(), qv, Integer.MAX_VALUE);
+                candidates = mysqlStore.search(target.spaceFingerprint(), qv, Integer.MAX_VALUE);
             } catch (Exception e2) {
                 log.warn("回退检索也失败（本轮无语义召回）：{}", e2.toString());
                 return List.of();
@@ -606,7 +762,7 @@ public class VectorIndexService {
         }
         List<Hit> hits = new ArrayList<>();
         for (org.dyh.learnhub.service.vector.VectorStore.VecHit c : candidates) {
-            if (c.score() >= MIN_SCORE) {
+            if (Double.isFinite(c.score()) && c.score() >= MIN_SCORE) {
                 hits.add(new Hit(c.sourceType(), c.sourceId(), c.title(), c.category(),
                         c.text(), c.score(), c.seq()));
             }
@@ -648,34 +804,62 @@ public class VectorIndexService {
 
     /** 索引状态：块数、字数、模型、来源数、是否与当前内容一致 */
     public Map<String, Object> status() {
-        Map<String, Object> o = new LinkedHashMap<>();
-        long chunks = mapper.selectCount(null);
-        String fp = mapper.fingerprint();
-        String[] parts = fp == null ? new String[]{"0", "0", "", "0"} : fp.split(":", -1);
-        o.put("chunks", chunks);
-        o.put("indexedChars", parts.length > 1 ? parseLong(parts[1]) : 0);
-        o.put("indexedModel", parts.length > 2 ? parts[2] : "");
-        o.put("indexedSources", parts.length > 3 ? parseLong(parts[3]) : 0);
-        o.put("currentSources", collectSources().size());
-        o.put("model", embedder.model());
-        o.put("baseUrl", embedder.baseUrl());
-        o.put("enabled", settingsService.vectorEnabled());
-        String sourceLatest = mapper.sourceLatestChange();
-        String indexedAt = mapper.indexedAt();
-        o.put("sourceLatestChange", sourceLatest);
-        o.put("indexedAt", indexedAt);
-        // 过期判定（三选一即过期）：
-        //   ① 从来没有索引过；② 来源数量变了（增删）；③ 有内容在索引之后被改过
-        // ③ 是关键：只比数量的话，"改一篇笔记"探测不到 —— 索引里的向量会一直是旧的。
-        boolean stale = chunks == 0
-                || !String.valueOf(o.get("currentSources")).equals(String.valueOf(o.get("indexedSources")))
-                || !embedder.model().equals(o.get("indexedModel"))
-                || (!sourceLatest.isBlank() && !indexedAt.isBlank() && sourceLatest.compareTo(indexedAt) > 0);
-        o.put("stale", stale);
-        // 向量后端信息也放进来：界面一眼看到"现在是全扫还是 ANN、两边数量一致不一致"
-        o.put("vectorBackend", String.valueOf(settingsService.effective(KEY_VECTOR_BACKEND)).isBlank()
-                ? "mysql" : settingsService.effective(KEY_VECTOR_BACKEND));
-        return o;
+        EmbeddingClient.Snapshot target = embedder.snapshot();
+        List<KbChunk> rows = mapper.loadAll();
+        List<Source> sources = collectSources();
+        List<KbIndexState> states = stateMapper.selectList(null);
+        Map<String, KbIndexState> bySource = new LinkedHashMap<>();
+        for (KbIndexState state : states) bySource.put(state.getId(), state);
+        Set<String> indexedSources = new LinkedHashSet<>();
+        Set<String> indexedModels = new LinkedHashSet<>();
+        Set<String> indexedSpaces = new LinkedHashSet<>();
+        long compatible = 0;
+        long legacy = 0;
+        long chars = 0;
+        boolean configured = target != null && target.configured();
+        for (KbChunk row : rows) {
+            indexedSources.add(KbIndexState.key(row.getSourceType(), row.getSourceId()));
+            if (row.getModel() != null) indexedModels.add(row.getModel());
+            if (row.getEmbeddingSpace() == null || row.getEmbeddingSpace().isBlank()) legacy++;
+            else indexedSpaces.add(row.getEmbeddingSpace());
+            if (configured && target.spaceFingerprint().equals(row.getEmbeddingSpace()) && row.getDim() != null
+                    && row.getDim() > 0 && row.getVec() != null && row.getVec().length == row.getDim() * 4) compatible++;
+            chars += row.getCharLen() == null ? 0 : row.getCharLen();
+        }
+        boolean changed = !rows.isEmpty() && (!configured || compatible != rows.size());
+        boolean stale = rows.isEmpty() || changed || sources.size() != states.size();
+        boolean contextual = contextual();
+        for (Source source : sources) {
+            KbIndexState state = bySource.get(KbIndexState.key(source.type(), source.id()));
+            if (state == null || !configured || !target.spaceFingerprint().equals(state.getEmbeddingSpace())
+                    || !sourceHash(source, target.spaceFingerprint(), contextual).equals(state.getContentHash())) stale = true;
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("chunks", rows.size());
+        result.put("indexedChars", chars);
+        result.put("indexedModel", String.join(", ", indexedModels));
+        result.put("indexedSources", indexedSources.size());
+        result.put("currentSources", sources.size());
+        result.put("model", target == null ? "" : target.model());
+        result.put("baseUrl", target == null ? "" : target.baseUrl());
+        result.put("provider", target == null ? "" : target.provider());
+        result.put("endpoint", target == null ? "" : target.endpoint());
+        result.put("enabled", settingsService.vectorEnabled());
+        result.put("configured", configured);
+        result.put("embeddingSpace", configured ? target.spaceFingerprint() : "");
+        result.put("indexedSpaces", indexedSpaces);
+        result.put("compatibleChunks", compatible);
+        result.put("legacyChunks", legacy);
+        result.put("embeddingChanged", changed);
+        result.put("annReady", annReadyFor(target));
+        result.put("reason", !configured ? (target == null ? "未配置嵌入模型，关键词检索仍可用" : target.reason())
+                : changed ? "嵌入空间已改变或存在旧索引，请手动重建；自动增量已暂停" : target.reason());
+        result.put("stale", stale);
+        result.put("sourceLatestChange", mapper.sourceLatestChange());
+        result.put("indexedAt", mapper.indexedAt());
+        String backend = settingsService.effective(KEY_VECTOR_BACKEND);
+        result.put("vectorBackend", backend == null || backend.isBlank() ? "mysql" : backend);
+        return result;
     }
 
     /**
@@ -702,7 +886,8 @@ public class VectorIndexService {
 
     /** 供调试/日志：索引里有什么模型 */
     public String modelInfo() {
-        return embedder.model() + "@" + embedder.baseUrl();
+        EmbeddingClient.Snapshot target = embedder.snapshot();
+        return target == null || !target.configured() ? "未配置嵌入模型" : target.model() + "@" + target.baseUrl();
     }
 
     // ---------------- 小工具 ----------------
@@ -713,14 +898,6 @@ public class VectorIndexService {
 
     private static String str(Object o) {
         return o == null ? "" : String.valueOf(o);
-    }
-
-    private static long parseLong(String s) {
-        try {
-            return Long.parseLong(s.trim());
-        } catch (Exception e) {
-            return 0;
-        }
     }
 
     private static String clip(String s, int max) {

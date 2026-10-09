@@ -182,6 +182,7 @@ CREATE TABLE IF NOT EXISTS kb_chunk (
     vec         BLOB         NULL COMMENT '向量：dim × float32 小端',
     dim         INT          NOT NULL DEFAULT 0,
     model       VARCHAR(64)  NULL COMMENT '嵌入模型名（换模型需重建索引）',
+    embedding_space VARCHAR(128) NULL COMMENT '嵌入协议、服务地址与模型的指纹；NULL 为待重建旧索引',
     updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uk_kb_chunk (source_type, source_id, seq),
@@ -337,7 +338,8 @@ CREATE TABLE IF NOT EXISTS kg_node (
   brief VARCHAR(500) NULL COMMENT '一句话说明：它是什么',
   wiki_key VARCHAR(64) NULL COMMENT '对应 wiki 实体页的 topic_key',
   source_count INT NOT NULL DEFAULT 0 COMMENT '提到它的素材条数',
-  embedding BLOB NULL COMMENT 'bge-m3 向量（float32 小端），实体级相似度/消歧用',
+  embedding BLOB NULL COMMENT '实体向量（float32 小端）；模型由向量嵌入分工选择',
+  embedding_space VARCHAR(128) NULL COMMENT '实体向量采用的嵌入空间指纹',
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
@@ -464,6 +466,7 @@ CREATE TABLE IF NOT EXISTS kb_index_state (
   source_type VARCHAR(16) NOT NULL,
   source_id BIGINT NOT NULL,
   content_hash VARCHAR(64) NOT NULL COMMENT '标题+正文的 sha256（变了才需要重编）',
+  embedding_space VARCHAR(128) NULL COMMENT '索引采用的嵌入空间指纹',
   chunks INT NOT NULL DEFAULT 0,
   indexed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
@@ -480,6 +483,7 @@ CREATE TABLE IF NOT EXISTS model_profile (
   id VARCHAR(36) NOT NULL COMMENT '档案 id',
   name VARCHAR(64) NOT NULL COMMENT '显示名，如 DeepSeek 云端 / 本地 Ollama',
   provider VARCHAR(32) NOT NULL DEFAULT 'custom' COMMENT 'deepseek/openai/kimi/ark/ollama/lmstudio/vllm/custom',
+  purpose VARCHAR(16) NOT NULL DEFAULT 'chat' COMMENT 'chat / embedding',
   base_url VARCHAR(255) NOT NULL COMMENT 'OpenAI 兼容基址',
   api_key VARCHAR(255) NULL COMMENT '密钥（**接口永不回传**，只回传是否已配置与尾号）',
   model VARCHAR(120) NOT NULL COMMENT '模型名',
@@ -490,6 +494,43 @@ CREATE TABLE IF NOT EXISTS model_profile (
   PRIMARY KEY (id),
   KEY idx_model_profile_order (sort_order, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='模型配置档案（可新增多个，任务各自指向一个）';
+
+-- Keep all existing profiles, source content and vector bytes.
+-- Vectors without an embedding-space identity are retained but require rebuilding.
+-- Idempotent column additions also support adoption of a schema.sql-created database.
+
+SET @learnhub_column_exists := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'model_profile' AND COLUMN_NAME = 'purpose');
+SET @learnhub_ddl := IF(@learnhub_column_exists = 0,
+  'ALTER TABLE model_profile ADD COLUMN purpose VARCHAR(16) NOT NULL DEFAULT ''chat'' COMMENT ''chat / embedding'' AFTER provider', 'DO 0');
+PREPARE learnhub_stmt FROM @learnhub_ddl;
+EXECUTE learnhub_stmt;
+DEALLOCATE PREPARE learnhub_stmt;
+
+SET @learnhub_column_exists := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'kb_chunk' AND COLUMN_NAME = 'embedding_space');
+SET @learnhub_ddl := IF(@learnhub_column_exists = 0,
+  'ALTER TABLE kb_chunk ADD COLUMN embedding_space VARCHAR(128) NULL COMMENT ''嵌入协议、服务地址与模型的指纹；NULL 为待重建旧索引'' AFTER model', 'DO 0');
+PREPARE learnhub_stmt FROM @learnhub_ddl;
+EXECUTE learnhub_stmt;
+DEALLOCATE PREPARE learnhub_stmt;
+
+SET @learnhub_column_exists := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'kb_index_state' AND COLUMN_NAME = 'embedding_space');
+SET @learnhub_ddl := IF(@learnhub_column_exists = 0,
+  'ALTER TABLE kb_index_state ADD COLUMN embedding_space VARCHAR(128) NULL COMMENT ''索引采用的嵌入空间指纹'' AFTER content_hash', 'DO 0');
+PREPARE learnhub_stmt FROM @learnhub_ddl;
+EXECUTE learnhub_stmt;
+DEALLOCATE PREPARE learnhub_stmt;
+
+SET @learnhub_column_exists := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'kg_node' AND COLUMN_NAME = 'embedding_space');
+SET @learnhub_ddl := IF(@learnhub_column_exists = 0,
+  'ALTER TABLE kg_node ADD COLUMN embedding_space VARCHAR(128) NULL COMMENT ''实体向量采用的嵌入空间指纹'' AFTER embedding', 'DO 0');
+PREPARE learnhub_stmt FROM @learnhub_ddl;
+EXECUTE learnhub_stmt;
+DEALLOCATE PREPARE learnhub_stmt;
+
 
 -- 会话记住自己用的档案（"新开不同会话"要能各自选模型）
 SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS

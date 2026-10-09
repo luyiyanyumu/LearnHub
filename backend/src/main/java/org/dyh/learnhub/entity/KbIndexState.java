@@ -31,6 +31,8 @@ public class KbIndexState {
     /** 该来源当前内容的 sha256（标题 + 正文） */
     private String contentHash;
 
+    private String embeddingSpace;
+
     private Integer chunks;
 
     private LocalDateTime indexedAt;

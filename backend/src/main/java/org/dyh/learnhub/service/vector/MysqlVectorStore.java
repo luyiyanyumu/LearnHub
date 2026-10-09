@@ -21,7 +21,7 @@ import java.util.Map;
  * 1.3k 块时约 3ms、2 万块约 60ms、10 万块约 294ms —— **扫描比嵌入便宜两个数量级**，
  * 所以到 2 万块以上才值得上 ANN（见 {@link MilvusVectorStore}）。
  *
- * <p>指纹缓存：{@link KbChunkMapper#fingerprint()} 变了才重新 {@code loadAll()}，
+ * <p>指纹缓存：{@link KbChunkMapper#cacheFingerprint()} 变了才重新 {@code loadAll()}，
  * 否则每轮对话都全表拉一遍。
  */
 @Slf4j
@@ -32,8 +32,8 @@ public class MysqlVectorStore implements VectorStore {
     private final KbChunkMapper mapper;
 
     /** 全量块缓存 + 产生它的指纹（指纹变了就作废） */
-    private volatile List<KbChunk> cache;
-    private volatile String cacheFingerprint;
+    private record Cached(String fingerprint, List<KbChunk> rows) { }
+    private volatile Cached cache;
 
     @Override
     public String name() {
@@ -41,54 +41,59 @@ public class MysqlVectorStore implements VectorStore {
     }
 
     @Override
-    public void ensure(String model, int dim) {
+    public void ensure(String space, int dim) {
         // kb_chunk 的表结构固定带 vec/dim/model 列，不需要建什么
     }
 
     @Override
-    public boolean hasVectors() {
-        return !chunks().isEmpty();
+    public boolean hasVectors(String space) {
+        return space != null && !space.isBlank() && chunks().stream()
+                .anyMatch(c -> space.equals(c.getEmbeddingSpace()) && c.getVec() != null
+                        && c.getDim() != null && c.getDim() > 0 && c.getVec().length == c.getDim() * 4);
     }
 
     @Override
-    public void replaceSource(String sourceType, Long sourceId, List<VecItem> items) {
-        // 向量随行写进 kb_chunk（见 VectorIndexService#indexSource），这里没有额外动作。
+    public void replaceSource(String space, String sourceType, Long sourceId, List<VecItem> items) {
+        // 向量随行写进 kb_chunk，这里只需使缓存失效。
         // 但缓存必须作废，否则新块在缓存里看不见。
         invalidate();
     }
 
     @Override
-    public void deleteSource(String sourceType, Long sourceId) {
+    public void deleteSource(String space, String sourceType, Long sourceId) {
         invalidate();
     }
 
     @Override
-    public void clear() {
+    public void clear(String space) {
         invalidate();
     }
 
     @Override
-    public List<VecHit> search(String model, float[] query, int pool) {
+    public List<VecHit> search(String space, float[] query, int pool) {
+        if (space == null || space.isBlank() || query == null || query.length == 0) return List.of();
         List<KbChunk> all = chunks();
         List<VecHit> out = new ArrayList<>(all.size());
         int skipped = 0;
         for (KbChunk c : all) {
-            if (c.getVec() == null) {
+            if (c.getVec() == null || c.getVec().length != query.length * 4
+                    || c.getDim() == null || c.getDim() != query.length) {
                 continue;   // 半成品行（嵌入失败/历史遗留）：跳过而不是抛 NPE
             }
             // 换过嵌入模型的旧向量与当前查询向量**不可比**（空间不同），拿它们算余弦只会出噪声。
-            // 这里按行上的 model 直接跳过：不额外查库，也不会把两个空间的距离混在一起。
-            if (model != null && c.getModel() != null && !model.equals(c.getModel())) {
+            // 协议、实际接口与模型均须相同；历史 NULL 空间不能推断为当前空间。
+            if (!space.equals(c.getEmbeddingSpace())) {
                 skipped++;
                 continue;
             }
             double score = EmbeddingClient.cosine(query, EmbeddingClient.toVector(c.getVec()));
+            if (!Double.isFinite(score)) continue;
             out.add(new VecHit(c.getId(), c.getSourceType(), c.getSourceId(),
                     c.getSeq() == null ? 0 : c.getSeq(), c.getTitle(), c.getCategory(),
                     c.getChunkText(), score));
         }
         if (skipped > 0) {
-            log.warn("语义检索跳过 {} 块：它们的嵌入模型与当前模型（{}）不一致，需要重建索引", skipped, model);
+            log.debug("语义检索跳过 {} 块：嵌入空间与当前查询不一致，需要重建索引", skipped);
         }
         // 全扫的成本与候选数无关，所以直接全给调用方，由它套阈值 + 相对带（口径与改前一致）
         return out;
@@ -105,25 +110,24 @@ public class MysqlVectorStore implements VectorStore {
 
     /** 带指纹缓存的全量块载入 */
     private List<KbChunk> chunks() {
-        String fp = mapper.fingerprint();
-        List<KbChunk> local = cache;
-        if (local != null && fp != null && fp.equals(cacheFingerprint)) {
-            return local;
+        String fp = mapper.cacheFingerprint();
+        Cached local = cache;
+        if (local != null && fp != null && fp.equals(local.fingerprint())) {
+            return local.rows();
         }
-        local = mapper.loadAll();
-        cache = local;
-        cacheFingerprint = fp;
-        return local;
+        List<KbChunk> rows = mapper.loadAll();
+        cache = new Cached(fp, rows);
+        return rows;
     }
 
     private void invalidate() {
         cache = null;
-        cacheFingerprint = null;
     }
 
     /** 供体检：当前缓存是否命中（能看到"有没有重复全表拉取"） */
     public boolean cacheHit() {
-        return cache != null && cacheFingerprint != null && cacheFingerprint.equals(mapper.fingerprint());
+        Cached local = cache;
+        return local != null && local.fingerprint() != null && local.fingerprint().equals(mapper.cacheFingerprint());
     }
 
     /** 兜底：清掉缓存后强制重载（诊断用） */

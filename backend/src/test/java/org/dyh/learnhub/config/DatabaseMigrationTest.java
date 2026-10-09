@@ -155,7 +155,7 @@ class DatabaseMigrationTest {
         assertThat(db.queryForObject("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()",
                 Integer.class)).isEqualTo(29); // 28 application tables and Flyway history
         assertThat(db.queryForList("SELECT version FROM flyway_schema_history ORDER BY installed_rank", String.class))
-                .containsExactly("1", "2");
+                .containsExactly("1", "2", "3");
         assertThat(db.queryForObject("SELECT COUNT(*) FROM note", Integer.class)).isEqualTo(2);
         assertEveryPersistentEntityColumnExists(url);
         assertThat(db.queryForObject("SELECT COUNT(*) FROM information_schema.REFERENTIAL_CONSTRAINTS "
@@ -166,7 +166,7 @@ class DatabaseMigrationTest {
         db.update("DELETE FROM note");
         migrate(url);
         assertThat(db.queryForObject("SELECT COUNT(*) FROM note", Integer.class)).isZero();
-        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(2);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(3);
     }
 
     @Test
@@ -180,7 +180,7 @@ class DatabaseMigrationTest {
         migrate(url);
         JdbcTemplate db = jdbc(url);
         assertThat(db.queryForList("SELECT version FROM flyway_schema_history ORDER BY installed_rank", String.class))
-                .containsExactly("0", "1", "2");
+                .containsExactly("0", "1", "2", "3");
         assertThat(structure(url)).containsExactlyElementsOf(structure(freshUrl));
         assertThat(indexes(url)).containsExactlyElementsOf(indexes(freshUrl));
         assertThat(db.queryForObject("SELECT COUNT(*) FROM note", Integer.class)).isEqualTo(1);
@@ -198,6 +198,48 @@ class DatabaseMigrationTest {
                 Integer.class)).isEqualTo(2);
         migrate(url);
         assertThat(db.queryForObject("SELECT COUNT(*) FROM note", Integer.class)).isEqualTo(1);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(4);
+    }
+
+    @Test
+    void versionTwoUpgradePreservesProfilesContentAndVectorsUntilExplicitRebuild() {
+        String url = emptyDatabase();
+        application(url, "spring.flyway.target=2")
+                .run(context -> assertThat(context).hasNotFailed().hasSingleBean(Flyway.class));
+        JdbcTemplate db = jdbc(url);
+        db.update("INSERT INTO model_profile (id, name, provider, base_url, api_key, model) "
+                + "VALUES ('old-chat', '原有档案', 'custom', 'http://127.0.0.1:9/v1', 'synthetic-key', 'chat-model')");
+        db.update("INSERT INTO note (id, title, content) VALUES (92001, '保留笔记', '用户原有正文')");
+        byte[] oldVector = new byte[] {0, 0, (byte) 128, 63, 0, 0, 0, 64};
+        db.update("INSERT INTO kb_chunk (source_type, source_id, seq, chunk_text, vec, dim, model) "
+                + "VALUES ('note', 92001, 0, '原有分块', ?, 2, 'old-embed')", oldVector);
+        db.update("INSERT INTO kb_index_state (id, source_type, source_id, content_hash, chunks) "
+                + "VALUES ('note:92001', 'note', 92001, 'original-content-hash', 1)");
+        db.update("INSERT INTO kg_node (id, name, norm, embedding) "
+                + "VALUES ('e-old', '原有实体', '原有实体', ?)", oldVector);
+
+        migrate(url);
+        assertThat(db.queryForList("SELECT version FROM flyway_schema_history ORDER BY installed_rank", String.class))
+                .containsExactly("1", "2", "3");
+        assertThat(db.queryForObject("SELECT purpose FROM model_profile WHERE id = 'old-chat'", String.class))
+                .isEqualTo("chat");
+        assertThat(db.queryForObject("SELECT api_key FROM model_profile WHERE id = 'old-chat'", String.class))
+                .isEqualTo("synthetic-key");
+        assertThat(db.queryForObject("SELECT content FROM note WHERE id = 92001", String.class))
+                .isEqualTo("用户原有正文");
+        assertThat(db.queryForObject("SELECT vec FROM kb_chunk WHERE source_id = 92001", byte[].class))
+                .containsExactly(oldVector);
+        assertThat(db.queryForObject("SELECT embedding FROM kg_node WHERE id = 'e-old'", byte[].class))
+                .containsExactly(oldVector);
+        assertThat(db.queryForObject("SELECT embedding_space FROM kb_chunk WHERE source_id = 92001", String.class))
+                .isNull();
+        assertThat(db.queryForObject("SELECT embedding_space FROM kb_index_state WHERE id = 'note:92001'", String.class))
+                .isNull();
+        assertThat(db.queryForObject("SELECT embedding_space FROM kg_node WHERE id = 'e-old'", String.class))
+                .isNull();
+        assertThat(db.queryForObject("SELECT content_hash FROM kb_index_state WHERE id = 'note:92001'", String.class))
+                .isEqualTo("original-content-hash");
+        migrate(url);
         assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(3);
     }
 
@@ -244,7 +286,7 @@ class DatabaseMigrationTest {
         jdbc(url).update("""
                 INSERT INTO flyway_schema_history
                 (installed_rank, version, description, type, script, checksum, installed_by, execution_time, success)
-                VALUES (3, '999', 'future release', 'SQL', 'V999__future.sql', 1, 'root', 0, true)
+                VALUES (4, '999', 'future release', 'SQL', 'V999__future.sql', 1, 'root', 0, true)
                 """);
         application(url).run(context -> assertThat(context).hasFailed());
     }
@@ -254,7 +296,7 @@ class DatabaseMigrationTest {
         String url = emptyDatabase();
         application(url, "spring.flyway.locations=classpath:db/migration,classpath:db/intentional-failure")
                 .run(context -> assertThat(context).hasFailed());
-        assertThat(jdbc(url).queryForObject("SELECT success FROM flyway_schema_history WHERE version = '3'", Boolean.class))
+        assertThat(jdbc(url).queryForObject("SELECT success FROM flyway_schema_history WHERE version = '4'", Boolean.class))
                 .isFalse();
     }
 }

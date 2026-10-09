@@ -345,12 +345,25 @@ public class KgGraphService {
     public Map<String, Object> stats() {
         List<KgRelation> rs = relations();
         long derived = rs.stream().filter(r -> "derived".equals(r.getOrigin())).count();
-        long embedded = nodes().stream().filter(n -> n.getEmbedding() != null && n.getEmbedding().length > 0).count();
+        List<KgNode> all = nodes();
+        EmbeddingClient.Snapshot target = embedder.snapshot();
+        boolean configured = target != null && target.configured();
+        long stored = all.stream().filter(n -> n.getEmbedding() != null && n.getEmbedding().length > 0).count();
+        long embedded = all.stream().filter(n -> configured && target.spaceFingerprint().equals(n.getEmbeddingSpace())
+                && n.getEmbedding() != null && n.getEmbedding().length > 0).count();
+        long legacy = all.stream().filter(n -> n.getEmbedding() != null && n.getEmbedding().length > 0
+                && (n.getEmbeddingSpace() == null || n.getEmbeddingSpace().isBlank())).count();
         Map<String, Object> m = new LinkedHashMap<>();
-        m.put("nodes", nodes().size());
+        m.put("nodes", all.size());
         m.put("edges", rs.size());
         m.put("derived", derived);
         m.put("embedded", embedded);
+        m.put("storedEmbeddings", stored);
+        m.put("legacyEmbeddings", legacy);
+        m.put("configured", configured);
+        m.put("model", target == null ? "" : target.model());
+        m.put("embeddingSpace", configured ? target.spaceFingerprint() : "");
+        m.put("embeddingChanged", stored > embedded);
         m.put("relations", KgOntology.RELATIONS.size());
         return m;
     }
@@ -574,7 +587,7 @@ public class KgGraphService {
     }
 
     /**
-     * 向量兜底识别：问题里没有出现任何已知名字时，用 bge-m3 找语义上最接近的实体。
+     * 向量兜底识别：问题里没有出现任何已知名字时，用当前嵌入模型找语义上最接近的实体。
      * <p>这是 Graph RAG 里"向量"那一半：靠向量处理**换一种说法**，靠图处理**关系与多跳**，两者互补。
      */
     public List<KgNode> recognizeByVector(String question, int limit) {
@@ -582,14 +595,18 @@ public class KgGraphService {
         if (question == null || question.isBlank()) {
             return out;
         }
+        EmbeddingClient.Snapshot target = embedder.snapshot();
+        if (target == null || !target.configured()) return out;
         List<KgNode> all = nodes();
-        boolean any = all.stream().anyMatch(n -> n.getEmbedding() != null && n.getEmbedding().length > 0);
+        boolean any = all.stream().anyMatch(n -> target.spaceFingerprint().equals(n.getEmbeddingSpace())
+                && n.getEmbedding() != null && n.getEmbedding().length > 0);
         if (!any) {
             return out;
         }
         float[] qv;
         try {
-            qv = embedder.embed(question);
+            qv = embedder.embed(target, question);
+            validateEmbedding(qv);
         } catch (Exception e) {
             log.debug("问题向量化失败，跳过向量兜底：{}", e.getMessage());
             return out;
@@ -598,11 +615,12 @@ public class KgGraphService {
         }
         List<Scored> scored = new ArrayList<>();
         for (KgNode n : all) {
-            if (n.getEmbedding() == null || n.getEmbedding().length == 0) {
+            if (!target.spaceFingerprint().equals(n.getEmbeddingSpace()) || n.getEmbedding() == null
+                    || n.getEmbedding().length != qv.length * 4) {
                 continue;
             }
             double s = EmbeddingClient.cosine(qv, EmbeddingClient.toVector(n.getEmbedding()));
-            if (s >= VECTOR_MIN_SCORE) {
+            if (Double.isFinite(s) && s >= VECTOR_MIN_SCORE) {
                 scored.add(new Scored(n, s));
             }
         }
@@ -946,34 +964,64 @@ public class KgGraphService {
      * 给每个实体算一次向量（描述 = 名字 + 说明 + 对应 wiki 页开头）。
      * <p>刻意**不做** TransE/RotatE 那类知识图谱嵌入：那需要**成千上万条**三元组才能训出有意义的空间，
      * 这个库只有几十条，训出来的向量是噪声。实体级文本向量能解决同一件事（换一种说法也能找到概念），
-     * 而且复用了已有的 bge-m3。
+     * 而且复用了所选嵌入模型。
      */
-    public Map<String, Object> embedEntities(Map<String, String> wikiTexts) {
+    public synchronized Map<String, Object> embedEntities(Map<String, String> wikiTexts) {
+        EmbeddingClient.Snapshot target = embedder.snapshot();
         List<KgNode> all = nodes();
-        int done = 0;
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("configured", target != null && target.configured());
+        result.put("embedded", 0);
+        result.put("total", all.size());
+        result.put("failed", 0);
+        if (target == null || !target.configured()) {
+            result.put("reason", target == null ? "未配置嵌入模型，实体名称识别仍可用" : target.reason());
+            return result;
+        }
+        Map<KgNode, float[]> prepared = new LinkedHashMap<>();
         int failed = 0;
-        for (KgNode n : all) {
-            String desc = descriptionOf(n, wikiTexts == null ? null : wikiTexts.get(n.getWikiKey()));
-            if (desc.length() < 4) {
-                continue;
-            }
+        int dimension = 0;
+        for (KgNode node : all) {
+            String description = descriptionOf(node, wikiTexts == null || node.getWikiKey() == null
+                    ? null : wikiTexts.get(node.getWikiKey()));
+            if (description.length() < 4) continue;
             try {
-                float[] v = embedder.embed(desc);
-                if (v != null && v.length > 0) {
-                    n.setEmbedding(EmbeddingClient.toBytes(v));
-                    nodeMapper.updateById(n);
-                    done++;
-                }
+                float[] vector = embedder.embed(target, description);
+                validateEmbedding(vector);
+                if (dimension != 0 && dimension != vector.length)
+                    throw new IllegalStateException("同一嵌入空间的实体向量维度不一致");
+                dimension = vector.length;
+                prepared.put(node, vector);
             } catch (Exception e) {
                 failed++;
-                log.debug("实体 {} 向量化失败：{}", n.getName(), e.getMessage());
+                log.debug("实体 {} 向量化失败，保留旧向量：{}", node.getName(), e.getMessage());
             }
         }
-        Map<String, Object> o = new LinkedHashMap<>();
-        o.put("embedded", done);
-        o.put("total", all.size());
-        o.put("failed", failed);
-        return o;
+        EmbeddingClient.Snapshot current = embedder.snapshot();
+        if (current == null || !current.configured() || !target.spaceFingerprint().equals(current.spaceFingerprint()))
+            throw new IllegalStateException("嵌入模型配置已变更，实体旧向量已保留，请重新构建");
+        for (Map.Entry<KgNode, float[]> entry : prepared.entrySet()) {
+            KgNode node = entry.getKey();
+            node.setEmbedding(EmbeddingClient.toBytes(entry.getValue()));
+            node.setEmbeddingSpace(target.spaceFingerprint());
+            nodeMapper.updateById(node);
+        }
+        result.put("embedded", prepared.size());
+        result.put("failed", failed);
+        result.put("model", target.model());
+        result.put("embeddingSpace", target.spaceFingerprint());
+        return result;
+    }
+
+    private static void validateEmbedding(float[] vector) {
+        if (vector == null || vector.length == 0 || vector.length > 16383)
+            throw new IllegalStateException("嵌入向量为空或超出存储限制");
+        double norm = 0;
+        for (float value : vector) {
+            if (!Float.isFinite(value)) throw new IllegalStateException("嵌入向量包含无效值");
+            norm += (double) value * value;
+        }
+        if (norm == 0) throw new IllegalStateException("嵌入服务返回零向量");
     }
 
     private String descriptionOf(KgNode n, String wiki) {

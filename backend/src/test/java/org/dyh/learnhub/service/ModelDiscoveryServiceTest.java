@@ -77,6 +77,8 @@ class ModelDiscoveryServiceTest {
         List<Map<String, Object>> m = ModelDiscoveryService.parseModels(json, openai);
         assertEquals(List.of("aura-7b:latest", "qwen3:8b", "bge-m3:latest"), m.stream().map(x -> x.get("id")).toList());
         assertEquals(true, m.get(2).get("embedding"));
+        assertEquals("embedding", m.get(2).get("purpose"));
+        assertEquals("chat", m.get(1).get("purpose"));
         assertEquals("library", m.get(1).get("ownedBy"));
 
         String ollama = "{\"models\":[{\"name\":\"qwen3:8b\"},{\"name\":\"nomic-embed-text\"}]}";
@@ -85,6 +87,7 @@ class ModelDiscoveryServiceTest {
 
         assertEquals(1, ModelDiscoveryService.parseModels(json, "[\"m1\"]").size());
         assertTrue(ModelDiscoveryService.parseModels(json, "not json").isEmpty());
+        assertFalse(ModelDiscoveryService.isEmbedding("bge-reranker-v2-m3"));
     }
 
     // ------------------------------------------------------------------ 联网（本机假服务）

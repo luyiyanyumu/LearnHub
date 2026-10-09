@@ -62,7 +62,7 @@ public class SettingsService {
      */
     public static final String KEY_QUERY_REWRITE = "ai.query_rewrite";
 
-    /** 语义检索（向量）：嵌入服务地址与模型。默认走本机 Ollama + bge-m3，零成本零依赖 */
+    /** 显式选择 legacy 嵌入路由时沿用的 Ollama 地址与模型。 */
     public static final String KEY_EMBED_BASE_URL = "ai.embed_base_url";
     public static final String KEY_EMBED_MODEL = "ai.embed_model";
     /** 模型分工：每个分析任务用哪个目标（main=云端主模型 / local=本地自建），见 ModelRouting */
@@ -316,6 +316,9 @@ public class SettingsService {
             if (key.startsWith("ai.embed_")) {
                 return environment.getProperty(key.replace("ai.embed_", "kb.embed-"));
             }
+            if (KEY_VECTOR_ENABLED.equals(key)) {
+                return environment.getProperty("kb.vector-enabled");
+            }
             return null;
         } catch (Exception e) {
             return null;
@@ -350,6 +353,7 @@ public class SettingsService {
             case KEY_EMBED_MODEL -> "bge-m3";
             case KEY_VECTOR_ENABLED -> "1";
             case KEY_AUTO_RECOMPILE -> "0";
+            case "ai.model_for_embed" -> org.dyh.learnhub.ai.ModelRouting.EMBED_DISABLED;
             // 模型分工的默认值放在 ModelRouting 里（那边连"为什么是这个默认"一起写着）。
             // 这里按**前缀**判断，而不是逐个列举任务名 —— 列举就会漏（漏了 triple/rerank/grounding）。
             // 空值 = 该任务用 ModelRouting 决定的默认档案。
@@ -377,6 +381,7 @@ public class SettingsService {
         m.put("webEnabled", webEnabled());
         m.put("queryRewrite", queryRewriteEnabled());
         m.put("vectorEnabled", vectorEnabled());
+        m.put("modelForEmbed", effective(modelForTaskKey(org.dyh.learnhub.ai.ModelRouting.TASK_EMBED)));
         m.put("autoRecompile", "1".equals(effective(KEY_AUTO_RECOMPILE)));
         // wiki 生成模型（可选覆写；留空 = 跟随主模型，例如本机 Ollama 的 qwen3:8b）
         m.put("wikiBaseUrl", effective(KEY_WIKI_BASE_URL));

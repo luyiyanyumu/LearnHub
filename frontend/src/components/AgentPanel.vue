@@ -13,6 +13,7 @@ import { isDark } from '../composables/useTheme'
 import { AGENT_NOTE_UPDATED_EVENT, matchesOpenNote, parseActionResult } from '../utils/agentNoteEdit'
 import { retrievalChannels, retrievalGroups, retrievalKey, retrievalSourcePath, retrievalTitle, retrievalTooltip } from '../utils/retrievalDisplay'
 import { groundingDisplay } from '../utils/groundingDisplay'
+import { MODEL_CONFIGURATION_CHANGED_EVENT, chatProfiles, chatProfileSelection } from '../utils/modelProfileView'
 
 /**
  * Markdown 预览（md-editor-v3）体积很大：整包 + 样式约 310 KB，
@@ -157,7 +158,8 @@ async function loadSessions() {
 async function loadModelProfiles() {
   try {
     const d = await modelApi.profiles()
-    modelProfiles.value = d.profiles || []
+    modelProfiles.value = chatProfiles(d.profiles)
+    chatProfile.value = chatProfileSelection(modelProfiles.value, chatProfile.value)
   } catch (e) {
     modelProfiles.value = []
   }
@@ -175,13 +177,14 @@ async function switchSession(id) {
   pending.value = []
   showSessions.value = false
   const s = sessions.value.find((x) => x.id === id)
-  chatProfile.value = s?.modelProfileId || ''
+  chatProfile.value = chatProfileSelection(modelProfiles.value, s?.modelProfileId)
   await loadSession()
   notifyCurrentSession()
 }
 
 /** 会话换模型：**同时写库**，这样下次打开这个会话还是这个模型 */
 async function onProfileChange(v) {
+  if (v && !chatProfileSelection(modelProfiles.value, v)) return
   if (!sessionId.value) {
     return // 还没建会话，下一次提问时后端会按请求体里的档案建
   }
@@ -630,13 +633,13 @@ onMounted(() => {
   loadWebSetting()
   loadSession()
   // 会话列表 + 模型档案：右边栏的"新开/切换会话"与"本会话用哪个模型"都靠它们
-  loadSessions()
-  loadModelProfiles().then(() => {
+  Promise.all([loadSessions(), loadModelProfiles()]).then(() => {
     // 恢复上次会话时，把该会话自己记的模型也带回来
     const cur = sessions.value.find((x) => x.id === sessionId.value)
     if (cur) {
-      chatProfile.value = cur.modelProfileId || ''
+      chatProfile.value = chatProfileSelection(modelProfiles.value, cur.modelProfileId)
     }
+    notifyCurrentSession()
   })
   // 嵌入模式（左侧导航「智能体」页）默认展开会话列表：那一页的左栏就是会话清单
   if (props.embedded) {
@@ -644,6 +647,7 @@ onMounted(() => {
   }
   // 支持从笔记编辑器等页面唤起（window 事件，避免组件强耦合）
   window.addEventListener('lh-agent-open', openFromEvent)
+  window.addEventListener(MODEL_CONFIGURATION_CHANGED_EVENT, loadModelProfiles)
   window.addEventListener('lh-agent-compose', composeFromEvent)
   // 知识图谱 / wiki 里的「问智能体」：不仅打开面板，还直接把问题发出去
   window.addEventListener('lh-ask-agent', askFromEvent)
@@ -661,6 +665,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('lh-agent-open', openFromEvent)
+  window.removeEventListener(MODEL_CONFIGURATION_CHANGED_EVENT, loadModelProfiles)
   window.removeEventListener('lh-agent-compose', composeFromEvent)
   window.removeEventListener('lh-ask-agent', askFromEvent)
   window.removeEventListener('lh-agent-sessions-open', openSessionsFromEvent)

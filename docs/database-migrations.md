@@ -4,10 +4,11 @@ LearnHub 后端通过 Flyway 在启动时迁移数据库，迁移成功后才提
 
 ## 首次安装与已有数据库
 
-- 全新数据库执行 `V1__adopt_learnhub_schema.sql` 和 `V2__seed_new_installation.sql`：创建当前所有表、列、索引及 Wiki 来源外键，并一次性导入示例内容。
+- 全新数据库依次执行 V1、V2、V3：创建所有表、列、索引及 Wiki 来源外键，一次性导入示例内容，并增加模型用途与嵌入空间标识。
 - 已有 LearnHub 数据库没有 `flyway_schema_history` 时，后端先检查分类、标签、笔记、关联、速查卡、资料、设置这 7 张核心表的签名，再以 **版本 0** 接管。随后仍执行 V1，创建缺表并补齐老表的缺列、缺索引，将 `rag_eval.note` 从 255 加宽至 1000，补历史学习日期。
 - 不能使用 Flyway 默认的 baseline 版本 1，否则老库会跳过 V1 的升级。设置其他 baseline 版本时，已有数据库启动会被拒绝。
 - 接管旧库时保留笔记、资料元数据、Wiki、模型档案和设置。V2 为没有旧种子标记的库补 `demo.seeded=legacy`，不重新导入用户已删除的示例内容。
+- V3 将原有档案的用途默认为 `chat`，增加 KB 分块、来源索引状态与图谱实体的 `embedding_space`。旧向量字节保留，空间标识仍为 NULL，避免误与新模型混用。升级后选择嵌入档案（或「兼容旧嵌入配置」），再手动重建知识库索引与实体向量；未配置时使用关键词检索，自动增量不会擅自重建旧空间。
 - 不含这些 LearnHub 核心表的非空数据库会在写入任何迁移记录或 DDL 前被拒绝。请使用专用空库或完整的 LearnHub 备份。
 
 默认配置为 `spring.sql.init.mode=never`；原有 `schema.sql`/`data.sql` 保留作历史参考，启动时不再执行。不要通过环境变量重新打开 SQL 初始化，或同时手工执行旧脚本。Flyway 的版本脚本才是发布后的数据库变更入口。
@@ -16,7 +17,7 @@ V1 是 2026-10-08 的不可变快照，包含该工作区已有的 Wiki 来源�
 
 ## 之后新增字段或表
 
-1. 新增 `backend/src/main/resources/db/migration/V3__描述.sql`，之后依次使用 V4、V5；每个已发布文件的版本和内容保持不变。
+1. 新增 `backend/src/main/resources/db/migration/V4__描述.sql`，之后依次使用 V5、V6；每个已发布文件的版本和内容保持不变。
 2. 使用显式 `ALTER TABLE` 或 `CREATE TABLE`，将数据回填放在对应版本中。不要只修改历史 `schema.sql`，也不要修改已发布 V1/V2 的内容。
 3. 如需兼容用户已手工添加的字段，可以参照 V1 的 `information_schema` 检查；不能用吞掉错误的方式掩盖迁移失败。
 4. 运行下述 MySQL 新库/旧库升级测试，并随新版本更新断言和代表性旧库 fixture。
@@ -50,6 +51,6 @@ LEARNHUB_MIGRATION_TESTS=true LEARNHUB_MIGRATION_TEST_IMAGE=mysql:8.4 \
   mvn -B -Dtest=DatabaseMigrationTest test
 ```
 
-将镜像变量设为 `mysql:8.0` 可验证现有旧部署版本，默认使用 `mysql:8.4`，也可指定 MySQL 镜像源地址。测试检查新库的所有持久化实体列与外键、旧库和新库全部列定义/索引一致、旧内容/设置/模拟密钥保留、重复启动不会恢复示例、不相关库不被接管、错误 baseline 版本被拒绝、历史 checksum 变化和未来版本会阻断启动、SQL 执行失败会被记录并阻断启动。
+将镜像变量设为 `mysql:8.0` 可验证现有旧部署版本，默认使用 `mysql:8.4`，也可指定 MySQL 镜像源地址。测试检查新库的所有持久化实体列与外键、旧库和新库全部列定义/索引一致、旧内容/设置/模拟密钥保留、V2 升级 V3 保留向量字节且旧空间保持 NULL、重复启动不会恢复示例、不相关库不被接管、错误 baseline 版本被拒绝、历史 checksum 变化和未来版本会阻断启动、SQL 执行失败会被记录并阻断启动。
 
 实现遵循 [Spring Boot 3.5 数据库初始化说明](https://docs.spring.io/spring-boot/3.5/how-to/data-initialization.html)；baseline 只允许执行其版本以上的迁移，详见 [Flyway baseline-on-migrate](https://documentation.red-gate.com/fd/flyway-baseline-on-migrate-setting-277578974.html)。

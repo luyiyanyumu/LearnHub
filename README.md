@@ -22,6 +22,24 @@ LearnHub 将笔记、速查卡、原始资料和智能体放在一个工作台�
 
 公式抽取保留原图对照，并支持视觉模型识别与 LaTeX 修正。识别效果取决于文档质量与所选模型，可以在阅读器中核对和修改。
 
+## 界面预览
+
+以下为当前应用使用独立示例数据运行的截图；笔记、记录、数量和模型信息均为演示内容。
+
+**总览：学习记录、最近更新与分类分布。**
+
+![LearnHub 学习总览（示例数据）](docs-shots/readme-dashboard.jpg)
+
+| 笔记编辑 | GraphRAG 知识图谱 |
+| --- | --- |
+| ![Markdown 源码与正文对照](docs-shots/readme-note-editor.jpg) | ![GraphRAG 概念与社区探索](docs-shots/readme-graphrag.jpg) |
+| 源码与正文对照，使用格式工具编辑表格与笔记 | 查看概念关系，按社区筛选并探索来源 |
+
+| 融合检索 | LLM Wiki |
+| --- | --- |
+| ![多通道召回与原文入口](docs-shots/readme-fusion-search.jpg) | ![主题知识页与来源依赖](docs-shots/readme-wiki.jpg) |
+| 展示召回通道、融合分和原文入口 | 沿主题与概念阅读，查看来源依赖并核对引用 |
+
 ## 快速安装
 
 准备 Node.js **22.14+** 和正在运行的 Docker（Docker Compose **2.20+**）。使用已发布的安装包启动：
@@ -207,6 +225,7 @@ tools/         开发与维护工具
 - [技能目录与提示词](skills/README.md)
 - [MCP 接入](mcp/README.md)
 - [前端开发](frontend/README.md)
+- [固定知识库评测工具](tools/README.md)
 
 ## 许可证
 

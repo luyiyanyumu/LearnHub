@@ -18,13 +18,19 @@ public interface KbChunkMapper extends BaseMapper<KbChunk> {
      * 一次读回内存（1MB 量级）再暴力余弦，比"把向量取出来算"更简单也更快。
      */
     @Select("SELECT id, source_type AS sourceType, source_id AS sourceId, seq, title, category, "
-            + "chunk_text AS chunkText, char_len AS charLen, vec, dim, model FROM kb_chunk")
+            + "chunk_text AS chunkText, char_len AS charLen, vec, dim, model, embedding_space AS embeddingSpace FROM kb_chunk")
     List<KbChunk> loadAll();
 
     /** 索引规模与模型（界面展示 / 判断是否需要重建） */
     @Select("SELECT CONCAT(COUNT(*), ':', IFNULL(SUM(char_len), 0), ':', IFNULL(MAX(model), ''), ':', "
             + "IFNULL(COUNT(DISTINCT CONCAT(source_type, '-', source_id)), 0)) FROM kb_chunk")
     String fingerprint();
+
+    /** 空间和更新也纳入缓存身份，避免同规模替换后继续使用旧向量。 */
+    @Select("SELECT CONCAT(COUNT(*), ':', IFNULL(MAX(id),0), ':', IFNULL(SUM(char_len),0), ':', "
+            + "IFNULL(MAX(updated_at),''), ':', IFNULL(BIT_XOR(CRC32(CONCAT(id, ':', "
+            + "IFNULL(embedding_space,''), ':', IFNULL(model,''), ':', IFNULL(title,'')))),0)) FROM kb_chunk")
+    String cacheFingerprint();
 
     /** 按来源清空（增量重建单条来源时用） */
     @org.apache.ibatis.annotations.Delete("DELETE FROM kb_chunk WHERE source_type = #{sourceType} AND source_id = #{sourceId}")

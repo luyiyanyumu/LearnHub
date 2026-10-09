@@ -230,7 +230,11 @@ public class KgPipelineService {
             job.stage = "实体向量化";
             try {
                 Map<String, Object> emb = graph.embedEntities(wikiTexts());
-                job.detail = "已向量化 " + emb.get("embedded") + "/" + emb.get("total") + " 个实体";
+                if (Boolean.FALSE.equals(emb.get("configured"))) {
+                    job.detail = "实体向量化跳过（" + emb.get("reason") + "）；图谱名称与关系检索仍可用";
+                } else {
+                    job.detail = "已向量化 " + emb.get("embedded") + "/" + emb.get("total") + " 个实体";
+                }
             } catch (Exception e) {
                 // 向量服务没起不该让整条流水线失败：图已经建好了，只是少一层兜底
                 job.detail = "实体向量化跳过（" + e.getMessage() + "）";

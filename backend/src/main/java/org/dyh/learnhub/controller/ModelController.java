@@ -31,7 +31,7 @@ import java.util.Map;
  * <ul>
  *   <li>{@code GET /api/model/profiles} 返回的档案**永不包含明文密钥**，只有 {@code hasKey} 与 {@code keyHint}；</li>
  *   <li>更新档案时 {@code apiKey} 传 {@code __KEEP__} = 保留原值（界面回传的是掩码，不能拿它覆盖真 key）；</li>
- *   <li>删除档案后，指向它的任务会自动回退到默认档案（不会让任何任务卡死）。</li>
+ *   <li>删除档案后，对话任务回退到默认对话档案；向量嵌入改为未配置。</li>
  * </ul>
  */
 @RestController
@@ -130,6 +130,7 @@ public class ModelController {
     public Result<Map<String, Object>> newSession(@RequestBody(required = false) Map<String, Object> body) {
         String title = body == null ? null : str(body.get("title"));
         String profile = body == null ? null : str(body.get("modelProfileId"));
+        profiles.requireChatProfile(profile);
         return Result.ok(sessions.createNew(title, profile));
     }
 
@@ -148,8 +149,12 @@ public class ModelController {
     /** 会话指定模型档案；profileId 传空 = 跟随分工表 */
     @PutMapping("/sessions/{id}/model")
     public Result<Object> setSessionModel(@PathVariable String id, @RequestBody Map<String, Object> body) {
+        profiles.requireChatProfile(str(body.get("profileId")));
         sessions.setModelProfile(id, str(body.get("profileId")));
-        return Result.ok(Map.of("ok", true, "profileId", sessions.modelProfileOf(id)));
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("ok", true);
+        result.put("profileId", sessions.modelProfileOf(id));
+        return Result.ok(result);
     }
 
     private static String str(Object o) {

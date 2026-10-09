@@ -18,6 +18,8 @@ import { retrievalSourcePath } from '../utils/retrievalDisplay'
 import { createKnowledgeSearchLoader } from '../utils/knowledgeSearch'
 import { findWikiHeading, wikiHeadingId, wikiRouteTarget } from '../utils/wikiNavigation'
 import { createWikiDependencyLoader, wikiDependencyView } from '../utils/wikiDependencyDisplay'
+import { MODEL_CONFIGURATION_CHANGED_EVENT } from '../utils/modelProfileView'
+import { createKnowledgeStatusLoader, knowledgeIndexView } from '../utils/knowledgeIndexView'
 
 /**
  * 知识库：三个视图
@@ -141,6 +143,20 @@ const kbBusy = ref(false)
 const probeQ = ref('')
 const probeResult = ref(null)
 const probeBusy = ref(false)
+let probeGeneration = 0
+const kbView = computed(() => knowledgeIndexView(kb.value, kbLoading.value))
+const kbStatusLoader = createKnowledgeStatusLoader({
+  load: () => kbApi.status(),
+  onState(state) { kb.value = state.status; kbLoading.value = state.loading },
+})
+
+function modelConfigurationChanged() {
+  probeGeneration++
+  probeResult.value = null
+  probeBusy.value = false
+  // Refreshing configuration only reads status; index building remains an explicit action.
+  loadKb()
+}
 
 /**
  * ③ 局部重编译：先做影响分析（模型判断该更新哪些页），再只重建受影响的页面。
@@ -193,17 +209,14 @@ async function runLint() {
 }
 
 async function loadKb() {
-  kbLoading.value = true
-  try {
-    kb.value = await kbApi.status()
-  } catch (e) {
-    kb.value = null
-  } finally {
-    kbLoading.value = false
-  }
+  return kbStatusLoader.refresh()
 }
 
 async function rebuildIndex() {
+  if (!kbView.value.canRebuild) {
+    ElMessage.info(kbView.value.description)
+    return
+  }
   kbBusy.value = true
   try {
     const started = await kbApi.rebuild()
@@ -237,13 +250,15 @@ async function runProbe() {
     ElMessage.info('先写一个问句 —— 用「换一种说法」的问法最能看出差别')
     return
   }
+  const current = ++probeGeneration
   probeBusy.value = true
   try {
-    probeResult.value = await kbApi.probe(q)
+    const result = await kbApi.probe(q)
+    if (current === probeGeneration) probeResult.value = result
   } catch (e) {
     /* 拦截器已提示 */
   } finally {
-    probeBusy.value = false
+    if (current === probeGeneration) probeBusy.value = false
   }
 }
 
@@ -1112,7 +1127,7 @@ function onWikiClick(e) {
 // ------------------------------------------------------------------
 const staleTopicCount = computed(() => topics.value.filter(t => t.stale).length)
 const maintenanceBusy = computed(() => kbBusy.value || kgBuilding.value || rebuilding.value || entBusy.value || reBusy.value || lintBusy.value || summaryBusy.value || kgBusy.value || communityLoading.value)
-const indexState = computed(() => kbLoading.value ? '读取索引…' : !kb.value ? '索引状态不可用' : kb.value.stale ? '索引待更新' : kb.value.chunks ? '索引可用' : '等待建立索引')
+const indexState = computed(() => kbView.value.label)
 const formatCount = value => value == null ? '—' : Number(value).toLocaleString('zh-CN')
 
 watch(tab, (v) => {
@@ -1134,6 +1149,7 @@ watch(() => [route.query.tab, route.query.topic, route.query.section, route.quer
 
 onMounted(() => {
   window.addEventListener('lh-open-wiki', openWikiFromReference)
+  window.addEventListener(MODEL_CONFIGURATION_CHANGED_EVENT, modelConfigurationChanged)
   doSearch()
   if (tab.value === 'graph') { loadGraph(); startPoll() }
   if (tab.value === 'wiki') loadTopics()
@@ -1153,6 +1169,9 @@ watch(layer, (v) => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('lh-open-wiki', openWikiFromReference)
+  window.removeEventListener(MODEL_CONFIGURATION_CHANGED_EVENT, modelConfigurationChanged)
+  kbStatusLoader.dispose()
+  probeGeneration++
   wikiLoadGeneration++
   wikiDependencyLoader.dispose()
   searchLoader.dispose()
@@ -1167,7 +1186,7 @@ onBeforeUnmount(() => {
       <div class="knowledge-heading">
         <h1>知识库</h1>
         <div class="knowledge-header-actions">
-          <span class="index-indicator" :class="{ stale: kb?.stale, unavailable: !kb && !kbLoading }"><i />{{ indexState }}</span>
+          <span class="index-indicator" :class="{ stale: kbView.warning, unavailable: kbView.unavailable || kbView.keywordOnly }" :title="kbView.description"><i />{{ indexState }}</span>
           <el-button size="small" :icon="Setting" @click="maintenanceOpen = true">知识库维护<span v-if="maintenanceBusy" class="maintenance-running">进行中</span></el-button>
         </div>
       </div>
@@ -1498,7 +1517,10 @@ onBeforeUnmount(() => {
       </div>
     </template>
 
-    <KnowledgeSearchPanel v-else v-model:query="kw" :mode="searchMode" :loading="loading" :searched="searched" :items="items" :keyword="keyword" :last-mode="lastMode" :error="searchError" @mode="switchMode" @search="doSearch" @clear="clearSearch" @open="open" @download="item => downloadFile(item.id ?? item.sourceId, item.title)" />
+    <template v-else>
+      <p v-if="kbView.keywordOnly" class="hint index-search-hint">{{ kbView.description }}</p>
+      <KnowledgeSearchPanel v-model:query="kw" :mode="searchMode" :loading="loading" :searched="searched" :items="items" :keyword="keyword" :last-mode="lastMode" :error="searchError" @mode="switchMode" @search="doSearch" @clear="clearSearch" @open="open" @download="item => downloadFile(item.id ?? item.sourceId, item.title)" />
+    </template>
     </div>
 
     <el-drawer v-model="maintenanceOpen" title="知识库维护" size="min(580px, 100vw)" append-to-body class="knowledge-maintenance-drawer">
@@ -1510,14 +1532,18 @@ onBeforeUnmount(() => {
         <span class="kb-title">语义索引</span>
         <template v-if="kb">
           <span class="hint">
-            {{ kb.chunks }} 块 · {{ kb.indexedChars }} 字 · {{ kb.model }}
-            <template v-if="kb.stale"> · <b class="kb-stale">已过期，建议重建</b></template>
+            {{ kb.chunks }} 块 · {{ kb.indexedChars }} 字
+            <template v-if="kb.configured !== false && kb.model"> · 当前模型 {{ kb.model }}</template>
+            <template v-if="kb.indexedModel && kb.indexedModel !== kb.model"> · 已索引模型 {{ kb.indexedModel }}</template>
+            <template v-if="kbView.warning"> · <b class="kb-stale">{{ kbView.label }}</b></template>
           </span>
-          <el-button size="small" :loading="kbBusy" @click="rebuildIndex">重建索引</el-button>
+          <el-button size="small" :loading="kbBusy" :disabled="!kbView.canRebuild" @click="rebuildIndex">重建索引</el-button>
           <span class="hint">当前来源 {{ kb.currentSources }} 个</span>
         </template>
-        <span v-else class="hint">索引状态不可用（检查嵌入服务 {{ kb?.baseUrl || 'Ollama' }} 是否在跑）</span>
+        <span v-else class="hint">{{ kbView.label }}</span>
       </div>
+      <p class="hint">{{ kbView.description }}</p>
+      <p v-if="kbView.canRebuild" class="hint">重建会调用所选嵌入服务，可能产生服务费用；更换配置不会自动重建。</p>
 
       <!-- 重建进度 -->
       <div v-if="kbBusy && kbJob" class="kb-progress">
@@ -1550,7 +1576,7 @@ onBeforeUnmount(() => {
         </div>
         <div class="probe-col">
           <h4>语义检索（{{ probeResult.vectorCount }} 条）</h4>
-          <p v-if="!probeResult.vectorCount" class="hint">0 条 —— 与库里的内容都不相关</p>
+          <p v-if="!probeResult.vectorCount" class="hint">{{ kbView.keywordOnly ? '当前没有可用向量索引，关键词检索仍可用' : '0 条 —— 当前语义检索未命中' }}</p>
           <div v-for="it in probeResult.vector" :key="'v' + it.type + it.id" class="probe-item">
             <b>{{ it.score }}</b> {{ it.type }}#{{ it.id }} 《{{ it.title }}》
           </div>
@@ -2222,6 +2248,13 @@ onBeforeUnmount(() => {
 
 /* ---- 检索（原有样式） ---- */
 /* 语义索引状态与体检 */
+.index-search-hint {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-sm);
+  background: var(--app-bg);
+}
 .kb-bar,
 .probe-bar {
   display: flex;

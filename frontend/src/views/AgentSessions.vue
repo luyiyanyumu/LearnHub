@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import AgentPanel from '../components/AgentPanel.vue'
 import { modelApi } from '../api'
+import { MODEL_CONFIGURATION_CHANGED_EVENT, chatProfiles, chatProfileSelection } from '../utils/modelProfileView'
 
 /**
  * 智能体（左侧主导航的第 6 个版块）：**独立会话侧栏 + 对话区**。
@@ -34,7 +35,7 @@ async function loadAll() {
   try {
     const [s, m] = await Promise.all([modelApi.sessions(100), modelApi.profiles()])
     sessions.value = s || []
-    profiles.value = m?.profiles || []
+    profiles.value = chatProfiles(m?.profiles)
     // 默认选中最近一次会话（与面板里的 localStorage 一致时高亮才对得上）
     const saved = localStorage.getItem('lh-agent-session')
     if (saved && sessions.value.some((x) => x.id === saved)) {
@@ -43,7 +44,7 @@ async function loadAll() {
       activeId.value = sessions.value[0].id
     }
     const cur = sessions.value.find((x) => x.id === activeId.value)
-    activeProfile.value = cur?.modelProfileId || ''
+    activeProfile.value = chatProfileSelection(profiles.value, cur?.modelProfileId)
   } catch (e) {
     sessions.value = []
   } finally {
@@ -58,7 +59,7 @@ function select(id) {
   }
   activeId.value = id
   const cur = sessions.value.find((x) => x.id === id)
-  activeProfile.value = cur?.modelProfileId || ''
+  activeProfile.value = chatProfileSelection(profiles.value, cur?.modelProfileId)
   localStorage.setItem('lh-agent-session', id)
   window.dispatchEvent(new CustomEvent('lh-agent-switch', { detail: { id } }))
 }
@@ -67,7 +68,7 @@ function select(id) {
 async function createSession() {
   creating.value = true
   try {
-    const s = await modelApi.newSession({ title: '新对话', modelProfileId: activeProfile.value || undefined })
+    const s = await modelApi.newSession({ title: '新对话', modelProfileId: chatProfileSelection(profiles.value, activeProfile.value) || undefined })
     await loadAll()
     select(s.id)
     ElMessage.success('已新建会话')
@@ -107,6 +108,7 @@ async function removeSession(s, e) {
 
 /** 会话换模型：写库 + 通知面板 */
 async function setModel(profileId) {
+  if (profileId && !chatProfileSelection(profiles.value, profileId)) return
   if (!activeId.value) {
     return
   }
@@ -128,19 +130,21 @@ function onCurrent(e) {
   const id = e?.detail?.id
   if (id && id !== activeId.value) {
     activeId.value = id
-    activeProfile.value = e.detail.modelProfileId || ''
+    activeProfile.value = chatProfileSelection(profiles.value, e.detail.modelProfileId)
   }
 }
 
 onMounted(() => {
   loadAll()
   window.addEventListener('lh-agent-current', onCurrent)
+  window.addEventListener(MODEL_CONFIGURATION_CHANGED_EVENT, loadAll)
   // 面板第一次提问会自动建会话：建完要出现在侧栏里
   window.addEventListener('lh-agent-sessions-changed', loadAll)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('lh-agent-current', onCurrent)
+  window.removeEventListener(MODEL_CONFIGURATION_CHANGED_EVENT, loadAll)
   window.removeEventListener('lh-agent-sessions-changed', loadAll)
 })
 </script>
