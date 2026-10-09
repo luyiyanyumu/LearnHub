@@ -1,411 +1,208 @@
-# 一键部署：docker compose
+# Docker Compose 部署
 
-三条命令起全套（MySQL + 后端 + 前端 nginx）：
+本目录提供 MySQL、LearnHub 后端和 nginx 前端的 Compose 配置。默认部署不包含 Ollama；未配置向量嵌入时，仍可使用关键词检索。
+
+## 快速启动
+
+先安装并启动 Docker Engine / Docker Desktop，确认 Docker Compose 可用。从仓库根目录执行：
 
 ```bash
 cd deploy
-cp .env.example .env          # 填 DEEPSEEK_API_KEY（可选：不填只是 AI 功能不可用）
+cp .env.example .env
 docker compose up -d --build
 ```
 
-打开 **http://localhost:8888** 即可。首次构建要拉基础镜像 + 编译前后端，**约 5~15 分钟**；
-之后改代码再 `up -d --build` 只要几十秒（依赖层有缓存）。
+Windows PowerShell 使用 `Copy-Item .env.example .env` 复制配置模板。启动前按需填写 `.env` 中的数据库密码、端口和模型服务配置；`DEEPSEEK_API_KEY` 可选，也可以启动后在网页设置中添加模型档案。
 
-> **要语义检索 / 用本地模型**？看下面的「[本地模型（嵌入 + 对话/翻译）](#本地模型嵌入--对话翻译两种接入方式二选一)」——
-> 本机已装 Ollama 只需改地址（方式 A）；没有则用 `--profile ollama` 自带一套（方式 B）。
-> 默认的 `docker compose up -d --build` **不含 Ollama**，这是有意的。
+打开 <http://localhost:8888>。首次构建需要下载镜像和编译前后端，耗时取决于网络和机器性能。运行 `docker compose ps` 查看容器状态；MySQL 和后端通过健康检查、前端处于运行状态后即可访问。
 
----
-
-## 端口与入口
-
-| 入口 | 默认 | 改哪 |
+| 入口 | 默认地址 | 配置项 |
 | --- | --- | --- |
-| 网页（nginx） | http://localhost:8888 | `.env` 的 `WEB_HOST_PORT` |
-| 后端接口 | http://localhost:18080 | `.env` 的 `BACKEND_HOST_PORT`（MCP server 默认连 18080，改了就同步改 MCP 配置） |
-| MySQL | localhost:3307 | `.env` 的 `MYSQL_HOST_PORT` |
-| 本地模型（可选） | 见下节两种方式 | 方式 A（宿主机已有 Ollama）= 不用动；方式 B（容器版）= `.env` 的 `OLLAMA_HOST_PORT` |
+| 网页 | `http://localhost:8888` | `WEB_HOST_PORT` |
+| 后端接口 | `http://localhost:18080` | `BACKEND_HOST_PORT`；MCP 等客户端需同步修改地址 |
+| MySQL | `localhost:3307` | `MYSQL_HOST_PORT` |
+| 容器版 Ollama（可选） | `localhost:11434` | `OLLAMA_HOST_PORT` |
 
----
+## 模型服务
 
-## 本地模型（嵌入 + 对话/翻译）：两种接入方式，二选一
+在「设置 → 模型档案与分工」中管理服务地址、模型名、密钥和用途，再通过「模型分工」指定各任务使用的档案。对话档案用于对话、翻译、主题 wiki 等生成任务；向量嵌入档案用于知识库和图谱的向量索引。智能体会话也可单独选择对话档案。
 
-**默认三件套里没有 Ollama** —— 它镜像 + 模型约 10GB 起，而**不启用也能正常用**：
-不启用时嵌入服务不可达，检索退化成关键词检索（不报错，只是没有语义召回），其余功能都不受影响。
+启用语义检索的步骤：
 
-| | **方式 A：用宿主机已装的 Ollama** | **方式 B：让本栈自带容器版 Ollama** |
-| --- | --- | --- |
-| 适合 | 本机已装 Ollama（哪怕只是为了别的项目装的） | 新机器/服务器，不想额外装东西 |
-| 代价 | 0 下载 | 镜像约 **9.4GB** + 模型约 1.2GB |
-| 地址 | `http://host.docker.internal:11434` | `http://ollama:11434` |
-| 起法 | 不用动 compose（默认三件套即可） | `docker compose --profile ollama up -d` |
+1. 新增用途为「向量嵌入」的档案，填写服务地址和支持嵌入的模型。
+2. 点击「测试」，确认嵌入接口可用及向量维数。
+3. 在「模型分工 → 向量嵌入」中选择该档案。
+4. 到知识库维护入口重建索引。
 
-> ⚠️ **别两套并行**：宿主机 Ollama 与容器版会抢同一个 **11434** 端口。
+BGE-M3 和 Ollama 均非必需，也可使用其他兼容嵌入服务。未选择嵌入档案时不会请求嵌入服务，检索使用关键词。
 
-### 铁律：同一个 Ollama，两条链路，`/v1` 不一样
+更换服务地址、协议或模型后，需要重新生成知识库索引和图谱实体向量。旧向量会保留，但不会参与新嵌入空间的比较；索引重建失败时保留原索引。
 
-| 用途 | 实际端点 | 地址写法 |
-| --- | --- | --- |
-| **嵌入**（语义检索，`bge-m3`） | Ollama 原生 `/api/embed` | `http://<host>:11434` ← **不加 `/v1`** |
-| **对话/翻译/wiki**（`qwen3:8b` 等） | OpenAI 兼容 `/v1/chat/completions` | `http://<host>:11434/v1` ← **要加** |
+### 使用宿主机上的 Ollama
 
-加错的表现：嵌入报 404 或"不支持嵌入"；对话档案报 404。**这是接入本地模型最容易错的一处。**
+先安装 Ollama，并下载需要的模型。以下模型名为示例，可替换为服务支持的模型：
 
-### 方式 A：用宿主机已装的 Ollama
-
-```powershell
-ollama list                          # 宿主机上有哪些模型
-ollama pull qwen3:8b                 # 想用别的就先拉（Ollama 只管拉，不会"申请了就有"）
+```bash
+ollama pull bge-m3
+ollama pull qwen3:8b
+ollama list
 ```
 
-1. **嵌入**（只有一个入口，走环境变量）：在 `deploy\.env` 里写明地址，然后重启后端：
+后端在容器内运行，访问宿主机服务时使用 `host.docker.internal`。Compose 已配置该主机名映射。
 
-   ```properties
-   KB_EMBED_BASE_URL=http://host.docker.internal:11434   # 注意不带 /v1
-   KB_EMBED_MODEL=bge-m3
-   ```
-   ```bash
-   docker compose up -d backend
-   ```
+| 档案用途 | 提供方 | Base URL | 示例模型 |
+| --- | --- | --- | --- |
+| 向量嵌入 | 本地 Ollama | `http://host.docker.internal:11434` | `bge-m3` |
+| 对话 / 翻译 / wiki | 本地 Ollama | `http://host.docker.internal:11434/v1` | `qwen3:8b` |
 
-2. **对话/翻译**（界面里配，可配多个）：**设置 → 外观与 AI → 模型档案 → 新建**
+其他宿主机模型服务同样应使用容器可访问的地址。服务还需允许来自 Docker 网络的连接；只监听宿主机回环地址时，容器可能无法访问。
 
-   | 字段 | 填什么 |
-   | --- | --- |
-   | 名称 | 如「本地 qwen3」 |
-   | 提供方 | 选 **本地 Ollama**（也有 本地 LM Studio `1234` / 本地 vLLM `8000`） |
-   | Base URL | ⚠️ 预置填的是 `http://localhost:11434/v1` → **必须改成 `http://host.docker.internal:11434/v1`** |
-   | 模型名 | 与 `ollama list` **同名**，如 `qwen3:8b` |
-   | API Key | 本地留空 |
+### 使用容器版 Ollama
 
-   > 三种本地预置默认都是 `localhost`，容器部署下一律要换成 `host.docker.internal`。
-
-### 方式 B：让本栈自带 Ollama
+在本目录执行：
 
 ```bash
 docker compose --profile ollama up -d
-docker compose exec ollama ollama pull bge-m3      # 模型存在具名卷 ollama-models 里，重建不丢
+docker compose exec ollama ollama pull bge-m3
+docker compose exec ollama ollama pull qwen3:8b
 ```
 
-然后把地址从 `host.docker.internal` 换成容器服务名 `ollama`：
+模型保存在 `ollama-models` 具名卷中，重建容器后仍可使用。档案地址使用 Compose 服务名：
 
-```properties
-# deploy/.env（嵌入：不带 /v1）
-KB_EMBED_BASE_URL=http://ollama:11434
-```
-```sql
--- 本地档案（对话/翻译：带 /v1）；在界面里改效果相同
-UPDATE model_profile SET base_url='http://ollama:11434/v1' WHERE name LIKE '%Ollama%';
-```
-
-### 接入完先验证（别等用的时候才发现连不上）
-
-```bash
-# 容器能不能访问到 Ollama 的 OpenAI 兼容端点（方式 A 用 host.docker.internal，方式 B 用 ollama）
-docker compose exec backend wget -qO- http://host.docker.internal:11434/v1/models
-
-# 嵌入这一路的生效值来自哪里（fromDb / fromExternal / effective）
-curl "http://localhost:18080/api/settings/effective?keys=ai.embed_base_url,ai.embed_model"
-
-# 翻译真调一次（能返回译文即通）
-curl -X POST http://localhost:18080/api/files/1/translate \
-  -H 'Content-Type: application/json' -d '{"text":"线程池的核心参数","targetLang":"en"}'
-```
-
-### 接好之后：把模型指派给任务（「模型分工」）
-
-**设置 → 外观与 AI → 模型分工** 可以给每个后台任务单独指定档案。默认值是实测定的：
-
-| 任务 | 建议 | 为什么 |
-| --- | --- | --- |
-| 主题 wiki、检索词扩展 | **本地档案** | 批量生成，免费且够用（默认就是这么配的） |
-| 翻译 | **本地档案** | 逐段翻译，本地足够 |
-| 判定类（实体编译、影响分析、语义自检、图谱关联、三元组抽取、答案核对） | 云端档案 | 实测本地小模型守不住跨页规则、标签不稳定 |
-| 检索重排 | 云端档案 | 97 条用例：本地 8B 几乎无增益（MRR 0.759 vs 云端 0.902） |
-| 对话用哪个模型 | 智能体界面里**按会话选** | 每个会话可固定一个档案，或选「默认」用当前生效档案 |
-
-### 填档案不用猜模型名：点「获取模型」
-
-**设置 → 外观与 AI → 模型档案与分工 → 编辑档案**里，`Base URL` 输入框右侧有个 **获取模型**：
-它按你填的地址 + 密钥去问服务端 `GET {baseUrl}/models`，把模型列成下拉让你选（仍可手输）。
-好处是**不用先保存再试错** —— 密钥不对会当场说「密钥无效（HTTP 401）」并附上游原话。
-
-它会顺手修三类最常见的填错（都是实测踩过的）：
-
-| 你填的 | 它做什么 | 为什么 |
-| --- | --- | --- |
-| `http://localhost:11434/v1` | 自动换成 `host.docker.internal` | **后端跑在容器里**，`localhost` / `127.0.0.1` 指的是容器自己，不是你的宿主机 |
-| `https://api.deepseek.com` | 自动补 `/v1` 再试 | OpenAI 兼容接口通常在 `/v1` 下（DeepSeek 官方两种都吃，本地服务多半只吃 `/v1`） |
-| `.../v1/chat/completions` | 剥掉尾巴 | 把完整接口地址当基址填了 |
-
-成功的地址若与原值不同，界面会**直接替你改好并说明原因**。取不到列表也不影响保存：
-有些服务（含自定义接入点、微调模型）不在 `/models` 里列出，手填即可。
-
-> 顺带：**云端地址 + 没填密钥**的档案会在列表里标一个「缺密钥」徽章。
-> 这种档案调用时必然 401，而上游原文是 `Your api key: null is invalid`，应用里显示成
-> 「该档案的 API Key 无效或未配置」—— 容易被误读成"我的密钥填错了"，其实是**压根没填**。
-
-### 为什么嵌入地址必须由部署时给（而不是界面里选）
-
-`EmbeddingClient` 走的是 **Ollama 的 `/api/embed`**（不是 OpenAI 兼容的 `/v1/embeddings`），
-默认 `http://localhost:11434` + `bge-m3`；换嵌入模型必须**重建整个索引**，所以设置面板里
-刻意没有这个入口（面板那行写着"嵌入向量固定用本地"）。容器里 `localhost` 指的是容器自己，
-因此必须由 compose 注入服务名。三个可覆盖的键：
-
-| 环境变量 | 默认 | 说明 |
-| --- | --- | --- |
-| `KB_EMBED_BASE_URL`（或 `AI_EMBED_BASE_URL`） | `http://ollama:11434` | 嵌入服务地址；两个前缀都认（代码里的键叫 `ai.embed_base_url`，但语义属知识库，容易写混） |
-| `KB_EMBED_MODEL`（或 `AI_EMBED_MODEL`） | `bge-m3` | 嵌入模型名，改它要重建索引 |
-| `KB_VECTOR_ENABLED` | `1` | 置 `0` 关掉语义检索（只走关键词） |
-
-> **用宿主机上已有的 Ollama**（不想再起一个容器）：把地址改成
-> `KB_EMBED_BASE_URL=http://host.docker.internal:11434` 即可 —— compose 已给 backend 配了
-> `host.docker.internal` 映射。
->
-> **注意**：这些键要么在 `.env` 里给（compose 会注入），要么作为容器环境变量给。
-> 早期版本只有"数据库 + 代码默认值"两条来源，**外部环境变量会被忽略** —— 现在
-> `SettingsService.effective()` 的顺序是 **数据库 > 外部配置 > 代码默认值**，
-> 上面那个 `/api/settings/effective` 接口就是用来一眼确认这件事的。
-
----
-
-## 端口/容器名被占用时怎么并存（本机已有别的项目或旧部署）
-
-一键启动脚本（`start-all.bat`）会从 `deploy\.env` 读端口与容器名。**同一台机器上跑多个项目时**
-必须在这里错开，否则 compose 会以"容器名已被占用"或"端口已分配"直接失败 —— 实测踩过两种：
-
-```
-Conflict. The container name "/learn-hub-mysql" is already in use by container "0e5df83c..."
-Bind for 127.0.0.1:8889 failed: port is already allocated     # 被另一个项目的容器占着
-```
-
-在 `deploy\.env` 里改这六行即可（数据各自独立，互不影响）：
-
-```dotenv
-MYSQL_HOST_PORT=3309
-BACKEND_HOST_PORT=18082
-WEB_HOST_PORT=8890
-MYSQL_CONTAINER_NAME=learn-hub-mysql-deploy
-BACKEND_CONTAINER_NAME=learn-hub-backend-deploy
-FRONTEND_CONTAINER_NAME=learn-hub-frontend-deploy
-```
-
-改完 `start-all.bat` 打印的端口与容器名会跟着变（脚本每次从 `.env` 读，不再写死）。
-
-> **别为了消掉冲突直接 `docker rm learn-hub-mysql`**：旧容器如果数据在**匿名卷**里
-> （`docker inspect <容器> --format "{{json .Mounts}}"` 看到的是一串 64 位十六进制名字），
-> 让 compose 用新卷起一个空库，你的笔记/资料在界面上就"没了"。先备份再迁移，或直接用上面的并存方案。
-
-### 前端容器反复重启：`host not found in upstream "backend"`
-
-nginx 写死 `proxy_pass http://backend:18080;` 时，**启动那一刻**就要解析到这个主机名，
-解析不到直接 `emerg` 退出、容器重启循环（本机实测：compose 里已有 `depends_on: service_healthy`，
-但单独重启前端容器时后端不在它的解析视图里，照样崩）。
-
-`deploy/nginx.conf` 已改成**请求时解析**：
-
-```nginx
-resolver 127.0.0.11 valid=10s ipv6=off;      # Docker 内置 DNS
-location /api/ {
-    set $api_upstream "http://backend:18080";
-    proxy_pass $api_upstream$request_uri;    # 变量形式 → 延迟到请求时解析
-}
-```
-
-好处有两个：后端暂时没起来只是该请求 502（nginx 本身健康、页面照常打开），
-后端重启换了 IP 也会立刻跟上（写死 upstream 的话 nginx 会一直打到旧 IP）。
-
-#### 从本机迁过来后必查：**库/档案里所有 `localhost` 都会失效**（翻译、本地档案、嵌入、Milvus…）
-
-本机那套里写 `localhost` 是对的（后端就在宿主机上）；**后端进容器后 `localhost` 指的是容器自己**，
-于是凡是"指向本机某个服务"的配置全部连不上。实测踩过两次，症状还完全不同：
-
-| 功能 | 症状 | 原因 |
-| --- | --- | --- |
-| 翻译（"本地 Ollama" 档案） | 弹「翻译调用失败（档案：本地 Ollama / qwen3:8b）：**null**」 | `model_profile.base_url = http://localhost:11434/v1` |
-| 语义检索 | 词面正常、**语义 0 命中**（不报错） | `ai.embed_base_url = http://localhost:11434` |
-
-**排查这条 SQL，把结果里每一个都改成 `host.docker.internal`**（或改成容器服务名）：
-
-```bash
-docker exec learn-hub-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -e "
-SELECT 'setting', setting_key, setting_value FROM learn_hub.app_setting
-  WHERE setting_value LIKE '%localhost%' OR setting_value LIKE '%127.0.0.1%'
-UNION ALL
-SELECT 'profile', CONCAT('#', id, ' ', name), base_url FROM learn_hub.model_profile
-  WHERE base_url LIKE '%localhost%' OR base_url LIKE '%127.0.0.1%';"
-```
-
-改法（两处都要，否则 UI 看到的和实际用的会不一致）：
-
-```bash
-# ① 库/档案（界面「设置 → 外观与 AI」里也能改，效果相同）
-docker exec learn-hub-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "
-UPDATE learn_hub.model_profile SET base_url='http://host.docker.internal:11434/v1'
-  WHERE base_url LIKE '%localhost:11434%';"
-
-# ② 嵌入服务走环境变量（见下节），compose 已默认给 host.docker.internal:11434
-```
-
-> `host.docker.internal` 由 compose 里的 `extra_hosts` 提供（Docker Desktop 自带，Linux 原生
-> Docker 靠这一行才有）。要改成容器版 Ollama 就统一换成 `http://ollama:11434`（不带 `/v1` ——
-> 嵌入走 Ollama 原生 API，本地档案走 OpenAI 兼容的 `/v1`）。
-
-### 从本机部署迁移数据到本栈（含"向量必须重建"这个坑）
-
-把本机那套（自己起的 MySQL + `java -jar`）搬到 compose 时，**要搬两样东西**，
-并且**有一类数据是搬不过去的**：
-
-| 搬什么 | 怎么搬 |
+| 档案用途 | Base URL |
 | --- | --- |
-| 数据库（笔记/资料元数据/图谱/设置） | `mysqldump` 导出 → 导入本栈的 `learn-hub-mysql` |
-| 上传的资料原文 | 把 `backend/uploads/*` 复制进本栈的卷 `learn-hub_uploads` |
-| **向量（`kb_chunk.vec`）** | ❌ **搬不了，必须重建** —— 见下 |
+| 向量嵌入 | `http://ollama:11434` |
+| 对话 / 翻译 / wiki | `http://ollama:11434/v1` |
 
-#### 坑 1：导出时**绝不能让它经过管道/命令输出的文本层**
+如果宿主机已有服务占用 `11434`，先调整 `.env` 的 `OLLAMA_HOST_PORT`，再启动容器版；容器之间仍使用 `ollama:11434`。
 
-```powershell
-# ❌ 错误：二进制 BLOB 会在这一层被当成文本解码，非法字节被替换成 U+FFFD（EF BF BD）
-docker exec learn-hub-mysql sh -c 'exec mysqldump ...' | Out-File -Encoding utf8 backup.sql
+### 接口与连接验证
 
-# ✅ 正确：写文件用**重定向到磁盘**（或先在容器内落地再 docker cp 出来），
-#          然后把文件交给 mysql 客户端导入 —— 二进制全程不经过"读出来再写回去"
-cmd /c "docker exec learn-hub-mysql sh -c \"exec mysqldump -uroot -p... --single-transaction --databases learn_hub\" > backup.sql"
-docker cp backup.sql learn-hub-mysql:/tmp/restore.sql
-docker exec learn-hub-mysql sh -c 'mysql -uroot -p... < /tmp/restore.sql'
-```
+Ollama 嵌入使用原生 `/api/embed`，档案地址的尾部 `/v1` 会自动归一化。对话使用兼容 OpenAI 的 `/v1/chat/completions`。其他嵌入提供方使用兼容 `/embeddings` 的接口，基址须包含服务要求的路径，例如 `/v1`。
 
-**症状**：库导进去了、笔记与文件都在，但**语义检索 0 命中**（词面正常）。
-原因就是向量字节被替换成了 `EF BF BD`（UTF-8 替换字符），解码出来是 `-6.7E+28` 这种垃圾浮点，
-余弦相似度全是 0.0，被 `MIN_SCORE` 过滤掉。
-排查命令（向量里出现 `EFBFBD` 即已损坏）：
+可以在档案编辑界面点击「获取模型」查询服务支持的模型；列表只帮助选择，嵌入能力仍需通过档案测试确认。不提供模型列表的服务可以手动填写模型名。
+
+「获取模型」会尝试修正完整接口地址、缺少 `/v1` 的基址，以及容器内无法连接的回环地址；成功修正后会在界面说明。需要鉴权的服务应配置相应密钥。
+
+以下命令检查后端容器能否访问宿主机 Ollama，以及当前嵌入与索引状态。使用容器版时将第一条命令中的 `host.docker.internal` 换成 `ollama`：
 
 ```bash
-docker exec learn-hub-mysql mysql -uroot -p... -N -e \
-  "SELECT HEX(LEFT(vec,32)) FROM learn_hub.kb_chunk LIMIT 1;"
+docker compose exec backend curl -fsS http://host.docker.internal:11434/v1/models
+curl "http://localhost:18080/api/kb/status"
 ```
 
-#### 坑 2：向量**重建**才是正解（不要试图"修好"搬过来的向量）
+### 兼容旧嵌入配置
 
-向量是**由文本算出来的产物**，文本在就一定能重算，而"修补二进制"既不划算也无必要：
+模型分工中的「兼容旧嵌入配置」可继续使用历史配置。当前 Compose 会向后端注入以下环境变量：
 
-```bash
-# 确认嵌入服务可用（容器内能访问到 Ollama）
-docker compose exec backend wget -qO- http://ollama:11434/api/tags
-# 全量重建（22 个来源约 2 分钟）
-curl -X POST http://localhost:18080/api/kb/rebuild
-curl "http://localhost:18080/api/kb/status"      # chunks 涨回、stale=false
-```
+| 环境变量 | Compose 默认值 | 用途 |
+| --- | --- | --- |
+| `KB_EMBED_BASE_URL` | `http://ollama:11434` | 嵌入服务地址 |
+| `KB_EMBED_MODEL` | `bge-m3` | 嵌入模型名 |
 
-**文本有没有被上面那个坑破坏？** 用这条自查（应全为 0，非 0 说明文本也坏了，得重新导出）：
+修改 `.env` 后执行 `docker compose up -d backend` 应用配置。历史嵌入设置的优先级为数据库设置、外部配置、代码默认值；已有数据库覆盖值时，修改环境变量不会覆盖它。新部署建议直接创建嵌入档案并在模型分工中选择。
 
-```bash
-docker exec learn-hub-mysql mysql -uroot -p... -N -e "
-SELECT 'notes', COUNT(*) FROM learn_hub.note WHERE content LIKE CONCAT('%', CHAR(0xEFBFBD USING utf8mb4), '%')
-UNION ALL SELECT 'chunks', COUNT(*) FROM learn_hub.kb_chunk WHERE chunk_text LIKE CONCAT('%', CHAR(0xEFBFBD USING utf8mb4), '%');"
-```
+## 数据与备份
 
-#### 坑 3：本机那套要**先停**，否则端口/容器名冲突
+默认 Compose 项目名为 `learn-hub`，使用以下具名卷：
 
-本机的 MySQL（3307）与本栈的 `learn-hub-mysql` 会抢**同一个宿主机端口**，
-而本机 jar 与容器后端会抢 **18080**：
-
-```bash
-docker stop <你本机的 MySQL 容器>     # 数据在它的卷里，不会丢
-docker rm  <你本机的 MySQL 容器>      # 只有确认迁移成功后再做（这一步才腾出容器名）
-```
-
-> **顺序建议**：先导出 → 停本机 MySQL 与 jar → `docker compose up -d` → 导入 → 复制上传目录 → **重建索引** → 验证。
-
----
-
-## 数据在哪、怎么备份与恢复
-
-数据落在两个**具名卷**里，`docker compose down` 不会删：
-
-| 卷 | 装什么 |
+| 默认卷名 | 内容 |
 | --- | --- |
-| `deploy_mysql-data` | 全部业务数据：笔记、资料元数据、知识库、图谱、界面设置 |
-| `deploy_uploads` | 上传的资料原文（PDF/Word…） |
+| `learn-hub_mysql-data` | 笔记、资料元数据、知识库、图谱和设置 |
+| `learn-hub_uploads` | 上传的资料原文 |
+| `learn-hub_ollama-models`（可选） | Ollama 模型文件 |
+
+覆盖 Compose 项目名后，卷名前缀也会变化。`docker compose down` 保留具名卷；`docker compose down -v` 会删除卷和其中的数据。
+
+以下备份命令在 `deploy` 目录使用 Bash 执行。先暂停前后端写入，在容器内生成 SQL 文件，再复制出来，避免文本管道改变 BLOB 或文件编码。每条命令成功后再执行下一条：
 
 ```bash
-# 备份数据库
-docker compose exec mysql sh -c 'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE"' > backup.sql
-
-# 恢复
-docker compose exec -T mysql sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE"' < backup.sql
-
-# 备份上传的资料原文（卷 → 本地目录）
+docker compose stop frontend backend
+docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysqldump -uroot --single-transaction --routines --events --triggers --hex-blob --no-tablespaces --set-gtid-purged=OFF "$MYSQL_DATABASE" > /tmp/learnhub-backup.sql'
+docker compose cp mysql:/tmp/learnhub-backup.sql ./backup.sql
 docker compose cp backend:/app/backend/uploads ./uploads-backup
-
-# 危险操作：连数据一起删（会清空！）
-docker compose down -v
+docker compose up -d
 ```
 
-> **从"宿主机直接跑 jar"的旧部署迁过来**：旧库在宿主机的 3307 上，新栈的库在卷里，两者互不相通。
-> 先 `mysqldump` 旧库，再按上面的命令灌进 compose 的库；`backend/uploads/` 用 `docker compose cp` 反向拷进去。
+同时保存部署配置和自行修改的 `skills/`。发布版安装器会自动备份数据库、上传资料、技能和实例配置，详见 [npx 安装与更新](../docs/npx-install.md)。
 
----
-
-## 常用运维命令
+恢复时使用与备份匹配的应用版本，并保持后端停止。数据库文件可按以下方式导入，上传资料需恢复到后端的 `/app/backend/uploads` 挂载目录。发布版安装器的完整恢复流程及 PowerShell 示例见 [npx 安装与更新](../docs/npx-install.md#手动恢复发布版备份)：
 
 ```bash
-docker compose ps                    # 看三个容器的状态与健康（healthy 才是真起来了）
-docker compose logs -f backend       # 跟后端日志（排错主要看这个）
+docker compose cp ./backup.sql mysql:/tmp/learnhub-restore.sql
+docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot "$MYSQL_DATABASE" < /tmp/learnhub-restore.sql'
+```
+
+### 从其他部署迁移
+
+迁移时同时保留数据库和上传资料原文。先暂停源实例写入，完成备份，再将数据库导入目标实例、恢复上传目录，并核对笔记、资料和模型配置。
+
+从宿主机运行迁入容器时，要检查模型和其他服务地址：容器内的 `localhost` / `127.0.0.1` 指向容器自身；访问宿主机使用 `host.docker.internal`，访问同一 Compose 网络中的服务使用服务名。
+
+数据库向量是可重新生成的数据。使用 `--hex-blob` 导出可保留其二进制内容；如果向量损坏或嵌入服务、模型发生变化，确认嵌入档案可用后重建索引：
+
+```bash
+curl -X POST "http://localhost:18080/api/kb/rebuild"
+curl "http://localhost:18080/api/kb/status"
+```
+
+## 运维与更新
+
+```bash
+docker compose ps
+docker compose logs -f backend
 docker compose logs -f frontend
-docker compose restart backend       # 只重启后端
-docker compose up -d --build         # 更新：拉新代码后重建镜像并滚动重启
-docker compose down                  # 停掉（保留数据）
+docker compose restart backend
+docker compose down
 ```
 
-`depends_on` + healthcheck 已配好启动顺序：**MySQL 能登 → 后端健康 → 前端起**。
-所以 `up -d` 之后不必手动等，`docker compose ps` 三个都 healthy 就是好了。
-
----
-
-## 更新
+源码部署更新时，先备份数据库和上传资料，再从仓库根目录执行：
 
 ```bash
-cd <仓库>
 git pull
 cd deploy
 docker compose up -d --build
 ```
 
-**数据库迁移**：当前后端通过 Flyway 执行版本迁移。新库自动初始化，已有 LearnHub 库从版本 0 接入并补齐兼容列和索引，保留业务数据。升级前备份数据库与上传资料；迁移失败会阻止后端启动。后续表结构变化应新增 `backend/src/main/resources/db/migration/V<N>__<说明>.sql`，不要修改已经发布的迁移文件。见[数据库迁移说明](../docs/database-migrations.md)。
+后端通过 Flyway 执行数据库版本迁移。新库自动初始化，已有 LearnHub 库从版本 0 接入并补齐兼容列和索引；迁移失败会阻止后端启动。后续表结构变化应新增 `backend/src/main/resources/db/migration/V<N>__<说明>.sql`，保留已发布迁移文件。详见 [数据库迁移说明](../docs/database-migrations.md)。
 
-**发布镜像与 npx 更新**：`deploy/docker-compose.release.yml` 使用版本镜像，不在用户机器上构建。安装器的 `adopt --from <原 deploy 目录>` 可以登记原实例并固定数据卷，随后 `update` 负责备份、数据库迁移和健康检查。npm 与镜像首次公开发布前先本地验证，见[npx 安装与更新](../docs/npx-install.md)。
+`docker-compose.release.yml` 使用版本镜像。安装器的 `adopt --from <原 deploy 目录>` 可登记现有实例并固定数据卷，再由 `update` 完成备份、迁移和健康检查。详见 [命令行安装器](../cli/README.md)。
 
----
+### 端口或容器名冲突
 
-## 两个真实的限制（不是配置问题，是容器网络决定的）
+在 `.env` 中修改端口和容器名，然后重新启动。独立实例应使用单独的部署目录；以下是该目录中 `.env` 的通用示例：
 
-1. **本地 Ollama 做向量嵌入时，地址不能是 `localhost`**
-   默认嵌入地址是 `http://localhost:11434`（宿主机视角）。在容器里 `localhost` 指的是**容器自己**，
-   所以语义检索的"嵌入"这一步会连不上。栈里已给 backend 加了 `host.docker.internal` 映射，
-   把「设置 → 检索」里的嵌入地址改成 `http://host.docker.internal:11434` 即可。
-   *不影响*：不配也能用 —— 检索默认是 MySQL 全量扫描，AI 走的是云端 DeepSeek API。
+```dotenv
+MYSQL_HOST_PORT=3310
+BACKEND_HOST_PORT=18090
+WEB_HOST_PORT=8890
+MYSQL_CONTAINER_NAME=learn-hub-secondary-mysql
+BACKEND_CONTAINER_NAME=learn-hub-secondary-backend
+FRONTEND_CONTAINER_NAME=learn-hub-secondary-frontend
+```
 
-2. **端口冲突时不要硬上**
-   这台机器如果已经有容器占了名字 `learn-hub-mysql` 或端口 3307（例如之前用
-   `docker run --name learn-hub-mysql ...` 起的旧库），`docker compose up` 会直接报冲突。
-   二选一：把旧的 `docker rm -f learn-hub-mysql` 之后迁数据过来，或者改 `.env` 里的端口与
-   compose 里的 `container_name`。
+独立数据还需要独立的 Compose 项目名，例如执行 `docker compose --project-name learn-hub-secondary up -d --build`；后续运维命令也使用相同项目名。Windows 的 `start-all.bat` 会读取 `deploy/.env` 中的端口和容器名。
 
----
+### 前端无法连接后端
 
-## 想用 Milvus（可选）
+查看前后端状态及日志，确认后端已启动。`nginx.conf` 使用 Docker DNS 在请求时解析 `backend` 服务名；后端暂时不可用时接口可能返回 502，恢复后重新请求即可。
 
-大规模向量（十万块以上）才需要，默认的 MySQL 全扫更省事。要用的话：
+## 可选 Milvus
+
+默认向量存储为 MySQL。需要使用 Milvus 时，在本目录叠加 Compose 配置：
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.milvus.yml --profile milvus up -d
 ```
 
-之后在后端切一下后端类型：
+后端容器应通过 `http://milvus:19530` 连接服务。配置地址、切换后端并同步现有兼容向量：
 
 ```bash
+curl -X PUT "http://localhost:18080/api/settings" \
+  -H 'Content-Type: application/json' -d '{"milvusUri":"http://milvus:19530"}'
 curl -X POST "http://localhost:18080/api/kb/vector/backend?backend=milvus"
-curl -X POST "http://localhost:18080/api/kb/vector/sync"     # 把库里现成的向量灌进去，不重新嵌入
-curl "http://localhost:18080/api/kb/vector/status"           # 看两个后端的块数是否一致
+curl -X POST "http://localhost:18080/api/kb/vector/sync"
+curl "http://localhost:18080/api/kb/vector/status"
 ```
+
+上述 curl 多行命令使用 Bash 语法。同步复用当前嵌入空间中已有的向量；更换嵌入服务或模型时，应重建索引。
