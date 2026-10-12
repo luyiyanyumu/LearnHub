@@ -16,6 +16,7 @@ import { fixHtmlQuotes } from './htmlQuotes'
 import mdCallout from './mdCallout'
 import mdAnchor from './mdAnchor'
 import mdMath from './mdMath'
+import { renderMermaid, mermaidFrameDocument, mermaidSvgSize } from './mermaidPreview'
 // 导出的 HTML 要能离线看公式，所以把 katex 的 CSS 也内联进去（与 hljs 的 CSS 同样处理）
 import katexCss from 'katex/dist/katex.min.css?raw'
 
@@ -48,6 +49,51 @@ const md = new MarkdownIt({
 md.use(mdCallout) // :::名称 … ::: 彩色提示块，与编辑器预览保持一致
 md.use(mdAnchor) // 给标题加 id：手写目录 [小节](#id) 在导出文件里也能跳（与预览同一套规则）
 md.use(mdMath) // 数学公式：$…$ / $$…$$ → KaTeX（与笔记编辑器同一套插件与渲染参数）
+
+// Each export keeps its own placeholders in env. Clipboard rendering remains
+// synchronous and uses the original, source-preserving fenced-code renderer.
+const renderFence = md.renderer.rules.fence
+md.renderer.rules.fence = function (tokens, index, options, env, renderer) {
+  const fallback = renderFence(tokens, index, options, env, renderer)
+  const token = tokens[index]
+  if (!env.mermaidExports || token.info.trim().split(/\s+/)[0].toLowerCase() !== 'mermaid') return fallback
+  const marker = `<!--${env.mermaidPrefix}${env.mermaidExports.length}-->`
+  env.mermaidExports.push({ marker, source: token.content, fallback })
+  return marker
+}
+
+const EXPORT_LIGHT = { dark: false, background: '#ffffff', primary: '#e2f5f1', text: '#1f2d2a', brand: '#0e9f8e', muted: '#5a6b67' }
+const EXPORT_DARK = { dark: true, background: '#0d1117', primary: '#12332e', text: '#e6edf3', brand: '#5eead4', muted: '#8b949e' }
+
+function diagramFrame(svg, variant) {
+  const { width, height } = mermaidSvgSize(svg)
+  const theme = variant === 'dark' ? EXPORT_DARK : EXPORT_LIGHT
+  // The outer export wrapper supplies spacing. Inner fixed padding would not
+  // scale with this ratio and could crop a wide diagram in a narrow container.
+  return `<iframe class="note-mermaid-${variant}" title="Mermaid 流程图" sandbox="" loading="lazy" width="${width}" height="${height}" style="aspect-ratio:${width}/${height};max-width:${width}px" srcdoc="${escapeHtml(mermaidFrameDocument(svg, { padding: 0, dark: theme.dark, background: theme.background }))}"></iframe>`
+}
+
+async function renderExportBody(content, renderDiagram) {
+  let prefix = 'LEARNHUBMERMAIDEXPORT'
+  while (content.includes(prefix)) prefix += 'X'
+  const env = { mermaidPrefix: prefix, mermaidExports: [] }
+  let body = md.render(content, env)
+  for (const diagram of env.mermaidExports) {
+    let rendered = diagram.fallback
+    try {
+      const light = await renderDiagram(diagram.source, EXPORT_LIGHT)
+      const dark = await renderDiagram(diagram.source, EXPORT_DARK)
+      if (typeof light !== 'string' || typeof dark !== 'string' || !/^\s*<svg\b/i.test(light) || !/^\s*<svg\b/i.test(dark)) throw new Error('Invalid diagram')
+      const sourceAttr = escapeHtml(diagram.source).replace(/\r/g, '&#13;').replace(/\n/g, '&#10;').replace(/\t/g, '&#9;')
+      rendered = `<div class="note-mermaid-export" data-mermaid-source="${sourceAttr}">${diagramFrame(light, 'light')}${diagramFrame(dark, 'dark')}<pre class="note-mermaid-source" hidden><code class="language-mermaid">${escapeHtml(diagram.source)}</code></pre></div>`
+    } catch {
+      // One invalid diagram must not prevent downloading the rest of the note.
+      // Its original code block is still readable and can be edited/reimported.
+    }
+    body = body.replace(diagram.marker, () => rendered)
+  }
+  return body
+}
 
 /**
  * 任务列表支持：`- [ ] 待办` / `- [x] 已完成` → 带勾选框的列表项
@@ -157,6 +203,9 @@ body {
   margin: 1em 0; line-height: 1.6;
 }
 .markdown-body pre code { background: none; padding: 0; font-size: 88%; }
+.note-mermaid-export { margin: 1em 0; padding: 10px; border: 1px solid #d0d7de; border-radius: 8px; overflow-x: auto; }
+.note-mermaid-export iframe { display: block; width: 100%; height: auto; border: 0; margin: 0 auto; }
+.note-mermaid-export .note-mermaid-dark, .note-mermaid-export .note-mermaid-source { display: none; }
 .hljs { display: block; overflow-x: auto; }
 .markdown-body ul, .markdown-body ol { padding-left: 2em; margin: .6em 0; }
 .markdown-body li { margin: .25em 0; }
@@ -195,6 +244,9 @@ body {
   .markdown-body blockquote { color: #8b949e; border-color: #30363d; background: #161b22; }
   .markdown-body code { background: rgba(110,118,129,.25); }
   .markdown-body pre { background: #161b22; border-color: #30363d; }
+  .note-mermaid-export { border-color: #30363d; }
+  .note-mermaid-export .note-mermaid-light { display: none; }
+  .note-mermaid-export .note-mermaid-dark { display: block; }
   .markdown-body th { background: #161b22; }
   .markdown-body th, .markdown-body td { border-color: #30363d; }
   .markdown-body hr { border-color: #21262d; }
@@ -207,11 +259,11 @@ body {
 /**
  * 渲染整份 HTML 文档字符串
  * @param {{ title?:string, content?:string, meta?:string }} param
- * @returns {string} 完整 html 文本
+ * @returns {Promise<string>} 完整 html 文本，流程图预渲染为离线 SVG。
  */
-export function renderNoteHtml({ title = '', content = '', meta = '' } = {}) {
+export async function renderNoteHtml({ title = '', content = '', meta = '' } = {}, { renderDiagram = renderMermaid } = {}) {
   // 与预览一致：先修复标签内弯引号，否则导出的 HTML 里 <font style=”…”> 也会显示成源码
-  const body = md.render(fixHtmlQuotes(content || ''))
+  const body = await renderExportBody(fixHtmlQuotes(content || ''), renderDiagram)
   const safeTitle = escapeHtml(title.trim() || '无标题笔记')
   const safeMeta = escapeHtml(meta)
   const darkCssBlock = `@media (prefers-color-scheme: dark) {\n${githubDarkCss}\n}`
@@ -253,7 +305,8 @@ ${body}
  *
  * 与 renderNoteHtml 用**同一个 markdown-it 实例**（同样的 callout/锚点规则、
  * 同样的 highlight.js 高亮、同样 breaks:true），所以"复制贴进笔记"与"导出 HTML 再打开"
- * 看到的结构一致。这里不做 fixHtmlQuotes：那个修的是导出文件里属性引号被弯引号污染，
+ * 普通内容结构一致；流程图在导出文档中预渲染，剪贴板保留带语言的源码代码块，
+ * 便于块编辑器粘贴后继续编辑。这里不做 fixHtmlQuotes：那个修的是导出文件里属性引号被弯引号污染，
  * 片段交给浏览器 DOMParser 解析，不经过那一步。
  */
 export function renderMarkdownFragment(markdown) {

@@ -29,6 +29,10 @@ public class FileInfo {
     /** 可选：所属分类 */
     private Long categoryId;
 
+    /** 仅由目录操作显式更新，普通元数据更新不能覆盖并发移动后的归属。 */
+    @com.baomidou.mybatisplus.annotation.TableField(updateStrategy = com.baomidou.mybatisplus.annotation.FieldStrategy.NEVER)
+    private Long folderId;
+
     /** 用户手填说明（抽不出正文的文件靠它参与检索） */
     private String summary;
 

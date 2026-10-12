@@ -41,6 +41,7 @@ public class NoteService {
     /** 内容变更广播：页面保存、智能体写入都会发；wiki 的自动增量更新订阅它 */
     private final ApplicationEventPublisher events;
     private final NoteContentEditor contentEditor;
+    private final FolderService folderService;
 
     /** 完整验证整批操作后返回预览，数据库零改动。 */
     public NoteEditVO previewEdit(Long id, NoteEditRequest request) {
@@ -83,12 +84,21 @@ public class NoteService {
     private static LambdaQueryWrapper<Note> listQuery() {
         return Wrappers.<Note>lambdaQuery()
                 .select(Note::getId, Note::getTitle, Note::getSummary,
-                        Note::getCategoryId, Note::getCreatedAt, Note::getUpdatedAt);
+                        Note::getCategoryId, Note::getFolderId, Note::getCreatedAt, Note::getUpdatedAt);
     }
 
     /** 分页查询笔记：支持分类 / 标签 / 关键词过滤 */
     public PageResult<NoteVO> page(Long categoryId, Long tagId, String kw, long current, long size) {
+        return page(categoryId, tagId, kw, current, size, null);
+    }
+
+    public PageResult<NoteVO> page(Long categoryId, Long tagId, String kw, long current, long size, Long folderId) {
         LambdaQueryWrapper<Note> wrapper = listQuery();
+        folderService.validateFilter("note", folderId);
+        if (folderId != null) {
+            if (folderId == 0) wrapper.isNull(Note::getFolderId);
+            else wrapper.eq(Note::getFolderId, folderId);
+        }
         if (categoryId != null && categoryId > 0) {
             wrapper.eq(Note::getCategoryId, categoryId);
         }
@@ -163,6 +173,7 @@ public class NoteService {
     @Transactional
     public NoteVO save(NoteDTO dto) {
         Note note = new Note();
+        note.setFolderId(folderService.requireTarget("note", dto.getFolderId()));
         note.setTitle(dto.getTitle().trim());
         // 标题只存 title 字段：正文开头那行重复的 `# 标题` 在这里统一剥掉（见 stripDuplicatedTitle）
         String content = normalizeNoteContent(dto.getContent(), note.getTitle());
@@ -199,12 +210,16 @@ public class NoteService {
         //（AI 的「整篇重写 / 追加」最容易把标题又带回正文）
         String content = normalizeNoteContent(dto.getContent(), dto.getTitle().trim());
         // 用显式 UpdateWrapper：categoryId 为 null 时也能真正清空（updateById 会忽略 null）
-        noteMapper.update(null, Wrappers.<Note>lambdaUpdate()
+        var update = Wrappers.<Note>lambdaUpdate()
                 .eq(Note::getId, id)
                 .set(Note::getTitle, dto.getTitle().trim())
                 .set(Note::getContent, content)
                 .set(Note::getSummary, plainSummary(content))
-                .set(Note::getCategoryId, dto.getCategoryId()));
+                .set(Note::getCategoryId, dto.getCategoryId());
+        if (dto.isFolderIdProvided()) {
+            update.set(Note::getFolderId, folderService.requireTarget("note", dto.getFolderId()));
+        }
+        noteMapper.update(null, update);
         if (dto.getTagIds() != null) {
             noteMapper.deleteNoteTags(id);
             saveTags(id, dto.getTagIds());
@@ -382,6 +397,7 @@ public class NoteService {
         vo.setContent(withContent ? note.getContent() : null);
         vo.setSummary(resolveSummary(note));
         vo.setCategoryId(note.getCategoryId());
+        vo.setFolderId(note.getFolderId());
         vo.setCategoryName(note.getCategoryId() == null ? null : categoryNames.get(note.getCategoryId()));
         vo.setCreatedAt(note.getCreatedAt());
         vo.setUpdatedAt(note.getUpdatedAt());

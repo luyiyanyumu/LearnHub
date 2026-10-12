@@ -1,0 +1,5625 @@
+{
+  "version": "1.0-synthetic-frozen",
+  "description": "由智能体新编、逐题完成作者检查并经root独立审核的冻结合成MMR评测题集；这些是审核后的合成标签，并非人工gold。24题×20候选，共480条，跨来源重复、同来源互补、低重复对照各8题。每题requiredFacets明确回答所需信息；候选facets只标正文直接完整支持的必要facet，正确但不完整的背景或反证不冒充完整facet。duplicateGroup仅合并回答所需的相同核心信息，与sourceRef来源独立；同一主题但支持不同facet必须分组。低重复对照没有8条集中重复，通常2条同一单facet的通用规则与具体实例归同组，实例中的新例值不算回答所需的新核心信息；覆盖全部四facet的综合段独立分组，仍与单facet段有部分重叠。relevance=2表示明确正确且完整支撑至少一个必要facet的高质量证据，不要求单片段独立回答全部facet；1表示正确但不完整的部分事实、前提或反证；0表示无关或错误对象/条件/结论。此标准区别于前次完整答案重排集，两个题集nDCG不可当作同一gold标准混合解释。算法可读取question及候选key/title/text/sourceRef，不得读取relevance/rationale/facets/duplicateGroup/requiredFacets/authorCheck；这些字段只供离线评估。全部正文≤120字符，使用新编合成代码与知识场景，无本机资料、数据库记录或真实ID。case id、key、候选顺序与审核标签在推理前冻结，不得依据模型或算法结果修改。固定候选仅衡量选材相关性与信息覆盖，不能推断召回率、端到端答案质量或真实用户分布；题材和冗余模式为预设的合成分布。",
+  "cases": [
+    {
+      "id": "q_2fc8e25656fa",
+      "category": "cross-source redundant",
+      "question": "合成编辑器允许同时打开多篇未保存笔记，并为当前笔记发起补全文本请求。切换笔记时，草稿实例、保存快捷键和补全响应分别应如何归属？",
+      "requiredFacets": [
+        "切换时保留各笔记草稿实例",
+        "保存快捷键只保存当前笔记",
+        "补全响应按发起笔记和请求代次校验"
+      ],
+      "authorCheck": "已检查：各笔记草稿、快捷键和补全归属为三facet；八条草稿说明跨来源复述同一事实，两个其他组各两条；取消通知是有用部分证据，未把它误判0。",
+      "items": [
+        {
+          "title": "服务器草稿恢复",
+          "text": "每次切走笔记先删除本地编辑器，然后无条件以服务器最后版本恢复。未保存修改由下一次用户手动输入重新建立，不影响面板切换。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_644ac7fab61d",
+          "rationale": "违背草稿保留。",
+          "sourceRef": "s_11b5a4e342c3",
+          "key": "d_d151ba1ed130"
+        },
+        {
+          "title": "补全结果回写",
+          "text": "补全请求携带发起文档键及递增代次。响应回来先核对该文档仍对应此代请求，再写入它自己的草稿；活动面板变化不能重定向回写目标。",
+          "relevance": 2,
+          "facets": [
+            "补全响应按发起笔记和请求代次校验"
+          ],
+          "duplicateGroup": "g_56f6ed079874",
+          "rationale": "同时校验文档与代次，防止错误回写。",
+          "sourceRef": "s_170db144c298",
+          "key": "d_466465650b99"
+        },
+        {
+          "title": "面板生命周期",
+          "text": "打开的笔记用各自文档键保存编辑器实例。切换面板只改变可见状态，未保存的正文和撤销栈仍留在原实例里，回到该笔记可继续编辑。",
+          "relevance": 2,
+          "facets": [
+            "切换时保留各笔记草稿实例"
+          ],
+          "duplicateGroup": "g_0f16291bb11c",
+          "rationale": "完整说明草稿实例切换保留。",
+          "sourceRef": "s_5bbb1d514609",
+          "key": "d_719b4ffc930a"
+        },
+        {
+          "title": "面板恢复方案",
+          "text": "各文档编辑器由文档键独立持有；后台面板隐藏但实例还在。笔记来回切换后未保存的文本和撤销历史保持连续，不重新初始化编辑器。",
+          "relevance": 2,
+          "facets": [
+            "切换时保留各笔记草稿实例"
+          ],
+          "duplicateGroup": "g_0f16291bb11c",
+          "rationale": "相同草稿保留信息。",
+          "sourceRef": "s_ef782082d35e",
+          "key": "d_aec290d4488b"
+        },
+        {
+          "title": "活动面板回填",
+          "text": "补全响应到达时读取当前可见编辑器并插入文本，不再记发起文档。用户已切换时把响应交给新面板，可以减少后台草稿修改。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_f41df2b9e693",
+          "rationale": "响应归属错误。",
+          "sourceRef": "s_f666026b023b",
+          "key": "d_07c4919495a2"
+        },
+        {
+          "title": "编辑器缓存策略",
+          "text": "每个已打开的文档对应一个持久编辑器实例；切换标签只是隐藏旧面板。草稿正文和撤销栈不随切换重建，重新激活时复用该文档实例。",
+          "relevance": 2,
+          "facets": [
+            "切换时保留各笔记草稿实例"
+          ],
+          "duplicateGroup": "g_0f16291bb11c",
+          "rationale": "同一草稿实例保留策略的跨来源复述。",
+          "sourceRef": "s_6298af2168fb",
+          "key": "d_4a6016a4a840"
+        },
+        {
+          "title": "全局保存广播",
+          "text": "每个笔记编辑器独立监听保存快捷键，收到键盘事件都立即提交各自内容。这样一次快捷键即可把当前及后台所有草稿一起存盘。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_c319bf202fda",
+          "rationale": "违反只保存当前笔记。",
+          "sourceRef": "s_8674380117a9",
+          "key": "d_a19340ad4bd9"
+        },
+        {
+          "title": "保存命令路由",
+          "text": "工作区只注册一个保存快捷键处理器，触发时读取当前活动文档键，再调用该文档的保存动作。隐藏笔记不得响应同一次快捷键事件。",
+          "relevance": 2,
+          "facets": [
+            "保存快捷键只保存当前笔记"
+          ],
+          "duplicateGroup": "g_548acf1cdb59",
+          "rationale": "明确快捷键当前归属。",
+          "sourceRef": "s_beba7b6de303",
+          "key": "d_d16dfbf2d4eb"
+        },
+        {
+          "title": "异步响应归属",
+          "text": "每次补全记录原笔记键和请求代次，回调只在这对标识仍有效时更新原笔记。切到另一篇笔记不改变回写目标，过时代次的响应应丢弃。",
+          "relevance": 2,
+          "facets": [
+            "补全响应按发起笔记和请求代次校验"
+          ],
+          "duplicateGroup": "g_56f6ed079874",
+          "rationale": "同一响应归属规则。",
+          "sourceRef": "s_7c66fb4e2e98",
+          "key": "d_d35c5771d3aa"
+        },
+        {
+          "title": "标签切换记录",
+          "text": "笔记面板切换不销毁已创建的编辑器。每篇笔记的未保存文档与撤销历史存在对应实例中，隐藏后再次显示时直接恢复原来的编辑状态。",
+          "relevance": 2,
+          "facets": [
+            "切换时保留各笔记草稿实例"
+          ],
+          "duplicateGroup": "g_0f16291bb11c",
+          "rationale": "与生命周期记录提供相同草稿保留信息。",
+          "sourceRef": "s_531b0257dd44",
+          "key": "d_8bb3b342e172"
+        },
+        {
+          "title": "后台请求取消",
+          "text": "离开笔记时取消尚在传输的补全请求可以节省资源，但取消不保证回调绝不抵达。是否接纳回调还取决于文档归属和活动请求记录。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_ef01925a60dd",
+          "rationale": "取消边界是相关前提，缺少完整代次处理。",
+          "sourceRef": "s_e210fc1daca2",
+          "key": "d_227e093a819c"
+        },
+        {
+          "title": "点击保存队列",
+          "text": "为避免重复提交，快捷键固定保存第一篇打开的笔记；当前标签只影响光标显示。其他笔记要先关闭第一篇才能用快捷键保存。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_5703d3161192",
+          "rationale": "保存路由对象错误。",
+          "sourceRef": "s_58ffa4ffddb7",
+          "key": "d_189e38539e3f"
+        },
+        {
+          "title": "文档键响应检查",
+          "text": "补全回调只需比对原笔记键是否存在，无须区分同一笔记前后请求。较慢的旧响应也可以覆盖该笔记较新的补全结果。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_7f39c502e80a",
+          "rationale": "遗漏请求代次并允许旧响应覆盖。",
+          "sourceRef": "s_0a5a0f9cbc6b",
+          "key": "d_de373cc8ca6c"
+        },
+        {
+          "title": "草稿容器设计",
+          "text": "多笔记容器保留每个文档的编辑器对象，选择另一标签仅更换可见面板。隐藏文档的未保存文本与撤销栈不会因这次选择而清空或重建。",
+          "relevance": 2,
+          "facets": [
+            "切换时保留各笔记草稿实例"
+          ],
+          "duplicateGroup": "g_0f16291bb11c",
+          "rationale": "同一保留事实的另一来源。",
+          "sourceRef": "s_fa888cd0dc51",
+          "key": "d_4f4439ab925e"
+        },
+        {
+          "title": "多文档工作区",
+          "text": "工作区按文档键留存打开过的编辑器，非当前面板保持隐藏。切走笔记不卸载实例，因此尚未保存的内容与已有撤销记录都能继续使用。",
+          "relevance": 2,
+          "facets": [
+            "切换时保留各笔记草稿实例"
+          ],
+          "duplicateGroup": "g_0f16291bb11c",
+          "rationale": "同一生命周期事实。",
+          "sourceRef": "s_4479528f9568",
+          "key": "d_9188d2338583"
+        },
+        {
+          "title": "工作区状态说明",
+          "text": "在笔记间导航只切换编辑器面板的可见性。原编辑器按文档键保留，草稿正文与撤销栈随实例留存，回到原文档时继续使用这些状态。",
+          "relevance": 2,
+          "facets": [
+            "切换时保留各笔记草稿实例"
+          ],
+          "duplicateGroup": "g_0f16291bb11c",
+          "rationale": "跨来源重复草稿保留事实。",
+          "sourceRef": "s_df7b11b9ee55",
+          "key": "d_a4cb0b064a75"
+        },
+        {
+          "title": "本地保存日志",
+          "text": "编辑器将最近保存时刻展示在笔记页头，便于用户判断是否有待保存修改。时间标记只描述存盘状态，本身不保存正文或撤销历史。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_29a6f3951a6f",
+          "rationale": "正确状态背景，不能代替三项核心规则。",
+          "sourceRef": "s_e4a1039c0e7f",
+          "key": "d_aefcfc5bd8db"
+        },
+        {
+          "title": "面板按需重建",
+          "text": "切换标签时卸载旧编辑器以回收内存，回到笔记后从最后已保存文本创建新实例。未提交的正文与撤销历史不需要跨标签保留。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_7f77dd5ea4f5",
+          "rationale": "明确违反未保存草稿保留需求。",
+          "sourceRef": "s_45a17b136af4",
+          "key": "d_c2ad65fd1982"
+        },
+        {
+          "title": "键盘事件分派",
+          "text": "保存快捷键由工作区入口接收，并在触发瞬间确定活动笔记。事件只交给该笔记保存，其他保留的后台编辑器不会同时提交自己的草稿。",
+          "relevance": 2,
+          "facets": [
+            "保存快捷键只保存当前笔记"
+          ],
+          "duplicateGroup": "g_548acf1cdb59",
+          "rationale": "与命令路由等价。",
+          "sourceRef": "s_abb31171eddc",
+          "key": "d_55c2419a6277"
+        },
+        {
+          "title": "标签页交互约定",
+          "text": "已打开笔记切到后台时仅停止显示，不释放编辑器。后台实例继续持有草稿及撤销历史，用户切回来会得到原文档的编辑状态。",
+          "relevance": 2,
+          "facets": [
+            "切换时保留各笔记草稿实例"
+          ],
+          "duplicateGroup": "g_0f16291bb11c",
+          "rationale": "重复同一保留事实。",
+          "sourceRef": "s_02e5934085d5",
+          "key": "d_aade12764e76"
+        }
+      ]
+    },
+    {
+      "id": "q_e32f4c8bb25b",
+      "category": "cross-source redundant",
+      "question": "合成知识库中的设计笔记会持续修改。生成带引用的回答时，怎样绑定可核验原文、处理文档版本变化，以及处理检索材料无法证明的结论？",
+      "requiredFacets": [
+        "引用保存来源及原文范围",
+        "回答时核对引用版本与当前内容",
+        "无法证明的结论明确保留不确定性"
+      ],
+      "authorCheck": "已检查：引用结构、版本核验和无依据结论三facet；八条来源范围记录为同一重复组；标题及缩略原文说明为有用前提，不把正确限制判作错误。",
+      "items": [
+        {
+          "title": "标题检索入口",
+          "text": "文档标题可以帮助用户寻找相关材料，也可作为引用卡片的显示名称。标题相同不等于正文相同，仍需核查具体版本和引用文本。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_38eecf4c0a23",
+          "rationale": "正确辅助检索与核验前提。",
+          "sourceRef": "s_e5ce5122cbed",
+          "key": "d_ee4f58f76e21"
+        },
+        {
+          "title": "缺失依据的结论",
+          "text": "若材料只说明离线导出却未证明在线同步，回答应指出在线能力尚无依据。可以展示已证实的离线功能，但不能把未证实结论写成既定事实。",
+          "relevance": 2,
+          "facets": [
+            "无法证明的结论明确保留不确定性"
+          ],
+          "duplicateGroup": "g_41c624e8698c",
+          "rationale": "明确未证实结论保持不确定。",
+          "sourceRef": "s_6e9b17fbc779",
+          "key": "d_626aef46f67c"
+        },
+        {
+          "title": "行级引用协议",
+          "text": "答案引用记录必须包含文档键、版本、起止行和这些行的原文；引用序号链接该记录。文档定位与所用文本因此都能交给读者核验。",
+          "relevance": 2,
+          "facets": [
+            "引用保存来源及原文范围"
+          ],
+          "duplicateGroup": "g_a9986db31376",
+          "rationale": "同一结构的跨来源复述。",
+          "sourceRef": "s_bd40ac27be89",
+          "key": "d_54a221bc87e2"
+        },
+        {
+          "title": "引用号重排",
+          "text": "删除失效引用后保留原结论并给剩余来源重新编号，保证每段至少有一个脚标。脚标的存在可以代替所指文本对结论的直接支持。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_2fe3067ff881",
+          "rationale": "引用号不能替代语义支持。",
+          "sourceRef": "s_5aa142e63273",
+          "key": "d_8ed8c3b55fd8"
+        },
+        {
+          "title": "引用条目结构",
+          "text": "每个回答引用保存来源文档键、版本号、起止行及该范围原文。引用标记指向这条记录，读者能据此打开当时实际采用的文本核验结论。",
+          "relevance": 2,
+          "facets": [
+            "引用保存来源及原文范围"
+          ],
+          "duplicateGroup": "g_a9986db31376",
+          "rationale": "完整引用来源与原文范围。",
+          "sourceRef": "s_55c720e2dd32",
+          "key": "d_72064a0d2a95"
+        },
+        {
+          "title": "全文标题匹配",
+          "text": "只要来源标题含有问题中的能力名称，就把该能力作为已实现事实写入回答。正文是否讨论计划、限制或已实现状态无需再辨别。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_6b9b86bae34d",
+          "rationale": "标题命中不能证明结论。",
+          "sourceRef": "s_4b9a777fd1ca",
+          "key": "d_e8368976a250"
+        },
+        {
+          "title": "原文缺失提示",
+          "text": "抓取器未取到完整段落时，缩略摘要可能省略限定条件。摘要可帮助定位候选出处，但单靠缩略文字无法确认被省略部分是否支持结论。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_6a8c0315e8fa",
+          "rationale": "有用的证据完整性反证。",
+          "sourceRef": "s_0ebe0dae1c11",
+          "key": "d_bca833953717"
+        },
+        {
+          "title": "最新版行号迁移",
+          "text": "文档更新后把旧引用行号直接映射到最新版的相同行数，不重新读取内容。只要文档键未变，旧证据就视为与新正文一致。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_ffc0203334b9",
+          "rationale": "忽略版本和行内容变化。",
+          "sourceRef": "s_873daf9085d3",
+          "key": "d_973d5103fc47"
+        },
+        {
+          "title": "出处回放记录",
+          "text": "系统给回答留存证据时保存来源文档键和版本，同时写入行区间与原文。回答引用标记关联该记录，方便按当时的来源文本重新核对。",
+          "relevance": 2,
+          "facets": [
+            "引用保存来源及原文范围"
+          ],
+          "duplicateGroup": "g_a9986db31376",
+          "rationale": "同一引用复核结构。",
+          "sourceRef": "s_bd958290cba1",
+          "key": "d_49b648ee331f"
+        },
+        {
+          "title": "证据范围约束",
+          "text": "检索证据没有支持某项能力时，答案标记该项尚不能确认，并说明已找到材料能支持的范围。不得用相邻功能的描述补成未经证明的结论。",
+          "relevance": 2,
+          "facets": [
+            "无法证明的结论明确保留不确定性"
+          ],
+          "duplicateGroup": "g_41c624e8698c",
+          "rationale": "同一无依据结论规则。",
+          "sourceRef": "s_68687df9828e",
+          "key": "d_ee09e458cd07"
+        },
+        {
+          "title": "证据记录约定",
+          "text": "回答采用的证据记录包括文档标识、版本、行区间和区间原文。页面上的引用编号连接该记录，来源位置与实际文字均可独立检查。",
+          "relevance": 2,
+          "facets": [
+            "引用保存来源及原文范围"
+          ],
+          "duplicateGroup": "g_a9986db31376",
+          "rationale": "跨来源重复同一引用结构。",
+          "sourceRef": "s_160b1244dcfd",
+          "key": "d_0914777aae90"
+        },
+        {
+          "title": "证据时效处理",
+          "text": "最终回答提交前校验文档版本及所引用行的当前文本。版本或内容不符时丢弃旧引用并重新取证，不把旧行号直接应用到新文档。",
+          "relevance": 2,
+          "facets": [
+            "回答时核对引用版本与当前内容"
+          ],
+          "duplicateGroup": "g_c22c9e254a33",
+          "rationale": "同一版本核验规则。",
+          "sourceRef": "s_253351332a63",
+          "key": "d_8f305b6f2881"
+        },
+        {
+          "title": "更新后引用校验",
+          "text": "组装回答前重新读取引用所属文档，核对版本与对应完整行是否一致。若已有修改，旧证据应失效并重新检索，不能沿用旧版本的行号。",
+          "relevance": 2,
+          "facets": [
+            "回答时核对引用版本与当前内容"
+          ],
+          "duplicateGroup": "g_c22c9e254a33",
+          "rationale": "明确版本变化后重新核验。",
+          "sourceRef": "s_73c24ee22d54",
+          "key": "d_3b2d516047d6"
+        },
+        {
+          "title": "相邻能力推断",
+          "text": "材料确认离线导出后，可在答案中直接宣布在线同步已可用。二者同属数据传输功能，因此无需另取在线能力的证据。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_3051393d4104",
+          "rationale": "无依据推出在线能力。",
+          "sourceRef": "s_e3fc36e854a3",
+          "key": "d_b030dba496f6"
+        },
+        {
+          "title": "标题式引用保存",
+          "text": "引用只保存文档标题和生成时的总结，省去文档键、版本和行范围。标题具有业务含义，足以在任何后续修改后准确复现原始证据。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_81c4b7d9f679",
+          "rationale": "错误声称标题总结足以复核。",
+          "sourceRef": "s_a2faa40defda",
+          "key": "d_2b537f59fc53"
+        },
+        {
+          "title": "出处索引说明",
+          "text": "引用不能只留下文档标题；证据条目同时存文档键、版本、起止行和原文片段。回答中的引用编号与该证据条目对应，支持定位与复核。",
+          "relevance": 2,
+          "facets": [
+            "引用保存来源及原文范围"
+          ],
+          "duplicateGroup": "g_a9986db31376",
+          "rationale": "同一完整出处结构。",
+          "sourceRef": "s_0fad13004f9b",
+          "key": "d_ec185efb8e5d"
+        },
+        {
+          "title": "回答证据格式",
+          "text": "每条引用把来源文档、版本号、原文行范围及文本一起记录，回答标记关联这条证据。这样打开出处时能明确系统当时依据的具体段落。",
+          "relevance": 2,
+          "facets": [
+            "引用保存来源及原文范围"
+          ],
+          "duplicateGroup": "g_a9986db31376",
+          "rationale": "同一可核验原文要求。",
+          "sourceRef": "s_6914bd851085",
+          "key": "d_64475faa1eac"
+        },
+        {
+          "title": "缓存证据免检",
+          "text": "命中过去回答的引用缓存时跳过文档版本校验，旧行范围持续有效。文档之后发生的编辑只在缓存过期后影响引用准确性。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_638bb4b662ce",
+          "rationale": "故意沿用过时证据。",
+          "sourceRef": "s_81feff86eb6e",
+          "key": "d_399e6e690c62"
+        },
+        {
+          "title": "证据卡片字段",
+          "text": "引用卡片记录文档标识、版本、开始行、结束行及范围内原文，答案脚标指向卡片。只有这些信息一起出现，才能定位实际引用的文字。",
+          "relevance": 2,
+          "facets": [
+            "引用保存来源及原文范围"
+          ],
+          "duplicateGroup": "g_a9986db31376",
+          "rationale": "同一证据记录信息。",
+          "sourceRef": "s_2ef842576b03",
+          "key": "d_6ff882d51992"
+        },
+        {
+          "title": "引用持久化方案",
+          "text": "证据存储以文档键加版本定位来源，并保留起止行与对应原文。答案引用号映射到该证据，核验者可同时看到原文位置和实际采用内容。",
+          "relevance": 2,
+          "facets": [
+            "引用保存来源及原文范围"
+          ],
+          "duplicateGroup": "g_a9986db31376",
+          "rationale": "重复来源范围事实。",
+          "sourceRef": "s_0b16808dcb35",
+          "key": "d_57294d2a6cf9"
+        }
+      ]
+    },
+    {
+      "id": "q_2926cfb7ace8",
+      "category": "cross-source redundant",
+      "question": "合成笔记的流程图要导出成离线HTML并能重新导入继续编辑。导出还需支持深浅两套主题，且图内样式不能影响正文；这四项要求如何实现？",
+      "requiredFacets": [
+        "导出预渲染无需网络的图形",
+        "导出保留可重新导入的图源码",
+        "导出明确设置深浅主题背景",
+        "图形样式与正文隔离"
+      ],
+      "authorCheck": "已检查：离线图形、可导入源码、双主题画布与样式隔离四facet分组；六条离线说明跨来源重复，其他组各两条；SVG外链安全是部分前提标1。",
+      "items": [
+        {
+          "title": "导出配色约定",
+          "text": "两套主题都给独立图形文档指定颜色方案和对应背景色，图形背景跟随所选导出主题。正文换色并不会自动替独立文档设定画布。",
+          "relevance": 2,
+          "facets": [
+            "导出明确设置深浅主题背景"
+          ],
+          "duplicateGroup": "g_28477ed08016",
+          "rationale": "同一双主题画布规则。",
+          "sourceRef": "s_6a18640c28f2",
+          "key": "d_acab44b5eac2"
+        },
+        {
+          "title": "父页面主题切换",
+          "text": "深色导出仅给正文容器设置黑色背景，图形iframe保留默认文档样式。父容器背景会自动覆盖子文档白色画布，因此无需配置图形背景。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_cd547be07e7a",
+          "rationale": "错误假定跨文档背景继承。",
+          "sourceRef": "s_a184b78add86",
+          "key": "d_3508d4f94395"
+        },
+        {
+          "title": "离线图形生成",
+          "text": "导出阶段把流程图源码渲染为净化后的SVG，再将SVG嵌入生成的HTML。打开导出文件时直接显示图形，不加载远端脚本，也不需要在线渲染服务。",
+          "relevance": 2,
+          "facets": [
+            "导出预渲染无需网络的图形"
+          ],
+          "duplicateGroup": "g_fc78bf170ef0",
+          "rationale": "明确导出时预渲染离线图形。",
+          "sourceRef": "s_e5b20f25501b",
+          "key": "d_d6bfe0d05c33"
+        },
+        {
+          "title": "正文样式保护",
+          "text": "流程图采用无权限sandbox的静态srcdoc子文档承载，SVG及其样式只存在于该文档。父页面正文有独立样式作用域，不受图内规则修改。",
+          "relevance": 2,
+          "facets": [
+            "图形样式与正文隔离"
+          ],
+          "duplicateGroup": "g_2740e1f61c52",
+          "rationale": "同一iframe样式隔离方案。",
+          "sourceRef": "s_7d20b8e46fdc",
+          "key": "d_236d07383d2b"
+        },
+        {
+          "title": "主题画布配置",
+          "text": "浅色和深色的导出各自明确设置图形文档的颜色方案及画布背景。不能只改正文背景，否则独立图形文档仍可能保留默认白色画布。",
+          "relevance": 2,
+          "facets": [
+            "导出明确设置深浅主题背景"
+          ],
+          "duplicateGroup": "g_28477ed08016",
+          "rationale": "明确双主题图形背景。",
+          "sourceRef": "s_3a40bd2efc66",
+          "key": "d_659fdb2d88a8"
+        },
+        {
+          "title": "交付包说明",
+          "text": "笔记HTML包含生成时预渲染的安全SVG流程图，阅读者直接查看静态结果。导出文件不通过远端JavaScript或在线接口重新计算图形。",
+          "relevance": 2,
+          "facets": [
+            "导出预渲染无需网络的图形"
+          ],
+          "duplicateGroup": "g_fc78bf170ef0",
+          "rationale": "跨来源重复静态图形交付。",
+          "sourceRef": "s_53155ab69488",
+          "key": "d_d4c846d0d850"
+        },
+        {
+          "title": "延迟图形渲染",
+          "text": "导出HTML只保存流程图语句，并引用远端图形库；打开页面后再下载脚本生成图。离线时没有脚本也能以相同方式得到完整图形。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_0b5e4b6dd961",
+          "rationale": "错误依赖网络且声称离线可渲染。",
+          "sourceRef": "s_266c2fe4fbd6",
+          "key": "d_56ba8ccd221b"
+        },
+        {
+          "title": "图形再编辑协议",
+          "text": "导出保留图形容器的源码数据属性和隐藏原文代码块；导入读取这些源码字段还原流程图围栏。已经绘制的SVG不能替代原始编辑文本。",
+          "relevance": 2,
+          "facets": [
+            "导出保留可重新导入的图源码"
+          ],
+          "duplicateGroup": "g_2d57988ba176",
+          "rationale": "同一源码保留信息。",
+          "sourceRef": "s_7166e2dd2947",
+          "key": "d_41c32e74328a"
+        },
+        {
+          "title": "内联全局样式",
+          "text": "将SVG中的样式直接拼到正文头部，允许图形的通用类名作用于整篇笔记。这样图与正文可以共享选择器，不必再考虑样式隔离。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_b7153285a4eb",
+          "rationale": "违反样式隔离要求。",
+          "sourceRef": "s_ba157b033927",
+          "key": "d_29292290e53c"
+        },
+        {
+          "title": "图形在线外链",
+          "text": "HTML仅保存在线图形服务的图片链接，以减少导出体积。断网打开时仍由浏览器自动恢复服务端图形，文件无需携带实际SVG。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_37d34a4ec5b7",
+          "rationale": "外链不能保证离线图形显示。",
+          "sourceRef": "s_a6c73de6af6c",
+          "key": "d_8aff2f6d0dcd"
+        },
+        {
+          "title": "导出图形资源",
+          "text": "HTML输出写入导出时已经生成并清理的流程图SVG。阅读阶段没有在线渲染步骤，不请求外部脚本，断网环境也能显示原本的图形。",
+          "relevance": 2,
+          "facets": [
+            "导出预渲染无需网络的图形"
+          ],
+          "duplicateGroup": "g_fc78bf170ef0",
+          "rationale": "相同离线图形信息。",
+          "sourceRef": "s_48a27fd8a442",
+          "key": "d_df5bffed5504"
+        },
+        {
+          "title": "静态文件交付",
+          "text": "生成HTML前完成流程图的SVG渲染和净化，导出文件内包含渲染结果。收件人离线打开即可看图，无须下载图形库或访问外部渲染接口。",
+          "relevance": 2,
+          "facets": [
+            "导出预渲染无需网络的图形"
+          ],
+          "duplicateGroup": "g_fc78bf170ef0",
+          "rationale": "同一离线预渲染事实。",
+          "sourceRef": "s_91fc40a87bff",
+          "key": "d_3b54ac14324b"
+        },
+        {
+          "title": "本地阅读路径",
+          "text": "流程图源码在导出阶段完成SVG转换与安全净化，HTML内嵌结果。打开成品只消费已有图形，因此不需网络脚本或远端渲染器。",
+          "relevance": 2,
+          "facets": [
+            "导出预渲染无需网络的图形"
+          ],
+          "duplicateGroup": "g_fc78bf170ef0",
+          "rationale": "同一预渲染要求。",
+          "sourceRef": "s_e52c6fb04e38",
+          "key": "d_de28201b0681"
+        },
+        {
+          "title": "SVG还原编辑",
+          "text": "只导出SVG路径即可，重新导入时按形状自动恢复原始流程图语句。源码数据属性和隐藏代码块都可以删除，不影响原文再编辑。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_c4aee759b7ea",
+          "rationale": "SVG不能可靠保留原始源码。",
+          "sourceRef": "s_c7c1a8d37a5e",
+          "key": "d_222520924598"
+        },
+        {
+          "title": "离线预览约定",
+          "text": "流程图在导出过程中转成安全SVG，成品HTML携带这段图形。浏览器打开本地文件直接展示已有SVG，不再依赖远端脚本或网络图形服务。",
+          "relevance": 2,
+          "facets": [
+            "导出预渲染无需网络的图形"
+          ],
+          "duplicateGroup": "g_fc78bf170ef0",
+          "rationale": "跨来源重复离线生成方案。",
+          "sourceRef": "s_efa8500169c5",
+          "key": "d_67ce063b17ce"
+        },
+        {
+          "title": "图形嵌入边界",
+          "text": "将净化后的图形放入无额外权限的sandbox iframe，srcdoc只含静态图与局部样式。图内选择器留在子文档中，不会覆盖笔记正文的排版。",
+          "relevance": 2,
+          "facets": [
+            "图形样式与正文隔离"
+          ],
+          "duplicateGroup": "g_2740e1f61c52",
+          "rationale": "明确样式隔离边界。",
+          "sourceRef": "s_0b454c983736",
+          "key": "d_0b705293d074"
+        },
+        {
+          "title": "SVG链接检查",
+          "text": "净化流程图应检查事件属性及外部资源链接，避免静态文件触发额外访问。清理这些内容有助于离线阅读，但仍需另行生成图形与保留源码。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_fadad687b78f",
+          "rationale": "正确安全前提。",
+          "sourceRef": "s_6fc10081cf78",
+          "key": "d_f596359a046a"
+        },
+        {
+          "title": "图源码体积",
+          "text": "保存流程图源码会使HTML比只含图形略大，但源码是恢复节点和连线编辑的依据。静态图本身只体现渲染形状，难以可靠恢复原始语句。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_9911c41f7509",
+          "rationale": "正确解释源码需要，未给完整保存协议。",
+          "sourceRef": "s_47d8c0e93fab",
+          "key": "d_01e0c6dda08a"
+        },
+        {
+          "title": "原文隐藏删除",
+          "text": "图形渲染成功后移除全部流程图源码，仅保留导出文件标题。再次导入可使用标题推导节点关系，因此不会丢失编辑内容。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_4cadc43a493e",
+          "rationale": "错误抛弃必需源码。",
+          "sourceRef": "s_6199b0f445a8",
+          "key": "d_649f08c95527"
+        },
+        {
+          "title": "源文恢复字段",
+          "text": "图形容器保存独立的流程图源码属性，并提供不显示的原文代码块。重新导入时从这些文本字段恢复围栏源码，不从SVG路径反推编辑内容。",
+          "relevance": 2,
+          "facets": [
+            "导出保留可重新导入的图源码"
+          ],
+          "duplicateGroup": "g_2d57988ba176",
+          "rationale": "明确保存可编辑源码。",
+          "sourceRef": "s_0aea24257081",
+          "key": "d_1686415ed8e5"
+        }
+      ]
+    },
+    {
+      "id": "q_3d737081b888",
+      "category": "cross-source redundant",
+      "question": "合成库存服务会并发预留最后一件商品，客户端也可能重复释放或让预留过期。如何确保库存非负、同一预留只返还一次，并处理过期时的状态竞争？",
+      "requiredFacets": [
+        "预留扣减与状态写入在同一原子边界",
+        "释放以预留状态转移保证仅返还一次",
+        "过期与完成通过同一状态条件竞争"
+      ],
+      "authorCheck": "已检查：原子预留、释放幂等和过期竞争三facet；八条扣减提交事实为重复组；日志和扫描候选边界是有用反证，错误返还和终态覆盖标0。",
+      "items": [
+        {
+          "title": "扣减提交边界",
+          "text": "库存通过足量条件更新减少，再由同一事务保存预留记录。事务提交前两步均须成功，不能让预留已成功而库存尚未扣减。",
+          "relevance": 2,
+          "facets": [
+            "预留扣减与状态写入在同一原子边界"
+          ],
+          "duplicateGroup": "g_46ffaf445ef3",
+          "rationale": "相同扣减提交规则。",
+          "sourceRef": "s_7bb618082ac4",
+          "key": "d_68df8f4f2126"
+        },
+        {
+          "title": "商品占用协议",
+          "text": "预留操作把带数量下限的库存更新和预留记录写入放进同一事务。扣减条件未通过就不给成功预留，两种状态随同一次提交一起变化。",
+          "relevance": 2,
+          "facets": [
+            "预留扣减与状态写入在同一原子边界"
+          ],
+          "duplicateGroup": "g_46ffaf445ef3",
+          "rationale": "跨来源同一占用事实。",
+          "sourceRef": "s_d6add933852d",
+          "key": "d_8fd8adf1d12b"
+        },
+        {
+          "title": "过期时间直接返还",
+          "text": "扫描器只要发现到期时间已过就立即加回库存，不核对预留当前状态。即使订单刚完成，该时间事实也足以证明商品应被释放。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_b583ce21b3df",
+          "rationale": "错误忽略完成与过期竞争。",
+          "sourceRef": "s_529f9830c709",
+          "key": "d_f771aef818ee"
+        },
+        {
+          "title": "先查库存后登记",
+          "text": "预留先普通查询库存，若大于零便独立写入成功记录，稍后再扣减。各请求都看过库存足够就可成功，不必对并发扣减设置条件。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_09569a68e35f",
+          "rationale": "允许并发重复占用最后库存。",
+          "sourceRef": "s_a5bccbaa8433",
+          "key": "d_c246794e0c5f"
+        },
+        {
+          "title": "预留事务流程",
+          "text": "预留事务先以库存足够为条件扣减数量，再写入预留记录；两步同一数据库事务提交。条件扣减失败则不创建成功预留，避免最后一件被并发重复售出。",
+          "relevance": 2,
+          "facets": [
+            "预留扣减与状态写入在同一原子边界"
+          ],
+          "duplicateGroup": "g_46ffaf445ef3",
+          "rationale": "完整原子预留边界。",
+          "sourceRef": "s_ed31d9b8f15a",
+          "key": "d_6b375b900dc0"
+        },
+        {
+          "title": "释放幂等条件",
+          "text": "释放事务先将预留从待使用改为已释放，只有状态转移命中的请求才返还库存，两步同事务。重试看到已释放时直接返回，不再次增加数量。",
+          "relevance": 2,
+          "facets": [
+            "释放以预留状态转移保证仅返还一次"
+          ],
+          "duplicateGroup": "g_a0f1b56a1fec",
+          "rationale": "明确一次性释放边界。",
+          "sourceRef": "s_44ef93316f21",
+          "key": "d_d521d498f0cd"
+        },
+        {
+          "title": "库存竞争窗口",
+          "text": "最后一件商品由条件扣减决定归属，预留记录与扣减同事务提交。并发条件失败的请求终止预留，不另外生成成功的占用记录。",
+          "relevance": 2,
+          "facets": [
+            "预留扣减与状态写入在同一原子边界"
+          ],
+          "duplicateGroup": "g_46ffaf445ef3",
+          "rationale": "相同原子预留规则。",
+          "sourceRef": "s_45f20e1e000d",
+          "key": "d_b6b35fcf2ae6"
+        },
+        {
+          "title": "重试日志编号",
+          "text": "释放接口可记录请求编号方便诊断重试次数，但编号日志本身不限制库存写入。是否再次返还仍必须依据预留记录的状态转移结果。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_9f2c88a33114",
+          "rationale": "正确指出日志不等于幂等。",
+          "sourceRef": "s_cea3ab9330ec",
+          "key": "d_d241cda3b42c"
+        },
+        {
+          "title": "后台扫描时间",
+          "text": "过期扫描可以按到期时刻筛选候选预留，减少检查范围。筛出来的记录可能已被购买完成，所以候选时间条件不能单独授权返还库存。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_016e0262fdb1",
+          "rationale": "有用的扫描前提与反证。",
+          "sourceRef": "s_1d589bb06f5c",
+          "key": "d_af36a1e57830"
+        },
+        {
+          "title": "预留状态收口",
+          "text": "超时释放和订单完成共享待使用状态条件，竞争转成过期或完成。失败的一方读取既有终态，不再返还；过期成功的转移与库存返还同事务。",
+          "relevance": 2,
+          "facets": [
+            "过期与完成通过同一状态条件竞争"
+          ],
+          "duplicateGroup": "g_8623a340bac0",
+          "rationale": "同一竞争收口事实。",
+          "sourceRef": "s_a259c63e1d41",
+          "key": "d_ab39175b76bb"
+        },
+        {
+          "title": "预留成功判定",
+          "text": "数据库事务同时执行库存足够的条件扣减和预留记录写入。只有两步提交成功才返回预留成功，条件失败的请求不能创建有效占用。",
+          "relevance": 2,
+          "facets": [
+            "预留扣减与状态写入在同一原子边界"
+          ],
+          "duplicateGroup": "g_46ffaf445ef3",
+          "rationale": "同一原子成功定义。",
+          "sourceRef": "s_4a4bff8279cd",
+          "key": "d_5d2280134b0f"
+        },
+        {
+          "title": "并发预留约定",
+          "text": "库存扣减必须检查当前剩余量，且与预留成功记录同事务落库。并发请求只有条件更新成功的一方建立预留，失败请求不会继续占用那件商品。",
+          "relevance": 2,
+          "facets": [
+            "预留扣减与状态写入在同一原子边界"
+          ],
+          "duplicateGroup": "g_46ffaf445ef3",
+          "rationale": "重复原子预留事实。",
+          "sourceRef": "s_a82704f9f2e1",
+          "key": "d_86368d9cee23"
+        },
+        {
+          "title": "最后一件处理",
+          "text": "事务内以库存足够为谓词扣减并登记预留，提交时一起生效。另一个请求若条件不成立，不能只写预留状态后等待后续任务补扣库存。",
+          "relevance": 2,
+          "facets": [
+            "预留扣减与状态写入在同一原子边界"
+          ],
+          "duplicateGroup": "g_46ffaf445ef3",
+          "rationale": "同一并发原子方案。",
+          "sourceRef": "s_b2ca1c1cf787",
+          "key": "d_08c0804a07b1"
+        },
+        {
+          "title": "返还库存流程",
+          "text": "释放用待使用状态作为更新条件，成功转成已释放后在同事务返还数量。重复调用不能再次匹配原状态，所以同一预留最多返还一次库存。",
+          "relevance": 2,
+          "facets": [
+            "释放以预留状态转移保证仅返还一次"
+          ],
+          "duplicateGroup": "g_a0f1b56a1fec",
+          "rationale": "同一状态转移幂等方案。",
+          "sourceRef": "s_e87d77f492ae",
+          "key": "d_34d5bcd6c59b"
+        },
+        {
+          "title": "库存扣减记录",
+          "text": "创建预留时使用带库存下限的条件更新，成功后在同一事务插入预留状态。更新未命中就回滚此次预留，库存扣减与成功记录不会分别提交。",
+          "relevance": 2,
+          "facets": [
+            "预留扣减与状态写入在同一原子边界"
+          ],
+          "duplicateGroup": "g_46ffaf445ef3",
+          "rationale": "同一原子条件扣减方案。",
+          "sourceRef": "s_76f917add92d",
+          "key": "d_56c982c8a47f"
+        },
+        {
+          "title": "完成后超时覆盖",
+          "text": "订单完成将状态改为已完成，超时任务随后无条件覆写为过期并返还库存。过期时刻更晚，应覆盖所有已经完成的预留。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_5faed98bc752",
+          "rationale": "错误终态覆盖。",
+          "sourceRef": "s_5ceb79fc7323",
+          "key": "d_4326844c3e88"
+        },
+        {
+          "title": "释放次数累加",
+          "text": "释放接口每次收到请求都加回预留数量，再将状态写为已释放。客户端重试仍执行加库存，以保证任何释放通知都不会漏记。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_dab5fe9277eb",
+          "rationale": "重复返还库存。",
+          "sourceRef": "s_84f118835d39",
+          "key": "d_d26097d4b62c"
+        },
+        {
+          "title": "释放成功日志",
+          "text": "只要释放成功日志存在就不必更新预留状态，返还库存可以在日志写入后任意重放。每次重放都增加库存不会影响同一预留的计数。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_231208388361",
+          "rationale": "日志与重复返还不能保证幂等。",
+          "sourceRef": "s_a23c3791d07b",
+          "key": "d_de8b8d0fafbf"
+        },
+        {
+          "title": "超时与完成竞争",
+          "text": "过期任务与完成购买都以待使用为状态条件，分别转为过期或已完成。只有一个转移能成功；仅过期成功的一方在同事务返还库存。",
+          "relevance": 2,
+          "facets": [
+            "过期与完成通过同一状态条件竞争"
+          ],
+          "duplicateGroup": "g_8623a340bac0",
+          "rationale": "明确过期完成竞争。",
+          "sourceRef": "s_0fb6ccf231f8",
+          "key": "d_f0b0783a438d"
+        },
+        {
+          "title": "独立预留提交",
+          "text": "扣减库存先提交，预留状态下一事务写入；若第二步失败也返回占用成功。后台以后会补记录，所以无需保持扣减和预留的原子性。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_5b8a027e2e50",
+          "rationale": "破坏原子边界并错误成功。",
+          "sourceRef": "s_2ceb828fe8ff",
+          "key": "d_e430cb73d7e3"
+        }
+      ]
+    },
+    {
+      "id": "q_91144c1f2764",
+      "category": "cross-source redundant",
+      "question": "合成代码库的搜索接口按仓库和语言限制返回片段，模型随后可能读取片段正文。如何避免全库截断漏召回、越界读取和跨范围缓存混用？",
+      "requiredFacets": [
+        "仓库语言过滤先于候选数量截断",
+        "正文读取再次核对当前范围",
+        "检索缓存键包含仓库语言范围"
+      ],
+      "authorCheck": "已检查：过滤前置、读取scope和缓存范围三facet；八条范围内限量为重复组；去重不能补漏和标题身份的正确说明标1，越界读及全库先限量标0。",
+      "items": [
+        {
+          "title": "语言后置过滤",
+          "text": "搜索仅按仓库预筛并全语言限量，语言过滤放到返回前。其他语言先占用候选名额不会影响目标语言的召回，所以无需前置语言条件。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_b3792cc28b38",
+          "rationale": "语言条件后置仍导致漏召回。",
+          "sourceRef": "s_968b32ee8e7c",
+          "key": "d_87a01b707395"
+        },
+        {
+          "title": "标识直读路径",
+          "text": "读取接口按模型给出的片段标识直接取正文，仓库与语言只在搜索时检查。模型已看到候选标识即可读取任意同名片段，不需再核对范围。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_ecf8466de02d",
+          "rationale": "读接口授权范围错误。",
+          "sourceRef": "s_e0063124b62a",
+          "key": "d_7d0d58f0e94a"
+        },
+        {
+          "title": "候选池构建",
+          "text": "生成代码候选时先筛当前仓库与语言，再取排序结果的限定数量。若先全库取上限，后续过滤只能移除记录，无法找回范围内被截断的片段。",
+          "relevance": 2,
+          "facets": [
+            "仓库语言过滤先于候选数量截断"
+          ],
+          "duplicateGroup": "g_2e8ac8e52841",
+          "rationale": "相同完整候选构建原则。",
+          "sourceRef": "s_bfe96b4f02ce",
+          "key": "d_ff0193b7164b"
+        },
+        {
+          "title": "结果缓存迁移",
+          "text": "某仓库的缓存候选可以复制给其他仓库相同关键词请求，无须改变键。两个仓库都讨论同一技术名称，片段所属范围不影响正文访问。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_39b70a05a01f",
+          "rationale": "不同范围语义相似不代表可复用。",
+          "sourceRef": "s_ee31d4fe3605",
+          "key": "d_5598cd25e26c"
+        },
+        {
+          "title": "限定范围召回",
+          "text": "仓库与语言过滤应加入底层检索条件，之后才限制候选条数。应用层从已截断的全库结果删去其他仓库，不能补回早先遗漏的范围内记录。",
+          "relevance": 2,
+          "facets": [
+            "仓库语言过滤先于候选数量截断"
+          ],
+          "duplicateGroup": "g_2e8ac8e52841",
+          "rationale": "同一截断次序事实。",
+          "sourceRef": "s_84980b51710f",
+          "key": "d_1e6f31619e6e"
+        },
+        {
+          "title": "检索缓存隔离",
+          "text": "检索缓存键除了查询词还包含仓库标识和语言条件。相同词语在不同范围产生独立条目，避免把另一仓库或语言的候选复用到当前请求。",
+          "relevance": 2,
+          "facets": [
+            "检索缓存键包含仓库语言范围"
+          ],
+          "duplicateGroup": "g_236bb1e2cae2",
+          "rationale": "完整范围缓存键。",
+          "sourceRef": "s_818f5f2d400e",
+          "key": "d_dddf591436c8"
+        },
+        {
+          "title": "全库百条过滤",
+          "text": "检索先在全库取前一百条，再按仓库和语言筛选输出。这个次序与范围内先过滤再限量具有相同召回率，因此无需改变底层查询。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_dfdb09c9353c",
+          "rationale": "错误认定截断次序等价。",
+          "sourceRef": "s_60fca878afec",
+          "key": "d_0e996128a487"
+        },
+        {
+          "title": "行窗口边界",
+          "text": "片段读取接口使用服务端当前仓库和语言再次约束查询，只有匹配记录可返回行文本。搜索曾返回过标识或模型自行生成标识都不能扩大读取范围。",
+          "relevance": 2,
+          "facets": [
+            "正文读取再次核对当前范围"
+          ],
+          "duplicateGroup": "g_f6b7978f3e25",
+          "rationale": "相同行窗口范围规则。",
+          "sourceRef": "s_0187767224e3",
+          "key": "d_42321a55bae6"
+        },
+        {
+          "title": "仓库搜索计划",
+          "text": "搜索的仓库、语言条件属于候选查询本身，必须在排序截断前生效。先从全库取有限记录后过滤，会漏掉未进入全库前列的目标仓库片段。",
+          "relevance": 2,
+          "facets": [
+            "仓库语言过滤先于候选数量截断"
+          ],
+          "duplicateGroup": "g_2e8ac8e52841",
+          "rationale": "跨来源重复过滤前置信息。",
+          "sourceRef": "s_5b6d896344aa",
+          "key": "d_5839e47f05ca"
+        },
+        {
+          "title": "查询范围说明",
+          "text": "底层搜索在当前仓库和语言的记录内排序与限量，不把全库前列当作过滤输入。范围内片段因此不会仅因其他仓库占位而被截掉。",
+          "relevance": 2,
+          "facets": [
+            "仓库语言过滤先于候选数量截断"
+          ],
+          "duplicateGroup": "g_2e8ac8e52841",
+          "rationale": "同一scope前置事实。",
+          "sourceRef": "s_03a0ee995a26",
+          "key": "d_8eb7ac2a03ff"
+        },
+        {
+          "title": "候选截断策略",
+          "text": "代码搜索把当前仓库与语言作为前置条件，再执行结果上限。先限量全库并在返回前过滤会让其他库记录耗尽名额，目标库结果不完整。",
+          "relevance": 2,
+          "facets": [
+            "仓库语言过滤先于候选数量截断"
+          ],
+          "duplicateGroup": "g_2e8ac8e52841",
+          "rationale": "同一前置条件方案。",
+          "sourceRef": "s_6e89ef2f2743",
+          "key": "d_5c9a90557f33"
+        },
+        {
+          "title": "缓存命名空间",
+          "text": "候选缓存按查询词、仓库及语言一起定位结果。同一查询跨仓库或语言不共享候选条目，命中缓存仍需保持原来绑定的检索范围。",
+          "relevance": 2,
+          "facets": [
+            "检索缓存键包含仓库语言范围"
+          ],
+          "duplicateGroup": "g_236bb1e2cae2",
+          "rationale": "同一缓存隔离规则。",
+          "sourceRef": "s_ed54a75f0560",
+          "key": "d_898153b912f3"
+        },
+        {
+          "title": "候选查询次序",
+          "text": "代码检索先在数据库查询中应用当前仓库和语言条件，再执行排序与数量限制。不能先取全库固定前若干条再过滤，否则范围内有效候选会被提前挤掉。",
+          "relevance": 2,
+          "facets": [
+            "仓库语言过滤先于候选数量截断"
+          ],
+          "duplicateGroup": "g_2e8ac8e52841",
+          "rationale": "完整说明scope先于limit。",
+          "sourceRef": "s_79a4f2b8bc0b",
+          "key": "d_353b63734da7"
+        },
+        {
+          "title": "正文访问校验",
+          "text": "读取片段行窗口时重新核对片段所属仓库和语言与请求范围一致。即便模型提供了某个片段标识，也不能绕过服务端范围条件访问其正文。",
+          "relevance": 2,
+          "facets": [
+            "正文读取再次核对当前范围"
+          ],
+          "duplicateGroup": "g_f6b7978f3e25",
+          "rationale": "明确读阶段独立scope校验。",
+          "sourceRef": "s_7e6d145fad9e",
+          "key": "d_b8eadd397b5b"
+        },
+        {
+          "title": "共享查询缓存",
+          "text": "为提高命中率，缓存键只使用查询词，所有仓库和语言共享候选。命中后直接返回原条目即可，因为词相同表明片段属于同一搜索范围。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_91abf65409cb",
+          "rationale": "错误跨范围缓存复用。",
+          "sourceRef": "s_31b2dc32e813",
+          "key": "d_6e5d50f6129c"
+        },
+        {
+          "title": "去重处理位置",
+          "text": "候选去重可以合并同一范围内重复的片段标识，减少展示重复。去重只能处理已经找出的记录，无法修复在全库限量时漏掉的目标库片段。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_de29679c6cb1",
+          "rationale": "正确但不完整的漏召回反证。",
+          "sourceRef": "s_edacb273f0a6",
+          "key": "d_1cd87ad6d6d2"
+        },
+        {
+          "title": "仓库显示名称",
+          "text": "仓库标题适合展示给用户，但标题可能相同或随后更改。服务端范围绑定需要稳定标识，显示文字不能单独作为片段访问的身份边界。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_1ecaadb1ec76",
+          "rationale": "正确稳定标识前提。",
+          "sourceRef": "s_2a1115739d65",
+          "key": "d_d1e3f5cffd64"
+        },
+        {
+          "title": "模型仓库覆盖",
+          "text": "读取时优先采用模型工具参数中的仓库标识覆盖服务端范围。这样模型可以自主修正仓库选择，即使用户请求从未授权其他仓库也允许读取。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_130c2ed34eb8",
+          "rationale": "模型参数擅自扩大scope。",
+          "sourceRef": "s_032281242c8f",
+          "key": "d_ed9478e58639"
+        },
+        {
+          "title": "检索SQL边界",
+          "text": "候选SQL先限定仓库和代码语言，再在该集合里排序并取上限。全库先限量再做范围筛选无法保证所需片段进入候选池。",
+          "relevance": 2,
+          "facets": [
+            "仓库语言过滤先于候选数量截断"
+          ],
+          "duplicateGroup": "g_2e8ac8e52841",
+          "rationale": "同一候选查询规则。",
+          "sourceRef": "s_94ebeca5f4aa",
+          "key": "d_5161a3d6db92"
+        },
+        {
+          "title": "库内检索步骤",
+          "text": "仓库及语言绑定到检索查询，在得到合格集合后排序截断。跨库记录不参与这次数量竞争，避免先全库限量带来的目标库漏召回。",
+          "relevance": 2,
+          "facets": [
+            "仓库语言过滤先于候选数量截断"
+          ],
+          "duplicateGroup": "g_2e8ac8e52841",
+          "rationale": "重复同一候选范围事实。",
+          "sourceRef": "s_dcb559b538c9",
+          "key": "d_5e75653ca998"
+        }
+      ]
+    },
+    {
+      "id": "q_f87e57e4361c",
+      "category": "cross-source redundant",
+      "question": "合成助手以流式文本补全当前草稿，用户可以取消后立即发起新请求。怎样判定流事件归属、清理旧请求资源，并保证取消后不存盘半截补全文本？",
+      "requiredFacets": [
+        "流事件按文档键和请求代次接纳",
+        "每个请求只清理自己的资源",
+        "取消的部分补全不自动提交正式正文"
+      ],
+      "authorCheck": "已检查：流事件身份、资源归属和取消提交三facet；八条事件身份说明为重复组；传输取消不保证无回调是有用反证标1，没有当作错方案。",
+      "items": [
+        {
+          "title": "补全回调入口",
+          "text": "流事件以原文档键及请求代次作为归属标识，入口先查活动请求是否匹配。取消或重发使旧标识失效，之后收到的旧片段不能影响预览。",
+          "relevance": 2,
+          "facets": [
+            "流事件按文档键和请求代次接纳"
+          ],
+          "duplicateGroup": "g_e271b2a605cf",
+          "rationale": "同一接纳边界。",
+          "sourceRef": "s_da1b4ac0654e",
+          "key": "d_e7464ec3ed4c"
+        },
+        {
+          "title": "新请求复用代次",
+          "text": "重发补全继续使用前一请求的相同代次，迟到事件都视为新请求数据。代次复用可以保留流缓存，不会造成两次请求文本交叉。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_9b2b7313a5ef",
+          "rationale": "复用代次破坏请求区分。",
+          "sourceRef": "s_cafec5ac9cdd",
+          "key": "d_e0570139876d"
+        },
+        {
+          "title": "预览写入协议",
+          "text": "补全文本写入预览前比对发起文档和请求代次，要求它们仍是活动请求。取消后的旧流以及被新请求取代的流均应停止改变预览内容。",
+          "relevance": 2,
+          "facets": [
+            "流事件按文档键和请求代次接纳"
+          ],
+          "duplicateGroup": "g_e271b2a605cf",
+          "rationale": "相同事件校验信息。",
+          "sourceRef": "s_7b654d67406a",
+          "key": "d_777665977739"
+        },
+        {
+          "title": "活动文档重定位",
+          "text": "流响应到达时只把文本写到当前选中笔记，不再核对发起文档。用户切页说明目标已变化，旧请求文本应跟随活动面板移动。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_b523e13db51a",
+          "rationale": "流响应对象错误。",
+          "sourceRef": "s_e8aaf1950a56",
+          "key": "d_0c61c21eca6c"
+        },
+        {
+          "title": "结束统一提交",
+          "text": "无论完成、失败还是取消，finally都把预览拼到正式正文并保存。统一出口可以避免漏存，因此不必区别是否有完整结果及用户确认。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_ff2570b51099",
+          "rationale": "错误取消失败统一提交。",
+          "sourceRef": "s_46d890d3eaba",
+          "key": "d_201bb5755b0d"
+        },
+        {
+          "title": "流回调识别",
+          "text": "每个流事件关联发起文档键和请求代次；只有仍对应该文档活动请求的事件才可更新预览。取消或新代次出现后，旧事件即使抵达也应丢弃。",
+          "relevance": 2,
+          "facets": [
+            "流事件按文档键和请求代次接纳"
+          ],
+          "duplicateGroup": "g_e271b2a605cf",
+          "rationale": "完整事件归属校验。",
+          "sourceRef": "s_6694ae9f7a02",
+          "key": "d_297e3833705f"
+        },
+        {
+          "title": "全局流句柄清理",
+          "text": "所有请求共用一个全局流句柄，任意请求结束时都关闭变量当前指向的流。较早请求先结束时关闭后来请求也没有影响，因为页面只显示一个预览。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_daf4c6b47167",
+          "rationale": "旧请求清理新资源。",
+          "sourceRef": "s_1a0be31a82e5",
+          "key": "d_22de82bec5a1"
+        },
+        {
+          "title": "取消自动存盘",
+          "text": "用户点击取消后将已经收到的部分补全文本立即替换正文并自动保存。取消表示结果已足够，所以半截文本无需再经过完成和确认步骤。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_00f7eaf7b585",
+          "rationale": "违反取消不提交要求。",
+          "sourceRef": "s_aa34126fba5a",
+          "key": "d_766f11096bd3"
+        },
+        {
+          "title": "取消后的提交策略",
+          "text": "取消补全只停止流并丢弃未确认的预览，半截结果不自动写入正式草稿或触发保存。正式正文只在成功完成后经用户确认的提交动作更新。",
+          "relevance": 2,
+          "facets": [
+            "取消的部分补全不自动提交正式正文"
+          ],
+          "duplicateGroup": "g_60c1f478314b",
+          "rationale": "明确取消不提交半截内容。",
+          "sourceRef": "s_470d294ee73f",
+          "key": "d_fb48da34dc33"
+        },
+        {
+          "title": "资源清理归属",
+          "text": "每个请求闭包保存自己的流句柄与控制器，结束时只关闭这些资源。旧请求的finally不能读取新的全局控制器去关闭，否则会误终止后发请求。",
+          "relevance": 2,
+          "facets": [
+            "每个请求只清理自己的资源"
+          ],
+          "duplicateGroup": "g_dbe086294e2d",
+          "rationale": "明确请求自己资源清理。",
+          "sourceRef": "s_bffc68bd1dbf",
+          "key": "d_c78d06b2c302"
+        },
+        {
+          "title": "传输取消语义",
+          "text": "调用传输取消会让后续网络读取尽快结束，但取消通知与已排队回调有竞争。取消成功返回并不能单独证明旧流事件再也不会执行。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_21e4b823a50f",
+          "rationale": "正确的取消回调反证。",
+          "sourceRef": "s_9f44a42d2cb1",
+          "key": "d_550fbfe56110"
+        },
+        {
+          "title": "流式更新边界",
+          "text": "回调使用发起文档键和代次核对当前活动请求后才写预览。只检查界面仍有加载图标不足以接纳事件，取消后抵达的旧流应忽略。",
+          "relevance": 2,
+          "facets": [
+            "流事件按文档键和请求代次接纳"
+          ],
+          "duplicateGroup": "g_e271b2a605cf",
+          "rationale": "同一文档代次识别事实。",
+          "sourceRef": "s_32ac62dc62e2",
+          "key": "d_f8107f11fa72"
+        },
+        {
+          "title": "流实例身份",
+          "text": "每次补全产生独立代次并记录原文档键，接收事件时按两者查活动记录。只要身份失效，即使网络又推来文本也不再接纳该段更新。",
+          "relevance": 2,
+          "facets": [
+            "流事件按文档键和请求代次接纳"
+          ],
+          "duplicateGroup": "g_e271b2a605cf",
+          "rationale": "跨来源同一事件归属规则。",
+          "sourceRef": "s_1af7e2d87d5e",
+          "key": "d_3246f30e6cad"
+        },
+        {
+          "title": "加载标志识别",
+          "text": "回调只检查页面是否正在加载，加载就追加收到的文本。不保存文档键或请求代次，新请求保持加载时旧流也可以继续写入当前预览。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_5515e780f8d8",
+          "rationale": "归属校验错误。",
+          "sourceRef": "s_e4991595e560",
+          "key": "d_2ca3a42453d0"
+        },
+        {
+          "title": "异步预览状态",
+          "text": "每条流数据都先确认其文档键与请求代次仍对应活动补全。新请求已经替换活动记录时，前一请求的迟到数据不再追加到预览区域。",
+          "relevance": 2,
+          "facets": [
+            "流事件按文档键和请求代次接纳"
+          ],
+          "duplicateGroup": "g_e271b2a605cf",
+          "rationale": "重复相同活动校验。",
+          "sourceRef": "s_88d9f91f2b05",
+          "key": "d_6ee21443278f"
+        },
+        {
+          "title": "预览与正文分离",
+          "text": "流式结果先留在临时预览，取消时删除未确认片段，不提交正式文档。只有完成并经用户确认的内容进入正文，取消不应顺带保存部分补全。",
+          "relevance": 2,
+          "facets": [
+            "取消的部分补全不自动提交正式正文"
+          ],
+          "duplicateGroup": "g_60c1f478314b",
+          "rationale": "同一正式提交边界。",
+          "sourceRef": "s_c667b78f7f93",
+          "key": "d_8ccf5335cfad"
+        },
+        {
+          "title": "请求代次约定",
+          "text": "补全流携带原文档标识及当前请求代次，事件到达时重新比较活动记录。文档或代次已不匹配就不接纳，防止旧流覆盖新的补全预览。",
+          "relevance": 2,
+          "facets": [
+            "流事件按文档键和请求代次接纳"
+          ],
+          "duplicateGroup": "g_e271b2a605cf",
+          "rationale": "同一归属规则。",
+          "sourceRef": "s_099795698e4f",
+          "key": "d_9afb8b11554d"
+        },
+        {
+          "title": "加载提示归属",
+          "text": "旧请求结束后隐藏其自身的进度提示有助于状态一致。若同一页面已有新请求活动，旧清理代码不能只按结束顺序把新的加载提示一并关闭。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_c06a7b278bf3",
+          "rationale": "正确状态前提，未覆盖核心资源和提交。",
+          "sourceRef": "s_107e7c4449c4",
+          "key": "d_f590f6c8862d"
+        },
+        {
+          "title": "请求终结处理",
+          "text": "流句柄和取消控制器由各请求单独持有，清理代码仅释放本请求实例。旧流结束时不得关闭后续新流的句柄，也不能覆盖新请求的资源引用。",
+          "relevance": 2,
+          "facets": [
+            "每个请求只清理自己的资源"
+          ],
+          "duplicateGroup": "g_dbe086294e2d",
+          "rationale": "同一资源归属原则。",
+          "sourceRef": "s_79edc39e1d4e",
+          "key": "d_99243855f289"
+        },
+        {
+          "title": "事件接纳条件",
+          "text": "流式补全以文档键加递增请求代次绑定回调。更新预览前核对这对标识仍为活动请求，旧代次或已取消请求的迟到事件不能改写文本。",
+          "relevance": 2,
+          "facets": [
+            "流事件按文档键和请求代次接纳"
+          ],
+          "duplicateGroup": "g_e271b2a605cf",
+          "rationale": "跨来源重复归属条件。",
+          "sourceRef": "s_755e5fadf892",
+          "key": "d_2bad5ceaf656"
+        }
+      ]
+    },
+    {
+      "id": "q_61d1e7c8df24",
+      "category": "cross-source redundant",
+      "question": "合成数据迁移要把持续写入的旧索引换成新索引，读取不能看到半套结果。如何界定初始快照、补齐后续变化、验证目标，以及切换读指针？",
+      "requiredFacets": [
+        "快照记录可复现的水位边界",
+        "按水位之后的变更补齐目标",
+        "切换前核对目标数据完整性",
+        "读指针原子切到已验证完整目标"
+      ],
+      "authorCheck": "已检查：快照水位、增量追补、目标验收和原子切换四facet；六条快照基线为重复组；双存储开销和任务完成不等于一致是正确部分信息标1。",
+      "items": [
+        {
+          "title": "普通扫描基线",
+          "text": "迁移直接分页扫描不断变化的旧表，只记录扫描完成时刻。扫描期间每页都最新，因此无需一致性快照或可复现水位也能形成同一时点基线。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_458ff28f1073",
+          "rationale": "错误快照一致性假设。",
+          "sourceRef": "s_37657aec3555",
+          "key": "d_c7434963c440"
+        },
+        {
+          "title": "快照与日志衔接",
+          "text": "一致性快照和对应变更水位一起保存，初始复制使用这份固定数据。增量阶段由同一个水位续接，初始扫描结束时间不能充当准确变更边界。",
+          "relevance": 2,
+          "facets": [
+            "快照记录可复现的水位边界"
+          ],
+          "duplicateGroup": "g_b31cca82b6d8",
+          "rationale": "重复同一快照日志边界。",
+          "sourceRef": "s_b87fcf6a5d65",
+          "key": "d_91345defa85d"
+        },
+        {
+          "title": "全量复制水位",
+          "text": "迁移基线来自一致性快照，生成时记录相应变更位置。快照装入新索引后，按这个边界追补后续事件，避免复制期间写入无法确定归属。",
+          "relevance": 2,
+          "facets": [
+            "快照记录可复现的水位边界"
+          ],
+          "duplicateGroup": "g_b31cca82b6d8",
+          "rationale": "同一固定基线要求。",
+          "sourceRef": "s_58f18df24ecb",
+          "key": "d_de24d99b6599"
+        },
+        {
+          "title": "时间估计增量起点",
+          "text": "增量起点取迁移服务器当前时钟减去复制耗时，不使用快照变更水位。估计时刻能精确区分快照包含事件，所以不会遗漏或重叠写入。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_cc637a94e37d",
+          "rationale": "错误以估计时间替代准确水位。",
+          "sourceRef": "s_eff8112a8393",
+          "key": "d_1f80e76d2092"
+        },
+        {
+          "title": "增量追补路径",
+          "text": "初始快照载入后，按已记录水位之后的变更日志持续补到新索引，包含新增、修改和删除。补录按事件标识幂等处理，直到达到切换要求的最新水位。",
+          "relevance": 2,
+          "facets": [
+            "按水位之后的变更补齐目标"
+          ],
+          "duplicateGroup": "g_d5b46ec5f7af",
+          "rationale": "完整后水位补录。",
+          "sourceRef": "s_7e08c93f1ff2",
+          "key": "d_64b1c3af7eb5"
+        },
+        {
+          "title": "复制结束切换",
+          "text": "全量复制任务一结束立刻切换新索引，不等待增量及字段校验。任务显示成功就证明目标已包含复制期间发生的全部变化。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_23e5244bbabd",
+          "rationale": "错误以任务结束替代补录验证。",
+          "sourceRef": "s_318007e49ac9",
+          "key": "d_7c5e81194ef1"
+        },
+        {
+          "title": "只补新增事件",
+          "text": "增量阶段仅导入新增记录，忽略修改和删除。快照曾含有那些记录，所以旧值留在目标或已删除记录仍存在都不影响新索引完整性。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_44a11aa23d9a",
+          "rationale": "遗漏必要变更类型。",
+          "sourceRef": "s_b9106ac9842f",
+          "key": "d_13cbf6a0d214"
+        },
+        {
+          "title": "迁移基线协议",
+          "text": "初始复制读取固定一致性快照，并绑定可复现的变更水位。该边界区分快照已包含的数据与随后需要追补的事件，普通分页扫描不能替代它。",
+          "relevance": 2,
+          "facets": [
+            "快照记录可复现的水位边界"
+          ],
+          "duplicateGroup": "g_b31cca82b6d8",
+          "rationale": "跨来源重复快照边界。",
+          "sourceRef": "s_d00db4e007ea",
+          "key": "d_7de50476fb92"
+        },
+        {
+          "title": "索引验收流程",
+          "text": "新索引完成复制和增量后还需检查数量、关键字段校验值及最终水位。只有这些完整性检查达标才允许切换，任务结束状态本身不足以替代验收。",
+          "relevance": 2,
+          "facets": [
+            "切换前核对目标数据完整性"
+          ],
+          "duplicateGroup": "g_6e4d27031f1f",
+          "rationale": "同一目标验证门槛。",
+          "sourceRef": "s_1dbf46d1687f",
+          "key": "d_60e76d2ceadb"
+        },
+        {
+          "title": "快照边界记录",
+          "text": "迁移开始时取一致性快照并记录对应变更水位。快照内数据用于初始复制，后续补录从该水位之后开始，避免把时间不明确的扫描结果当成固定基线。",
+          "relevance": 2,
+          "facets": [
+            "快照记录可复现的水位边界"
+          ],
+          "duplicateGroup": "g_b31cca82b6d8",
+          "rationale": "明确一致快照及水位。",
+          "sourceRef": "s_f78b7e22db5a",
+          "key": "d_156c5ec77ac8"
+        },
+        {
+          "title": "目标校验门槛",
+          "text": "切换前核对新索引的条目数量、关键字段校验值以及追补水位，确认达到约定完整性门槛。目标校验未通过时保持旧读入口，不把复制结束当成正确证明。",
+          "relevance": 2,
+          "facets": [
+            "切换前核对目标数据完整性"
+          ],
+          "duplicateGroup": "g_6e4d27031f1f",
+          "rationale": "明确切换前完整性验证。",
+          "sourceRef": "s_16e6ddd8858a",
+          "key": "d_ecaa4bfa963f"
+        },
+        {
+          "title": "变更日志消费",
+          "text": "新索引加载快照后从其水位之后消费变更，新增修改删除均需反映，重复事件幂等应用。追补到切换约定的最新位置后，目标才具备当前数据。",
+          "relevance": 2,
+          "facets": [
+            "按水位之后的变更补齐目标"
+          ],
+          "duplicateGroup": "g_d5b46ec5f7af",
+          "rationale": "同一补录协议。",
+          "sourceRef": "s_2d85d34c7f30",
+          "key": "d_6c511accfc22"
+        },
+        {
+          "title": "读入口切换",
+          "text": "读请求使用单一索引指针；目标完整且验证通过后一次原子替换指针。每个请求固定使用取得的那一代索引，不能逐条把读取分散到迁移中的两套结果。",
+          "relevance": 2,
+          "facets": [
+            "读指针原子切到已验证完整目标"
+          ],
+          "duplicateGroup": "g_23966ea527c0",
+          "rationale": "明确原子读指针切换。",
+          "sourceRef": "s_81294dfcab10",
+          "key": "d_482d8f599f7e"
+        },
+        {
+          "title": "初始复制基线",
+          "text": "旧索引数据以一致性快照导出，同时保存这份快照的变更水位。新索引先载入基线，再处理水位后的变化，不能只记一个扫描开始的本地时刻。",
+          "relevance": 2,
+          "facets": [
+            "快照记录可复现的水位边界"
+          ],
+          "duplicateGroup": "g_b31cca82b6d8",
+          "rationale": "同一快照水位信息。",
+          "sourceRef": "s_72dbb8636e2f",
+          "key": "d_416240b4bb6d"
+        },
+        {
+          "title": "初始迁移记录",
+          "text": "迁移记录保留一致快照及其变更水位，快照是新索引的初始基线。只有明确边界才知道哪些后续写入需要追补，不能凭复制耗时估计。",
+          "relevance": 2,
+          "facets": [
+            "快照记录可复现的水位边界"
+          ],
+          "duplicateGroup": "g_b31cca82b6d8",
+          "rationale": "相同快照基线方案。",
+          "sourceRef": "s_83f4e2eb9b90",
+          "key": "d_e7a000f38a83"
+        },
+        {
+          "title": "任务进度含义",
+          "text": "复制进度达到百分之百只说明计划中的扫描已结束，期间仍可能有写入尚未追补。进度条完成不能单独证明目标与当前旧索引一致。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_91fa9d4549d0",
+          "rationale": "正确完整性反证。",
+          "sourceRef": "s_7000bb8df580",
+          "key": "d_4768d258523f"
+        },
+        {
+          "title": "双份存储开销",
+          "text": "迁移期间暂存旧新两套索引便于验证和回退，会增加磁盘占用。保留双份并不自动保证新索引完整，还需要快照衔接与切换前检查。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_05a5a1d7e369",
+          "rationale": "正确资源前提。",
+          "sourceRef": "s_fb40d2ba07bb",
+          "key": "d_e65b5c17a974"
+        },
+        {
+          "title": "验收后清空补录",
+          "text": "新索引数量与旧索引相同就可清空所有未消费日志并切换，字段值和删除记录无需再核对。总数一致代表任意记录内容也完全一致。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_cae7ba0d915a",
+          "rationale": "错误把数量等同完整一致性。",
+          "sourceRef": "s_3b18c37d4045",
+          "key": "d_07b4636a8513"
+        },
+        {
+          "title": "读取代次约定",
+          "text": "验收完成后原子更新读入口指向新索引，请求开始时固定该代索引。切换不逐项改变数据来源，同一个读请求不会混用尚在迁移的旧新索引。",
+          "relevance": 2,
+          "facets": [
+            "读指针原子切到已验证完整目标"
+          ],
+          "duplicateGroup": "g_23966ea527c0",
+          "rationale": "同一读原子切换规则。",
+          "sourceRef": "s_bcd35169986c",
+          "key": "d_5686afe4af63"
+        },
+        {
+          "title": "逐条读入口迁移",
+          "text": "每复制一条记录就让该条改从新索引读取，未复制条仍读取旧索引。这样同一请求混用两套迁移进度也不会出现半套结果，无需原子指针。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_86c7c3d1f1aa",
+          "rationale": "违反一致读切换边界。",
+          "sourceRef": "s_35cb5f9a47b2",
+          "key": "d_eecfd8501a33"
+        }
+      ]
+    },
+    {
+      "id": "q_6569abe3e645",
+      "category": "cross-source redundant",
+      "question": "合成扣款接口支持同一幂等键与相同请求体只执行一次。调用方丢失首次响应后重试，怎样保持请求身份、获得已有处理结果，并处理远端结果暂时未知？",
+      "requiredFacets": [
+        "重试复用幂等键及相同请求体",
+        "重复请求返回该键已有处理结果",
+        "未知远端结果进入查询对账而非新扣款"
+      ],
+      "authorCheck": "已检查：原请求身份、重复结果和未知状态对账三facet；八条原键原体重发为重复组；传输失败及重试次数边界标1，换键重扣与提前失败标0。",
+      "items": [
+        {
+          "title": "超时换键重扣",
+          "text": "每次扣款超时立即生成新的幂等键重新扣款，旧请求不再查询。换键让远端重新处理即可可靠补足超时失败，不会造成同一业务扣两次。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_a77ad19da4be",
+          "rationale": "错误换键造成重复扣款。",
+          "sourceRef": "s_451fd8e24473",
+          "key": "d_0b237822a153"
+        },
+        {
+          "title": "响应丢失处理",
+          "text": "没有收到扣款响应时，重新发送原幂等键对应的相同请求体。远端据此识别同一次操作；另起键或改变正文会绕过原请求的重复执行保护。",
+          "relevance": 2,
+          "facets": [
+            "重试复用幂等键及相同请求体"
+          ],
+          "duplicateGroup": "g_58b324ae7ee4",
+          "rationale": "同一幂等重试要求。",
+          "sourceRef": "s_4d7d208baa60",
+          "key": "d_cc26801c30be"
+        },
+        {
+          "title": "重复请求再执行",
+          "text": "服务端收到同键同请求体时重新执行扣款，再把最新结果覆盖旧记录。只保留一个结果就等于只扣款一次，无需阻止重复执行。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_9ef621660439",
+          "rationale": "结果覆盖不能避免重复副作用。",
+          "sourceRef": "s_ffa197430cbe",
+          "key": "d_d98876939b27"
+        },
+        {
+          "title": "幂等请求存档",
+          "text": "调用方在首次发送前保存幂等键和扣款正文；重试读取原记录原样发送。网络超时不会改变业务请求身份，也不能顺便调整金额再当作相同扣款。",
+          "relevance": 2,
+          "facets": [
+            "重试复用幂等键及相同请求体"
+          ],
+          "duplicateGroup": "g_58b324ae7ee4",
+          "rationale": "同一重试身份规则。",
+          "sourceRef": "s_29620cd82694",
+          "key": "d_0e54a472ced4"
+        },
+        {
+          "title": "未知状态对账",
+          "text": "远端扣款结果暂时无法确认时把本地状态标为待核对，按原请求标识查询并对账。确认成功或失败后再收口，不能用新键再扣一次来试探是否成功。",
+          "relevance": 2,
+          "facets": [
+            "未知远端结果进入查询对账而非新扣款"
+          ],
+          "duplicateGroup": "g_1df5506366e9",
+          "rationale": "完整未知状态处理。",
+          "sourceRef": "s_d48390e135d7",
+          "key": "d_5330d7ca5e83"
+        },
+        {
+          "title": "重复结果查询",
+          "text": "服务端记录幂等键对应的执行状态与处理结果；收到同键同请求体时返回已有结果或当前状态，不再发起扣款。相同键但正文不同应拒绝。",
+          "relevance": 2,
+          "facets": [
+            "重复请求返回该键已有处理结果"
+          ],
+          "duplicateGroup": "g_9428d82e8743",
+          "rationale": "完整服务端结果复用。",
+          "sourceRef": "s_a2ad2c39c938",
+          "key": "d_230ba59f76f9"
+        },
+        {
+          "title": "扣款状态收口",
+          "text": "请求超时且远端结果未知时进入待确认状态，通过原请求标识继续查询或对账。直到确认结果前不另起新扣款，避免首次已成功时重复扣钱。",
+          "relevance": 2,
+          "facets": [
+            "未知远端结果进入查询对账而非新扣款"
+          ],
+          "duplicateGroup": "g_1df5506366e9",
+          "rationale": "同一查询对账边界。",
+          "sourceRef": "s_40f48deb8e16",
+          "key": "d_cfbbc9d641a5"
+        },
+        {
+          "title": "超时直接失败",
+          "text": "客户端读取超时后立即把扣款置为最终失败并结束对账。远端一定也在相同时刻回滚，未知结果无需保留或通过原标识查询。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_e3abb37fd6db",
+          "rationale": "错误将传输超时认作业务失败。",
+          "sourceRef": "s_62c691a38a6f",
+          "key": "d_405f78a2011e"
+        },
+        {
+          "title": "扣款请求身份",
+          "text": "客户端首次扣款生成幂等键并保存完整请求体，丢失响应后重试复用这对内容。不得因一次超时换键或改变金额，否则远端会视为另一笔扣款请求。",
+          "relevance": 2,
+          "facets": [
+            "重试复用幂等键及相同请求体"
+          ],
+          "duplicateGroup": "g_58b324ae7ee4",
+          "rationale": "完整保持重试身份。",
+          "sourceRef": "s_ebaafbd22bfe",
+          "key": "d_60ec6c17bfec"
+        },
+        {
+          "title": "同键修改金额",
+          "text": "原键下第一次扣款未收到响应时，重试可以改成更小金额。幂等键相同会让远端把两种请求体都执行一次，并合并为同一扣款结果。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_fdabd3ff4cbf",
+          "rationale": "违反同键同体语义。",
+          "sourceRef": "s_a3d5b1b5b60c",
+          "key": "d_b3ceb2dbeed6"
+        },
+        {
+          "title": "新扣款探测状态",
+          "text": "结果不明时发送一笔同金额新键扣款来探测远端可用性；成功就当作原请求成功。两笔请求可以互相替代，无需关联原执行记录。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_3138b786e0c1",
+          "rationale": "错误用新扣款试探旧状态。",
+          "sourceRef": "s_a1d59a0d02dd",
+          "key": "d_a96dd92c8fb5"
+        },
+        {
+          "title": "超时重试约定",
+          "text": "扣款响应超时时使用原幂等键及原请求体再次提交，金额和收款对象均保持一致。更换键或修改请求内容会形成新身份，不能称为同一次重试。",
+          "relevance": 2,
+          "facets": [
+            "重试复用幂等键及相同请求体"
+          ],
+          "duplicateGroup": "g_58b324ae7ee4",
+          "rationale": "跨来源重复身份保持信息。",
+          "sourceRef": "s_ccebf8f30075",
+          "key": "d_752214a3a3cf"
+        },
+        {
+          "title": "扣款重试协议",
+          "text": "首次请求的幂等键与完整正文作为固定重试身份保存。后续网络重发沿用原键原正文，不借超时重新生成键，也不在原身份下改扣款参数。",
+          "relevance": 2,
+          "facets": [
+            "重试复用幂等键及相同请求体"
+          ],
+          "duplicateGroup": "g_58b324ae7ee4",
+          "rationale": "重复同一协议。",
+          "sourceRef": "s_0464a43882a2",
+          "key": "d_d0b61f5d09c0"
+        },
+        {
+          "title": "重试次数上限",
+          "text": "限制自动重试次数可以避免长时间占用连接，但次数达到上限并不确定远端成功还是失败。停止网络重发后仍可能需要保留待确认业务状态。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_24819af9e2ba",
+          "rationale": "正确预算与业务状态前提。",
+          "sourceRef": "s_9e976d7dfcb2",
+          "key": "d_fbe6797f9b39"
+        },
+        {
+          "title": "请求身份边界",
+          "text": "远端以幂等键和一致正文识别扣款重试，因此客户端须保留首次的两者。收到超时后仍按原身份发送，键或金额变化将成为另一笔操作。",
+          "relevance": 2,
+          "facets": [
+            "重试复用幂等键及相同请求体"
+          ],
+          "duplicateGroup": "g_58b324ae7ee4",
+          "rationale": "跨来源同一身份边界。",
+          "sourceRef": "s_b114e97038e0",
+          "key": "d_e1bb197edc2f"
+        },
+        {
+          "title": "扣款重发记录",
+          "text": "每笔扣款先固定幂等键及请求体，丢失回包后重发保持完全相同。超时只代表响应未取得，不允许把重试改成新键或新的金额。",
+          "relevance": 2,
+          "facets": [
+            "重试复用幂等键及相同请求体"
+          ],
+          "duplicateGroup": "g_58b324ae7ee4",
+          "rationale": "相同重发身份事实。",
+          "sourceRef": "s_c4207f35000c",
+          "key": "d_6cfb07c4185a"
+        },
+        {
+          "title": "原请求重放",
+          "text": "重放扣款时读取已保存的首次幂等键和正文，按原样提交。响应没有抵达不等于业务被撤销，换键或改金额不能继续视作原请求的重试。",
+          "relevance": 2,
+          "facets": [
+            "重试复用幂等键及相同请求体"
+          ],
+          "duplicateGroup": "g_58b324ae7ee4",
+          "rationale": "相同完整身份约束。",
+          "sourceRef": "s_b8ba9b78c19d",
+          "key": "d_e9dac7642b16"
+        },
+        {
+          "title": "传输失败含义",
+          "text": "连接断开只说明调用方没有取得完整响应，远端可能已提交扣款。传输错误不能单独证明扣款失败，业务状态需要另行查询确认。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_39476fa9df0e",
+          "rationale": "正确的未知状态反证。",
+          "sourceRef": "s_2cab55dfde84",
+          "key": "d_edd9284d74e6"
+        },
+        {
+          "title": "幂等键重置",
+          "text": "服务端返回处理中时删除原幂等记录，让客户端用相同键再次执行。删除记录可推进处理进度，即使首次执行还在进行也无需等待。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_54300567996b",
+          "rationale": "删除在途记录破坏幂等。",
+          "sourceRef": "s_4b2bbf1f2f6f",
+          "key": "d_058f30d6319f"
+        },
+        {
+          "title": "幂等记录回包",
+          "text": "同键且请求体一致的重复调用读取原执行记录，返回既有结果或处理状态，不能再次扣款。同一键下参数不同表示身份冲突，应返回拒绝响应。",
+          "relevance": 2,
+          "facets": [
+            "重复请求返回该键已有处理结果"
+          ],
+          "duplicateGroup": "g_9428d82e8743",
+          "rationale": "同一重复结果规则。",
+          "sourceRef": "s_9600a61e5634",
+          "key": "d_805254ac5496"
+        }
+      ]
+    },
+    {
+      "id": "q_e099bcb4cccb",
+      "category": "complementary same-source",
+      "question": "合成代码助手只能搜索与读取用户选定仓库中的片段，并通过已读原文引用回答。如何约束工具范围、准入结果、核验引用，以及终止长时间循环？",
+      "requiredFacets": [
+        "工具范围由服务端固定当前仓库",
+        "最终结果标识必须来自本次合法读取",
+        "引用行范围与原读窗口原文严格对应",
+        "循环轮数工具次数和总截止时间均有上限"
+      ],
+      "authorCheck": "已检查：同一参考来源中的四项必要规则使用四个独立信息组；摘要、单次超时和文件变化属于有用部分证据；未读标识与错行号方案为真正错误，正文均在120字符内。",
+      "items": [
+        {
+          "title": "工具参数绑定",
+          "text": "工具执行使用服务端当前仓库条件，模型提供的仓库参数不能覆盖它。搜索与正文读取均在该范围内重新校验，片段标识本身不扩大访问权限。",
+          "relevance": 2,
+          "facets": [
+            "工具范围由服务端固定当前仓库"
+          ],
+          "duplicateGroup": "g_13a03cc9ef84",
+          "rationale": "完整固定工具scope。",
+          "sourceRef": "s_acddec1baf48",
+          "key": "d_4a33e4eb8d23"
+        },
+        {
+          "title": "模型仓库纠正",
+          "text": "模型工具参数若指定另一仓库，服务端按它覆盖用户原范围继续读正文。模型自行判断仓库比用户选择准确，因此无需逐次校验访问边界。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_68478a45647c",
+          "rationale": "模型越权扩大scope。",
+          "sourceRef": "s_ef59a259117c",
+          "key": "d_7d85f07fef5d"
+        },
+        {
+          "title": "预算后追加总结",
+          "text": "工具次数用尽后继续调用多轮模型直到生成完整总结，不标记受限。总结轮次不需要工具，所以可以不受请求整体截止时间约束。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_6e76499abbe5",
+          "rationale": "预算耗尽后继续无界工作。",
+          "sourceRef": "s_947a3285efa4",
+          "key": "d_be70faefb2b5"
+        },
+        {
+          "title": "搜索摘要用途",
+          "text": "搜索标题和短摘要可帮助决定下一步读取哪段代码，但摘要不等于模型已见完整原文。候选相关性较高也不能单靠摘要证明具体引用行。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_00c46b50defd",
+          "rationale": "正确已读证据前提。",
+          "sourceRef": "s_acddec1baf48",
+          "key": "d_61d2b40f3ba5"
+        },
+        {
+          "title": "工具结果展示",
+          "text": "步骤记录可以展示某次搜索命中多少候选，以及读取了哪段窗口。步骤说明是过程日志，其存在不自动证明最终回答中所有结论都得到正文支持。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_e5a1df9eb3fb",
+          "rationale": "正确过程与证据区别。",
+          "sourceRef": "s_acddec1baf48",
+          "key": "d_c1827fedcede"
+        },
+        {
+          "title": "窗口关键词核验",
+          "text": "引用只要在已读窗口任意位置找到同样词语就通过，不要求词语位于声明行。这样可以给窗口内每个行号共享相同短词的证明能力。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_78783b8507e4",
+          "rationale": "词匹配忽略精确行归属。",
+          "sourceRef": "s_217104fbb795",
+          "key": "d_094266f77bbd"
+        },
+        {
+          "title": "仓库访问约定",
+          "text": "搜索和读代码由服务端绑定用户选定仓库，每次执行都校验范围。模型若提出其他仓库只被拒绝，不允许用工具参数替换当前仓库条件。",
+          "relevance": 2,
+          "facets": [
+            "工具范围由服务端固定当前仓库"
+          ],
+          "duplicateGroup": "g_13a03cc9ef84",
+          "rationale": "同一工具范围事实。",
+          "sourceRef": "s_acddec1baf48",
+          "key": "d_d27d64a41b76"
+        },
+        {
+          "title": "单次超时含义",
+          "text": "给每次模型请求设置相同超时并不能保证整条循环的总耗时；重试与等待会累加。单次网络时限需要和请求整体预算分开理解。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_a4659bca36d4",
+          "rationale": "正确总预算反证，未列完整限制。",
+          "sourceRef": "s_acddec1baf48",
+          "key": "d_12e16e45bfad"
+        },
+        {
+          "title": "循环预算出口",
+          "text": "检索循环同时限制轮数、总工具次数及绝对截止时间，模型调用返回后也检查剩余时间。任一预算耗尽即返回受限状态，不额外调用模型继续收尾。",
+          "relevance": 2,
+          "facets": [
+            "循环轮数工具次数和总截止时间均有上限"
+          ],
+          "duplicateGroup": "g_ff0a7580a905",
+          "rationale": "完整三预算及返回检查。",
+          "sourceRef": "s_acddec1baf48",
+          "key": "d_76cdc9c2f0e1"
+        },
+        {
+          "title": "文件编辑竞争",
+          "text": "代码在检索后可能被编辑，旧读窗口与新正文不一定相同。最终核验必须考虑这种变化，仅看到当前文件中有相同短词不能证明引用来自原窗口。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_80a85a9e34d6",
+          "rationale": "正确版本变化前提。",
+          "sourceRef": "s_acddec1baf48",
+          "key": "d_354257800287"
+        },
+        {
+          "title": "行证据生成",
+          "text": "服务器用本次已读窗口的原始行生成引用文字，并核对起止行仍在该窗口。引用必须与这些行完整对应，当前文件里另有同词不能代替原读文本。",
+          "relevance": 2,
+          "facets": [
+            "引用行范围与原读窗口原文严格对应"
+          ],
+          "duplicateGroup": "g_c205446c01ce",
+          "rationale": "同一严格行证据约束。",
+          "sourceRef": "s_acddec1baf48",
+          "key": "d_4598d5a19569"
+        },
+        {
+          "title": "连续重复工具",
+          "text": "相同工具调用可无限重复，只要每次结果非空就重新累计一轮。重复检索能增强信心，因此无需总工具次数或轮数上限。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_ac37d491f904",
+          "rationale": "无限重复违背有界要求。",
+          "sourceRef": "s_c31650c3c7e9",
+          "key": "d_76646fbc2daa"
+        },
+        {
+          "title": "工具循环限制",
+          "text": "请求建立绝对截止时刻并设置轮次和工具总数上限，每轮与模型返回时校验预算。达到上限立即停止并标记受限，不能靠重试重新获得整份预算。",
+          "relevance": 2,
+          "facets": [
+            "循环轮数工具次数和总截止时间均有上限"
+          ],
+          "duplicateGroup": "g_ff0a7580a905",
+          "rationale": "同一有界循环预算。",
+          "sourceRef": "s_acddec1baf48",
+          "key": "d_d71d7805a4d1"
+        },
+        {
+          "title": "超时预算重置",
+          "text": "每次重试都重新建立完整总截止时间，轮次计数也清零。连续遇到重试时仍声称请求有界，因为每一单次调用始终带独立超时。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_bea2f648810f",
+          "rationale": "重置预算使请求无界。",
+          "sourceRef": "s_b84b48f28237",
+          "key": "d_2bbec1a16c93"
+        },
+        {
+          "title": "候选即证据",
+          "text": "搜索命中片段后无需读取正文即可把它列为最终引用结果。搜索标题已概括实现，所以模型生成的任意行号都视为该片段中的真实位置。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_568d07d06ab9",
+          "rationale": "未读候选不能作为行证据。",
+          "sourceRef": "s_e7f4a9ddd131",
+          "key": "d_93c1e33b8f6d"
+        },
+        {
+          "title": "结果登记流程",
+          "text": "搜索发现的候选先登记标识，只有随后在本次请求内通过范围校验并成功读取的片段才进入可引用结果集。模型凭空返回的标识不会被采纳。",
+          "relevance": 2,
+          "facets": [
+            "最终结果标识必须来自本次合法读取"
+          ],
+          "duplicateGroup": "g_1e33f2534c04",
+          "rationale": "明确本次合法已读准入。",
+          "sourceRef": "s_acddec1baf48",
+          "key": "d_3d503deb48cc"
+        },
+        {
+          "title": "候选证据准入",
+          "text": "结果列表只接纳本次请求已合法读取正文的片段，搜索记录用于发现而非直接作为已读证据。模型写出的未知标识必须排除，即使标题很相关。",
+          "relevance": 2,
+          "facets": [
+            "最终结果标识必须来自本次合法读取"
+          ],
+          "duplicateGroup": "g_1e33f2534c04",
+          "rationale": "同一已读结果规则。",
+          "sourceRef": "s_acddec1baf48",
+          "key": "d_b0faf9866381"
+        },
+        {
+          "title": "标识推断加入",
+          "text": "模型最终答案出现未登记的片段标识时，根据相似标题补进结果。只要新标识属于同一仓库，即使本次未读取也可以算作有依据的证据。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_d4dad7c39b2d",
+          "rationale": "违反本次已读准入。",
+          "sourceRef": "s_0effa2cb8f61",
+          "key": "d_7732c8954410"
+        },
+        {
+          "title": "引用范围校验",
+          "text": "引用起止行必须落在本次提供给模型的完整读窗口内，服务器按原读窗口切取对应行核对文本。不能把窗口其他行的词语借给未读或错误行号。",
+          "relevance": 2,
+          "facets": [
+            "引用行范围与原读窗口原文严格对应"
+          ],
+          "duplicateGroup": "g_c205446c01ce",
+          "rationale": "完整原窗行级对应。",
+          "sourceRef": "s_acddec1baf48",
+          "key": "d_a48b4526330c"
+        },
+        {
+          "title": "新文件扩展引文",
+          "text": "文件已被修改时，允许把模型未读的新行附加到原引用文字。当前服务器可看到这些行，所以它们自动成为模型当时采用的已读依据。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_f1c9230bde11",
+          "rationale": "混用未读新行。",
+          "sourceRef": "s_ab5df9861b9c",
+          "key": "d_194bdcbc10fc"
+        }
+      ]
+    },
+    {
+      "id": "q_117ffa5fd377",
+      "category": "complementary same-source",
+      "question": "合成图谱用文档键标记抽取边，手工边另有独立来源。某文档重写后，应如何删除旧抽取、提交新抽取、保护手工关系并清理孤立实体？",
+      "requiredFacets": [
+        "只删除当前文档旧版本的抽取边",
+        "新抽取与旧抽取替换同一事务提交",
+        "手工关系不随文档抽取删除",
+        "仅无任何剩余引用关系的实体可清理"
+      ],
+      "authorCheck": "已检查：四项规则来自同一合成维护说明、不同facet不同组；共享别名和局部计数是相关但不完整证据；错误候选明确扩大删除或破坏提交原子性，未把反证误判0。",
+      "items": [
+        {
+          "title": "局部孤立认定",
+          "text": "节点在当前文档没有剩余自动边时直接删除，无须查看手工或其他文档。局部抽取已经完整替换，就等于该节点不再服务任何知识来源。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_0f346f7e362c",
+          "rationale": "局部无边不等于全局孤立。",
+          "sourceRef": "s_89379b4cd877",
+          "key": "d_bf897a560c87"
+        },
+        {
+          "title": "抽取失败回报",
+          "text": "新文档抽取发生解析错误时应记录失败并允许重试，不能把空结果默认为文档确实没有关系。错误状态本身尚不能决定旧边删除的范围。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_c2cee4b44e39",
+          "rationale": "正确抽取失败反证。",
+          "sourceRef": "s_d79d2e8093be",
+          "key": "d_98ad902e1ca6"
+        },
+        {
+          "title": "手工边同步清空",
+          "text": "旧自动边与手工边只要端点相同就一起清理。手工记录可以由新模型抽取重建，所以文档更新不需要保护独立来源。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_2ae41b4c11bf",
+          "rationale": "违背手工来源保护。",
+          "sourceRef": "s_a34941610ed8",
+          "key": "d_39cdb3d777d3"
+        },
+        {
+          "title": "抽取替换事务",
+          "text": "新抽取全部验证后，在同一事务删除该文档旧抽取并写入新实体边。任何写入失败都回滚这次替换，读取不会长期看到只删未建的中间结果。",
+          "relevance": 2,
+          "facets": [
+            "新抽取与旧抽取替换同一事务提交"
+          ],
+          "duplicateGroup": "g_9a9c95d4b168",
+          "rationale": "完整原子抽取替换。",
+          "sourceRef": "s_d79d2e8093be",
+          "key": "d_6612e091bd9a"
+        },
+        {
+          "title": "文档边更新范围",
+          "text": "自动抽取替换仅作用于该文档旧版本产生的边，筛选条件包含文档键与版本。即使其他来源连接同一实体，也不属于此次删除集合。",
+          "relevance": 2,
+          "facets": [
+            "只删除当前文档旧版本的抽取边"
+          ],
+          "duplicateGroup": "g_5e45180d1f84",
+          "rationale": "同一文档版本清理事实。",
+          "sourceRef": "s_d79d2e8093be",
+          "key": "d_53faf609e259"
+        },
+        {
+          "title": "同名实体全删",
+          "text": "文档重写时删除其中出现过的所有实体及相连关系，不检查来源。其他文档和手工关系使用同名实体也应同步删除，以保持新文档独立。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_6e15f5a9b218",
+          "rationale": "错误扩大删除到全图。",
+          "sourceRef": "s_002a98ce56c7",
+          "key": "d_51491c8a536b"
+        },
+        {
+          "title": "旧版本边范围",
+          "text": "文档重建时按当前文档键和旧版本清理自动抽取边，其他文档的抽取边继续保留。不能仅按实体名称删除整张图中的所有同名关系。",
+          "relevance": 2,
+          "facets": [
+            "只删除当前文档旧版本的抽取边"
+          ],
+          "duplicateGroup": "g_5e45180d1f84",
+          "rationale": "完整旧边删除scope。",
+          "sourceRef": "s_d79d2e8093be",
+          "key": "d_156ef618f4e5"
+        },
+        {
+          "title": "两段独立提交",
+          "text": "先提交旧抽取删除，再独立写入新结果；新增失败仍把文档标为重建成功。读者暂时缺少整套关系不会影响版本替换的一致性。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_9c873d3db7a5",
+          "rationale": "破坏原子替换且错误成功。",
+          "sourceRef": "s_4c74aa23896e",
+          "key": "d_673d0b9899f8"
+        },
+        {
+          "title": "忽略版本条件",
+          "text": "仅按文档键删除所有版本和所有来源，再写新自动边。历史手工来源也算这份文档内容，可以一并覆盖而不用版本及来源条件。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_0cc2d6176020",
+          "rationale": "混删手工和范围错误。",
+          "sourceRef": "s_4b25e2851a28",
+          "key": "d_507c74632965"
+        },
+        {
+          "title": "实体保留替代边",
+          "text": "只要共享实体还存在，旧关系来源就无需精确保留。更新时可以删除所有来源边，留下节点名称就足以维护其他文档和手工知识。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_2de363dcaf87",
+          "rationale": "保留节点不能替代独立关系。",
+          "sourceRef": "s_e7d05663c788",
+          "key": "d_fcb714687e57"
+        },
+        {
+          "title": "关系计数界限",
+          "text": "只统计当前文档的自动关系数，无法知道节点是否仍被别处使用。局部关系数降为零不能单独证明全图实体可以被回收。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_fd80626c3ae1",
+          "rationale": "正确局部与全局引用区别。",
+          "sourceRef": "s_d79d2e8093be",
+          "key": "d_6e0ad784b4ed"
+        },
+        {
+          "title": "实体别名共享",
+          "text": "多个文档可能通过不同别名连接同一个规范实体，实体名是否出现在当前原文不能单独决定其存在性。删除节点前还要考虑图中的其他引用。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_8353970e5a0a",
+          "rationale": "正确共享实体前提。",
+          "sourceRef": "s_d79d2e8093be",
+          "key": "d_63e967fd88f0"
+        },
+        {
+          "title": "手工来源保护",
+          "text": "手工创建关系使用独立来源类型，文档抽取重建不得删除它们。即使手工边与旧自动边连接相同实体，删除筛选也只覆盖自动来源。",
+          "relevance": 2,
+          "facets": [
+            "手工关系不随文档抽取删除"
+          ],
+          "duplicateGroup": "g_c38a573e957b",
+          "rationale": "完整手工关系保留。",
+          "sourceRef": "s_d79d2e8093be",
+          "key": "d_5a83b79c32d9"
+        },
+        {
+          "title": "关系来源类型",
+          "text": "图谱区分手工边和文档自动边；文档版本替换只清理自动来源。相同端点或关系名称不使手工边成为文档旧抽取，应继续保留其独立记录。",
+          "relevance": 2,
+          "facets": [
+            "手工关系不随文档抽取删除"
+          ],
+          "duplicateGroup": "g_c38a573e957b",
+          "rationale": "同一手工保护事实。",
+          "sourceRef": "s_d79d2e8093be",
+          "key": "d_aa823c348308"
+        },
+        {
+          "title": "失败结果覆盖",
+          "text": "新抽取解析失败时把结果当空图提交，并清除旧版本关系。无法解析说明原文没有有效实体，所以删除仍代表一次成功重建。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_a2dfb90abbcb",
+          "rationale": "把失败误当合法空结果。",
+          "sourceRef": "s_0363fa5198ca",
+          "key": "d_b3effee066d0"
+        },
+        {
+          "title": "手工修改记录",
+          "text": "手工关系可带独立创建时间和操作者备注，方便解释来源。记录这些属性有助于审计，但来源备注不自动替代重建时的删除条件。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_e15dd42562a6",
+          "rationale": "正确审计背景。",
+          "sourceRef": "s_d79d2e8093be",
+          "key": "d_23a0178b91c0"
+        },
+        {
+          "title": "实体回收条件",
+          "text": "旧边移除后仅清理不再被任何来源关系引用的实体，需同时检查其他文档和手工关系。仍有任一保留关系连接的实体不能随当前文档一起删除。",
+          "relevance": 2,
+          "facets": [
+            "仅无任何剩余引用关系的实体可清理"
+          ],
+          "duplicateGroup": "g_6922db45713a",
+          "rationale": "完整全来源孤立检查。",
+          "sourceRef": "s_d79d2e8093be",
+          "key": "d_6fb3bb566073"
+        },
+        {
+          "title": "版本提交边界",
+          "text": "文档旧抽取移除与新抽取落库属于同一事务，新结果先验证再提交。失败时保留旧版本图，不能把删除成功和新增失败分别作为完成状态。",
+          "relevance": 2,
+          "facets": [
+            "新抽取与旧抽取替换同一事务提交"
+          ],
+          "duplicateGroup": "g_9a9c95d4b168",
+          "rationale": "同一替换提交规则。",
+          "sourceRef": "s_d79d2e8093be",
+          "key": "d_9b5a19a06414"
+        },
+        {
+          "title": "名称缺失回收",
+          "text": "新原文未出现旧实体名称便删除该实体，即使其他文档仍连接它。实体是否属于全图只由当前修改文档的最新文字决定。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_882ca99671d3",
+          "rationale": "错误以单文档文字决定全局实体。",
+          "sourceRef": "s_55cd8fc1ee78",
+          "key": "d_b06fa026d0f4"
+        },
+        {
+          "title": "孤立节点清理",
+          "text": "文档重建结束后可回收没有任何剩余引用关系的节点，检查范围涵盖手工边与其他文档边。实体在当前文档失去关系不等于它已在全图孤立。",
+          "relevance": 2,
+          "facets": [
+            "仅无任何剩余引用关系的实体可清理"
+          ],
+          "duplicateGroup": "g_6922db45713a",
+          "rationale": "同一孤立实体边界。",
+          "sourceRef": "s_d79d2e8093be",
+          "key": "d_9e9b0c07b41d"
+        }
+      ]
+    },
+    {
+      "id": "q_1c336b793265",
+      "category": "complementary same-source",
+      "question": "合成订单付款后要异步发放积分，消息可能重复投递且处理会失败。如何保存待发送事件、防止重复加分、安排成功确认，以及收口持续失败？",
+      "requiredFacets": [
+        "订单与待发送事件同一事务保存",
+        "加分与消费标记同一事务且事件标识唯一",
+        "消息成功确认发生在业务事务提交后",
+        "持续失败进入可追踪死信而非无限热重试"
+      ],
+      "authorCheck": "已检查：事务outbox、消费幂等、确认顺序和失败收口为独立必要facet，同源四组；网络超时和日志背景标1；漏发、重复加分、提前确认及热重试均是明确错误。",
+      "items": [
+        {
+          "title": "失败事件追踪",
+          "text": "重复失败采用退避，超过重试限额转入可查询死信并保留原事件身份。后续修复可按原事件重放，不让失败消息无限热循环挤占正常处理。",
+          "relevance": 2,
+          "facets": [
+            "持续失败进入可追踪死信而非无限热重试"
+          ],
+          "duplicateGroup": "g_8cc9b203e634",
+          "rationale": "同一死信与退避规则。",
+          "sourceRef": "s_51102da70eb1",
+          "key": "d_a2fec077f48c"
+        },
+        {
+          "title": "消费幂等事务",
+          "text": "消费者以唯一事件标识记录消费，加积分与消费标记在同一事务提交。重复事件已存在标记时不再加分，处理失败时两项一起回滚。",
+          "relevance": 2,
+          "facets": [
+            "加分与消费标记同一事务且事件标识唯一"
+          ],
+          "duplicateGroup": "g_ecc42f605d33",
+          "rationale": "完整消费幂等原子边界。",
+          "sourceRef": "s_51102da70eb1",
+          "key": "d_ab773af65dc6"
+        },
+        {
+          "title": "消息确认时机",
+          "text": "消费者只有在积分业务事务成功提交后才确认消息，提交失败保持未成功确认以便重投。收到消息或开始处理并不代表业务结果已持久化。",
+          "relevance": 2,
+          "facets": [
+            "消息成功确认发生在业务事务提交后"
+          ],
+          "duplicateGroup": "g_88c518d217aa",
+          "rationale": "完整commit后确认。",
+          "sourceRef": "s_51102da70eb1",
+          "key": "d_65e6d161f46b"
+        },
+        {
+          "title": "持续失败出口",
+          "text": "同一事件重试达到约定次数后进入死信记录，保留事件标识和失败原因供人工或修复后重放。采用退避和有界重试，不能持续无延迟占用处理线程。",
+          "relevance": 2,
+          "facets": [
+            "持续失败进入可追踪死信而非无限热重试"
+          ],
+          "duplicateGroup": "g_8cc9b203e634",
+          "rationale": "完整有界失败收口。",
+          "sourceRef": "s_51102da70eb1",
+          "key": "d_aca17c496909"
+        },
+        {
+          "title": "新标识重放",
+          "text": "每次重投都生成新的业务事件标识，使消费端能再次加积分。一次付款的多次网络投递可以分别记为多笔积分业务，无须保持身份一致。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_7289cdc14d30",
+          "rationale": "改变业务身份导致重复加分。",
+          "sourceRef": "s_c132882df618",
+          "key": "d_74ac12b9081a"
+        },
+        {
+          "title": "失败立即循环",
+          "text": "事件处理失败立即无间隔重试且永不转死信；失败次数越多优先级越高。持续失败应一直占用线程，避免其他消息先处理。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_a1b7ac4a42d4",
+          "rationale": "违反有界退避收口。",
+          "sourceRef": "s_48c8fb43fd75",
+          "key": "d_c46bba2ad386"
+        },
+        {
+          "title": "网络投递结果",
+          "text": "发布器网络超时不证明消息未送达，可能需要重发同一事件。可重复投递是正常恢复路径，是否重复加分要由消费侧的业务幂等规则决定。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_2aa99b605073",
+          "rationale": "正确投递不确定前提。",
+          "sourceRef": "s_51102da70eb1",
+          "key": "d_cb8d60accc39"
+        },
+        {
+          "title": "投递确认约定",
+          "text": "消息处理完成后先提交积分与消费标记事务，再发送成功确认。事务失败不能提前确认，否则投递系统可能停止重试而积分尚未入账。",
+          "relevance": 2,
+          "facets": [
+            "消息成功确认发生在业务事务提交后"
+          ],
+          "duplicateGroup": "g_88c518d217aa",
+          "rationale": "同一消息确认次序。",
+          "sourceRef": "s_51102da70eb1",
+          "key": "d_05de36a2b4c6"
+        },
+        {
+          "title": "待发记录创建",
+          "text": "付款成功记录及积分待发事件共同提交，发布器只读取已提交的事件。两者不能分别提交，否则订单已付款但积分通知可能永久没有来源。",
+          "relevance": 2,
+          "facets": [
+            "订单与待发送事件同一事务保存"
+          ],
+          "duplicateGroup": "g_095ba6c7db77",
+          "rationale": "同一订单事件原子保存。",
+          "sourceRef": "s_51102da70eb1",
+          "key": "d_e032e99b0a71"
+        },
+        {
+          "title": "死信静默删除",
+          "text": "重试超限后删除事件内容和标识，不记录原因也不提供重放入口。任务从队列消失就代表业务已完成，积分结果无需追踪。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_78d3187df3c8",
+          "rationale": "错误把丢弃任务当可追踪完成。",
+          "sourceRef": "s_3b90a4051d7b",
+          "key": "d_7321736abcc8"
+        },
+        {
+          "title": "消费标记先提交",
+          "text": "先提交已消费标记，再在另一事务加积分；中间失败仍不允许该事件重试。标记已存在即可视为积分入账完成，不需核对实际积分。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_4cb19d8fb592",
+          "rationale": "非原子消费导致漏加。",
+          "sourceRef": "s_b3198d6500b7",
+          "key": "d_1744c083acc5"
+        },
+        {
+          "title": "接收即成功确认",
+          "text": "消费者刚收到消息便发送成功确认，然后再尝试提交积分事务。提前确认可以提高吞吐，后续数据库失败也无需投递系统再次发送。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_18a541c14e4e",
+          "rationale": "提前ack可能丢业务处理。",
+          "sourceRef": "s_8fba84632409",
+          "key": "d_78299e084b6d"
+        },
+        {
+          "title": "付款后直接发消息",
+          "text": "订单事务先成功，再直接发送积分消息而不保存待发记录。发送失败无需补偿，订单已经提交会自动让投递系统发现所有漏发事件。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_29a6784b304f",
+          "rationale": "没有outbox会漏发且错误保证。",
+          "sourceRef": "s_ec421b709059",
+          "key": "d_f62240f91a7e"
+        },
+        {
+          "title": "订单事件落库",
+          "text": "订单支付状态与待发送积分事件在同一数据库事务写入，事务提交后才允许发布事件。订单成功而事件记录缺失的中间提交状态不能被接受。",
+          "relevance": 2,
+          "facets": [
+            "订单与待发送事件同一事务保存"
+          ],
+          "duplicateGroup": "g_095ba6c7db77",
+          "rationale": "完整事务outbox边界。",
+          "sourceRef": "s_51102da70eb1",
+          "key": "d_c61260ae0ed4"
+        },
+        {
+          "title": "只改积分不记消费",
+          "text": "积分写入后不需要持久消费标记，仅保留内存里的已见事件集合。进程重启会恢复队列历史，因此内存丢失也不会重复执行加分。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_baac659d438d",
+          "rationale": "内存标记不足以跨重启幂等。",
+          "sourceRef": "s_ef8d11df56f6",
+          "key": "d_13d230b3ac0c"
+        },
+        {
+          "title": "每次投递增加积分",
+          "text": "收到同一个事件就再加一次积分，消费标记仅用于展示尝试次数。投递系统会自动保证只有一份消息，所以重投也不会导致重复业务副作用。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_d8da1f063e44",
+          "rationale": "错误依赖投递exactly-once。",
+          "sourceRef": "s_7a4da836649d",
+          "key": "d_37fd117e0ee0"
+        },
+        {
+          "title": "重放对象身份",
+          "text": "修复失败任务时应继续使用原事件身份，便于消费端区分已处理和待处理。新的消息包装标识并不必然代表一笔新的积分业务。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_419b449a1e0e",
+          "rationale": "有用事件身份背景，缺少完整幂等事务。",
+          "sourceRef": "s_51102da70eb1",
+          "key": "d_959c31f8f76e"
+        },
+        {
+          "title": "队列确认意义",
+          "text": "队列确认表示投递系统可停止重发，该信号本身不查询积分数据库。是否已经持久化加分仍取决于消费程序发出确认前的处理过程。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_9580224c445e",
+          "rationale": "正确确认语义背景。",
+          "sourceRef": "s_51102da70eb1",
+          "key": "d_738943a9f6b9"
+        },
+        {
+          "title": "积分入账协议",
+          "text": "每个事件标识有唯一消费记录，积分变更和该记录同事务落库。已消费事件直接返回已有状态；不能先标已处理后再单独增加积分。",
+          "relevance": 2,
+          "facets": [
+            "加分与消费标记同一事务且事件标识唯一"
+          ],
+          "duplicateGroup": "g_ecc42f605d33",
+          "rationale": "同一积分和标记边界。",
+          "sourceRef": "s_51102da70eb1",
+          "key": "d_134ebe30fdfb"
+        },
+        {
+          "title": "日志审计入口",
+          "text": "记录事件标识和各次处理状态有助于定位卡住的积分任务。日志说明发生过哪些尝试，不能单靠一条成功日志替代积分及消费标记的数据库事务。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_3e8531f48a60",
+          "rationale": "正确审计前提。",
+          "sourceRef": "s_51102da70eb1",
+          "key": "d_a6b0b971ca6b"
+        }
+      ]
+    },
+    {
+      "id": "q_22b9ebef792b",
+      "category": "complementary same-source",
+      "question": "合成笔记导入器把HTML转换成Markdown，需要保留任务完成状态、代码块原文、数学公式源码和永久段落链接。四种内容分别要如何恢复？",
+      "requiredFacets": [
+        "任务项从checkbox状态恢复完成标记",
+        "代码围栏原文不进行普通正文清理",
+        "数学节点用原始TeX恢复公式",
+        "永久段落链接保留稳定block标识"
+      ],
+      "authorCheck": "已检查：四种内容恢复各有两个完整证据，来自同一合成导入规范的不同信息组；视觉、包裹结构和重名是正确前提标1；正文清理与源码保留的边界均已检查。",
+      "items": [
+        {
+          "title": "待办导入规则",
+          "text": "HTML任务项按checkbox是否checked生成Markdown任务标记，勾选和未勾选均需保留。导入后项目文字仍跟着该标记，不把状态当装饰元素删除。",
+          "relevance": 2,
+          "facets": [
+            "任务项从checkbox状态恢复完成标记"
+          ],
+          "duplicateGroup": "g_95a0d551c175",
+          "rationale": "同一任务状态信息。",
+          "sourceRef": "s_fe4d7997adc8",
+          "key": "d_c49bc3691c51"
+        },
+        {
+          "title": "任务节点恢复",
+          "text": "导入任务列表读取每项checkbox的完成状态，并恢复对应的未完成或已完成Markdown标记。任务文字与标记属于同一列表项，不能只保留可见文字。",
+          "relevance": 2,
+          "facets": [
+            "任务项从checkbox状态恢复完成标记"
+          ],
+          "duplicateGroup": "g_95a0d551c175",
+          "rationale": "完整checkbox恢复。",
+          "sourceRef": "s_fe4d7997adc8",
+          "key": "d_f83afde7a6f1"
+        },
+        {
+          "title": "锚点导入约定",
+          "text": "永久段落链接以稳定block标识定位，导入Markdown时保存这个标识及原段落。普通标题显示slug与永久block身份不同，不能混为同一种持久链接。",
+          "relevance": 2,
+          "facets": [
+            "永久段落链接保留稳定block标识"
+          ],
+          "duplicateGroup": "g_fefa59c0d94a",
+          "rationale": "同一永久链接保存事实。",
+          "sourceRef": "s_fe4d7997adc8",
+          "key": "d_0f2663a34557"
+        },
+        {
+          "title": "任务标签结构",
+          "text": "某些HTML任务项把checkbox放在label内，而任务文字位于旁边容器。导入器需识别这种结构，不能把label的显示文本误当项目正文。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_9575717b8296",
+          "rationale": "正确结构前提，未完整规定状态。",
+          "sourceRef": "s_fe4d7997adc8",
+          "key": "d_4d01ef8d035c"
+        },
+        {
+          "title": "显示slug作永久键",
+          "text": "把标题按显示文字生成的slug直接覆盖所有段落block标识。标题改名或重名都不会影响slug，因此这种显示标识可以无条件替代永久身份。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_51e2cf15754f",
+          "rationale": "错误混用临时显示slug。",
+          "sourceRef": "s_186850c62fb1",
+          "key": "d_4c4f0c807ec7"
+        },
+        {
+          "title": "视觉文字拼公式",
+          "text": "公式转换直接拼接屏幕可见字符，不读取TeX属性或注释。分式与上下标可以从字符顺序自动精确恢复，所以原始表达式字段无需保留。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_dc0c60b9e2ca",
+          "rationale": "视觉字符不足以恢复源码。",
+          "sourceRef": "s_381caa0e055e",
+          "key": "d_70953f4b488f"
+        },
+        {
+          "title": "checkbox装饰清理",
+          "text": "导入前删除所有checkbox，只按任务可见文字生成普通列表。勾选状态属于界面装饰，与任务是否完成没有关系，不需要恢复标记。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_9a9e53e5d202",
+          "rationale": "丢失任务状态。",
+          "sourceRef": "s_93e59524991e",
+          "key": "d_19faeeea14f8"
+        },
+        {
+          "title": "代码原文保留",
+          "text": "代码块按原语言生成围栏，围栏内文本与原文一致，包括空行、缩进和符号。只对普通正文规整空白，不能把相同清理规则施加到代码原文。",
+          "relevance": 2,
+          "facets": [
+            "代码围栏原文不进行普通正文清理"
+          ],
+          "duplicateGroup": "g_6dda3459aad9",
+          "rationale": "完整代码围栏保护。",
+          "sourceRef": "s_fe4d7997adc8",
+          "key": "d_1b6ca3faf3a8"
+        },
+        {
+          "title": "公式图片替换",
+          "text": "所有数学节点只存远端图片链接并删除原TeX，再导入时从图片地址恢复原表达式。地址稳定就能保证公式继续作为源码编辑。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_65225db59a3a",
+          "rationale": "图片地址不保留原TeX。",
+          "sourceRef": "s_04c9e36c38cc",
+          "key": "d_f8366bcc5e6e"
+        },
+        {
+          "title": "段落链接保留",
+          "text": "已建立永久链接的段落保留稳定block标识与段落内容，转换时可用携带标识的HTML表达。普通标题自动生成的临时slug不冒充永久段落标识。",
+          "relevance": 2,
+          "facets": [
+            "永久段落链接保留稳定block标识"
+          ],
+          "duplicateGroup": "g_fefa59c0d94a",
+          "rationale": "完整永久block身份。",
+          "sourceRef": "s_fe4d7997adc8",
+          "key": "d_fb277add3d13"
+        },
+        {
+          "title": "公式源恢复",
+          "text": "数学节点从源码属性或TeX注释读取原始表达式，按行内或块级公式恢复。不能用视觉排版中的字符顺序代替TeX，否则上下标和分式结构可能丢失。",
+          "relevance": 2,
+          "facets": [
+            "数学节点用原始TeX恢复公式"
+          ],
+          "duplicateGroup": "g_5ac88bc2bc5d",
+          "rationale": "完整TeX源码恢复。",
+          "sourceRef": "s_fe4d7997adc8",
+          "key": "d_2381ab6643e3"
+        },
+        {
+          "title": "围栏转换约定",
+          "text": "导入代码时保留语言及完整文本，代码内缩进、连续空行和符号不做正文规范化。空白压缩仅作用于围栏外，避免改变程序或示例含义。",
+          "relevance": 2,
+          "facets": [
+            "代码围栏原文不进行普通正文清理"
+          ],
+          "duplicateGroup": "g_6dda3459aad9",
+          "rationale": "同一代码原文规则。",
+          "sourceRef": "s_fe4d7997adc8",
+          "key": "d_e66d1f72c8e5"
+        },
+        {
+          "title": "标题重名场景",
+          "text": "笔记可以有多个相同标题，标题文字变化也很常见。单靠显示标题无法证明同一永久段落身份，链接稳定性需要额外定位信息。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_48204f50466b",
+          "rationale": "正确永久身份前提。",
+          "sourceRef": "s_fe4d7997adc8",
+          "key": "d_e64faff522c4"
+        },
+        {
+          "title": "数学导入字段",
+          "text": "公式优先从原始TeX字段还原，行内与独立块的边界分别保留。渲染后的视觉字符只表达显示结果，不能作为原公式语句的可靠替代。",
+          "relevance": 2,
+          "facets": [
+            "数学节点用原始TeX恢复公式"
+          ],
+          "duplicateGroup": "g_5ac88bc2bc5d",
+          "rationale": "同一公式源码事实。",
+          "sourceRef": "s_fe4d7997adc8",
+          "key": "d_455647f7369a"
+        },
+        {
+          "title": "围栏语言删除",
+          "text": "导入所有代码块后删除围栏和语言标签并合并为普通段落。读者仍能看到文字，所以后续解析会自动识别代码边界与原缩进。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_7e531959f290",
+          "rationale": "破坏代码边界原文。",
+          "sourceRef": "s_ead234bd71ca",
+          "key": "d_30632fccbf3b"
+        },
+        {
+          "title": "任务状态统一",
+          "text": "所有导入任务一律写成已完成标记，便于减少未完成提醒。原checkbox未勾选也可以直接完成，不影响任务状态的忠实导入。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_780f24f5a92a",
+          "rationale": "错误改变未完成状态。",
+          "sourceRef": "s_f03555ad257b",
+          "key": "d_1be650746c76"
+        },
+        {
+          "title": "永久锚点重命名",
+          "text": "导入时根据段落当前文字重新生成全部block标识，并丢弃旧标识。外部永久链接会自动跟随新标识，因此无需保留原段落身份。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_24e8d07f0d70",
+          "rationale": "破坏永久链接身份。",
+          "sourceRef": "s_978753fd7872",
+          "key": "d_c7eeed442a9d"
+        },
+        {
+          "title": "代码复制语义",
+          "text": "显示代码可能由多层高亮span包裹，复制时应关注原文本而非装饰类名。高亮节点的颜色和样式不属于代码业务内容。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_659db2fa6883",
+          "rationale": "正确源码与装饰区别。",
+          "sourceRef": "s_fe4d7997adc8",
+          "key": "d_7a2df8019a88"
+        },
+        {
+          "title": "代码空白归一",
+          "text": "围栏内连续空行合并为一行并删除行首缩进，与普通正文使用同一清理流程。程序块的空白不会影响任何语言语义，因此可统一规范化。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_4c1e9d0d2708",
+          "rationale": "错误更改代码原文。",
+          "sourceRef": "s_45e3d59343a6",
+          "key": "d_1a3447450982"
+        },
+        {
+          "title": "视觉公式边界",
+          "text": "公式显示可能把原TeX变成多个视觉span或MathML节点；屏幕文字复制不一定包含原来的宏和分式结构。视觉正确并不证明源表达式可无损恢复。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_77b28c7da311",
+          "rationale": "正确公式视觉反证。",
+          "sourceRef": "s_fe4d7997adc8",
+          "key": "d_f3ff86c8dd7a"
+        }
+      ]
+    },
+    {
+      "id": "q_478a2898d937",
+      "category": "complementary same-source",
+      "question": "合成多租户数据库要导出完整记录。createdAt非空且不可修改，记录键唯一，导出使用一致性快照并按createdAt、记录键升序分页；租户范围、排序、下一页游标和并发变化分别如何处理？",
+      "requiredFacets": [
+        "租户条件在查询限量前应用",
+        "稳定升序同时包含时间及唯一记录键",
+        "游标使用严格大于上一页末尾的二元组",
+        "所有分页固定同一一致性快照"
+      ],
+      "authorCheck": "已检查：题目显式规定时间不可变非空、键唯一和快照，四个facet各两条；同时间游标需包括键；相关资源与偏移说明为1，跳过同时间和包含末行为真实错误。",
+      "items": [
+        {
+          "title": "分页范围约定",
+          "text": "每页的底层查询包含当前租户条件，然后排序限量。分页只在该租户集合中进行，应用层从全库已截断结果删去其他租户无法保证完整导出。",
+          "relevance": 2,
+          "facets": [
+            "租户条件在查询限量前应用"
+          ],
+          "duplicateGroup": "g_0cfd2eba1a9c",
+          "rationale": "同一租户查询规则。",
+          "sourceRef": "s_af50d26490fb",
+          "key": "d_f889d4560dc6"
+        },
+        {
+          "title": "二元游标边界",
+          "text": "页末游标保存创建时间和记录键，后页条件是二元组严格大于该值。时间相等时比较记录键，沿相同升序前进，不能用大于等于重复取末行。",
+          "relevance": 2,
+          "facets": [
+            "游标使用严格大于上一页末尾的二元组"
+          ],
+          "duplicateGroup": "g_91e9e6695ea0",
+          "rationale": "同一游标规则。",
+          "sourceRef": "s_af50d26490fb",
+          "key": "d_7564bcf2a39c"
+        },
+        {
+          "title": "导出快照生命期",
+          "text": "整个导出任务的各页读取同一一致性快照，并保持快照到任务结束。任务开始之后发生的新增或修改不混入这次导出，结果表示固定时点数据。",
+          "relevance": 2,
+          "facets": [
+            "所有分页固定同一一致性快照"
+          ],
+          "duplicateGroup": "g_5abff0cd3307",
+          "rationale": "完整快照固定边界。",
+          "sourceRef": "s_af50d26490fb",
+          "key": "d_45d158f26903"
+        },
+        {
+          "title": "逐页最新快照",
+          "text": "每页都创建最新快照，以包含导出途中发生的写入。这样整份文件仍对应开始时的同一状态，新增记录不会改变页边界或内容集合。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_24be1a33cd03",
+          "rationale": "混用快照时点。",
+          "sourceRef": "s_4107e307fdf3",
+          "key": "d_6ed6f527d4a3"
+        },
+        {
+          "title": "记录键分布",
+          "text": "记录键唯一但数值未必连续，删除旧记录也会留下空洞。分页不能把键加一当作下一条存在记录，需要根据实际查询结果继续定位。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_6849b5e86840",
+          "rationale": "正确键空洞前提。",
+          "sourceRef": "s_af50d26490fb",
+          "key": "d_462feb25c06b"
+        },
+        {
+          "title": "导出排序键",
+          "text": "导出使用createdAt升序后接唯一记录键升序，两者共同形成稳定次序。多个记录创建时间相同仍由唯一键区分，不能只按时间排序。",
+          "relevance": 2,
+          "facets": [
+            "稳定升序同时包含时间及唯一记录键"
+          ],
+          "duplicateGroup": "g_3b8463d15841",
+          "rationale": "完整二元稳定排序。",
+          "sourceRef": "s_af50d26490fb",
+          "key": "d_ba0a7a506f7a"
+        },
+        {
+          "title": "同时间跳页",
+          "text": "游标仅保存页末时间，后页条件只取创建时间更大的记录。与末行同一时间但键更大的条目可以跳过，因为它们视为已经随该时间一起导出。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_6a345b5a13fc",
+          "rationale": "遗漏同时间其余记录。",
+          "sourceRef": "s_2a4cfbc7923c",
+          "key": "d_e32bd8598cec"
+        },
+        {
+          "title": "游标编码协议",
+          "text": "游标可以把末行时间和键序列化为不透明令牌，解码时需校验格式。令牌只是传输载体，不能代替服务端对实际查询边界的判断。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_4b14adceffc1",
+          "rationale": "正确游标载体前提。",
+          "sourceRef": "s_af50d26490fb",
+          "key": "d_c3b5cb933c05"
+        },
+        {
+          "title": "租户查询边界",
+          "text": "导出SQL先限制当前租户，再在该租户记录中排序和取页大小。不能先从全租户结果取一页再过滤，否则其他租户会占用名额并导致当前租户漏记录。",
+          "relevance": 2,
+          "facets": [
+            "租户条件在查询限量前应用"
+          ],
+          "duplicateGroup": "g_0cfd2eba1a9c",
+          "rationale": "完整租户过滤前置。",
+          "sourceRef": "s_af50d26490fb",
+          "key": "d_ab9dd17e370e"
+        },
+        {
+          "title": "跨租户令牌复用",
+          "text": "导出游标若来自另一租户也直接复用，保留相同时间键边界即可。租户只影响标题，相同二元组边界在任意租户表示同一导出位置。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_304105f8ad2e",
+          "rationale": "跨范围游标位置错误。",
+          "sourceRef": "s_461d8bca725d",
+          "key": "d_f0eea1889988"
+        },
+        {
+          "title": "仅时间排序",
+          "text": "导出只按创建时间排序，完全相同时间的记录允许每页随机排列。唯一记录键只用于显示，随机顺序不会影响游标分页的完整性。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_d49ce3c21654",
+          "rationale": "破坏稳定排序。",
+          "sourceRef": "s_66edaef60aff",
+          "key": "d_fce4856790a3"
+        },
+        {
+          "title": "包含末行的游标",
+          "text": "下一页使用二元组大于等于页末值，保留末行作为页首。导出不做去重也无需跳过它，大于等于与严格大于会产生相同结果。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_4db333a1e2d5",
+          "rationale": "重复页末记录。",
+          "sourceRef": "s_9b7890a03dc4",
+          "key": "d_6031db6a259a"
+        },
+        {
+          "title": "偏移分页限制",
+          "text": "在不断变化的数据里，偏移分页可能因前面插入或删除而漏项或重复。使用一致快照能避免这类变化，但仍需要明确定义当前租户和排序条件。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_30a2ac4dd47d",
+          "rationale": "正确偏移与快照背景。",
+          "sourceRef": "s_af50d26490fb",
+          "key": "d_115a7aa95be4"
+        },
+        {
+          "title": "固定递增记录键",
+          "text": "下一页直接按末行键加一取记录，不再比较时间字段。记录键与创建时间无须同序，也可以保证沿既定创建时间升序完整导出。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_f9b6dbdfa2a5",
+          "rationale": "忽略排序主键和键空洞。",
+          "sourceRef": "s_d347d6d2e1f0",
+          "key": "d_a4b1ad246cf2"
+        },
+        {
+          "title": "同时间记录排列",
+          "text": "记录按创建时间和唯一键的升序二元组排列，时间相同的条目仍有确定位置。只有时间字段的排序不能为这些条目提供稳定跨页次序。",
+          "relevance": 2,
+          "facets": [
+            "稳定升序同时包含时间及唯一记录键"
+          ],
+          "duplicateGroup": "g_3b8463d15841",
+          "rationale": "同一稳定排序事实。",
+          "sourceRef": "s_af50d26490fb",
+          "key": "d_6d48b8c6154a"
+        },
+        {
+          "title": "分页一致时点",
+          "text": "所有导出页面绑定同一快照而非逐页开启新的当前视图。并发写入不改变本次页内容，这份导出始终代表开始时固定的数据库状态。",
+          "relevance": 2,
+          "facets": [
+            "所有分页固定同一一致性快照"
+          ],
+          "duplicateGroup": "g_5abff0cd3307",
+          "rationale": "同一全任务快照要求。",
+          "sourceRef": "s_af50d26490fb",
+          "key": "d_4e94cc8ed91a"
+        },
+        {
+          "title": "下一页检索条件",
+          "text": "下一页读取严格大于上一页末尾的创建时间与唯一键二元组的记录，再按同一二元组升序限量。比较包括同时间时键更大的条目，且排除上一页末项。",
+          "relevance": 2,
+          "facets": [
+            "游标使用严格大于上一页末尾的二元组"
+          ],
+          "duplicateGroup": "g_91e9e6695ea0",
+          "rationale": "完整严格keyset游标。",
+          "sourceRef": "s_af50d26490fb",
+          "key": "d_d0b7b13a786f"
+        },
+        {
+          "title": "快照资源占用",
+          "text": "长时间保持一致性快照会占用数据库版本资源，任务结束或失败后应释放。资源管理重要，但它不自动决定导出页面的排序或租户边界。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_34640047afbc",
+          "rationale": "正确快照生命周期背景。",
+          "sourceRef": "s_af50d26490fb",
+          "key": "d_eb00159c5270"
+        },
+        {
+          "title": "先全库分页",
+          "text": "导出先对所有租户排序限量，最后才删除不属于当前租户的记录。空页直接结束即可，这个次序不会漏掉排在其他租户之后的目标记录。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_ee159673e764",
+          "rationale": "scope后置漏导出。",
+          "sourceRef": "s_97590958f2e6",
+          "key": "d_fba40ef4167d"
+        },
+        {
+          "title": "途中释放快照",
+          "text": "第一页面完成后释放一致性快照，后面页面读取普通当前状态。第一页已固定就足以使整份导出在并发修改下仍表示单一时点数据。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_3227504587c0",
+          "rationale": "中途丢快照破坏一致时点。",
+          "sourceRef": "s_f54be2fa44bb",
+          "key": "d_e70e0b38699a"
+        }
+      ]
+    },
+    {
+      "id": "q_1086ebe1483c",
+      "category": "complementary same-source",
+      "question": "合成检索系统把原文切块后生成向量，缓存结果并按仓库查询。更新原文或更换向量模型时，如何构造缓存身份、清除失效块、隔离仓库并保持相似度计算一致？",
+      "requiredFacets": [
+        "向量缓存身份包含块内容及模型版本",
+        "原文更新移除旧版本不再存在的块",
+        "查询候选严格绑定当前仓库",
+        "余弦比较使用双方归一化向量或等价公式"
+      ],
+      "authorCheck": "已检查：内容模型身份、旧块替换、仓库隔离和余弦一致性四组互补同源；零范数等正确边界标1；同维空间、单方归一化和跨库读取错误标0。",
+      "items": [
+        {
+          "title": "更新只追加块",
+          "text": "文档更新仅追加新切块，不删除旧版本记录。新旧片段都参与当前答案更完整，即使旧段已从文档移除也不应被判作过时材料。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_a03842f66c72",
+          "rationale": "错误保留失效旧块。",
+          "sourceRef": "s_220dbc6c3b93",
+          "key": "d_f455a259a69e"
+        },
+        {
+          "title": "跨库正文补齐",
+          "text": "向量查询受当前仓库限制，但读取模型提供的块标识时允许跨库正文。搜索过滤一次即可授权其他仓库相似片段，不用再检查读取所属。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_69039c640cb0",
+          "rationale": "读阶段越界。",
+          "sourceRef": "s_f8dcc2f57c31",
+          "key": "d_d2a6eca795bf"
+        },
+        {
+          "title": "范数乘法余弦",
+          "text": "用点积再乘查询和候选双方范数作为余弦评分，不执行除法。这样长向量被进一步放大，也仍与单位化点积具有相同排序。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_9faa8f2539f7",
+          "rationale": "公式错误。",
+          "sourceRef": "s_bc586295e8ac",
+          "key": "d_1f364e99dc9f"
+        },
+        {
+          "title": "向量长度处理",
+          "text": "检索若以点积实现余弦，查询向量和文档向量都需单位化；也可直接用带双方范数的余弦公式。保留某一方原长度的裸点积不是等价评分。",
+          "relevance": 2,
+          "facets": [
+            "余弦比较使用双方归一化向量或等价公式"
+          ],
+          "duplicateGroup": "g_274b75b1746b",
+          "rationale": "同一双方归一化事实。",
+          "sourceRef": "s_d44766586f2c",
+          "key": "d_561cd96db99c"
+        },
+        {
+          "title": "切块边界变化",
+          "text": "改动一个标题或分隔符可能改变后面的切块边界，即使大部分原句未修改。增量更新不能假设只有文字直接改动的位置会影响块集合。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_a1aa7231e0d1",
+          "rationale": "正确切块变化背景。",
+          "sourceRef": "s_d44766586f2c",
+          "key": "d_2b8ab79ed538"
+        },
+        {
+          "title": "仅标题缓存",
+          "text": "向量缓存只按文档标题命名，标题没变就复用全部旧向量。模型版本或块正文修改不会影响语义表示，所以缓存身份无需记录这些变化。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_265212aeae6c",
+          "rationale": "缓存身份错误。",
+          "sourceRef": "s_05fa2edee189",
+          "key": "d_062db7a9c691"
+        },
+        {
+          "title": "最近向量跨库取",
+          "text": "先在全索引取最近向量并直接返回，不应用仓库条件。语义距离近的块天然属于用户当前问题，因此仓库身份不会影响结果许可范围。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_6db3ba45a51a",
+          "rationale": "忽略仓库scope。",
+          "sourceRef": "s_6961c1b2eaa9",
+          "key": "d_7cb92b15222d"
+        },
+        {
+          "title": "只归一化查询",
+          "text": "余弦评分只把查询向量单位化，再与原始候选向量点积。候选向量的不同长度不可能影响点积分数，因此无需处理候选范数。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_adb8009c5cc7",
+          "rationale": "点积不等价双方余弦。",
+          "sourceRef": "s_7c9abc258a19",
+          "key": "d_03bcd1a6150d"
+        },
+        {
+          "title": "相同标题文档",
+          "text": "不同文档可以共享标题而内容不同，标题修改也可能不涉及原文。标题显示只是人类导航信息，不能单独判断某个向量是否仍对应当前内容。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_a95311c6e597",
+          "rationale": "正确缓存标识前提。",
+          "sourceRef": "s_d44766586f2c",
+          "key": "d_d757744411c4"
+        },
+        {
+          "title": "维数相同复用",
+          "text": "新模型只要维数与旧模型相同，就继续复用旧向量缓存进行比较。向量坐标空间完全由维数决定，所以模型名称和版本无需区分。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_bf8f10edae5d",
+          "rationale": "错误同维等于同空间。",
+          "sourceRef": "s_7d4d25889ac7",
+          "key": "d_c1fcd95995fa"
+        },
+        {
+          "title": "余弦评分约定",
+          "text": "余弦比较要求查询与候选双方归一化后做点积，或按点积除以双方范数的等价公式计算。只归一化一方再点积会让另一方长度影响排序。",
+          "relevance": 2,
+          "facets": [
+            "余弦比较使用双方归一化向量或等价公式"
+          ],
+          "duplicateGroup": "g_274b75b1746b",
+          "rationale": "完整余弦计算一致性。",
+          "sourceRef": "s_d44766586f2c",
+          "key": "d_135c7062030b"
+        },
+        {
+          "title": "块序号固定缓存",
+          "text": "向量只按文档键和块序号缓存，原文重排后直接把旧序号向量交给新文本。序号相同保证内容相同，不需要内容哈希或重新生成。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_e64a02d98a48",
+          "rationale": "序号不代表内容身份。",
+          "sourceRef": "s_ad911e244088",
+          "key": "d_d32201f45285"
+        },
+        {
+          "title": "索引访问隔离",
+          "text": "检索查询绑定用户选定仓库，并在读候选正文时再次核对所属仓库。向量距离很近不改变访问范围，其他仓库的记录仍不能作为本次结果。",
+          "relevance": 2,
+          "facets": [
+            "查询候选严格绑定当前仓库"
+          ],
+          "duplicateGroup": "g_9f7cfe249972",
+          "rationale": "同一仓库隔离规则。",
+          "sourceRef": "s_d44766586f2c",
+          "key": "d_79c8405331ae"
+        },
+        {
+          "title": "嵌入版本命名",
+          "text": "缓存条目由块内容摘要和模型版本共同确定，正文或模型任一改变都不命中旧向量。标题相同不代表块内容和向量空间仍与旧条目一致。",
+          "relevance": 2,
+          "facets": [
+            "向量缓存身份包含块内容及模型版本"
+          ],
+          "duplicateGroup": "g_424cdbc0f3b7",
+          "rationale": "同一缓存身份事实。",
+          "sourceRef": "s_d44766586f2c",
+          "key": "d_031e28f9baf6"
+        },
+        {
+          "title": "归一化零向量",
+          "text": "向量范数为零时不能按普通余弦公式除法，需要明确特殊处理策略。处理零向量有助于可靠评分，但不会自动建立仓库或缓存范围。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_7c5c447cd05f",
+          "rationale": "正确余弦定义前提。",
+          "sourceRef": "s_d44766586f2c",
+          "key": "d_2a92307dd368"
+        },
+        {
+          "title": "块版本替换",
+          "text": "文档更新重新切块后删除该文档旧版本中已不存在的块及其向量记录，再保存新块。不能只追加新切块，否则检索还会命中过时原文。",
+          "relevance": 2,
+          "facets": [
+            "原文更新移除旧版本不再存在的块"
+          ],
+          "duplicateGroup": "g_e6643a5506f8",
+          "rationale": "完整失效块清理。",
+          "sourceRef": "s_d44766586f2c",
+          "key": "d_bb3c3c605c9a"
+        },
+        {
+          "title": "模型维数检查",
+          "text": "不同向量模型可能输出不同维数，查询时维数不一致应拒绝比较。维数相同也不必然表示模型空间相同，还需考虑实际模型身份。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_30eceae2403b",
+          "rationale": "正确模型空间前提。",
+          "sourceRef": "s_d44766586f2c",
+          "key": "d_08f4d472fbfb"
+        },
+        {
+          "title": "仓库候选边界",
+          "text": "向量检索候选由服务端当前仓库范围约束，索引查询和后续正文读取都不能跨仓库。语义相似的外库块不属于此次请求的可用材料。",
+          "relevance": 2,
+          "facets": [
+            "查询候选严格绑定当前仓库"
+          ],
+          "duplicateGroup": "g_9f7cfe249972",
+          "rationale": "完整仓库候选scope。",
+          "sourceRef": "s_d44766586f2c",
+          "key": "d_fad9c2886e07"
+        },
+        {
+          "title": "切块更新生命周期",
+          "text": "更新文档时用新块集合替换当前文档旧版本集合，不再出现的旧块和向量一并移除。新块写入不能让旧正文片段继续参与当前检索。",
+          "relevance": 2,
+          "facets": [
+            "原文更新移除旧版本不再存在的块"
+          ],
+          "duplicateGroup": "g_e6643a5506f8",
+          "rationale": "同一旧块替换规则。",
+          "sourceRef": "s_d44766586f2c",
+          "key": "d_9a7a01c362ca"
+        },
+        {
+          "title": "向量缓存身份",
+          "text": "向量缓存键包含切块原文的内容哈希和向量模型版本，同一文本更换模型也产生不同条目。不能仅用文件标题定位向量，否则内容或模型变化后会复用旧表示。",
+          "relevance": 2,
+          "facets": [
+            "向量缓存身份包含块内容及模型版本"
+          ],
+          "duplicateGroup": "g_424cdbc0f3b7",
+          "rationale": "完整内容模型缓存身份。",
+          "sourceRef": "s_d44766586f2c",
+          "key": "d_6361b10baf70"
+        }
+      ]
+    },
+    {
+      "id": "q_698b881200c2",
+      "category": "complementary same-source",
+      "question": "合成块编辑器支持表格转换、工具栏命令和异步复制链接。如何保留一次操作的撤销边界、拒绝丢单元格的转换、锁定命令选区并避免异步回调误改其他块？",
+      "requiredFacets": [
+        "每次工具操作独立形成一次撤销动作",
+        "丢失表格单元格的转换应拒绝",
+        "工具栏命令使用捕获的原编辑选区",
+        "异步块目标随事务映射并在删除后失效"
+      ],
+      "authorCheck": "已检查：四项操作语义从同一合成编辑器规范抽取且不同facet分组；焦点、同文身份和表格结构解释标1；异步旧位置与同文接替是明确错误，不混为有用反证。",
+      "items": [
+        {
+          "title": "异步固定位置",
+          "text": "复制操作发起时保存数字位置，回调到达后直接修改该位置的现有块。原块删除或前方插入不需处理，只要位置仍合法就视作原对象。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_4fbcba448616",
+          "rationale": "忽略事务映射与删除身份。",
+          "sourceRef": "s_e2265c197f50",
+          "key": "d_e2940899239f"
+        },
+        {
+          "title": "格式命令定位",
+          "text": "工具栏保存原编辑选区的书签，在执行命令前将其恢复到对应编辑器。点击按钮产生的焦点变化不应决定新目标，格式仍作用于原选择文字。",
+          "relevance": 2,
+          "facets": [
+            "工具栏命令使用捕获的原编辑选区"
+          ],
+          "duplicateGroup": "g_a5b50eed3428",
+          "rationale": "同一捕获选区信息。",
+          "sourceRef": "s_1f7bbc4856e7",
+          "key": "d_d68727f5a603"
+        },
+        {
+          "title": "跨编辑器选区",
+          "text": "工具栏命令使用最后获得焦点的任意编辑器选区，即使按钮属于另一篇笔记。共享命令可以忽略组件归属，所有草稿选区可互相代替。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_669933434df0",
+          "rationale": "跨编辑器错误目标。",
+          "sourceRef": "s_268e70cad396",
+          "key": "d_15693c839ed7"
+        },
+        {
+          "title": "表格首格替换",
+          "text": "表格转段落只保留首个单元格文字，删除其他行列内容并返回成功。用户看到一段文字就代表转换完成，无需判断被删单元格是否重要。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_3b88e2a98652",
+          "rationale": "有损转换丢内容。",
+          "sourceRef": "s_d2cc71a47bfc",
+          "key": "d_342ca4097512"
+        },
+        {
+          "title": "历史恢复显示",
+          "text": "撤销后的界面应呈现恢复出的文档状态，保存状态也可能随之变化。界面标记是历史结果的展示，不能替代编辑器本身的操作记录。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_a67c389cb01d",
+          "rationale": "正确撤销显示背景。",
+          "sourceRef": "s_1f7bbc4856e7",
+          "key": "d_b85c02373ae6"
+        },
+        {
+          "title": "操作撤销分组",
+          "text": "每次工具栏或菜单操作各自建立独立历史边界，用户撤销一次只回退最近那一次操作。连续点两个工具不能因时间接近而合并成不可单独撤销的一组。",
+          "relevance": 2,
+          "facets": [
+            "每次工具操作独立形成一次撤销动作"
+          ],
+          "duplicateGroup": "g_06b4417b701d",
+          "rationale": "完整独立undo边界。",
+          "sourceRef": "s_1f7bbc4856e7",
+          "key": "d_0fe403853803"
+        },
+        {
+          "title": "同文块接替",
+          "text": "异步原块被删除后寻找任何文字相同的块作为替代，继续给它生成永久链接。相同内容意味着相同对象，因此可以自动恢复已经失效的目标。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_d0a9d5b6df13",
+          "rationale": "同文不等同对象。",
+          "sourceRef": "s_7b90b84f7cf2",
+          "key": "d_fdb55ff15edd"
+        },
+        {
+          "title": "历史清空转换",
+          "text": "每次表格转换先清空撤销历史再改文档，保证新状态干净。用户不需要回退转换前的表格，清空记录仍满足一次操作可撤销要求。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_fd5a32c28a64",
+          "rationale": "破坏撤销保留。",
+          "sourceRef": "s_76242da8b927",
+          "key": "d_fdb418665147"
+        },
+        {
+          "title": "连续操作合并",
+          "text": "连续工具点击全部合并成同一次历史记录，撤销时一起回退。即使用户只想撤销最近一次转换，也不必为每次菜单操作建立单独边界。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_2ecc8f0fc73a",
+          "rationale": "违背独立操作撤销。",
+          "sourceRef": "s_8f8d1c4f3f33",
+          "key": "d_c44492178cad"
+        },
+        {
+          "title": "按钮焦点定位",
+          "text": "工具栏点击后只读取此刻浏览器选区，原正文选择不再保存。失去正文选区时默认格式化文档末尾，确保按钮每次都有可写目标。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_a235ccb76185",
+          "rationale": "格式目标错位。",
+          "sourceRef": "s_aa1da0d82119",
+          "key": "d_084632422f87"
+        },
+        {
+          "title": "菜单历史约定",
+          "text": "菜单与工具栏命令分别作为一次撤销动作写入历史，相邻的两次点击仍能逐步回退。操作之间设置明确边界，不依赖短时间间隔自动合并。",
+          "relevance": 2,
+          "facets": [
+            "每次工具操作独立形成一次撤销动作"
+          ],
+          "duplicateGroup": "g_06b4417b701d",
+          "rationale": "同一操作历史规则。",
+          "sourceRef": "s_1f7bbc4856e7",
+          "key": "d_5c363464ed96"
+        },
+        {
+          "title": "异步目标映射",
+          "text": "复制链接等异步操作保存原块目标并随每次事务映射位置；原块被删除后目标失效。即使相同文字的新块占据旧位置，也不能当作原目标继续修改。",
+          "relevance": 2,
+          "facets": [
+            "异步块目标随事务映射并在删除后失效"
+          ],
+          "duplicateGroup": "g_5bf9e8d3a04b",
+          "rationale": "完整异步目标身份。",
+          "sourceRef": "s_1f7bbc4856e7",
+          "key": "d_d07a58e0323b"
+        },
+        {
+          "title": "工具选区捕获",
+          "text": "用户点击工具栏前捕获编辑器当前选区，命令执行时恢复该目标再应用格式。工具栏抢走焦点不会把目标改成文档末尾或其他编辑器的选区。",
+          "relevance": 2,
+          "facets": [
+            "工具栏命令使用捕获的原编辑选区"
+          ],
+          "duplicateGroup": "g_a5b50eed3428",
+          "rationale": "完整原选区命令规则。",
+          "sourceRef": "s_1f7bbc4856e7",
+          "key": "d_9168c8b3c7b6"
+        },
+        {
+          "title": "表格转换保护",
+          "text": "转换表格前检查目标结构能否保留全部单元格及其内容，无法保留时拒绝操作。不能只取第一个单元格文本生成段落并丢弃其余行列。",
+          "relevance": 2,
+          "facets": [
+            "丢失表格单元格的转换应拒绝"
+          ],
+          "duplicateGroup": "g_5713d82b4600",
+          "rationale": "完整无损转换门槛。",
+          "sourceRef": "s_1f7bbc4856e7",
+          "key": "d_e74a463ca0eb"
+        },
+        {
+          "title": "表格结构上下文",
+          "text": "一个表格可含嵌套标记、空格子及多行内容，单看可见首行无法描述全部信息。转换前需考虑这些内容，不能以首行摘要代表整个表格。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_1d6d406c9774",
+          "rationale": "正确无损转换前提。",
+          "sourceRef": "s_1f7bbc4856e7",
+          "key": "d_6e321100b367"
+        },
+        {
+          "title": "回调重建原段落",
+          "text": "异步目标被删除时按旧快照重新插入该段落并继续复制链接。删除是临时位置变化，回调可自行恢复用户明确删除的内容而不再确认。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_5f8a3fc27d58",
+          "rationale": "错误恢复已删除目标。",
+          "sourceRef": "s_4ca12fa4d29d",
+          "key": "d_97260878df80"
+        },
+        {
+          "title": "单元格内容边界",
+          "text": "表格转成其他块必须保持每格文字和结构所需信息，不支持无损转换的目标应禁用。拒绝比默默只保存部分格子更符合编辑内容保留要求。",
+          "relevance": 2,
+          "facets": [
+            "丢失表格单元格的转换应拒绝"
+          ],
+          "duplicateGroup": "g_5713d82b4600",
+          "rationale": "同一表格拒绝规则。",
+          "sourceRef": "s_1f7bbc4856e7",
+          "key": "d_9968d7559f18"
+        },
+        {
+          "title": "块定位生命周期",
+          "text": "异步回调使用事务映射后的原块目标，检测删除后停止更新并提示重新选择。旧位置后来出现同文段落不恢复原身份，不能凭位置或文字相似继续操作。",
+          "relevance": 2,
+          "facets": [
+            "异步块目标随事务映射并在删除后失效"
+          ],
+          "duplicateGroup": "g_5bf9e8d3a04b",
+          "rationale": "同一异步映射失效规则。",
+          "sourceRef": "s_1f7bbc4856e7",
+          "key": "d_77e7695b1d2b"
+        },
+        {
+          "title": "工具栏焦点变化",
+          "text": "点击按钮可能让浏览器选区离开正文，这不说明用户希望格式作用于按钮或别处。焦点与编辑目标需要区分，不能单靠当前活动DOM判断文本范围。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_a61523fcc1f8",
+          "rationale": "正确选区前提。",
+          "sourceRef": "s_1f7bbc4856e7",
+          "key": "d_0beb2c5d7336"
+        },
+        {
+          "title": "相同段落身份",
+          "text": "两段完全相同文字仍可以是不同的编辑块，其中一段被删除不授权回调操作另一段。文本相同不能单独证明异步目标仍然存在。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_a3a2bfe2e37c",
+          "rationale": "正确目标身份反证。",
+          "sourceRef": "s_1f7bbc4856e7",
+          "key": "d_91883956ef48"
+        }
+      ]
+    },
+    {
+      "id": "q_5569a4a9cf4a",
+      "category": "complementary same-source",
+      "question": "合成图谱中A的depends_on边指向它依赖的B。某服务故障后要找最多三跳的依赖者，图内还有contains和related_to边及环；应如何选择方向、关系类型、去重并定义跳数？",
+      "requiredFacets": [
+        "沿depends_on反向寻找依赖者",
+        "只遍历depends_on关系不混入其他类型",
+        "用已访问实体集合防止环反复扩展",
+        "根节点零跳并以边数限制最多三跳"
+      ],
+      "authorCheck": "已检查：箭头定义已在问题明确，四facet分别为反向、类型、visited、边数；环与实际故障的区别是相关反证标1；根一跳和双向边候选错误明确，支持组与同源ID独立。",
+      "items": [
+        {
+          "title": "根节点算第一跳",
+          "text": "根故障服务算第一跳，最多再走两条依赖边即可代表题目三跳。跳数按节点个数计算与按边数完全一致，不会少返回一层依赖者。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_e646ce90f0c4",
+          "rationale": "三跳定义错误。",
+          "sourceRef": "s_2ac1c19f2e30",
+          "key": "d_baaf47552a4a"
+        },
+        {
+          "title": "依赖边限定",
+          "text": "影响查询的每一步先筛depends_on关系，再按依赖者方向扩展。contains与related_to虽可能连接相同实体，但它们不能替代运行依赖的路径依据。",
+          "relevance": 2,
+          "facets": [
+            "只遍历depends_on关系不混入其他类型"
+          ],
+          "duplicateGroup": "g_b8dc3e7ba75d",
+          "rationale": "同一类型限定事实。",
+          "sourceRef": "s_e742770e4887",
+          "key": "d_52d3f5250c06"
+        },
+        {
+          "title": "所有边共同扩展",
+          "text": "contains和related_to都可作为depends_on的等价替代，共同扩展故障影响。只要图上相邻实体就存在运行依赖，所以关系类型无需筛选。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_92df0a73b24d",
+          "rationale": "关系语义错误。",
+          "sourceRef": "s_3ae92f78f1de",
+          "key": "d_776630e0df02"
+        },
+        {
+          "title": "环路径持续入队",
+          "text": "遇到已访问实体仍不断入队扩展，直到队列自然为空。依赖环最终会自行结束，重复入队不会增加无限路径或影响遍历上限。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_0235f9b5a7ea",
+          "rationale": "环中无限重复扩展。",
+          "sourceRef": "s_d9b29b4636c6",
+          "key": "d_6255d7bed212"
+        },
+        {
+          "title": "容器继承依赖",
+          "text": "实体被同一contains容器收纳就自动认为彼此depends_on，无需实际依赖边。一个成员故障应把所有同容器对象作为三跳以内依赖者。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_5b380d84a8f2",
+          "rationale": "归属不能证明依赖。",
+          "sourceRef": "s_fc55b9e83366",
+          "key": "d_4e19bacf2c45"
+        },
+        {
+          "title": "节点显示别名",
+          "text": "同一实体可以有多个显示别名，去重时应考虑稳定实体身份。显示名称相同或不同都不能单独判断是否是两个独立服务。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_398af7318e99",
+          "rationale": "正确实体身份前提。",
+          "sourceRef": "s_e742770e4887",
+          "key": "d_cbd29f73145d"
+        },
+        {
+          "title": "箭头含义约定",
+          "text": "图谱不同关系的箭头可表示不同语义，界面线条方向本身不说明运行时调用方向。使用某类边前必须知道该关系字段的定义。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_91bfbacdc2a3",
+          "rationale": "正确方向语义前提。",
+          "sourceRef": "s_e742770e4887",
+          "key": "d_750863cdebc6"
+        },
+        {
+          "title": "沿出边找影响",
+          "text": "depends_on从依赖者指向被依赖者，故障影响搜索仍沿故障服务出边走。出边上的下游组件就是依赖该故障服务的调用者，不必反向检查。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_94f675fb40b7",
+          "rationale": "方向与定义相反。",
+          "sourceRef": "s_d8eb57a28252",
+          "key": "d_699d51276c9e"
+        },
+        {
+          "title": "依赖者查询",
+          "text": "故障根服务的依赖者位于depends_on入边方向，遍历时逆着原箭头向依赖它的实体扩展。原箭头表示谁依赖谁，直接顺出边无法找齐依赖者。",
+          "relevance": 2,
+          "facets": [
+            "沿depends_on反向寻找依赖者"
+          ],
+          "duplicateGroup": "g_a68a912a021b",
+          "rationale": "同一反向遍历事实。",
+          "sourceRef": "s_e742770e4887",
+          "key": "d_e5a98627007f"
+        },
+        {
+          "title": "遍历深度约定",
+          "text": "跳数按路径的边数计算，根节点计零；查询包含一至三条依赖边可达的依赖者。到三跳停止扩展，不将根本身算成第一跳缩短可达范围。",
+          "relevance": 2,
+          "facets": [
+            "根节点零跳并以边数限制最多三跳"
+          ],
+          "duplicateGroup": "g_e8eb33e2bf33",
+          "rationale": "同一三跳边数规则。",
+          "sourceRef": "s_e742770e4887",
+          "key": "d_591e094faa14"
+        },
+        {
+          "title": "故障传播方向",
+          "text": "A依赖B时depends_on从A指向B，所以从故障B查依赖者要沿入边反向走到A。顺着B的出边得到的是B自己的依赖项，不是依赖B的上游调用者。",
+          "relevance": 2,
+          "facets": [
+            "沿depends_on反向寻找依赖者"
+          ],
+          "duplicateGroup": "g_a68a912a021b",
+          "rationale": "完整反向依赖方向。",
+          "sourceRef": "s_e742770e4887",
+          "key": "d_6305e1bab6e2"
+        },
+        {
+          "title": "名称去重共享身份",
+          "text": "遍历仅按显示名称去重，不同实体只要名称一样就合并。服务稳定标识无需检查，同名服务在不同环境天然是同一个影响对象。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_4a5a35a6367d",
+          "rationale": "错误同名实体合并。",
+          "sourceRef": "s_e094d453b37c",
+          "key": "d_48c3c3ff6628"
+        },
+        {
+          "title": "实体扩展记录",
+          "text": "故障依赖搜索用已访问实体集合记录已入队节点，重复路径抵达既有节点不重复入队。这样环和多条汇合路径都不会持续制造重复扩展。",
+          "relevance": 2,
+          "facets": [
+            "用已访问实体集合防止环反复扩展"
+          ],
+          "duplicateGroup": "g_26215f8100a3",
+          "rationale": "同一已访问扩展规则。",
+          "sourceRef": "s_e742770e4887",
+          "key": "d_be8112b35af1"
+        },
+        {
+          "title": "环与故障关系",
+          "text": "依赖环表示服务可能相互依赖，但它本身不证明所有节点当前都已故障。遍历的潜在影响集合和监控实际故障状态需要分开解释。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_6dfa6aad63a8",
+          "rationale": "正确潜在影响反证。",
+          "sourceRef": "s_e742770e4887",
+          "key": "d_1a5972973c76"
+        },
+        {
+          "title": "三跳边界定义",
+          "text": "根故障实体深度为零，每经过一条允许的依赖边增加一跳，只返回深度一到三的依赖者。深度三的节点可返回，但不能继续扩展到第四跳。",
+          "relevance": 2,
+          "facets": [
+            "根节点零跳并以边数限制最多三跳"
+          ],
+          "duplicateGroup": "g_e8eb33e2bf33",
+          "rationale": "完整根零跳及三边限深。",
+          "sourceRef": "s_e742770e4887",
+          "key": "d_5d345404b28f"
+        },
+        {
+          "title": "关系类型过滤",
+          "text": "故障影响遍历只使用depends_on边，contains和related_to不能参与路径扩展。容器归属或一般关联不表示运行依赖，混用会把无依赖的实体当作影响对象。",
+          "relevance": 2,
+          "facets": [
+            "只遍历depends_on关系不混入其他类型"
+          ],
+          "duplicateGroup": "g_b8dc3e7ba75d",
+          "rationale": "完整关系类型约束。",
+          "sourceRef": "s_e742770e4887",
+          "key": "d_4f320bb418fe"
+        },
+        {
+          "title": "入边关系重写",
+          "text": "为省查询时间，把depends_on全部改写成双向边再找影响。双向化不改变依赖方向含义，因此服务自己的依赖项也可以作为它的依赖者返回。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_52fcfdbd6c0f",
+          "rationale": "双向化错误混入依赖项。",
+          "sourceRef": "s_c5545c8a2d5b",
+          "key": "d_a3fae31cb0af"
+        },
+        {
+          "title": "环遍历去重",
+          "text": "维护已访问实体集合，实体首次到达后才加入扩展队列，后续重复到达不再次扩展。依赖环因此不会无限反复遍历同一组实体。",
+          "relevance": 2,
+          "facets": [
+            "用已访问实体集合防止环反复扩展"
+          ],
+          "duplicateGroup": "g_26215f8100a3",
+          "rationale": "完整visited去重。",
+          "sourceRef": "s_e742770e4887",
+          "key": "d_4b45f277fbae"
+        },
+        {
+          "title": "深度三继续扩展",
+          "text": "节点达到三条边距离后继续将邻居作为第三跳加入结果。第四条边不会改变深度标签，因此三跳限制不需要阻止后续扩展。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_336d850ce008",
+          "rationale": "实际扩展到第四跳。",
+          "sourceRef": "s_849945c36f50",
+          "key": "d_f7c269fa13f3"
+        },
+        {
+          "title": "路径汇合说明",
+          "text": "同一个依赖者可能经多个中间服务被找到，重复到达不一定意味着发现新实体。展示路径和列出实体是不同需求，可分别保存路径依据与实体记录。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_ef6d65712518",
+          "rationale": "正确多路径背景。",
+          "sourceRef": "s_e742770e4887",
+          "key": "d_17e4d97b0647"
+        }
+      ]
+    },
+    {
+      "id": "q_aa9878cfe3cf",
+      "category": "low-redundancy control",
+      "question": "合成订单CSV要保留编号00027，允许逗号和双引号出现在引号字段，允许引号内CRLF；怎样按逻辑记录读取并安全导出到表格？导出副本须处理首字符为=、+、-、@的字段，原存储值不变。",
+      "requiredFacets": [
+        "按逗号分字段，引号内逗号属于字段内容，两个双引号还原为一个",
+        "引号内CRLF保留在字段中，仅引号外换行结束逻辑记录",
+        "编号按字符串处理，保留前导零",
+        "仅导出副本对首字符为=、+、-、@的字段加单引号，存储值不变"
+      ],
+      "authorCheck": "已完成作者检查并经root独立审核：9条grade2、5条有用grade1、6条错误grade0，各facet有3条完整支持。同一单facet的通用规则与具体实例归同一核心信息组，通常每组2条；控制组没有8条集中复述。覆盖全部四facet的综合段独立分组，仍与单facet段部分信息重叠；grade1/0保持各自原组。CSV的引号转义、逻辑换行、前导零及导出副本边界均正确；导出字符规则以题设为准。",
+      "items": [
+        {
+          "title": "字段读取",
+          "text": "解析器维护引号状态：逗号只在引号外分字段，引号内连续两个双引号还原为一个。每列先生成字符串，再交给字段级业务校验。",
+          "relevance": 2,
+          "facets": [
+            "按逗号分字段，引号内逗号属于字段内容，两个双引号还原为一个"
+          ],
+          "duplicateGroup": "g_b8b728d8fbe4",
+          "sourceRef": "s_51c6f207e707",
+          "rationale": "完整引用与转义规则。",
+          "key": "d_e04578f3544e"
+        },
+        {
+          "title": "流边界",
+          "text": "遇到CRLF时先看是否位于引号内：引号内原样加入当前字段，引号外提交整条记录。物理行计数可用于报错，但不能代替逻辑记录数。",
+          "relevance": 2,
+          "facets": [
+            "引号内CRLF保留在字段中，仅引号外换行结束逻辑记录"
+          ],
+          "duplicateGroup": "g_060e821c2455",
+          "sourceRef": "s_79a31ab06a6b",
+          "rationale": "明确记录边界和内部换行。",
+          "key": "d_d742ebdd804b"
+        },
+        {
+          "title": "输出记录",
+          "text": "合成备注@SUM(1,2)写入表格副本时变为'@SUM(1,2)，负数形式文本也走相同首字符规则；持久化备注仍保存导入时的原文。",
+          "relevance": 2,
+          "facets": [
+            "仅导出副本对首字符为=、+、-、@的字段加单引号，存储值不变"
+          ],
+          "duplicateGroup": "g_533b6c2cc025",
+          "sourceRef": "s_65fce8bea300",
+          "rationale": "具体输出例和存储隔离，不是通用规则纯复述。",
+          "key": "d_bcb85d388a90"
+        },
+        {
+          "title": "编码入口",
+          "text": "入口约定UTF-8，并在第一列名称前处理可能出现的BOM。编码预处理完成后才开始字段解析，错误字节会中止本次导入。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_15edb68b6087",
+          "sourceRef": "s_948ac336934d",
+          "rationale": "有用编码前提，未完整提供必要facet。",
+          "key": "d_f7da05b24405"
+        },
+        {
+          "title": "持久化清洗",
+          "text": "字段首字符命中=、+、-、@时，直接给数据库原值添加单引号。之后所有读取者都使用清洗后的值，不再单独处理表格输出副本。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_97d671346bcb",
+          "sourceRef": "s_717f43c28419",
+          "rationale": "错误修改存储值。",
+          "key": "d_9021522637b2"
+        },
+        {
+          "title": "简化读入",
+          "text": "每个物理行调用split(',')即可生成订单列，外层双引号只用于美化输出，读入时统一删除。这样解析过程无需维护字段内部状态。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_d484f8282b86",
+          "sourceRef": "s_b7ff0b157b0d",
+          "rationale": "错误处理引号内逗号与转义。",
+          "key": "d_866ab529e982"
+        },
+        {
+          "title": "数字转换",
+          "text": "编号和金额都先转为Number，00027会变成27；输出时直接使用数值，保持订单编号的数值相等即可满足字符串往返要求。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_7d35f1f0fcbd",
+          "sourceRef": "s_8b5455884eb3",
+          "rationale": "破坏编号前导零。",
+          "key": "d_63aa6cc46113"
+        },
+        {
+          "title": "异常回滚",
+          "text": "最后一个字段的外层引号若未闭合，整条逻辑记录进入错误列表。批次先验证再提交，以免部分订单成功后无法说明失败位置。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_56d3e1ab58b5",
+          "sourceRef": "s_a13e45973356",
+          "rationale": "正确异常处理补充。",
+          "key": "d_95916b2580b1"
+        },
+        {
+          "title": "编号映射",
+          "text": "订单编号列使用字符串模式，00027原样进入索引和导出值。数值金额可单独转换，不能对整条记录执行统一的数字类型推断。",
+          "relevance": 2,
+          "facets": [
+            "编号按字符串处理，保留前导零"
+          ],
+          "duplicateGroup": "g_3d8e4600f5b1",
+          "sourceRef": "s_dde2e0badf06",
+          "rationale": "编号文本与金额类型的独立映射。",
+          "key": "d_21ac5728bd17"
+        },
+        {
+          "title": "转义优化",
+          "text": "为了兼容逗号字段，解析器把两个双引号保留为两个字符。备注中引号的数量不变后，导出的文本会更接近输入文件的字节形式。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_19a5c94b4730",
+          "sourceRef": "s_27b2465f9334",
+          "rationale": "未还原双引号转义。",
+          "key": "d_5679bfa0318f"
+        },
+        {
+          "title": "处理链",
+          "text": "先按引号状态识别逗号、双引号转义和引号外CRLF，再把编号按字符串保存。导出副本才给首字符=、+、-、@的值加单引号，存储值不改。",
+          "relevance": 2,
+          "facets": [
+            "按逗号分字段，引号内逗号属于字段内容，两个双引号还原为一个",
+            "引号内CRLF保留在字段中，仅引号外换行结束逻辑记录",
+            "编号按字符串处理，保留前导零",
+            "仅导出副本对首字符为=、+、-、@的字段加单引号，存储值不变"
+          ],
+          "duplicateGroup": "g_e5c4e50b53a9",
+          "sourceRef": "s_4782487cc12b",
+          "rationale": "一条证据覆盖完整处理链。",
+          "key": "d_d2e8e12e12ad"
+        },
+        {
+          "title": "记录计数",
+          "text": "导入计数器每遇到CRLF就提交一条订单，说明字段的换行也可用同样规则。提交后的零列记录再通过过滤器删除即可。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_4b989efd6bdb",
+          "sourceRef": "s_dd4f24b52d03",
+          "rationale": "错误用内部换行结束记录。",
+          "key": "d_658fa4ff5808"
+        },
+        {
+          "title": "地址样本",
+          "text": "合成输入的地址列为\"北区,二层\"，备注列为\"他说\"\"收到\"\"\"；逗号留在地址里，双引号对变成备注中的单个引号。",
+          "relevance": 2,
+          "facets": [
+            "按逗号分字段，引号内逗号属于字段内容，两个双引号还原为一个"
+          ],
+          "duplicateGroup": "g_b8b728d8fbe4",
+          "sourceRef": "s_9ec1e0a8cc2a",
+          "rationale": "具体输入样本说明分隔与转义，包含独立地址和备注实例。",
+          "key": "d_12c990b6769a"
+        },
+        {
+          "title": "批量读入",
+          "text": "说明列含两段文字和一个CRLF，且外层引号尚未结束时，下一物理行仍属同一记录。读到引号外换行才增加已导入订单计数。",
+          "relevance": 2,
+          "facets": [
+            "引号内CRLF保留在字段中，仅引号外换行结束逻辑记录"
+          ],
+          "duplicateGroup": "g_060e821c2455",
+          "sourceRef": "s_bc8782dce0bc",
+          "rationale": "具体批量计数场景说明逻辑边界。",
+          "key": "d_7dd6716c37ec"
+        },
+        {
+          "title": "物理行统计",
+          "text": "监控同时记录读到的物理行数与最终提交的记录数。引号字段含换行时两者不同，这个差值本身不能认定为文件损坏。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_b8ef0a181a58",
+          "sourceRef": "s_e79889fdcca6",
+          "rationale": "正确逻辑记录边界反证，未给完整解析。",
+          "key": "d_51748dab5e39"
+        },
+        {
+          "title": "权限检查",
+          "text": "上传接口检查调用者是否有导入权限，并限制文件体积。批量提交时使用任务标识防止用户重复点击造成相同订单被重复写入。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_cdc2993d582c",
+          "sourceRef": "s_237e67a064cd",
+          "rationale": "相关权限和重复提交前提。",
+          "key": "d_a26f4430dd95"
+        },
+        {
+          "title": "公式分支",
+          "text": "表格导出只给以=开头的字段加单引号，+、-、@按普通文本输出。这三个字符不是本规范的公式入口，可减少不必要的改动。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_85ecc0b48daf",
+          "sourceRef": "s_f299c7ee0833",
+          "rationale": "遗漏题设指定的三个首字符。",
+          "key": "d_580857dcd2e0"
+        },
+        {
+          "title": "表格观察",
+          "text": "电子表格自动推断数字可能把00027显示成27。仅在显示侧调整列宽不能恢复已经丢失的零，需要检查导入和导出过程的类型。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_cfd34b59a744",
+          "sourceRef": "s_f37eec70cfe0",
+          "rationale": "正确前导零丢失反证。",
+          "key": "d_7593b85f5fc3"
+        },
+        {
+          "title": "表格输出",
+          "text": "生成表格CSV副本时，检查字段首字符是否为=、+、-、@，命中便在输出值前加单引号。数据库内的原字段不经过这一输出变换。",
+          "relevance": 2,
+          "facets": [
+            "仅导出副本对首字符为=、+、-、@的字段加单引号，存储值不变"
+          ],
+          "duplicateGroup": "g_533b6c2cc025",
+          "sourceRef": "s_b57175bf3cc9",
+          "rationale": "完整题设导出副本规则。",
+          "key": "d_ccba0fd697cd"
+        },
+        {
+          "title": "回读检查",
+          "text": "合成往返测试将编号00027写出后再按文本列读回，断言仍为五位且首两位为0。映射器不会对编号调用parseInt或Number。",
+          "relevance": 2,
+          "facets": [
+            "编号按字符串处理，保留前导零"
+          ],
+          "duplicateGroup": "g_3d8e4600f5b1",
+          "sourceRef": "s_14633055dec9",
+          "rationale": "完整字符串策略及具体往返检查。",
+          "key": "d_f187ea9ba59c"
+        }
+      ]
+    },
+    {
+      "id": "q_fc4836f079a2",
+      "category": "low-redundancy control",
+      "question": "合成任务读取UTF-8 JSONL事件流，每个非空行是一条对象，eventId唯一；收到一行坏JSON必须停止且不跳过。怎样在进程重启后从最后完整且已提交的记录后恢复，并在重复投递时保持幂等？",
+      "requiredFacets": [
+        "按非空物理行解码JSON对象，不把多条行合成一个JSON数组",
+        "坏JSON立即停止，不推进已提交检查点",
+        "业务写入与检查点提交原子完成，恢复从最后已提交完整记录之后开始",
+        "以eventId唯一约束或幂等写入消除重投副作用"
+      ],
+      "authorCheck": "已完成作者检查并经root独立审核：9条grade2、5条有用grade1、6条错误grade0，各facet有3条完整支持。同一单facet的通用规则与具体实例归同一核心信息组，通常每组2条；控制组没有8条集中复述。覆盖全部四facet的综合段独立分组，仍与单facet段部分信息重叠；grade1/0保持各自原组。网络残片、坏JSON与未提交完整行已区分；正确超时和偏移解释为部分证据。",
+      "items": [
+        {
+          "title": "行读取器",
+          "text": "流读取器累积字节至完整换行，按UTF-8解码每个非空物理行，再独立解析为JSON对象。空行跳过，多个对象行不会拼成一个数组解析。",
+          "relevance": 2,
+          "facets": [
+            "按非空物理行解码JSON对象，不把多条行合成一个JSON数组"
+          ],
+          "duplicateGroup": "g_a9f4919d00ce",
+          "sourceRef": "s_5ebd09fcbcf2",
+          "rationale": "完整逐行对象规则。",
+          "key": "d_5f5cb4faf038"
+        },
+        {
+          "title": "重试编号",
+          "text": "每次重试生成新eventId，以便唯一约束不会阻止重复消费。余额更新根据新编号执行，消费次数与收到的事件副本数量保持一致。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_e72324dffc72",
+          "sourceRef": "s_b5e8917bf681",
+          "rationale": "新身份破坏幂等。",
+          "key": "d_c38ea4357753"
+        },
+        {
+          "title": "内存去重",
+          "text": "已见eventId只放在进程内集合，服务重启时清空。重放阶段不查询数据库唯一键，靠上游避免重复即可保障断线恢复不会重复扣款。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_49b2c3bfc2d5",
+          "sourceRef": "s_74cd46e92185",
+          "rationale": "不能跨重启幂等。",
+          "key": "d_559174fab8e4"
+        },
+        {
+          "title": "幂等键",
+          "text": "事件表对eventId建立唯一约束，重复投递走幂等更新或忽略分支。余额扣减和通知生成只在首次接受事件时执行，不随重试再次发生。",
+          "relevance": 2,
+          "facets": [
+            "以eventId唯一约束或幂等写入消除重投副作用"
+          ],
+          "duplicateGroup": "g_5067abe8c30f",
+          "sourceRef": "s_a8b036199083",
+          "rationale": "完整eventId防重复副作用。",
+          "key": "d_68c84a79fedb"
+        },
+        {
+          "title": "提交边界",
+          "text": "每条事件的业务写入与其行结束偏移在同一事务提交。崩溃恢复只读取最后已提交偏移之后的内容，不从尚未完整或尚未提交的行尾开始。",
+          "relevance": 2,
+          "facets": [
+            "业务写入与检查点提交原子完成，恢复从最后已提交完整记录之后开始"
+          ],
+          "duplicateGroup": "g_3af4c4abc37a",
+          "sourceRef": "s_f7dc6b8e2983",
+          "rationale": "完整原子检查点与恢复。",
+          "key": "d_eeffff8e3cd8"
+        },
+        {
+          "title": "来源指纹",
+          "text": "任务开始时记录合成文件大小与哈希，恢复时确认输入没有被替换。文件身份变了要创建新任务，不能把旧偏移套到新文件上。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_454d91b4b289",
+          "sourceRef": "s_908f54fed411",
+          "rationale": "有用恢复输入身份前提。",
+          "key": "d_b47364aabbcc"
+        },
+        {
+          "title": "错误策略",
+          "text": "某个完整行不是合法JSON对象时，读入任务立即停止并报告行位置。该行及后续内容都不提交检查点，不能为了追赶进度把它跳过去。",
+          "relevance": 2,
+          "facets": [
+            "坏JSON立即停止，不推进已提交检查点"
+          ],
+          "duplicateGroup": "g_a777dcc23bcc",
+          "sourceRef": "s_0adb7664c211",
+          "rationale": "完整坏行停止且不推进。",
+          "key": "d_85c9427a7007"
+        },
+        {
+          "title": "位置说明",
+          "text": "诊断输出可同时携带物理行号和字节偏移。含多字节中文时字符数不等于字节数，恢复游标若混用两种单位会落到错误位置。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_3aa0aa27a084",
+          "sourceRef": "s_1e629e9e5504",
+          "rationale": "有用偏移单位前提。",
+          "key": "d_17015684f3e6"
+        },
+        {
+          "title": "执行约定",
+          "text": "每个非空行独立解析对象；坏JSON即停且不推进。业务写入与行末检查点同事务，重启从最后已提交行后继续，并以eventId唯一约束消除重复副作用。",
+          "relevance": 2,
+          "facets": [
+            "按非空物理行解码JSON对象，不把多条行合成一个JSON数组",
+            "坏JSON立即停止，不推进已提交检查点",
+            "业务写入与检查点提交原子完成，恢复从最后已提交完整记录之后开始",
+            "以eventId唯一约束或幂等写入消除重投副作用"
+          ],
+          "duplicateGroup": "g_df002cf89aa6",
+          "sourceRef": "s_2554b1e4a7c4",
+          "rationale": "综合证据覆盖全部要求。",
+          "key": "d_d14a418a56eb"
+        },
+        {
+          "title": "事务重试",
+          "text": "数据库提交返回未知状态时，先通过eventId查询结果再决定重试。网络超时不能说明服务器一定没有完成写入，因此重试需要幂等入口。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_ace5a6143ff3",
+          "sourceRef": "s_3960f9f02ab6",
+          "rationale": "正确提交未知状态反证。",
+          "key": "d_74b1476db65a"
+        },
+        {
+          "title": "错误游标",
+          "text": "坏JSON触发停止之前先把该行偏移提交为完成。恢复直接读取下一行，不再触碰坏行；这个偏移也可代表最后已提交的业务记录。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_0646118e36d1",
+          "sourceRef": "s_a4552a7e8bda",
+          "rationale": "错误推进坏行检查点。",
+          "key": "d_963afd460a92"
+        },
+        {
+          "title": "缓存上限",
+          "text": "读入器限制单行最大字节数，超过阈值时返回明确错误。限制作用于一条记录而不是当前网络块，避免分块大小改变校验结果。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_1f3f84a986a1",
+          "sourceRef": "s_bb3002770351",
+          "rationale": "有用内存前提。",
+          "key": "d_15262dff09a9"
+        },
+        {
+          "title": "中断记录",
+          "text": "读取第十二行后若业务事务未提交就掉电，该行结束偏移也不落库。重启使用第十一行的已提交偏移，完整重放第十二行的业务操作。",
+          "relevance": 2,
+          "facets": [
+            "业务写入与检查点提交原子完成，恢复从最后已提交完整记录之后开始"
+          ],
+          "duplicateGroup": "g_3af4c4abc37a",
+          "sourceRef": "s_a7c5c14b6852",
+          "rationale": "具体未提交掉电重放场景。",
+          "key": "d_edffca2c1c09"
+        },
+        {
+          "title": "坏行处置",
+          "text": "语法错误的行放入告警列表后继续消费后面的行，检查点随最新成功行推进。修复坏行时单独补跑它，可满足本任务的立即停止约定。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_f57883bc487e",
+          "sourceRef": "s_581fbfa4e81f",
+          "rationale": "违反立即停止规则。",
+          "key": "d_6924c62424ff"
+        },
+        {
+          "title": "重复演练",
+          "text": "同一个eventId在断线后再收到两次，处理器复用已提交结果，不新增第二笔扣款。唯一键检查与业务写入同事务，避免并发重放穿透。",
+          "relevance": 2,
+          "facets": [
+            "以eventId唯一约束或幂等写入消除重投副作用"
+          ],
+          "duplicateGroup": "g_5067abe8c30f",
+          "sourceRef": "s_5b245e07f851",
+          "rationale": "具体重复投递及并发事务细节。",
+          "key": "d_41cb6ebe1656"
+        },
+        {
+          "title": "对象合并",
+          "text": "先去除所有换行，再把连续对象字符串作为一个JSON对象解析。恢复时也按对象内字符位置寻址，这样不必保存每行的结束偏移。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_b0ac05064203",
+          "sourceRef": "s_6c33d6db8736",
+          "rationale": "错误解析单元。",
+          "key": "d_3e38986593d9"
+        },
+        {
+          "title": "尾部残片",
+          "text": "最后一行尚未接收完时，解析器把残片留在缓冲区。它与一个已经完整但语法错误的行不同，不能仅凭暂时缺少右花括号认定坏数据。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_b62a33ffe2da",
+          "sourceRef": "s_319468538f3e",
+          "rationale": "正确残片与坏行反证。",
+          "key": "d_6c1c9fbfc360"
+        },
+        {
+          "title": "恢复演练",
+          "text": "第七行语法损坏时任务停在已提交的第六行之后。修复输入再重启会重读第七行，失败前绝不会把检查点更新到第八行。",
+          "relevance": 2,
+          "facets": [
+            "坏JSON立即停止，不推进已提交检查点"
+          ],
+          "duplicateGroup": "g_a777dcc23bcc",
+          "sourceRef": "s_58a8a5767f77",
+          "rationale": "具体第七行失败及修复位置。",
+          "key": "d_57770a1ad9c7"
+        },
+        {
+          "title": "分段接收",
+          "text": "网络块可在对象中间结束，缓存会保留残片直到该物理行完整。随后仅对这一非空行做对象解析，下一行保留为另一条事件。",
+          "relevance": 2,
+          "facets": [
+            "按非空物理行解码JSON对象，不把多条行合成一个JSON数组"
+          ],
+          "duplicateGroup": "g_a9f4919d00ce",
+          "sourceRef": "s_79ff785a7a68",
+          "rationale": "具体网络分块接收场景。",
+          "key": "d_b79672bcce18"
+        },
+        {
+          "title": "预写游标",
+          "text": "拿到完整行后先保存其结束偏移，再执行业务写入。重启跳过已读行能够降低重复计算，即使上次业务事务还没有提交也继续下一行。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_c01d7e3fb4c8",
+          "sourceRef": "s_2b7df90ce270",
+          "rationale": "非原子检查点导致漏业务。",
+          "key": "d_102e7a0092fd"
+        }
+      ]
+    },
+    {
+      "id": "q_22653b9d4361",
+      "category": "low-redundancy control",
+      "question": "合成代码目录索引依据相对路径识别文件，内容哈希识别修改；本轮只删除旧清单中缺失的路径。怎样保证扫描失败不误删，写入失败仍保留旧清单，并让内容相同的不同路径都可被检索？",
+      "requiredFacets": [
+        "按规范化相对路径作为清单键，同内容不同路径独立保留",
+        "比较同路径内容哈希决定新增或更新，不只依赖mtime",
+        "仅在扫描完整成功后计算旧清单减新清单的删除集",
+        "索引增改删成功后原子替换清单，失败保留旧清单"
+      ],
+      "authorCheck": "已完成作者检查并经root独立审核：9条grade2、5条有用grade1、6条错误grade0，各facet有3条完整支持。同一单facet的通用规则与具体实例归同一核心信息组，通常每组2条；控制组没有8条集中复述。覆盖全部四facet的综合段独立分组，仍与单facet段部分信息重叠；grade1/0保持各自原组。路径身份、内容哈希、完整扫描及清单发布顺序已检查；不额外声称索引整体原子性。",
+      "items": [
+        {
+          "title": "中途失败",
+          "text": "第三个文件更新失败时，清单文件仍是上一轮版本。处理器不会先公布本轮哈希，成功重试所有索引变更后才原子替换清单。",
+          "relevance": 2,
+          "facets": [
+            "索引增改删成功后原子替换清单，失败保留旧清单"
+          ],
+          "duplicateGroup": "g_d54d224332a4",
+          "sourceRef": "s_d14874654add",
+          "rationale": "具体第三文件失败和重试位置。",
+          "key": "d_c1566f5a1cdf"
+        },
+        {
+          "title": "读取保护",
+          "text": "扫描到正在写入的文件时可在读取后再次核验大小。若内容在两次检查间变化，本轮返回失败，等待后续扫描得到稳定输入。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_69422af578eb",
+          "sourceRef": "s_85b6ae4b1610",
+          "rationale": "有用稳定输入补充。",
+          "key": "d_bcfe2c48e943"
+        },
+        {
+          "title": "时间戳回放",
+          "text": "合成文件内容由alpha改为bravo但mtime保持不变，扫描仍因同路径哈希变化更新索引。旧时间戳不会使这次内容修改被直接略过。",
+          "relevance": 2,
+          "facets": [
+            "比较同路径内容哈希决定新增或更新，不只依赖mtime"
+          ],
+          "duplicateGroup": "g_d6bb35fd365f",
+          "sourceRef": "s_12a7909faee5",
+          "rationale": "具体内容改变而时间不变的演练。",
+          "key": "d_7c3d571a163c"
+        },
+        {
+          "title": "内容合并",
+          "text": "清单使用内容哈希作为唯一键，两条路径字节相同就只留下较短路径。后续检索只显示这一条来源，符合按路径保留所有文件的目标。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_93154ceeb134",
+          "sourceRef": "s_236386b00567",
+          "rationale": "错误合并不同路径。",
+          "key": "d_e43c7cdf659a"
+        },
+        {
+          "title": "目录键",
+          "text": "清单键使用规范化相对路径而不是内容哈希。src/a.ts与demo/a.ts即使字节相同也各自保留条目，检索结果可分别定位到两个文件。",
+          "relevance": 2,
+          "facets": [
+            "按规范化相对路径作为清单键，同内容不同路径独立保留"
+          ],
+          "duplicateGroup": "g_4bd3cb4ff9c1",
+          "sourceRef": "s_d3f51b899d6e",
+          "rationale": "路径身份与同内容独立保留。",
+          "key": "d_d0087b756ae4"
+        },
+        {
+          "title": "修改检测",
+          "text": "同一个相对路径的内容哈希改变时更新索引，新路径则新增。mtime仅可用于扫描提示，不能作为跳过哈希核验的唯一依据。",
+          "relevance": 2,
+          "facets": [
+            "比较同路径内容哈希决定新增或更新，不只依赖mtime"
+          ],
+          "duplicateGroup": "g_d6bb35fd365f",
+          "sourceRef": "s_0047c50e0ebf",
+          "rationale": "完整哈希新增更新判断。",
+          "key": "d_d1b703a511aa"
+        },
+        {
+          "title": "缺失清理",
+          "text": "目录读取失败时，用已经扫描到的路径计算删除集。未遍历到的旧条目视为已经移除，先清理它们可以减少检索中的历史来源。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_5d9d98823eba",
+          "sourceRef": "s_8ff790a0b99a",
+          "rationale": "不完整扫描误删。",
+          "key": "d_cdc149d4542b"
+        },
+        {
+          "title": "权限演练",
+          "text": "子目录权限错误导致本次列表不完整时，旧清单里的那些路径仍保留。任务标记失败，待完整扫描成功才根据旧减新计算待删条目。",
+          "relevance": 2,
+          "facets": [
+            "仅在扫描完整成功后计算旧清单减新清单的删除集"
+          ],
+          "duplicateGroup": "g_c9d78bb4e454",
+          "sourceRef": "s_9ab920752a69",
+          "rationale": "具体权限失败守卫。",
+          "key": "d_010262bf7c7b"
+        },
+        {
+          "title": "路径预处理",
+          "text": "合成扫描只接受项目根目录内的文件，并统一分隔符和点目录表示。路径规范化后才写入清单，避免同一文件因不同拼法生成多条身份。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_dbf41e1ecb54",
+          "sourceRef": "s_c39bc6b39c4f",
+          "rationale": "正确路径规范化前提。",
+          "key": "d_609bd388f148"
+        },
+        {
+          "title": "移动观察",
+          "text": "示例代码从示例目录复制到源码目录后，两条相对路径同时存在。扫描器为各路径记录自己的哈希和位置，不把内容相等解释为同一个文件。",
+          "relevance": 2,
+          "facets": [
+            "按规范化相对路径作为清单键，同内容不同路径独立保留"
+          ],
+          "duplicateGroup": "g_4bd3cb4ff9c1",
+          "sourceRef": "s_c54620c0a4fc",
+          "rationale": "具体复制场景的路径身份。",
+          "key": "d_a4d6e6d76749"
+        },
+        {
+          "title": "检索显示",
+          "text": "结果页展示相对路径与代码行范围，内容相同的片段也可供使用者判断来源。标题不能代替完整路径，否则同名文件难以区分。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_42efe3c254d5",
+          "sourceRef": "s_13c51df23f01",
+          "rationale": "正确检索显示信息。",
+          "key": "d_d6b012ec85d1"
+        },
+        {
+          "title": "空目录处置",
+          "text": "任何目录读取错误都转换为空目录成功结果。任务随后按旧减空执行删除并更新清单，可让下一轮扫描重新导入所有真实存在的文件。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_b179e317080f",
+          "sourceRef": "s_043c6290a9b6",
+          "rationale": "错误把扫描失败当合法空目录。",
+          "key": "d_2288204ddb6e"
+        },
+        {
+          "title": "删除集合",
+          "text": "只有本轮目录扫描完整成功后，才计算旧清单路径减去新清单路径得到删除集。权限错误或读取中断时，本轮不执行缺失路径删除。",
+          "relevance": 2,
+          "facets": [
+            "仅在扫描完整成功后计算旧清单减新清单的删除集"
+          ],
+          "duplicateGroup": "g_c9d78bb4e454",
+          "sourceRef": "s_bdaa6639c684",
+          "rationale": "完整扫描与旧减新删除。",
+          "key": "d_231945bf4eb3"
+        },
+        {
+          "title": "提交流程",
+          "text": "先完成索引新增、更新与删除，全部成功后以临时文件原子替换新清单。任一索引写入失败都会保留旧清单，便于下一轮重试同一差异。",
+          "relevance": 2,
+          "facets": [
+            "索引增改删成功后原子替换清单，失败保留旧清单"
+          ],
+          "duplicateGroup": "g_d54d224332a4",
+          "sourceRef": "s_b45995cea3a8",
+          "rationale": "完整清单发布顺序。",
+          "key": "d_850fa299cedb"
+        },
+        {
+          "title": "同步顺序",
+          "text": "以相对路径独立建键，同路径哈希变化才更新。完整扫描后按旧减新删路径，索引增改删全部成功才原子换清单；任一失败继续保留旧版。",
+          "relevance": 2,
+          "facets": [
+            "按规范化相对路径作为清单键，同内容不同路径独立保留",
+            "比较同路径内容哈希决定新增或更新，不只依赖mtime",
+            "仅在扫描完整成功后计算旧清单减新清单的删除集",
+            "索引增改删成功后原子替换清单，失败保留旧清单"
+          ],
+          "duplicateGroup": "g_8ebe0a83caa9",
+          "sourceRef": "s_35cb830f8ee9",
+          "rationale": "综合完整同步策略。",
+          "key": "d_b1a0c160f9af"
+        },
+        {
+          "title": "时间过滤",
+          "text": "文件mtime没有变化就直接跳过，内容哈希只在时间戳变化后计算。这样即使字节被原时间戳恢复，也不会产生不必要的索引更新。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_6884e1ac220b",
+          "sourceRef": "s_f995789d1c42",
+          "rationale": "遗漏时间未变内容修改。",
+          "key": "d_d832da93cb1a"
+        },
+        {
+          "title": "清单恢复",
+          "text": "启动时若临时清单文件残留，只读取已发布的完整清单。任务可清理残留临时文件，但不能把它当作一轮索引操作已经成功的证据。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_743286488984",
+          "sourceRef": "s_284a4f2a9101",
+          "rationale": "有用临时文件恢复前提。",
+          "key": "d_5e16b2890c9a"
+        },
+        {
+          "title": "失败分类",
+          "text": "目录读取失败和文件内容解析失败需要分别计数。第一类可能造成路径集合不完整，第二类影响具体索引条目，重试范围由错误分类决定。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_ca7e63f2ac4c",
+          "sourceRef": "s_0f8ee9cd0d37",
+          "rationale": "正确失败范围解释。",
+          "key": "d_a9e1ca60d9ec"
+        },
+        {
+          "title": "集合计算",
+          "text": "删除集取新清单减旧清单，新出现的路径需要从旧索引移除。旧清单中已经消失的路径则保留，因为本轮扫描没有其新内容可供核验。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_5965bbde4757",
+          "sourceRef": "s_fade412f7c5b",
+          "rationale": "删除差集方向错误。",
+          "key": "d_91fd9a436828"
+        },
+        {
+          "title": "清单优先",
+          "text": "扫描结束立即原子替换清单，再逐项写入索引。写入失败时仍保留新清单，下轮相同哈希的文件可直接跳过，减少重复更新开销。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_88e4b7db2792",
+          "sourceRef": "s_84e96e3c4243",
+          "rationale": "失败清单提前发布导致漏重试。",
+          "key": "d_6ea24157be88"
+        }
+      ]
+    },
+    {
+      "id": "q_87facb7091e8",
+      "category": "low-redundancy control",
+      "question": "合成异步调用追踪用traceId串联一次请求；每段操作有独立spanId和parentSpanId。怎样跨消息边界正确传递上下文，避免并发请求串线，并在异常或提前返回时结束每个span？",
+      "requiredFacets": [
+        "同一请求的各span共享traceId，每个操作创建唯一spanId并记录父spanId",
+        "消息生产方注入上下文，消费方提取后建立子span",
+        "并发任务使用任务局部上下文，不使用共享全局当前span",
+        "span在finally或等价作用域退出时结束，覆盖异常和提前返回"
+      ],
+      "authorCheck": "已完成作者检查并经root独立审核：9条grade2、5条有用grade1、6条错误grade0，各facet有3条完整支持。同一单facet的通用规则与具体实例归同一核心信息组，通常每组2条；控制组没有8条集中复述。覆盖全部四facet的综合段独立分组，仍与单facet段部分信息重叠；grade1/0保持各自原组。trace与span标识、消息传播、任务隔离和所有出口结束已检查；采样和批次反证标1。",
+      "items": [
+        {
+          "title": "复用标识",
+          "text": "同一请求的入口和全部子操作复用完全相同的spanId，仅traceId变化。这样查询spanId即可得到整次请求，不需要存储parentSpanId。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_50d03c52e422",
+          "sourceRef": "s_a0acdcc52227",
+          "rationale": "错误span与trace标识关系。",
+          "key": "d_00189e80ba9b"
+        },
+        {
+          "title": "任务隔离",
+          "text": "并发处理使用异步任务局部上下文保存当前span，每个任务独立进入和退出作用域。共享全局变量会被另一请求覆盖，不可用来定位父span。",
+          "relevance": 2,
+          "facets": [
+            "并发任务使用任务局部上下文，不使用共享全局当前span"
+          ],
+          "duplicateGroup": "g_03d1d6f1184f",
+          "sourceRef": "s_e6612e31f8d5",
+          "rationale": "完整任务局部隔离。",
+          "key": "d_e48076489a10"
+        },
+        {
+          "title": "消费者起点",
+          "text": "生产方只发送业务对象，消费者每次生成新traceId并新建根span。队列名称相同即可把图上的上下游自动关联为原请求的父子操作。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_e752128c01d2",
+          "sourceRef": "s_dad0fb1d2253",
+          "rationale": "没有上下文无法延续链路。",
+          "key": "d_c6311811e9d0"
+        },
+        {
+          "title": "链路标识",
+          "text": "同一请求的全部操作共享traceId，每个新操作分配独立spanId并把当前spanId记为parentSpanId。父子关系依赖这些标识，不靠相同操作名推断。",
+          "relevance": 2,
+          "facets": [
+            "同一请求的各span共享traceId，每个操作创建唯一spanId并记录父spanId"
+          ],
+          "duplicateGroup": "g_8ace34062fb6",
+          "sourceRef": "s_a14e6b3c9ec6",
+          "rationale": "完整标识及父子关系。",
+          "key": "d_a9fb472679bb"
+        },
+        {
+          "title": "成功结束",
+          "text": "只在操作成功返回之前调用span.end，异常和提前校验返回直接退出。失败操作保留活动span可用于记录诊断，因此无需作用域退出清理。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_7f085da7ce5b",
+          "sourceRef": "s_d84b1fc9c69b",
+          "rationale": "漏掉异常提前返回清理。",
+          "key": "d_4ef9835740ab"
+        },
+        {
+          "title": "校验出口",
+          "text": "输入校验提前返回时，外层作用域退出仍会调用span.end。存储异常走同一个finally结束路径，因此两种非正常出口都不会留下持续活动的span。",
+          "relevance": 2,
+          "facets": [
+            "span在finally或等价作用域退出时结束，覆盖异常和提前返回"
+          ],
+          "duplicateGroup": "g_fae00ac021c0",
+          "sourceRef": "s_6ab795cb3bd8",
+          "rationale": "具体提前返回及存储异常演练。",
+          "key": "d_b68ef98fcfdc"
+        },
+        {
+          "title": "采样决定",
+          "text": "采样标志随上下文传播，消费者沿用请求的采样决定。单独在下游按随机值重新采样会造成链路只剩零散片段，影响排查完整性。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_3d2608025901",
+          "sourceRef": "s_63fe2b46e855",
+          "rationale": "正确采样传播补充。",
+          "key": "d_5a0e1830e75d"
+        },
+        {
+          "title": "错误记录",
+          "text": "异常可在当前span上记录类型和状态，日志关联traceId便于查找同一请求。记录异常事件本身不会自动证明span已经执行结束操作。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_6bff3c016d70",
+          "sourceRef": "s_83d08995a260",
+          "rationale": "正确错误日志与结束区别。",
+          "key": "d_174bb1fed4cd"
+        },
+        {
+          "title": "消息提取",
+          "text": "消费方先创建新的根span，处理结束后再读取消息头覆盖其traceId。这样子操作在执行时也能自然获得消息原来的父span关系。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_1ad1f4f866ed",
+          "sourceRef": "s_d24ea16e743c",
+          "rationale": "上下文提取过晚。",
+          "key": "d_aea02894b2b6"
+        },
+        {
+          "title": "共享父节点",
+          "text": "所有请求统一把固定spanId设置为父节点，traceId相同即可形成各自链路。即使请求交错运行，固定父标识也能区分真实调用来源。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_c0f0126469a0",
+          "sourceRef": "s_6713fa65a730",
+          "rationale": "固定父节点错误表示真实父关系。",
+          "key": "d_fa98ce3c7de0"
+        },
+        {
+          "title": "消息载体",
+          "text": "生产方把当前追踪上下文注入消息头，消费方先提取这些字段再创建子span。消息体业务字段不承担上下文传播职责，避免调用链断开。",
+          "relevance": 2,
+          "facets": [
+            "消息生产方注入上下文，消费方提取后建立子span"
+          ],
+          "duplicateGroup": "g_487c6c68ae42",
+          "sourceRef": "s_c2d53ce93ff1",
+          "rationale": "完整消息注入提取顺序。",
+          "key": "d_66ade9f7bd17"
+        },
+        {
+          "title": "实现摘要",
+          "text": "请求内共享traceId而各操作新建spanId并记父标识；消息注入、提取后建子span。当前span保存在任务局部上下文，finally结束覆盖异常和提前返回。",
+          "relevance": 2,
+          "facets": [
+            "同一请求的各span共享traceId，每个操作创建唯一spanId并记录父spanId",
+            "消息生产方注入上下文，消费方提取后建立子span",
+            "并发任务使用任务局部上下文，不使用共享全局当前span",
+            "span在finally或等价作用域退出时结束，覆盖异常和提前返回"
+          ],
+          "duplicateGroup": "g_ff408705a979",
+          "sourceRef": "s_fc29a3aa5654",
+          "rationale": "综合完整策略。",
+          "key": "d_5af9b1557695"
+        },
+        {
+          "title": "全局位置",
+          "text": "模块级currentSpan在每次进入函数时覆盖，所有并发任务读同一变量。这种设计省去了上下文复制，等待恢复后也能得到各自的父span。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_3f9b45ec18e9",
+          "sourceRef": "s_16e80b1c1052",
+          "rationale": "共享全局变量造成串线。",
+          "key": "d_666b3b14f3a6"
+        },
+        {
+          "title": "时间单位",
+          "text": "span持续时间用单调时钟计算，日志时间使用墙上时钟显示。机器校时改变墙上时间后，持续时间仍不应变成负值或突然放大。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_62a04fd10121",
+          "sourceRef": "s_3c29d594d8a3",
+          "rationale": "有用计时前提。",
+          "key": "d_27b5e99eaa52"
+        },
+        {
+          "title": "结束范围",
+          "text": "span结束放在finally或等价作用域退出钩子，正常完成、抛异常和提前return都必须经过它。错误状态在结束前记录，不另开一个遗漏结束的分支。",
+          "relevance": 2,
+          "facets": [
+            "span在finally或等价作用域退出时结束，覆盖异常和提前返回"
+          ],
+          "duplicateGroup": "g_fae00ac021c0",
+          "sourceRef": "s_b26fabe79a9d",
+          "rationale": "完整所有出口结束。",
+          "key": "d_532538685b9e"
+        },
+        {
+          "title": "调用样例",
+          "text": "合成请求依次经过入口、校验与存储，三段共享一个traceId但有三个不同spanId。校验和存储分别记录实际调用者的spanId作为父标识。",
+          "relevance": 2,
+          "facets": [
+            "同一请求的各span共享traceId，每个操作创建唯一spanId并记录父spanId"
+          ],
+          "duplicateGroup": "g_8ace34062fb6",
+          "sourceRef": "s_c1525f7a8b34",
+          "rationale": "具体链路分段实例。",
+          "key": "d_00e591b8e22d"
+        },
+        {
+          "title": "字段过滤",
+          "text": "追踪属性允许记录合成操作名与计数，但不写入口令或正文内容。属性过滤与上下文传递是不同步骤，都可以在消息发送前完成。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_b02dff883e63",
+          "sourceRef": "s_77bf699275b2",
+          "rationale": "有用属性选择补充。",
+          "key": "d_d37216ded628"
+        },
+        {
+          "title": "交错执行",
+          "text": "请求甲等待数据库时请求乙开始处理，两者的任务局部上下文仍各自指向自己的span。实现不会把currentSpan放到单个模块级可变变量中。",
+          "relevance": 2,
+          "facets": [
+            "并发任务使用任务局部上下文，不使用共享全局当前span"
+          ],
+          "duplicateGroup": "g_03d1d6f1184f",
+          "sourceRef": "s_fdff68f868a1",
+          "rationale": "具体甲乙交错执行场景。",
+          "key": "d_cc19c4ee2f75"
+        },
+        {
+          "title": "批量消息",
+          "text": "一次批量消费可包含多个独立请求，不能仅凭同一批次号认定所有消息属于一个trace。需要检查每条消息携带的上下文身份。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_156b1a1e3e8f",
+          "sourceRef": "s_a3c9ebbb889e",
+          "rationale": "正确批次与trace身份反证。",
+          "key": "d_d00dca48246b"
+        },
+        {
+          "title": "消费记录",
+          "text": "队列投递后消费者读取头中的traceId与父span标识，并以该上下文建立自己的处理span。若仅发送业务对象而不注入头，消费者不能延续原链路。",
+          "relevance": 2,
+          "facets": [
+            "消息生产方注入上下文，消费方提取后建立子span"
+          ],
+          "duplicateGroup": "g_487c6c68ae42",
+          "sourceRef": "s_74d91a4422db",
+          "rationale": "具体消息消费者及缺上下文后果。",
+          "key": "d_52dc951262e0"
+        }
+      ]
+    },
+    {
+      "id": "q_957efe00a6f0",
+      "category": "low-redundancy control",
+      "question": "合成笔记的标题可改名、重复和拖动；每个标题块已有永久anchorId。怎样让正文内部链接一直指向原标题，并在目标删除或链接编码损坏时明确显示失效而不误跳？",
+      "requiredFacets": [
+        "标题改名或移动仍保留永久anchorId，不以标题文字重新生成",
+        "同名标题使用不同anchorId，链接按ID精确定位",
+        "链接片段只解码一次，非法编码报错，按ID映射查找而非未转义CSS选择器",
+        "目标删除时保留链接并标记失效，不跳到同名或邻近标题"
+      ],
+      "authorCheck": "已完成作者检查并经root独立审核：9条grade2、5条有用grade1、6条错误grade0，各facet有3条完整支持。同一单facet的通用规则与具体实例归同一核心信息组，通常每组2条；控制组没有8条集中复述。覆盖全部四facet的综合段独立分组，仍与单facet段部分信息重叠；grade1/0保持各自原组。永久ID、同名标题、单次解码及删除失效已检查；隐藏不是删除，所有例子ID合成。",
+      "items": [
+        {
+          "title": "同名定位",
+          "text": "同名标题共用一个ID以简化目录；正文链接统一跳到当前最靠前的标题。拖动重排后切换目标属于按ID精确定位的正常结果。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_72bc1a863a30",
+          "sourceRef": "s_59d598251135",
+          "rationale": "同名合并错误目标。",
+          "key": "d_e859147b6b67"
+        },
+        {
+          "title": "重复标题",
+          "text": "两个名为记录的标题分别分配a_p2和a_q8，链接仅依据对应anchorId精确查找。相同显示文字既不合并节点，也不决定跳转到哪个标题。",
+          "relevance": 2,
+          "facets": [
+            "同名标题使用不同anchorId，链接按ID精确定位"
+          ],
+          "duplicateGroup": "g_1f757e1b2055",
+          "sourceRef": "s_1338d59e4f46",
+          "rationale": "完整同名不同ID策略。",
+          "key": "d_749c64ea4ced"
+        },
+        {
+          "title": "复制范围",
+          "text": "复制整个笔记时可给新文档创建独立身份空间，避免跨文档查询混用ID。是否重写副本内部链接应由复制操作的整体规则决定。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_343c1605ef78",
+          "sourceRef": "s_55e7c512f750",
+          "rationale": "相关跨文档边界。",
+          "key": "d_e8914f1a8e57"
+        },
+        {
+          "title": "定位反馈",
+          "text": "跳转结果向键盘用户反馈是否成功，并把失效信息关联到原链接。仅改变页面滚动位置但没有反馈，会让使用者难以判断操作是否生效。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_a13163470de7",
+          "sourceRef": "s_e2c301a0961f",
+          "rationale": "有用可访问性补充。",
+          "key": "d_6870c84e2cdd"
+        },
+        {
+          "title": "移除处理",
+          "text": "标题块删除后，其链接仍保留在正文并标记目标失效。解析器不会将旧ID改指向一个同名标题或附近段落，使用者可自行修改或删除引用。",
+          "relevance": 2,
+          "facets": [
+            "目标删除时保留链接并标记失效，不跳到同名或邻近标题"
+          ],
+          "duplicateGroup": "g_9a400d5523d8",
+          "sourceRef": "s_0797a118d65a",
+          "rationale": "完整删除失效处理。",
+          "key": "d_120c7731328d"
+        },
+        {
+          "title": "删除演练",
+          "text": "指向a_m4的链接在该块移除后显示失效，即使文档还存在同名标题也不跳过去。旧引用文本保留，编辑者仍能查到原先的链接用途。",
+          "relevance": 2,
+          "facets": [
+            "目标删除时保留链接并标记失效，不跳到同名或邻近标题"
+          ],
+          "duplicateGroup": "g_9a400d5523d8",
+          "sourceRef": "s_b11d165ce263",
+          "rationale": "具体目标删除而同名仍在场景。",
+          "key": "d_14d2e9167fe6"
+        },
+        {
+          "title": "重排记录",
+          "text": "合成标题从第三节移到第一节并改名后，anchorId仍为创建时的a_k7。原正文链接无需重写即可定位该块，不会因排序和名称变化产生新身份。",
+          "relevance": 2,
+          "facets": [
+            "标题改名或移动仍保留永久anchorId，不以标题文字重新生成"
+          ],
+          "duplicateGroup": "g_137d20e3a275",
+          "sourceRef": "s_c4b7a2e24a9f",
+          "rationale": "具体重排改名演练。",
+          "key": "d_66a5355f2c06"
+        },
+        {
+          "title": "目标状态",
+          "text": "折叠区域中的目标可能需要先展开再滚动。隐藏与删除属于不同状态，暂时不可见不能直接解释为引用已经永久丢失。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_9cda64cc7aa5",
+          "sourceRef": "s_4b9b391c8652",
+          "rationale": "正确隐藏不等于删除反证。",
+          "key": "d_825964b48e7f"
+        },
+        {
+          "title": "目录缓存",
+          "text": "目录可缓存标题的显示文字与当前位置，用于绘制导航。缓存更新滞后时需要重新定位节点，不能把显示文字当成目标身份。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_965e6247ab38",
+          "sourceRef": "s_49dc873788c6",
+          "rationale": "正确目录与身份反证。",
+          "key": "d_123b05c3d246"
+        },
+        {
+          "title": "定位约定",
+          "text": "改名和拖动保留永久anchorId，同名标题各有ID。片段只解码一次并经ID映射查找，坏编码报错；删除目标则保留失效链接，拒绝同名或邻近替代。",
+          "relevance": 2,
+          "facets": [
+            "标题改名或移动仍保留永久anchorId，不以标题文字重新生成",
+            "同名标题使用不同anchorId，链接按ID精确定位",
+            "链接片段只解码一次，非法编码报错，按ID映射查找而非未转义CSS选择器",
+            "目标删除时保留链接并标记失效，不跳到同名或邻近标题"
+          ],
+          "duplicateGroup": "g_0672732963d1",
+          "sourceRef": "s_5dc0e4fccdbe",
+          "rationale": "综合完整定位方案。",
+          "key": "d_d6a20d6446e3"
+        },
+        {
+          "title": "重复解码",
+          "text": "片段持续调用decodeURIComponent直到没有百分号，再作为最终目标ID。遇到损坏编码就去掉百分号继续查找，可以保持原引用的精确含义。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_d03c0d39d80a",
+          "sourceRef": "s_1894d9b774b1",
+          "rationale": "解码次数与坏编码处理错误。",
+          "key": "d_38b7b224d597"
+        },
+        {
+          "title": "片段入口",
+          "text": "处理链接片段时只解码一次，非法百分号编码返回明确失效状态。有效结果作为ID映射键精确查找，不直接拼接成未转义的CSS选择器。",
+          "relevance": 2,
+          "facets": [
+            "链接片段只解码一次，非法编码报错，按ID映射查找而非未转义CSS选择器"
+          ],
+          "duplicateGroup": "g_41616ed0b595",
+          "sourceRef": "s_b6977dae28ae",
+          "rationale": "完整解码和ID映射规则。",
+          "key": "d_429f2ebd0e67"
+        },
+        {
+          "title": "文字键",
+          "text": "每次渲染按当前标题文字生成slug，改名时同步生成新ID。旧链接保留原slug，定位时查找最相近的标题即可延续此前的引用关系。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_26f09def7f85",
+          "sourceRef": "s_22539498bdae",
+          "rationale": "违反稳定身份和精确定位。",
+          "key": "d_98f8d5a63105"
+        },
+        {
+          "title": "页面滚动",
+          "text": "找到目标后可滚到标题附近，并给短暂视觉提示。跳转不需要改动正文内容，编辑器当前草稿仍应留在同一实例内。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_e89c9ff61508",
+          "sourceRef": "s_beac171ae5e0",
+          "rationale": "有用跳转呈现前提。",
+          "key": "d_66532661db36"
+        },
+        {
+          "title": "重名演练",
+          "text": "文档中两个检查标题有独立标识，指向第二个标识的链接始终找到第二个块。第一个标题移到页尾后，也不会改变这一链接的目标。",
+          "relevance": 2,
+          "facets": [
+            "同名标题使用不同anchorId，链接按ID精确定位"
+          ],
+          "duplicateGroup": "g_1f757e1b2055",
+          "sourceRef": "s_35f67a549939",
+          "rationale": "具体同名重排场景。",
+          "key": "d_5647697a6581"
+        },
+        {
+          "title": "字符样例",
+          "text": "合成片段里的冒号通过一次解码恢复，再由ID映射找到目标。损坏编码直接报错；解析器不会把解码结果当CSS选择器交给querySelector执行。",
+          "relevance": 2,
+          "facets": [
+            "链接片段只解码一次，非法编码报错，按ID映射查找而非未转义CSS选择器"
+          ],
+          "duplicateGroup": "g_41616ed0b595",
+          "sourceRef": "s_e4198b3de6a9",
+          "rationale": "具体冒号与坏编码场景。",
+          "key": "d_ba566f4b02fc"
+        },
+        {
+          "title": "名称恢复",
+          "text": "删除标题后只要又出现同名标题，就自动把旧ID绑定到新块。即使新标题是后来独立创建的内容，也继承原链接的目标身份。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_d55957e2678d",
+          "sourceRef": "s_620691366e4c",
+          "rationale": "同名不恢复已删除身份。",
+          "key": "d_ca0dd3c28d7b"
+        },
+        {
+          "title": "选择器拼接",
+          "text": "链接片段解码后直接拼成#加ID传给querySelector，无需转义或ID映射。冒号、方括号等字符与普通字母一样，不会改变选择器含义。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_89fda0fdede8",
+          "sourceRef": "s_d859ef3a64ae",
+          "rationale": "未转义选择器不等价精确ID。",
+          "key": "d_9ca5cb6353bd"
+        },
+        {
+          "title": "目标替换",
+          "text": "原目标删除后自动选取后面的第一个标题，并把旧链接标为有效。临近位置更接近原阅读上下文，因此无需向使用者显示失效状态。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_66019eb110f4",
+          "sourceRef": "s_b6f5336be231",
+          "rationale": "删除目标被错误替代。",
+          "key": "d_368e6c0479a8"
+        },
+        {
+          "title": "块标识",
+          "text": "标题块创建时分配永久anchorId，之后改名或拖动仅更新文字与位置，标识保持原值。内部链接继续引用该标识，标题文本不参与重新生成。",
+          "relevance": 2,
+          "facets": [
+            "标题改名或移动仍保留永久anchorId，不以标题文字重新生成"
+          ],
+          "duplicateGroup": "g_137d20e3a275",
+          "sourceRef": "s_ad601a67c25c",
+          "rationale": "完整稳定ID策略。",
+          "key": "d_8e77c94e0233"
+        }
+      ]
+    },
+    {
+      "id": "q_8b1463b297db",
+      "category": "low-redundancy control",
+      "question": "合成Markdown脚注以定义标签关联正文引用；显示序号按正文首次引用顺序生成，同标签多次引用共用序号。怎样重排正文后重新编号，并为每次引用生成独立返回链接，且保留未找到定义的原引用并提示？",
+      "requiredFacets": [
+        "定义以标签为身份，显示序号不作为定义键",
+        "按正文首次引用顺序编号，同标签重复引用共用序号，重排后重新计算",
+        "每次引用有独立锚点，脚注返回链接分别定位每个引用位置",
+        "缺少定义时保留原引用语法并提示，不伪造空脚注"
+      ],
+      "authorCheck": "已完成作者检查并经root独立审核：9条grade2、5条有用grade1、6条错误grade0，各facet有3条完整支持。同一单facet的通用规则与具体实例归同一核心信息组，通常每组2条；控制组没有8条集中复述。覆盖全部四facet的综合段独立分组，仍与单facet段部分信息重叠；grade1/0保持各自原组。定义标签、显示序号与引用锚点已区分；正文重排、重复引用及缺失定义处理正确。",
+      "items": [
+        {
+          "title": "内容呈现",
+          "text": "脚注内容中的普通链接仍按正文链接规则渲染，长文本可换行。脚注内容很长时，返回入口应保持可见和可通过键盘到达。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_6c7fafcc9cf2",
+          "sourceRef": "s_c23cf38e931f",
+          "rationale": "有用呈现与键盘补充。",
+          "key": "d_3ad70badfdc6"
+        },
+        {
+          "title": "定义顺序",
+          "text": "显示数字按定义在文末出现的顺序生成，正文首次引用位置不影响编号。重复引用同标签时再分配新数字，方便区分每次提及。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_c36a454dea56",
+          "sourceRef": "s_984eade7c33c",
+          "rationale": "违反首次引用顺序与同号。",
+          "key": "d_8b3d10713680"
+        },
+        {
+          "title": "引用锚点",
+          "text": "同一脚注的每次引用分配独立锚点，脚注区为各锚点分别生成返回链接。返回链接指向引用位置，不直接跳到定义自身或该标签的第一个位置。",
+          "relevance": 2,
+          "facets": [
+            "每次引用有独立锚点，脚注返回链接分别定位每个引用位置"
+          ],
+          "duplicateGroup": "g_80d526649a7f",
+          "sourceRef": "s_0c39d82e296e",
+          "rationale": "完整独立返回锚点。",
+          "key": "d_9befcd19486f"
+        },
+        {
+          "title": "渲染步骤",
+          "text": "定义按标签存储，首次引用顺序决定数字，同标签复用且重排后重算。每次引用有独立返回锚点；找不到定义便保留原语法并提示，不生成空脚注。",
+          "relevance": 2,
+          "facets": [
+            "定义以标签为身份，显示序号不作为定义键",
+            "按正文首次引用顺序编号，同标签重复引用共用序号，重排后重新计算",
+            "每次引用有独立锚点，脚注返回链接分别定位每个引用位置",
+            "缺少定义时保留原引用语法并提示，不伪造空脚注"
+          ],
+          "duplicateGroup": "g_ef098f4fad22",
+          "sourceRef": "s_374a0f2e064f",
+          "rationale": "综合完整脚注流程。",
+          "key": "d_3074938955e4"
+        },
+        {
+          "title": "定义排布",
+          "text": "定义可写在Markdown末尾或靠近正文的位置。其存储位置用于编辑组织，不足以推断使用者第一次在正文引用它的时间和顺序。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_7626691a2977",
+          "sourceRef": "s_d3b4dbf812c4",
+          "rationale": "正确定义位置与引用顺序反证。",
+          "key": "d_0f682aae229b"
+        },
+        {
+          "title": "编号遍历",
+          "text": "渲染器按正文顺序遍历引用，标签首次出现时分配下一个序号，重复引用复用该号。正文重排后重新遍历，不能沿用上次生成的数字。",
+          "relevance": 2,
+          "facets": [
+            "按正文首次引用顺序编号，同标签重复引用共用序号，重排后重新计算"
+          ],
+          "duplicateGroup": "g_1a26701c0fd9",
+          "sourceRef": "s_76bbd56ef0d2",
+          "rationale": "完整首次引用重算策略。",
+          "key": "d_25df571e731a"
+        },
+        {
+          "title": "固定序号",
+          "text": "第一次渲染生成数字后永久保存，正文拖动重排仍使用旧号。这样即可满足按当前正文首次引用顺序重新编号的要求，也不必重新遍历。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_74849a01bcbf",
+          "sourceRef": "s_b31de73ab32f",
+          "rationale": "重排后未按现顺序重算。",
+          "key": "d_6ff6861daaa3"
+        },
+        {
+          "title": "目标方向",
+          "text": "脚注返回入口直接链接脚注定义本身，每次引用都沿用这个目标。定义包含同一标签，因此返回定义也能准确回到每次正文的引用位置。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_ae4ae98ebff8",
+          "sourceRef": "s_07cde11311a5",
+          "rationale": "返回目标方向错误。",
+          "key": "d_cb9cf7fdd104"
+        },
+        {
+          "title": "返回演练",
+          "text": "alpha在开头和末尾引用两次，两处引用锚点不同但显示序号一致。脚注区提供两个返回入口，选择末尾入口只定位末尾的那次引用。",
+          "relevance": 2,
+          "facets": [
+            "每次引用有独立锚点，脚注返回链接分别定位每个引用位置"
+          ],
+          "duplicateGroup": "g_80d526649a7f",
+          "sourceRef": "s_9836592a73a3",
+          "rationale": "具体开头末尾独立返回演练。",
+          "key": "d_7a0caf62d245"
+        },
+        {
+          "title": "范围约定",
+          "text": "一次渲染只收集当前合成文档里的定义，不从其他文档按同名标签补内容。脚注语法相同并不说明两个文档中的标签拥有共同身份。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_480d55e61fed",
+          "sourceRef": "s_dcdad7e2d68f",
+          "rationale": "有用文档范围前提。",
+          "key": "d_eecd3d750bab"
+        },
+        {
+          "title": "标签样例",
+          "text": "正文的[^alpha]关联alpha定义，即使渲染序号从2变为1也仍使用同一标签。定义表不会把这次显示数字写回成新的持久化查找键。",
+          "relevance": 2,
+          "facets": [
+            "定义以标签为身份，显示序号不作为定义键"
+          ],
+          "duplicateGroup": "g_f192b4489cf6",
+          "sourceRef": "s_d27ac990c078",
+          "rationale": "具体alpha编号变化。",
+          "key": "d_710d928f5e02"
+        },
+        {
+          "title": "空定义",
+          "text": "缺失标签时创建内容为空的脚注定义并正常编号，正文不保留原引用语法。渲染状态显示成功，让使用者通过空白脚注判断哪里缺内容。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_0f91f0fe7b6c",
+          "sourceRef": "s_1b4885e3c940",
+          "rationale": "伪造缺失脚注解析成功。",
+          "key": "d_f3cf286f208f"
+        },
+        {
+          "title": "数字键",
+          "text": "渲染后把显示序号写为定义表唯一键，原标签只用作注释。正文重排时按原数字找定义，可以确保重新生成的显示数字不会改变含义。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_321ce1078640",
+          "sourceRef": "s_1387a6f5456b",
+          "rationale": "错误将显示数字作为定义身份。",
+          "key": "d_cbe189f5f293"
+        },
+        {
+          "title": "重排样例",
+          "text": "正文先引用beta再引用alpha时编号为1和2；把alpha段落移到前面后重新计算为1和2的相反对应，后续再次引用alpha仍显示同一序号1。",
+          "relevance": 2,
+          "facets": [
+            "按正文首次引用顺序编号，同标签重复引用共用序号，重排后重新计算"
+          ],
+          "duplicateGroup": "g_1a26701c0fd9",
+          "sourceRef": "s_03a71ef81264",
+          "rationale": "具体alpha与beta重排。",
+          "key": "d_e965fbf42592"
+        },
+        {
+          "title": "损坏样例",
+          "text": "合成段落含[^gamma]但没有gamma定义，预览仍展示原引用并提示标签缺失。后续补上定义再重新渲染即可解析，不先占位创建空定义。",
+          "relevance": 2,
+          "facets": [
+            "缺少定义时保留原引用语法并提示，不伪造空脚注"
+          ],
+          "duplicateGroup": "g_402f990f30ba",
+          "sourceRef": "s_305b68cf41d8",
+          "rationale": "具体gamma缺失及恢复过程。",
+          "key": "d_8eaeef468882"
+        },
+        {
+          "title": "定义表",
+          "text": "脚注定义存入以标签为键的映射，显示序号仅是本次渲染结果。定义的身份不随编号变化，正文引用先按标签找到定义，再生成显示文本。",
+          "relevance": 2,
+          "facets": [
+            "定义以标签为身份，显示序号不作为定义键"
+          ],
+          "duplicateGroup": "g_f192b4489cf6",
+          "sourceRef": "s_dba644e42242",
+          "rationale": "完整标签身份规则。",
+          "key": "d_12414548e73a"
+        },
+        {
+          "title": "单一返回",
+          "text": "同标签所有引用共用一个锚点，脚注区只保留指向首处的返回入口。选择该入口后由阅读者手动寻找其他位置即可实现逐次准确返回。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_ec2a2c86dd98",
+          "sourceRef": "s_9167cf25d1c7",
+          "rationale": "不能逐次独立返回。",
+          "key": "d_80b628381bd4"
+        },
+        {
+          "title": "编辑状态",
+          "text": "修改定义文本后，所有关联引用共享新的脚注内容。内容同步与引用编号属于不同步骤，不应因修正文句而删除正文中的其他引用。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_08f956d7d775",
+          "sourceRef": "s_c62c9b42320d",
+          "rationale": "正确内容修改背景。",
+          "key": "d_88aab4adef4c"
+        },
+        {
+          "title": "返回解释",
+          "text": "多次引用如果使用完全相同的DOM ID，定位行为可能总回到第一处。仅给返回按钮换显示文字不能让浏览器区分这些重复的目标节点。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_32563bc8c225",
+          "sourceRef": "s_05caa4a9581a",
+          "rationale": "正确重复DOM目标反证。",
+          "key": "d_aff63ae0d4a1"
+        },
+        {
+          "title": "缺失定义",
+          "text": "引用标签在定义表中找不到时，正文保留原来的[^标签]语法，并给出缺失定义提示。渲染器不会新增空脚注，避免虚构这条引用已经解析成功。",
+          "relevance": 2,
+          "facets": [
+            "缺少定义时保留原引用语法并提示，不伪造空脚注"
+          ],
+          "duplicateGroup": "g_402f990f30ba",
+          "sourceRef": "s_ca2e81e4f5de",
+          "rationale": "完整缺失定义处理。",
+          "key": "d_b7cbdae1e96a"
+        }
+      ]
+    },
+    {
+      "id": "q_b6ceda5045fa",
+      "category": "low-redundancy control",
+      "question": "合成中英文本搜索要求全角ＡＰＩ与API大小写等价，中文参与检索而不被删除或译成拼音；索引和查询共用NFKC及拉丁小写化，结果展示原文。没有显式同义词表时，能否据此把API与接口判成同义？怎样实现这些边界？",
+      "requiredFacets": [
+        "使用Unicode NFKC将兼容全角形式转成规范形式",
+        "大小写处理仅改变拉丁字母，不删除中文或将其替换成拼音英文",
+        "索引与查询使用同一规范化过程，同时保留原文用于展示",
+        "规范化不自动建立API与接口的跨语言同义关系，须显式词表支持"
+      ],
+      "authorCheck": "已完成作者检查并经root独立审核：9条grade2、5条有用grade1、6条错误grade0，各facet有3条完整支持。同一单facet的通用规则与具体实例归同一核心信息组，通常每组2条；控制组没有8条集中复述。覆盖全部四facet的综合段独立分组，仍与单facet段部分信息重叠；grade1/0保持各自原组。NFKC不冒充跨语言翻译；仅大小写步骤不删不译中文，原字形由原文展示保留。",
+      "items": [
+        {
+          "title": "检索约定",
+          "text": "索引和查询共用NFKC、拉丁小写，中文不删不译，展示用原文。全角ＡＰＩ可匹配api，但API与接口的跨语言同义关系必须由显式词表提供。",
+          "relevance": 2,
+          "facets": [
+            "使用Unicode NFKC将兼容全角形式转成规范形式",
+            "大小写处理仅改变拉丁字母，不删除中文或将其替换成拼音英文",
+            "索引与查询使用同一规范化过程，同时保留原文用于展示",
+            "规范化不自动建立API与接口的跨语言同义关系，须显式词表支持"
+          ],
+          "duplicateGroup": "g_d74c6678e223",
+          "sourceRef": "s_ab696df164a5",
+          "rationale": "综合完整规范。",
+          "key": "d_947f44e88917"
+        },
+        {
+          "title": "同义边界",
+          "text": "NFKC与拉丁小写处理只统一字符形式，不会自动把API和接口连成同义词。需要显式词表提供这一映射后，检索才能按该跨语言规则扩展。",
+          "relevance": 2,
+          "facets": [
+            "规范化不自动建立API与接口的跨语言同义关系，须显式词表支持"
+          ],
+          "duplicateGroup": "g_a11cc2950329",
+          "sourceRef": "s_ee81023bf970",
+          "rationale": "完整字符与语义边界。",
+          "key": "d_ef7c9aeab3b6"
+        },
+        {
+          "title": "词表维护",
+          "text": "显式同义词表可记录来源、版本和适用领域，一个缩写可有多个解释。新增条目之前要确定该映射作用于当前领域还是所有搜索。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_8b2b5ed94141",
+          "sourceRef": "s_30203fdaecbf",
+          "rationale": "有用词表领域边界。",
+          "key": "d_1d25cf59e990"
+        },
+        {
+          "title": "混合样本",
+          "text": "合成文本API接口说明生成api接口说明作为检索键，中文四字仍完整存在。算法只改变拉丁大小写，不把中文也映射为空串或其他语言。",
+          "relevance": 2,
+          "facets": [
+            "大小写处理仅改变拉丁字母，不删除中文或将其替换成拼音英文"
+          ],
+          "duplicateGroup": "g_76db87f2877b",
+          "sourceRef": "s_c1d2f41a0c35",
+          "rationale": "普通中文样例的具体键。",
+          "key": "d_a832596f24da"
+        },
+        {
+          "title": "字符过滤",
+          "text": "检索前删掉所有非ASCII字符，包括全角字母和中文，余下字母统一小写。这样ＡＰＩ与API自然等价，也能保持中文内容完整参与匹配。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_de034d227f4a",
+          "sourceRef": "s_e41f26ba898e",
+          "rationale": "删除全角与中文破坏匹配。",
+          "key": "d_21f9c4cb81d2"
+        },
+        {
+          "title": "空白策略",
+          "text": "连续空白是否合并需单独约定，并让索引与查询采用同一规则。这个决定与字符兼容规范化不同，不能依赖界面自动换行来完成。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_364e29c9593c",
+          "sourceRef": "s_16060a39356d",
+          "rationale": "有用空白规则前提。",
+          "key": "d_e99ea21c7e2f"
+        },
+        {
+          "title": "扩展入口",
+          "text": "只启用规范化时，API查询的规范键为api，接口的键仍为接口，二者不会因该步骤变成相等。显式新增双向同义词条后才扩展匹配范围。",
+          "relevance": 2,
+          "facets": [
+            "规范化不自动建立API与接口的跨语言同义关系，须显式词表支持"
+          ],
+          "duplicateGroup": "g_a11cc2950329",
+          "sourceRef": "s_aafc27bdc42a",
+          "rationale": "具体无词表与有词表差异。",
+          "key": "d_4f0651b89f9b"
+        },
+        {
+          "title": "兼容形式",
+          "text": "规范化步骤先执行Unicode NFKC，把全角拉丁字母等兼容形式转换为对应规范形式。ＡＰＩ经此处理得到API，随后再执行约定的大小写处理。",
+          "relevance": 2,
+          "facets": [
+            "使用Unicode NFKC将兼容全角形式转成规范形式"
+          ],
+          "duplicateGroup": "g_6f9247d0ee15",
+          "sourceRef": "s_0d8e986e9acc",
+          "rationale": "完整NFKC兼容转换。",
+          "key": "d_b971ed55ed1c"
+        },
+        {
+          "title": "位置映射",
+          "text": "规范化可能改变字符数量，结果高亮最好保存规范键到原文的位置映射。直接拿规范键的偏移切原文，可能把高亮范围放错位置。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_728705adf366",
+          "sourceRef": "s_ef0a6e984938",
+          "rationale": "正确高亮映射前提。",
+          "key": "d_62ccea960bdb"
+        },
+        {
+          "title": "大小写规则",
+          "text": "NFKC之后对拉丁字母做小写化，API与api得到相同键。大小写步骤不删除中文，也不把中文替换成拼音或英文，字符兼容转换与大小写处理分开。",
+          "relevance": 2,
+          "facets": [
+            "大小写处理仅改变拉丁字母，不删除中文或将其替换成拼音英文"
+          ],
+          "duplicateGroup": "g_76db87f2877b",
+          "sourceRef": "s_cd50b7f21616",
+          "rationale": "完整拉丁大小写和中文内容边界。",
+          "key": "d_831fd8155b58"
+        },
+        {
+          "title": "字符样本",
+          "text": "合成测试把全角Ａ、Ｐ、Ｉ与半角API同时送入NFKC阶段，得到相同字母序列。实现没有用逐字符白名单删除全角字母来代替规范化。",
+          "relevance": 2,
+          "facets": [
+            "使用Unicode NFKC将兼容全角形式转成规范形式"
+          ],
+          "duplicateGroup": "g_6f9247d0ee15",
+          "sourceRef": "s_fc110f5bceb3",
+          "rationale": "具体全角字母实例。",
+          "key": "d_0203f2da3748"
+        },
+        {
+          "title": "宽度处理",
+          "text": "只运行普通拉丁小写，不执行NFKC，全角ＡＰＩ保持全角形式。查询api仍能与其按字符串完全相等，额外兼容规范化没有必要。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_18c713f61060",
+          "sourceRef": "s_4e029054b75d",
+          "rationale": "未规范全角不能字符串等价。",
+          "key": "d_950a2b7e6e2a"
+        },
+        {
+          "title": "语言提示",
+          "text": "查询可显示其原始语言标签，方便用户检查输入。标签只是元数据，不能单凭标成中文就把每个拉丁缩写替换成某个中文解释。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_f2afc7a71bef",
+          "sourceRef": "s_a1fbf77c2423",
+          "rationale": "正确语言标签与同义反证。",
+          "key": "d_67edb252e0dc"
+        },
+        {
+          "title": "自动翻译",
+          "text": "NFKC在统一字符宽度时会同时把API翻译成接口，普通小写化继续保留这一语义。没有词表也可以将二者作为相同字符串查询。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_8516c44a9875",
+          "sourceRef": "s_062df1b747bd",
+          "rationale": "错误声称NFKC建立同义关系。",
+          "key": "d_d44cf8ffdddf"
+        },
+        {
+          "title": "双端流程",
+          "text": "文档索引键与查询键调用同一套NFKC和拉丁小写函数。每条文档另保留未规范化原文，命中结果展示原文，不把索引键当正文覆盖。",
+          "relevance": 2,
+          "facets": [
+            "索引与查询使用同一规范化过程，同时保留原文用于展示"
+          ],
+          "duplicateGroup": "g_5245d431f686",
+          "sourceRef": "s_c1b882d375ea",
+          "rationale": "完整双端一致及原文存储。",
+          "key": "d_d75a59cfa15b"
+        },
+        {
+          "title": "正文替换",
+          "text": "把规范化结果直接覆盖文档原文，并用小写键作为搜索结果正文。输入中的全角、大小写和原字形不再保存，这也满足原文展示约定。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_017a90548b5c",
+          "sourceRef": "s_fd3aa6466432",
+          "rationale": "丢失原文显示。",
+          "key": "d_4bb45a90427e"
+        },
+        {
+          "title": "中文替换",
+          "text": "为了中英文一致，所有中文字符先替换为拼音首字母，再与拉丁缩写比较。接口生成jk即可保留它的中文原字形与全部语义。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_2d9f0a34394d",
+          "sourceRef": "s_0ee9b1396bb9",
+          "rationale": "替换拼音违反题设中文边界。",
+          "key": "d_d4e60b75b8d3"
+        },
+        {
+          "title": "字段权重",
+          "text": "标题与正文可分开建检索字段，再配置不同权重。字段权重调整影响排序，不会改变字符规范化函数对同一输入产生的输出键。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_f4d6ef6f7064",
+          "sourceRef": "s_b921307ad04e",
+          "rationale": "有用字段排序前提。",
+          "key": "d_3fd7cb9e057f"
+        },
+        {
+          "title": "单端处理",
+          "text": "文档索引保留原字节，查询端才执行NFKC和小写。两个检索键无需采用同一过程，查询规范化后自然会与所有原索引形式相等。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_a3033cdc454a",
+          "sourceRef": "s_d2d137edc050",
+          "rationale": "双端规范不一致。",
+          "key": "d_bffa20d0ae5c"
+        },
+        {
+          "title": "返回样例",
+          "text": "原文含ＡＰＩ说明时，索引与查询均走同一规范化函数，api查询能够命中。结果仍显示输入时的ＡＰＩ说明，存储的原文没有被改写成小写键。",
+          "relevance": 2,
+          "facets": [
+            "索引与查询使用同一规范化过程，同时保留原文用于展示"
+          ],
+          "duplicateGroup": "g_5245d431f686",
+          "sourceRef": "s_917e86d92e14",
+          "rationale": "具体全角命中和原文显示。",
+          "key": "d_42bd273a8c8f"
+        }
+      ]
+    },
+    {
+      "id": "q_1b46cbc087a0",
+      "category": "low-redundancy control",
+      "question": "合成离线笔记保存使用文档ID和baseRevision；服务器只接受与当前revision一致的提交并原子递增。怎样处理离线冲突，让本地草稿和远端版本都保留，三方合并后重新提交，并仅在成功确认后清除未保存状态？",
+      "requiredFacets": [
+        "离线提交携带文档ID和编辑所基于的baseRevision",
+        "baseRevision等于服务器当前revision才原子写入并递增，检查与写入不可分离",
+        "revision冲突返回409且保留本地草稿及最新远端内容，不用最后写入获胜覆盖",
+        "显式三方合并后以最新远端revision重提，收到成功确认才清除未保存状态"
+      ],
+      "authorCheck": "已完成作者检查并经root独立审核：9条grade2、5条有用grade1、6条错误grade0，各facet有3条完整支持。同一单facet的通用规则与具体实例归同一核心信息组，通常每组2条；控制组没有8条集中复述。覆盖全部四facet的综合段独立分组，仍与单facet段部分信息重叠；grade1/0保持各自原组。版本与客户端时间已分开；基准7、远端8及以8重提过程正确，超时反证标1。",
+      "items": [
+        {
+          "title": "提交载体",
+          "text": "离线保存请求包含文档ID与baseRevision，后者是本地开始编辑时读取的远端版本。正文修改不会凭空生成一个代表服务器当前状态的新版本号。",
+          "relevance": 2,
+          "facets": [
+            "离线提交携带文档ID和编辑所基于的baseRevision"
+          ],
+          "duplicateGroup": "g_3955a20b3d91",
+          "sourceRef": "s_e54cf7ad6a18",
+          "rationale": "完整文档和编辑基准身份。",
+          "key": "d_8344111c0515"
+        },
+        {
+          "title": "分离检查",
+          "text": "先读取当前revision做相等判断，释放事务后再无条件写正文并递增。另一请求期间修改版本不会影响本次写入，仍可满足原子条件保存。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_a3ba4c629f7f",
+          "sourceRef": "s_2f5bcfcb5efe",
+          "rationale": "检查写入分离产生覆盖竞态。",
+          "key": "d_a6ce635e515a"
+        },
+        {
+          "title": "时间比较",
+          "text": "客户端时钟可能不同，较新的本地时间不能证明其编辑基于较新的服务器内容。冲突判断需要版本身份，时间只可作为界面辅助信息。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_ec733084ae02",
+          "sourceRef": "s_b541977ff310",
+          "rationale": "正确时间与基准反证。",
+          "key": "d_fd796e99a97f"
+        },
+        {
+          "title": "权限变化",
+          "text": "离线期间权限可能被撤销，上传需要重新检查权限。收到权限错误时应向用户说明原因，不能把它当作普通版本冲突自动重试。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_a20543594a50",
+          "sourceRef": "s_7395c7a7221a",
+          "rationale": "有用权限恢复前提。",
+          "key": "d_25ddf9b22b58"
+        },
+        {
+          "title": "合并界面",
+          "text": "合并视图可并排显示基准、本地和远端，标出各自修改位置。选择某段文本仅形成待提交的合并稿，不会自动意味着远端已经保存。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_540452af1e2b",
+          "sourceRef": "s_b0e672ae7c37",
+          "rationale": "正确合并呈现与提交区别。",
+          "key": "d_93cb383b6270"
+        },
+        {
+          "title": "远端替换",
+          "text": "收到409立即把最新远端内容替换到本地编辑器，并清除本地草稿。这样冲突已被自动解决，原离线修改不必另存或展示给用户。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_d023b8672410",
+          "sourceRef": "s_f1699ab57639",
+          "rationale": "错误丢本地草稿。",
+          "key": "d_5c66706a4114"
+        },
+        {
+          "title": "提前完成",
+          "text": "发送合并保存请求时立即清除未保存状态，成功或失败都维持已保存显示。请求已经离开客户端即可确认正文持久化，无需等待服务器响应。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_08c19f8e3f40",
+          "sourceRef": "s_0c93dba91fba",
+          "rationale": "未确认提前清未保存。",
+          "key": "d_2799c2768dd5"
+        },
+        {
+          "title": "服务端条件",
+          "text": "服务器在同一原子操作中比较baseRevision与当前revision，相等才写入正文并递增版本。比较完成后另开无条件写入会留下并发覆盖窗口。",
+          "relevance": 2,
+          "facets": [
+            "baseRevision等于服务器当前revision才原子写入并递增，检查与写入不可分离"
+          ],
+          "duplicateGroup": "g_f74ec5ea78d4",
+          "sourceRef": "s_01e988cd48e4",
+          "rationale": "完整原子条件写入。",
+          "key": "d_33d2217cc80f"
+        },
+        {
+          "title": "状态约定",
+          "text": "提交带文档ID和编辑基准；服务端原子比版本、写入并递增。冲突409保留本地与远端，显式三方合并后用最新版本重提，成功确认才清未保存。",
+          "relevance": 2,
+          "facets": [
+            "离线提交携带文档ID和编辑所基于的baseRevision",
+            "baseRevision等于服务器当前revision才原子写入并递增，检查与写入不可分离",
+            "revision冲突返回409且保留本地草稿及最新远端内容，不用最后写入获胜覆盖",
+            "显式三方合并后以最新远端revision重提，收到成功确认才清除未保存状态"
+          ],
+          "duplicateGroup": "g_b304b6194c60",
+          "sourceRef": "s_f68ad867dee7",
+          "rationale": "综合完整保存协议。",
+          "key": "d_ad2e2d7e4df8"
+        },
+        {
+          "title": "草稿身份",
+          "text": "多文档同时编辑时，每份草稿保持自己的请求状态。某个文档保存完成不代表其他文档的修改也已持久化，界面需分别显示未保存标志。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_e0d27b2bfb70",
+          "sourceRef": "s_fe8bec94cf8c",
+          "rationale": "有用保存结果作用域。",
+          "key": "d_6643668fac3b"
+        },
+        {
+          "title": "原版重提",
+          "text": "用户完成三方合并后继续使用最初baseRevision7提交给已在8的远端。合并稿包含最新内容，因此服务端应跳过版本检查并接受这次写入。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_eb552a2aebb0",
+          "sourceRef": "s_5611afcf78da",
+          "rationale": "原基准重提不满足最新版本。",
+          "key": "d_873bbe1c8a57"
+        },
+        {
+          "title": "确认流程",
+          "text": "合成冲突以基准7、本地改稿和远端8生成合并稿，再以baseRevision8发送。请求进行中仍标未保存；收到成功确认后的合并版本才转为已保存。",
+          "relevance": 2,
+          "facets": [
+            "显式三方合并后以最新远端revision重提，收到成功确认才清除未保存状态"
+          ],
+          "duplicateGroup": "g_d57e111adab9",
+          "sourceRef": "s_9b018255350a",
+          "rationale": "具体合并版本8确认流程。",
+          "key": "d_fe04be7a6dbf"
+        },
+        {
+          "title": "最后提交",
+          "text": "revision冲突时仍接受最后到达的正文并覆盖远端，返回成功。客户端清除本地草稿，最后写入获胜能够同时保留双方版本。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_ac36e172f755",
+          "sourceRef": "s_d5bd193a3d8f",
+          "rationale": "覆盖不能保留双方。",
+          "key": "d_eea3a321a145"
+        },
+        {
+          "title": "冲突样例",
+          "text": "本地基于7编辑而远端已到8时，保存收到409，本地草稿仍在，远端8另存供比较。界面不会把远端内容直接替换到本地编辑区或丢掉其中一版。",
+          "relevance": 2,
+          "facets": [
+            "revision冲突返回409且保留本地草稿及最新远端内容，不用最后写入获胜覆盖"
+          ],
+          "duplicateGroup": "g_47ca73f9a8c3",
+          "sourceRef": "s_c326db1912c5",
+          "rationale": "具体基准7与远端8冲突。",
+          "key": "d_9345086382e5"
+        },
+        {
+          "title": "并发演练",
+          "text": "两个客户端都基于revision7提交时，原子条件写入只让一个更新到8。另一个不能继续按7无条件覆盖8，版本核验与正文更新在同一提交边界。",
+          "relevance": 2,
+          "facets": [
+            "baseRevision等于服务器当前revision才原子写入并递增，检查与写入不可分离"
+          ],
+          "duplicateGroup": "g_f74ec5ea78d4",
+          "sourceRef": "s_0c4d313280ed",
+          "rationale": "具体双客户端并发场景。",
+          "key": "d_3d3520acc598"
+        },
+        {
+          "title": "冲突保存",
+          "text": "baseRevision不一致返回409，客户端保留尚未保存的本地正文，同时取回最新远端内容。双方版本都可查看，不能直接用最后一次写入覆盖另一方。",
+          "relevance": 2,
+          "facets": [
+            "revision冲突返回409且保留本地草稿及最新远端内容，不用最后写入获胜覆盖"
+          ],
+          "duplicateGroup": "g_47ca73f9a8c3",
+          "sourceRef": "s_bf61f741e0ec",
+          "rationale": "完整409与双方保存。",
+          "key": "d_e72050ca68e8"
+        },
+        {
+          "title": "离线样例",
+          "text": "合成文档在revision7时被下载，离线修改后请求仍携带该文档ID和baseRevision7。客户端本地计数增长不替代实际读取的远端基准版本。",
+          "relevance": 2,
+          "facets": [
+            "离线提交携带文档ID和编辑所基于的baseRevision"
+          ],
+          "duplicateGroup": "g_3955a20b3d91",
+          "sourceRef": "s_eec83f3b1354",
+          "rationale": "具体基准7的离线编辑。",
+          "key": "d_c32ab2d5b18f"
+        },
+        {
+          "title": "合并提交",
+          "text": "用户确认基准、本地和最新远端三方合并后，用最新远端revision再次提交。只有服务器成功确认这一提交，客户端才清除对应草稿的未保存状态。",
+          "relevance": 2,
+          "facets": [
+            "显式三方合并后以最新远端revision重提，收到成功确认才清除未保存状态"
+          ],
+          "duplicateGroup": "g_d57e111adab9",
+          "sourceRef": "s_3a5a9b7ad07c",
+          "rationale": "完整三方合并最新重提与确认。",
+          "key": "d_f145c5ea21ed"
+        },
+        {
+          "title": "网络未知",
+          "text": "保存请求超时可能发生在服务器已提交之后，客户端不能仅凭超时断定写入失败。查询提交结果或带请求标识重试，有助于确认这次操作状态。",
+          "relevance": 1,
+          "facets": [],
+          "duplicateGroup": "g_eb957d48c0c6",
+          "sourceRef": "s_1a8d60e27873",
+          "rationale": "正确超时不等于失败反证。",
+          "key": "d_ad4bc9df03ec"
+        },
+        {
+          "title": "本地版本",
+          "text": "客户端每次敲字就给baseRevision加一，上传时发送增长后的数字作为服务器版本。这个数比旧版本大就说明本地正文可以覆盖当前远端。",
+          "relevance": 0,
+          "facets": [],
+          "duplicateGroup": "g_009bc1b5438a",
+          "sourceRef": "s_9f667c93d2f7",
+          "rationale": "本地计数伪造基准版本。",
+          "key": "d_cd8371c51a11"
+        }
+      ]
+    }
+  ]
+}
+

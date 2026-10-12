@@ -63,3 +63,5 @@ ai:
 # 技能文件每次请求实时读取：改完存盘即生效，不用重启后端。详见 skills/README.md
 learnhub:
   skills-dir: ${LEARNHUB_SKILLS_DIR:}
+  # Optional isolated code runner; empty keeps workflow-only tools available.
+  code-runner-url: ${LEARNHUB_CODE_RUNNER_URL:}

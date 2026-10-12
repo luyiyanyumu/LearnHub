@@ -3,6 +3,14 @@ package org.dyh.learnhub.config;
 import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.baomidou.mybatisplus.autoconfigure.MybatisPlusAutoConfiguration;
+import org.mybatis.spring.annotation.MapperScan;
+import org.dyh.learnhub.dto.FolderMoveRequest;
+import org.dyh.learnhub.dto.FolderRequest;
+import org.dyh.learnhub.mapper.ContentFolderMapper;
+import org.dyh.learnhub.mapper.FileInfoMapper;
+import org.dyh.learnhub.mapper.NoteMapper;
+import org.dyh.learnhub.service.FolderService;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -11,15 +19,19 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration;
 import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
+import org.springframework.boot.autoconfigure.jdbc.DataSourceTransactionManagerAutoConfiguration;
 import org.springframework.boot.autoconfigure.sql.init.SqlInitializationAutoConfiguration;
 import org.springframework.boot.env.YamlPropertySourceLoader;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.datasource.init.ScriptUtils;
 import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.utility.DockerImageName;
+import org.springframework.transaction.annotation.EnableTransactionManagement;
 
 import java.sql.Connection;
 import java.lang.reflect.Modifier;
@@ -30,8 +42,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Real MySQL migration tests. Only disposable databases in a dedicated container
@@ -153,9 +169,9 @@ class DatabaseMigrationTest {
         migrate(url);
         JdbcTemplate db = jdbc(url);
         assertThat(db.queryForObject("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()",
-                Integer.class)).isEqualTo(29); // 28 application tables and Flyway history
+                Integer.class)).isEqualTo(30); // 29 application tables and Flyway history
         assertThat(db.queryForList("SELECT version FROM flyway_schema_history ORDER BY installed_rank", String.class))
-                .containsExactly("1", "2", "3");
+                .containsExactly("1", "2", "3", "4");
         assertThat(db.queryForObject("SELECT COUNT(*) FROM note", Integer.class)).isEqualTo(2);
         assertEveryPersistentEntityColumnExists(url);
         assertThat(db.queryForObject("SELECT COUNT(*) FROM information_schema.REFERENTIAL_CONSTRAINTS "
@@ -166,7 +182,7 @@ class DatabaseMigrationTest {
         db.update("DELETE FROM note");
         migrate(url);
         assertThat(db.queryForObject("SELECT COUNT(*) FROM note", Integer.class)).isZero();
-        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(3);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(4);
     }
 
     @Test
@@ -180,7 +196,7 @@ class DatabaseMigrationTest {
         migrate(url);
         JdbcTemplate db = jdbc(url);
         assertThat(db.queryForList("SELECT version FROM flyway_schema_history ORDER BY installed_rank", String.class))
-                .containsExactly("0", "1", "2", "3");
+                .containsExactly("0", "1", "2", "3", "4");
         assertThat(structure(url)).containsExactlyElementsOf(structure(freshUrl));
         assertThat(indexes(url)).containsExactlyElementsOf(indexes(freshUrl));
         assertThat(db.queryForObject("SELECT COUNT(*) FROM note", Integer.class)).isEqualTo(1);
@@ -198,7 +214,7 @@ class DatabaseMigrationTest {
                 Integer.class)).isEqualTo(2);
         migrate(url);
         assertThat(db.queryForObject("SELECT COUNT(*) FROM note", Integer.class)).isEqualTo(1);
-        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(4);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(5);
     }
 
     @Test
@@ -220,7 +236,7 @@ class DatabaseMigrationTest {
 
         migrate(url);
         assertThat(db.queryForList("SELECT version FROM flyway_schema_history ORDER BY installed_rank", String.class))
-                .containsExactly("1", "2", "3");
+                .containsExactly("1", "2", "3", "4");
         assertThat(db.queryForObject("SELECT purpose FROM model_profile WHERE id = 'old-chat'", String.class))
                 .isEqualTo("chat");
         assertThat(db.queryForObject("SELECT api_key FROM model_profile WHERE id = 'old-chat'", String.class))
@@ -240,7 +256,134 @@ class DatabaseMigrationTest {
         assertThat(db.queryForObject("SELECT content_hash FROM kb_index_state WHERE id = 'note:92001'", String.class))
                 .isEqualTo("original-content-hash");
         migrate(url);
-        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(3);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(4);
+    }
+
+    @Test
+    void versionThreeUpgradeAddsUnfiledFoldersWithoutChangingExistingNotesFilesOrCategories() {
+        String url = emptyDatabase();
+        application(url, "spring.flyway.target=3").run(context -> assertThat(context).hasNotFailed());
+        JdbcTemplate db = jdbc(url);
+        db.update("INSERT INTO category (id, name) VALUES (93000, '原有知识分类')");
+        db.update("INSERT INTO note (id, title, content, category_id) VALUES (93001, '旧笔记', '保留原文与公式', 93000)");
+        db.update("INSERT INTO file_info (id, origin_name, store_name, size, category_id, summary, text_content, text_status) "
+                + "VALUES (93001, '旧论文.pdf', 'original-random-name.pdf', 1024, 93000, '说明', '抽取正文', 'ok')");
+        migrate(url);
+        assertThat(db.queryForObject("SELECT folder_id FROM note WHERE id=93001", Long.class)).isNull();
+        assertThat(db.queryForObject("SELECT folder_id FROM file_info WHERE id=93001", Long.class)).isNull();
+        assertThat(db.queryForObject("SELECT content FROM note WHERE id=93001", String.class)).isEqualTo("保留原文与公式");
+        assertThat(db.queryForObject("SELECT category_id FROM note WHERE id=93001", Long.class)).isEqualTo(93000);
+        assertThat(db.queryForObject("SELECT store_name FROM file_info WHERE id=93001", String.class)).isEqualTo("original-random-name.pdf");
+        assertThat(db.queryForObject("SELECT text_content FROM file_info WHERE id=93001", String.class)).isEqualTo("抽取正文");
+        assertThat(db.queryForObject("SELECT category_id FROM file_info WHERE id=93001", Long.class)).isEqualTo(93000);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM content_folder", Integer.class)).isZero();
+    }
+
+    @Test
+    void schemaSqlAdoptionPreservesExistingFoldersAndItemLocations() throws Exception {
+        String url = emptyDatabase();
+        JdbcTemplate db = jdbc(url);
+        try (Connection connection = db.getDataSource().getConnection()) {
+            ScriptUtils.executeSqlScript(connection, new ClassPathResource("schema.sql"));
+        }
+        db.update("INSERT INTO content_folder (id, kind, name, parent_id) VALUES (96001, 'note', '已收纳', 0), (96002, 'file', '资料', 0)");
+        db.update("INSERT INTO note (id, title, content, folder_id) VALUES (96001, '保留笔记', '正文', 96001)");
+        db.update("INSERT INTO file_info (id, origin_name, store_name, folder_id) VALUES (96001, 'demo.md', 'kept.md', 96002)");
+        migrate(url);
+        assertThat(db.queryForObject("SELECT folder_id FROM note WHERE id=96001", Long.class)).isEqualTo(96001);
+        assertThat(db.queryForObject("SELECT folder_id FROM file_info WHERE id=96001", Long.class)).isEqualTo(96002);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM content_folder", Integer.class)).isEqualTo(2);
+        assertThat(db.queryForList("SELECT version FROM flyway_schema_history ORDER BY installed_rank", String.class))
+                .containsExactly("0", "1", "2", "3", "4");
+        migrate(url);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM content_folder", Integer.class)).isEqualTo(2);
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    @EnableTransactionManagement
+    @MapperScan("org.dyh.learnhub.mapper")
+    static class FolderTestConfiguration {
+        @Bean FolderService folderService(ContentFolderMapper folders, NoteMapper notes, FileInfoMapper files) {
+            return new FolderService(folders, notes, files);
+        }
+    }
+
+    private static ApplicationContextRunner folderApplication(String url) {
+        return application(url)
+                .withConfiguration(AutoConfigurations.of(MybatisPlusAutoConfiguration.class,
+                        DataSourceTransactionManagerAutoConfiguration.class))
+                .withUserConfiguration(FolderTestConfiguration.class);
+    }
+
+    @Test
+    void folderTransactionsValidateWholeBatchesAndDeletingLeavesPreservesContent() {
+        String url = emptyDatabase();
+        folderApplication(url).run(context -> {
+            assertThat(context).hasNotFailed();
+            var service = context.getBean(FolderService.class);
+            JdbcTemplate db = jdbc(url);
+            db.update("INSERT INTO note (id, title, content) VALUES (94001, 'A', '正文 A'), (94002, 'B', '正文 B')");
+            db.update("UPDATE note SET updated_at='2024-01-01 10:00:00' WHERE id IN (94001, 94002)");
+            db.update("INSERT INTO file_info (id, origin_name, store_name) VALUES (94001, 'demo.pdf', 'preserve-random.pdf')");
+            var parent = service.create(new FolderRequest("note", "笔记根", null));
+            var leaf = service.create(new FolderRequest("note", "子目录", parent.id()));
+            var fileFolder = service.create(new FolderRequest("file", "论文", null));
+            assertThatThrownBy(() -> service.moveItems(new FolderMoveRequest("note", List.of(94001L, 999999L), leaf.id())))
+                    .isInstanceOf(IllegalArgumentException.class);
+            assertThat(db.queryForObject("SELECT folder_id FROM note WHERE id=94001", Long.class)).isNull();
+            assertThatThrownBy(() -> service.moveItems(new FolderMoveRequest("note", List.of(94001L), fileFolder.id())))
+                    .isInstanceOf(IllegalArgumentException.class);
+            assertThat(service.moveItems(new FolderMoveRequest("note", List.of(94002L, 94001L), leaf.id()))).isEqualTo(2);
+            assertThat(db.queryForObject("SELECT DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') FROM note WHERE id=94001", String.class))
+                    .isEqualTo("2024-01-01 10:00:00");
+            assertThat(service.list("note").stream().filter(folder -> folder.id().equals(leaf.id())).findFirst().orElseThrow().itemCount())
+                    .isEqualTo(2);
+            assertThatThrownBy(() -> service.delete(parent.id())).isInstanceOf(IllegalArgumentException.class);
+            assertThat(service.delete(leaf.id())).isEqualTo(2);
+            assertThat(db.queryForObject("SELECT COUNT(*) FROM note WHERE id IN (94001, 94002) AND folder_id IS NULL", Integer.class)).isEqualTo(2);
+            assertThat(db.queryForObject("SELECT content FROM note WHERE id=94001", String.class)).isEqualTo("正文 A");
+            assertThat(db.queryForObject("SELECT DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') FROM note WHERE id=94001", String.class))
+                    .isEqualTo("2024-01-01 10:00:00");
+            service.moveItems(new FolderMoveRequest("file", List.of(94001L), fileFolder.id()));
+            var file = context.getBean(FileInfoMapper.class).selectById(94001L);
+            // 模拟读取旧快照后并发移动：普通元数据保存必须忽略旧目录值。
+            file.setFolderId(999999L); file.setSummary("新的说明");
+            context.getBean(FileInfoMapper.class).updateById(file);
+            assertThat(db.queryForObject("SELECT folder_id FROM file_info WHERE id=94001", Long.class)).isEqualTo(fileFolder.id());
+            assertThat(service.delete(fileFolder.id())).isEqualTo(1);
+            assertThat(db.queryForObject("SELECT store_name FROM file_info WHERE id=94001", String.class)).isEqualTo("preserve-random.pdf");
+        });
+    }
+
+    @Test
+    void concurrentOppositeFolderMovesCannotCreateACycle() {
+        String url = emptyDatabase();
+        folderApplication(url).run(context -> {
+            assertThat(context).hasNotFailed();
+            var service = context.getBean(FolderService.class);
+            var a = service.create(new FolderRequest("note", "A", null));
+            var b = service.create(new FolderRequest("note", "B", null));
+            var gate = new CountDownLatch(1);
+            try (var pool = Executors.newFixedThreadPool(2)) {
+                var moveA = pool.submit(() -> attemptMove(service, a.id(), b.id(), gate));
+                var moveB = pool.submit(() -> attemptMove(service, b.id(), a.id(), gate));
+                gate.countDown();
+                assertThat(List.of(moveA.get(15, TimeUnit.SECONDS), moveB.get(15, TimeUnit.SECONDS)))
+                        .containsExactlyInAnyOrder(true, false);
+            }
+            var rows = service.list("note");
+            assertThat(rows.stream().filter(folder -> folder.parentId() == 0).count()).isEqualTo(1);
+        });
+    }
+
+    private static boolean attemptMove(FolderService service, Long self, Long parent, CountDownLatch gate) throws Exception {
+        gate.await(10, TimeUnit.SECONDS);
+        try {
+            service.update(self, new FolderRequest(null, null, parent));
+            return true;
+        } catch (IllegalArgumentException rejectedCycle) {
+            return false;
+        }
     }
 
     @Test
@@ -286,7 +429,7 @@ class DatabaseMigrationTest {
         jdbc(url).update("""
                 INSERT INTO flyway_schema_history
                 (installed_rank, version, description, type, script, checksum, installed_by, execution_time, success)
-                VALUES (4, '999', 'future release', 'SQL', 'V999__future.sql', 1, 'root', 0, true)
+                VALUES (5, '999', 'future release', 'SQL', 'V999__future.sql', 1, 'root', 0, true)
                 """);
         application(url).run(context -> assertThat(context).hasFailed());
     }
@@ -296,7 +439,7 @@ class DatabaseMigrationTest {
         String url = emptyDatabase();
         application(url, "spring.flyway.locations=classpath:db/migration,classpath:db/intentional-failure")
                 .run(context -> assertThat(context).hasFailed());
-        assertThat(jdbc(url).queryForObject("SELECT success FROM flyway_schema_history WHERE version = '4'", Boolean.class))
+        assertThat(jdbc(url).queryForObject("SELECT success FROM flyway_schema_history WHERE version = '5'", Boolean.class))
                 .isFalse();
     }
 }

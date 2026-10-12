@@ -27,6 +27,7 @@ RUN mvn -B -q dependency:go-offline
 
 # 源码层
 COPY backend/src ./src
+COPY frontend/src /frontend/src
 RUN mvn -B -q -DskipTests package
 
 # ---------- 运行阶段 ----------

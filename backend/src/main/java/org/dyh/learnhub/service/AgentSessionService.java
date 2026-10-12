@@ -57,6 +57,9 @@ public class AgentSessionService {
     public static final String ROLE_ASSISTANT = "assistant";
     public static final String ROLE_TOOL = "tool";
     public static final String ROLE_SUMMARY = "summary";
+    /** Factual UI process snapshots, kept out of the user/assistant model projection. */
+    public static final String ROLE_PROGRESS = "progress";
+    private static final com.fasterxml.jackson.databind.ObjectMapper DISPLAY_JSON = new com.fasterxml.jackson.databind.ObjectMapper();
     /**
      * 思考过程（thinking 模型返回的 reasoning_content）。
      * <p>
@@ -236,14 +239,33 @@ public class AgentSessionService {
         return rows.isEmpty() ? null : rows.get(0).getContent();
     }
 
-    /** 最新摘要事件的 id —— 它就是「已经被概括到哪」的水位线（watermark） */
-    private Long latestSummaryEventId(String sessionId) {
+    private static final String SUMMARY_WATERMARK_PREFIX = "summary-through:";
+
+    /** Keep summary prose display-compatible while recording exactly which conversation event it covers. */
+    public void appendSummary(String sessionId, String text, long coveredThroughEventId) {
+        if (coveredThroughEventId <= 0 || !StringUtils.hasText(text)) {
+            throw new IllegalArgumentException("摘要正文和已覆盖事件编号不能为空");
+        }
+        append(sessionId, ROLE_SUMMARY, text, null, SUMMARY_WATERMARK_PREFIX + coveredThroughEventId);
+    }
+
+    /** The summary event's own id is later than recent, uncompressed turns and is not a valid watermark. */
+    private Long latestSummaryCoveredEventId(String sessionId) {
         List<AgentEvent> rows = eventMapper.selectList(Wrappers.<AgentEvent>lambdaQuery()
                 .eq(AgentEvent::getSessionId, sessionId)
                 .eq(AgentEvent::getRole, ROLE_SUMMARY)
                 .orderByDesc(AgentEvent::getId)
                 .last("LIMIT 1"));
-        return rows.isEmpty() ? null : rows.get(0).getId();
+        if (rows.isEmpty()) return null;
+        AgentEvent summary = rows.getFirst();
+        String marker = summary.getToolCallId();
+        // Old summaries contain no coverage metadata. Recompact conservatively rather than
+        // guessing that every event preceding the summary has already been summarized.
+        if (marker == null || !marker.startsWith(SUMMARY_WATERMARK_PREFIX)) return null;
+        try {
+            long id = Long.parseLong(marker.substring(SUMMARY_WATERMARK_PREFIX.length()));
+            return id > 0 && (summary.getId() == null || id < summary.getId()) ? id : null;
+        } catch (NumberFormatException ignored) { return null; }
     }
 
     /** 一次压缩最少要覆盖多少条事件 —— 太小会导致「每轮都触发一次摘要」 */
@@ -254,7 +276,7 @@ public class AgentSessionService {
      *
      * <p>空列表 = 本轮不用压缩。这里刻意留了迟滞（{@link #COMPACT_MIN_EVENTS}）：
      * 否则一旦总轮数超过窗口，就会每轮都触发一次摘要调用，平白多一次模型往返。
-     * 代价是"未被覆盖的溢出部分"在攒够之前仍看不到 —— 这个取舍写在文档里，别当成 bug。
+     * 未达到阈值的最多七条溢出消息仍由 projection 带给模型，不会在等待压缩期间消失。
      *
      * @param rounds 投影窗口轮数（与 {@link #projection} 保持一致）
      */
@@ -265,7 +287,7 @@ public class AgentSessionService {
             return List.of();
         }
         List<AgentEvent> older = turns.subList(0, turns.size() - keep);
-        Long watermark = latestSummaryEventId(sessionId);
+        Long watermark = latestSummaryCoveredEventId(sessionId);
         List<AgentEvent> uncovered = new ArrayList<>();
         for (AgentEvent e : older) {
             if (watermark == null || e.getId() > watermark) {
@@ -297,7 +319,19 @@ public class AgentSessionService {
         if (all.size() <= max) {
             return all;
         }
-        return new ArrayList<>(all.subList(all.size() - max, all.size()));
+        int recentStart = all.size() - max;
+        Long watermark = latestSummaryCoveredEventId(sessionId);
+        List<AgentEvent> awaitingCompaction = new ArrayList<>();
+        for (int index = 0; index < recentStart; index++) {
+            AgentEvent event = all.get(index);
+            if (watermark == null || event.getId() > watermark) awaitingCompaction.add(event);
+        }
+        // Normally this contains 0–7 events: the caller compacts once eight accumulate.
+        // Keep a strict bound even if a legacy session or a failed compaction has a large backlog.
+        int from = Math.max(0, awaitingCompaction.size() - (COMPACT_MIN_EVENTS - 1));
+        List<AgentEvent> projection = new ArrayList<>(awaitingCompaction.subList(from, awaitingCompaction.size()));
+        projection.addAll(all.subList(recentStart, all.size()));
+        return projection;
     }
 
     /**
@@ -309,23 +343,47 @@ public class AgentSessionService {
         List<Map<String, Object>> out = new ArrayList<>();
         List<String> pendingTools = new ArrayList<>();
         String pendingReasoning = "";
+        Map<String, Object> pendingProgress = Map.of();
         for (AgentEvent e : allEvents(sessionId)) {
             switch (e.getRole()) {
                 case ROLE_USER -> {
+                    // A failed/interrupted round may have milestones and staged actions without an answer.
+                    if (!pendingProgress.isEmpty() || !pendingTools.isEmpty() || StringUtils.hasText(pendingReasoning)) {
+                        Map<String, Object> interrupted = bubble(ROLE_ASSISTANT, "", new ArrayList<>(pendingTools), pendingReasoning);
+                        interrupted.putAll(pendingProgress);
+                        out.add(interrupted);
+                    }
                     pendingTools.clear();
                     pendingReasoning = "";
+                    pendingProgress = Map.of();
                     out.add(bubble(ROLE_USER, e.getContent(), List.of(), ""));
                 }
                 case ROLE_TOOL -> {
                     if (StringUtils.hasText(e.getContent())) {
-                        pendingTools.add(e.getContent());
+                        // Confirm/cancel events arrive after the answer; retain them on that same round.
+                        if (!out.isEmpty() && ROLE_ASSISTANT.equals(out.getLast().get("role"))) {
+                            List<String> saved = new ArrayList<>((List<String>) out.getLast().get("events"));
+                            saved.add(e.getContent());
+                            out.getLast().put("events", saved);
+                            out.getLast().put("toolUsed", true);
+                        } else pendingTools.add(e.getContent());
                     }
                 }
                 case ROLE_REASONING -> pendingReasoning = nullTo(e.getContent());
+                case ROLE_PROGRESS -> {
+                    Map<String, Object> parsed = displayProgress(e.getContent());
+                    if (!parsed.isEmpty()) {
+                        if (!out.isEmpty() && ROLE_ASSISTANT.equals(out.getLast().get("role"))) out.getLast().putAll(parsed);
+                        else pendingProgress = parsed;
+                    }
+                }
                 case ROLE_ASSISTANT -> {
-                    out.add(bubble(ROLE_ASSISTANT, e.getContent(), new ArrayList<>(pendingTools), pendingReasoning));
+                    Map<String, Object> answer = bubble(ROLE_ASSISTANT, e.getContent(), new ArrayList<>(pendingTools), pendingReasoning);
+                    answer.putAll(pendingProgress);
+                    out.add(answer);
                     pendingTools.clear();
                     pendingReasoning = "";
+                    pendingProgress = Map.of();
                 }
                 default -> {
                     // summary 是给模型用的内部事件，不在界面出现
@@ -333,10 +391,37 @@ public class AgentSessionService {
             }
         }
         // 思考落库了但这一轮没等到回答（超时/报错）：别把思考吞掉，单独挂一条气泡
-        if (StringUtils.hasText(pendingReasoning)) {
-            out.add(bubble(ROLE_ASSISTANT, "", List.of(), pendingReasoning));
+        if (StringUtils.hasText(pendingReasoning) || !pendingProgress.isEmpty() || !pendingTools.isEmpty()) {
+            Map<String, Object> interrupted = bubble(ROLE_ASSISTANT, "", new ArrayList<>(pendingTools), pendingReasoning);
+            interrupted.putAll(pendingProgress);
+            out.add(interrupted);
         }
+        resolveProgressActions(sessionId, out);
         return out;
+    }
+
+    /** Approval status can change after the round was saved; resolve it when history is read. */
+    @SuppressWarnings("unchecked")
+    private void resolveProgressActions(String sessionId, List<Map<String, Object>> messages) {
+        Map<Long, List<Map<String, Object>>> waiting = new LinkedHashMap<>();
+        for (Map<String, Object> message : messages) {
+            for (Map<String, Object> row : (List<Map<String, Object>>) message.getOrDefault("progress", List.of())) {
+                if ("waiting".equals(row.get("status")) && row.get("actionId") instanceof Number number)
+                    waiting.computeIfAbsent(number.longValue(), ignored -> new ArrayList<>()).add(row);
+            }
+        }
+        if (waiting.isEmpty()) return;
+        List<AgentPendingAction> actions = actionMapper.selectBatchIds(waiting.keySet());
+        if (actions == null) return;
+        for (AgentPendingAction action : actions) {
+            if (!sessionId.equals(action.getSessionId()) || !waiting.containsKey(action.getId())) continue;
+            String status = action.getStatus();
+            if (!"approved".equals(status) && !"rejected".equals(status) && !"failed".equals(status)) continue;
+            for (Map<String, Object> row : waiting.get(action.getId())) {
+                row.put("status", "failed".equals(status) ? "error" : "completed");
+                row.put("detail", "approved".equals(status) ? "已确认执行" : "rejected".equals(status) ? "已取消，本项未执行" : "执行失败，请根据会话中的说明重试");
+            }
+        }
     }
 
     private static Map<String, Object> bubble(String role, String content, List<String> events, String reasoning) {
@@ -346,7 +431,39 @@ public class AgentSessionService {
         m.put("events", events);
         m.put("reasoning", reasoning == null ? "" : reasoning);
         m.put("toolUsed", !events.isEmpty());
+        m.put("progress", List.of());
         return m;
+    }
+
+    /** A corrupt/old snapshot must not hide the rest of the conversation. */
+    private static Map<String, Object> displayProgress(String raw) {
+        if (raw == null || raw.length() > 200_000) return Map.of();
+        try {
+            var node = DISPLAY_JSON.readTree(raw);
+            if (node == null || !node.path("progress").isArray()) return Map.of();
+            List<Map<String, Object>> rows = new ArrayList<>();
+            for (var item : node.path("progress")) {
+                if (rows.size() >= 160) break;
+                if (!item.isObject() || !item.path("id").isTextual()
+                        || !List.of("phase", "tool", "update", "plan").contains(item.path("kind").asText())
+                        || !List.of("pending", "running", "completed", "cancelled", "error", "waiting").contains(item.path("status").asText())) continue;
+                Map<String, Object> row = new LinkedHashMap<>();
+                for (String key : List.of("id", "kind", "status", "title", "detail", "toolName", "parentId", "at")) {
+                    if (item.path(key).isTextual()) {
+                        String value = item.path(key).asText();
+                        row.put(key, value.length() > 500 ? value.substring(0, 500) : value);
+                    }
+                }
+                if (item.path("elapsedMs").canConvertToLong()) row.put("elapsedMs", Math.max(0, item.path("elapsedMs").asLong()));
+                if (item.path("actionId").canConvertToLong() && item.path("actionId").asLong() > 0)
+                    row.put("actionId", item.path("actionId").asLong());
+                rows.add(row);
+            }
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("progress", rows);
+            if (node.path("elapsedMs").canConvertToLong()) result.put("elapsedMs", Math.max(0, node.path("elapsedMs").asLong()));
+            return result;
+        } catch (Exception ignored) { return Map.of(); }
     }
 
     private static String nullTo(String s) {
@@ -398,13 +515,73 @@ public class AgentSessionService {
         return actionMapper.selectById(id);
     }
 
-    /** 标记为已确认 / 已取消 */
+    /** Only the winner of the pending→executing transition may perform the stored side effect. */
+    public AgentPendingAction claimAction(Long id) {
+        AgentPendingAction action = getAction(id);
+        if (action == null) throw new IllegalArgumentException("待确认操作不存在: " + id);
+        if (!"pending".equals(action.getStatus())) throw new IllegalStateException("该操作已处理或正在执行，不能重复执行");
+        AgentPendingAction claimed = new AgentPendingAction();
+        claimed.setStatus("executing");
+        int changed = actionMapper.update(claimed, Wrappers.<AgentPendingAction>lambdaUpdate()
+                .eq(AgentPendingAction::getId, id).eq(AgentPendingAction::getStatus, "pending"));
+        if (changed != 1) throw new IllegalStateException("该操作已处理或正在执行，不能重复执行");
+        action.setStatus("executing");
+        return action;
+    }
+
+    /** A terminal transition cannot overwrite a concurrent approval, cancellation, or completed action. */
     public void resolveAction(Long id, String status) {
+        String expected = switch (status) {
+            case "approved", "failed" -> "executing";
+            case "rejected" -> "pending";
+            default -> throw new IllegalArgumentException("无效的操作结果状态");
+        };
         AgentPendingAction a = new AgentPendingAction();
-        a.setId(id);
         a.setStatus(status);
         a.setResolvedAt(LocalDateTime.now());
-        actionMapper.updateById(a);
+        int changed = actionMapper.update(a, Wrappers.<AgentPendingAction>lambdaUpdate()
+                .eq(AgentPendingAction::getId, id).eq(AgentPendingAction::getStatus, expected));
+        if (changed != 1) throw new IllegalStateException("该操作状态已变化，不能重复处理");
+    }
+
+    /** Bounded application-owned facts for the next model turn; never raw tool parameters. */
+    public List<Map<String, Object>> actionContext(String sessionId) {
+        if (!StringUtils.hasText(sessionId)) return List.of();
+        List<AgentPendingAction> actions = actionMapper.selectList(Wrappers.<AgentPendingAction>lambdaQuery()
+                .select(AgentPendingAction::getId, AgentPendingAction::getSessionId,
+                        AgentPendingAction::getToolName, AgentPendingAction::getStatus, AgentPendingAction::getSummary)
+                .eq(AgentPendingAction::getSessionId, sessionId)
+                .in(AgentPendingAction::getStatus, List.of("pending", "executing", "approved", "executed", "rejected", "failed"))
+                .orderByDesc(AgentPendingAction::getId).last("LIMIT 8"));
+        if (actions == null) return List.of();
+        List<Map<String, Object>> context = new ArrayList<>();
+        for (AgentPendingAction action : actions) {
+            if (context.size() >= 8) break;
+            if (action.getId() == null || !sessionId.equals(action.getSessionId())) continue;
+            String status = action.getStatus();
+            if (status == null || !List.of("pending", "executing", "approved", "executed", "rejected", "failed").contains(status)) continue;
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("id", action.getId());
+            item.put("tool", boundedActionText(action.getToolName(), 64));
+            item.put("status", "approved".equals(status) ? "executed" : status);
+            item.put("summary", safeActionSummary(action.getSummary()));
+            context.add(item);
+        }
+        return context;
+    }
+
+    private static String boundedActionText(String value, int limit) {
+        String text = nullTo(value).replaceAll("[\\p{Cntrl}]+", " ").trim();
+        return text.substring(0, Math.min(text.length(), limit));
+    }
+
+    private static String safeActionSummary(String value) {
+        String text = boundedActionText(value, 1024)
+                .replaceAll("(?i)(https?://)[^\\s/@]+:[^\\s/@]+@", "$1[redacted]@")
+                .replaceAll("(?i)([?&](?:token|api_key|apikey|access_token|key|password|secret)=)[^&\\s]+", "$1[redacted]")
+                .replaceAll("(?i)\\bBearer\\s+[^\\s]+", "Bearer [redacted]")
+                .replaceAll("\\bsk-(?:proj-)?[a-zA-Z0-9_-]{16,}", "[redacted]");
+        return boundedActionText(text, 240);
     }
 
     /** 给界面用的简短形状 */

@@ -43,6 +43,7 @@ import java.util.Map;
 public class ModelRouting {
 
     public static final String TASK_CHAT = "chat";
+    public static final String TASK_CODE_SEARCH = "code_search";
     public static final String TASK_EMBED = "embed";
     public static final String EMBED_DISABLED = "disabled";
     public static final String EMBED_LEGACY = "legacy";
@@ -81,6 +82,8 @@ public class ModelRouting {
                 "可选：将资料转为语义向量。未配置时使用关键词检索；更换嵌入服务或模型后需重建索引"));
         META.put(TASK_CHAT, new TaskMeta(TASK_CHAT, "对话问答", MAIN,
                 "你要等的那个环节：工具调用纪律与回答质量都靠它"));
+        META.put(TASK_CODE_SEARCH, new TaskMeta(TASK_CODE_SEARCH, "代码智能检索", MAIN,
+                "在当前代码范围内反复搜索、读取代码行并归纳可核对的依据"));
         META.put(TASK_WIKI, new TaskMeta(TASK_WIKI, "主题 wiki 生成", LOCAL,
                 "批量长输出、摘要性质：本地 20~35 秒/页且 0 元，实测够用"));
         META.put(TASK_ENTITY, new TaskMeta(TASK_ENTITY, "实体/概念页编译", MAIN,

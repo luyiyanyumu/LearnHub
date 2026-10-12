@@ -541,10 +541,41 @@ html.dark .md-editor-preview.md-editor-preview mark {
   text-decoration-color: color-mix(in srgb, var(--app-brand) 40%, transparent);
   text-underline-offset: 3px;
   transition: text-decoration-color var(--dur-fast) ease;
+  overflow-wrap: anywhere;
 }
 
 .md-editor-preview.md-editor-preview a:hover {
   text-decoration-color: var(--app-brand);
+}
+
+/* Wiki 来源引用、笔记和代码区共用引用标签；长链接可在正文中换行。 */
+.wiki-body .md-editor-preview a[href^='#note-'],
+.wiki-body .md-editor-preview a[href^='#ref-'],
+.wiki-body .md-editor-preview a[href^='#file-'],
+.block-preview .tiptap a[href],
+.edit-page .md-editor-preview.md-editor-preview a[href],
+.code-page a[href],
+.code-page .code-source-link.el-button {
+  color: var(--app-brand-deep);
+  background: var(--app-brand-soft);
+  border-radius: 4px;
+  padding: 0 4px;
+  text-decoration: none;
+  font-size: 0.92em;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.wiki-body .md-editor-preview a[href^='#note-']:hover,
+.wiki-body .md-editor-preview a[href^='#ref-']:hover,
+.wiki-body .md-editor-preview a[href^='#file-']:hover,
+.block-preview .tiptap a[href]:hover,
+.edit-page .md-editor-preview.md-editor-preview a[href]:hover,
+.code-page a[href]:hover,
+.code-page .code-source-link.el-button:hover {
+  text-decoration: underline;
 }
 
 .md-editor-preview.md-editor-preview img {

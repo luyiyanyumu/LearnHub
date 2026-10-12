@@ -15,9 +15,11 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
+import java.util.function.LongSupplier;
 
 /**
  * 手写的 OpenAI 兼容 Chat Completions 客户端（面向 DeepSeek）。
@@ -46,6 +48,7 @@ public class DeepSeekClient {
             .connectTimeout(Duration.ofSeconds(15))
             .version(HttpClient.Version.HTTP_1_1)
             .build();
+    private final LongSupplier nanoTime = System::nanoTime;
 
     /** API Key 是否已配置（设置面板 > .env；未配置时前端给出引导提示） */
     public boolean isConfigured() {
@@ -476,17 +479,17 @@ public class DeepSeekClient {
                                int maxTokens, double temperature,
                                String thinking, String reasoningEffort,
                                Duration timeout) throws Exception {
+        long startNanos = nanoTime.getAsLong();
+        long timeoutNanos = timeout.toNanos();
         String payload = objectMapper.writeValueAsString(
                 buildBody(messages, tools, baseUrl, model, maxTokens, temperature, thinking, reasoningEffort, false));
-        HttpRequest request = HttpRequest.newBuilder()
+        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
                 .uri(URI.create(normalizeBase(baseUrl) + "/chat/completions"))
-                .timeout(timeout)
                 .header("Content-Type", "application/json; charset=utf-8")
                 .header("Authorization", "Bearer " + apiKey)
-                .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
-                .build();
+                .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8));
+        HttpRequest request = requestBuilder.timeout(remainingTimeout(startNanos, timeoutNanos)).build();
 
-        long start = System.currentTimeMillis();
         HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
         // 上游引擎崩溃时**自愈一次**：llama.cpp 这类服务在子进程挂掉之后会回 503 +
         // "the engine stopped unexpectedly (exit code …); the next request restarts it" ——
@@ -495,9 +498,11 @@ public class DeepSeekClient {
         // 崩过一次，阅读器翻译直接 500；紧接着的下一次请求 22 秒就正常返回了。
         if (engineRestartable(response.statusCode(), response.body())) {
             log.warn("上游模型引擎崩溃（status={} model={}），按其约定重试一次", response.statusCode(), model);
+            // 两次尝试共享调用方的原始期限，防止恢复请求再占用一整段超时预算。
+            request = requestBuilder.timeout(remainingTimeout(startNanos, timeoutNanos)).build();
             response = http.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
         }
-        long cost = System.currentTimeMillis() - start;
+        long cost = Duration.ofNanos(nanoTime.getAsLong() - startNanos).toMillis();
         if (response.statusCode() != 200) {
             // Vision providers may echo the input image or authentication data in an error body.
             log.error("AI 服务调用失败 status={} model={} cost={}ms", response.statusCode(), model, cost);
@@ -526,6 +531,14 @@ public class DeepSeekClient {
                 cost, model, messages.size(), isThinkingOn(model, thinking) ? "on" : "off",
                 finish, completion, reasoning);
         return new ChatResult(message, finish, prompt, completion, reasoning);
+    }
+
+    private Duration remainingTimeout(long startNanos, long timeoutNanos) throws HttpTimeoutException {
+        long remainingNanos = timeoutNanos - (nanoTime.getAsLong() - startNanos);
+        if (remainingNanos <= 0) {
+            throw new HttpTimeoutException("AI 请求已用完本次调用的超时预算");
+        }
+        return Duration.ofNanos(remainingNanos);
     }
 
     private String truncate(String s, int max) {

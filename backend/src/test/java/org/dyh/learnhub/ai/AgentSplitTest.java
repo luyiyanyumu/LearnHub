@@ -81,6 +81,104 @@ class AgentSplitTest {
         assertTrue(chunks.stream().skip(1).anyMatch(c -> c.startsWith("````") || c.contains("````")));
     }
 
+    @Test
+    @DisplayName("跨分片边界的多行公式保留内部空行")
+    void blankLinesInsideMathAreNotBoundaries() {
+        String formula = "$$\n\\begin{aligned}\ns(q,d) &= \\langle E_q(q), E_d(d) \\rangle \\\\\n\n"
+                + "p(y \\mid x) &= \\frac{e^{s_y}}{\\sum_j e^{s_j}}\n\\end{aligned}\n$$";
+        String prefix = "前文：" + "合成说明".repeat(970);
+        String text = prefix + "\n\n" + formula + "\n\n结论：相似度可表示为向量内积。";
+        assertTrue(text.length() > AgentService.POLISH_CHUNK_CHARS);
+
+        List<String> chunks = AgentService.splitForPolish(text);
+        assertEquals(2, chunks.size());
+        assertTrue(chunks.get(1).contains(formula), "公式和内部空行必须原样处于同一分片");
+        assertEquals(text, String.join("\n\n", chunks));
+    }
+
+    @Test
+    @DisplayName("超长 aligned 公式整体保留，不补写或拆分数学环境")
+    void hugeAlignedMathStaysIntact() {
+        String formula = "$$\n\\begin{aligned}\n"
+                + "a_{i+1} &= a_i + \\sum_{j=1}^{n} w_j x_j \\\\\n\n".repeat(210)
+                + "\\end{aligned}\n$$";
+        assertTrue(formula.length() > AgentService.POLISH_CHUNK_CHARS * 2);
+
+        assertEquals(List.of(formula), AgentService.splitForPolish(formula));
+        assertEquals(List.of(formula), AgentService.hardSplit(formula));
+    }
+
+    @Test
+    @DisplayName("公式前后无空行时，硬切仍只能发生在公式外")
+    void hardSplitKeepsMathBetweenAdjacentProse() {
+        String prefix = "公式之前".repeat(980);
+        String formula = "$$\n\\begin{aligned}\n"
+                + "f(x) &= \\sum_{i=1}^{n} x_i^2 \\\\\n".repeat(180)
+                + "\\end{aligned}\n$$";
+        String suffix = "公式之后".repeat(980);
+        String block = prefix + "\n" + formula + "\n" + suffix;
+
+        List<String> chunks = AgentService.hardSplit(block);
+        assertEquals(List.of(prefix, formula, suffix), chunks);
+        assertEquals(block, String.join("\n", chunks));
+    }
+
+    @Test
+    @DisplayName("兼容方括号数学块、同一行公式以及多个公式之间的正文")
+    void multipleMathDelimitersAndProseKeepOrder() {
+        String first = "\\[\n\\begin{aligned}\nA &= BC \\\\\n\nD &= EF\n\\end{aligned}\n\\]";
+        String middle = "中间解释".repeat(980);
+        String second = "$$s(q,d) = \\langle q,d \\rangle$$";
+        String tail = "后续解释".repeat(980);
+        String text = first + "\n\n" + middle + "\n\n" + second + "\n\n" + tail;
+
+        List<String> chunks = AgentService.splitForPolish(text);
+        assertTrue(chunks.size() > 1);
+        assertTrue(chunks.stream().anyMatch(c -> c.contains(first)));
+        assertTrue(chunks.stream().anyMatch(c -> c.contains(second)));
+        assertEquals(text, String.join("\n\n", chunks));
+    }
+
+    @Test
+    @DisplayName("代码围栏里的 $$ 不被当成数学块，长代码仍正常续接")
+    void dollarsInsideCodeDoNotStartMath() {
+        String block = "```text\n$$\n"
+                + "这里是合成代码示例行，不是公式。\n\n".repeat(650)
+                + "```";
+
+        List<String> chunks = AgentService.splitForPolish(block);
+        assertTrue(chunks.size() > 1, "代码里的未配对 $$ 不应阻止正常分片");
+        for (String chunk : chunks) {
+            assertTrue(chunk.startsWith("```text\n"));
+            assertTrue(chunk.endsWith("```"));
+            assertEquals(2, chunk.lines().filter(l -> FENCE_LINE.matcher(l).matches()).count());
+        }
+        assertEquals(1, chunks.stream().mapToLong(c -> c.lines().filter("$$"::equals).count()).sum());
+    }
+
+    @Test
+    @DisplayName("同一行闭合的数学块不会吞掉后续长正文")
+    void oneLineMathDoesNotKeepFollowingProseTogether() {
+        String formula = "$$f(x)=x^2$$";
+        String prose = "下一行仍是普通正文，不属于数学块。\n".repeat(650).stripTrailing();
+        List<String> chunks = AgentService.hardSplit(formula + "\n" + prose);
+
+        assertTrue(chunks.size() > 1);
+        assertTrue(chunks.stream().allMatch(c -> c.length() <= AgentService.POLISH_CHUNK_CHARS));
+        assertEquals(formula + "\n" + prose, String.join("\n", chunks));
+    }
+
+    @Test
+    @DisplayName("未闭合数学块和转义的分隔符保留到文末，不制造半个公式")
+    void unclosedMathAndEscapedDelimitersAreNotSplit() {
+        String formula = "$$\n\\begin{aligned}\n"
+                + "x &= \\text{literal \\$$} + y \\\\\n\n".repeat(250);
+        assertTrue(formula.length() > AgentService.POLISH_CHUNK_CHARS);
+
+        assertEquals(List.of(formula), AgentService.splitForPolish(formula));
+        assertEquals(List.of(formula), AgentService.hardSplit(formula));
+    }
+
     // ------------------------------------------------------------------
     // hardSplit：超长代码块 / 超长表格
     // ------------------------------------------------------------------

@@ -1,6 +1,7 @@
 package org.dyh.learnhub.controller;
 
 import jakarta.validation.Valid;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dyh.learnhub.ai.AgentService;
@@ -32,6 +33,13 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 智能体接口：
@@ -77,9 +85,24 @@ public class AiController {
         return t;
     });
 
+    /** Chat must not wait behind a long polish task; bound both workers and queued requests. */
+    private final ExecutorService chatStreamPool = new ThreadPoolExecutor(4, 4, 0L, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(24), r -> {
+                Thread thread = new Thread(r, "ai-chat-stream");
+                thread.setDaemon(true);
+                return thread;
+            });
+    private final ScheduledExecutorService chatHeartbeats = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread thread = new Thread(r, "ai-chat-heartbeat");
+        thread.setDaemon(true);
+        return thread;
+    });
+
     @PreDestroy
     void shutdownStreamPool() {
         polishStreamPool.shutdownNow();
+        chatStreamPool.shutdownNow();
+        chatHeartbeats.shutdownNow();
     }
 
     @GetMapping("/status")
@@ -254,6 +277,69 @@ public class AiController {
     @PostMapping("/chat")
     public Result<AiChatVO> chat(@Valid @RequestBody AiChatRequest req) {
         return Result.ok(agentService.chat(req));
+    }
+
+    /** POST/fetch SSE: session → progress(upsert by id) → result, or error. No Result envelope. */
+    @PostMapping(value = "/chat-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter chatStream(@Valid @RequestBody AiChatRequest req, HttpServletResponse response) {
+        response.setHeader("Cache-Control", "no-cache, no-transform");
+        response.setHeader("X-Accel-Buffering", "no");
+        SseEmitter emitter = new SseEmitter(360_000L);
+        AtomicBoolean connected = new AtomicBoolean(true);
+        ScheduledFuture<?> heartbeat = chatHeartbeats.scheduleAtFixedRate(() -> {
+            if (!connected.get()) return;
+            try { emitter.send(SseEmitter.event().comment("keep-alive")); }
+            catch (Exception ignored) { connected.set(false); }
+        }, 0, 10, TimeUnit.SECONDS);
+        Runnable close = () -> {
+            connected.set(false);
+            heartbeat.cancel(false);
+        };
+        emitter.onCompletion(close);
+        emitter.onTimeout(() -> { close.run(); emitter.complete(); });
+        emitter.onError(error -> close.run());
+        try {
+            chatStreamPool.execute(() -> {
+                try {
+                    AiChatVO answer = agentService.chat(req, new AgentService.ChatListener() {
+                        @Override public void onSession(String sessionId) {
+                            sendChat(emitter, connected, "session", Map.of("sessionId", sessionId));
+                        }
+                        @Override public void onProgress(Map<String, Object> progress) {
+                            sendChat(emitter, connected, "progress", progress);
+                        }
+                    });
+                    sendChat(emitter, connected, "result", answer);
+                } catch (Exception failure) {
+                    log.warn("流式对话未完成: {}", failure.getClass().getSimpleName());
+                    sendChat(emitter, connected, "error", Map.of("message", chatFailureMessage(failure)));
+                } finally {
+                    close.run();
+                    emitter.complete();
+                }
+            });
+        } catch (RejectedExecutionException full) {
+            sendChat(emitter, connected, "error", Map.of("message", "当前处理中的对话较多，请稍后重试。本次消息尚未开始处理。"));
+            close.run();
+            emitter.complete();
+        }
+        return emitter;
+    }
+
+    private static void sendChat(SseEmitter emitter, AtomicBoolean connected, String event, Object data) {
+        if (!connected.get()) return;
+        try { emitter.send(SseEmitter.event().name(event).data(data, MediaType.APPLICATION_JSON)); }
+        catch (Exception ignored) { connected.set(false); }
+        // A disconnected browser must not undo approvals or interrupt the final history save.
+    }
+
+    private static String chatFailureMessage(Exception failure) {
+        if (failure instanceof AgentService.ChatBusyException) return failure.getMessage();
+        String message = failure.getMessage() == null ? "" : failure.getMessage();
+        if (message.contains("未配置") || message.contains("没有配置")) return "请先在设置中配置可用的对话模型，再重新发送。";
+        if (message.contains("超时") || message.toLowerCase(java.util.Locale.ROOT).contains("timeout"))
+            return "本轮处理超时，已完成的过程和待确认改动会保留在会话中。可以缩小问题范围后继续。";
+        return "本轮未能完成，请稍后继续。已完成的过程和待确认改动会保留在会话中。";
     }
 
     /**

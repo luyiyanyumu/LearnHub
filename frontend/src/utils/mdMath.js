@@ -151,19 +151,21 @@ function mathBlock(state, startLine, endLine, silent) {
 /**
  * 把数学公式接进一个 markdown-it 实例。
  * 用法：`md.use(mdMath)` —— 与 `mdCallout` / `mdAnchor` 是同一类插件。
+ * 块编辑器使用 `md.use(mdMath, { renderKatex: false })`：只解析 TeX 外壳，
+ * 由节点视图完成一次渲染，避免先生成整套 KaTeX DOM 再被编辑器解析丢弃。
  */
-export function mdMath(md) {
+export function mdMath(md, { renderKatex = true } = {}) {
   md.inline.ruler.before('escape', 'math_inline', mathInline)
   md.block.ruler.before('fence', 'math_block', mathBlock, {
     alt: ['paragraph', 'reference', 'blockquote', 'list'],
   })
   md.renderer.rules.math_inline = (tokens, idx) => {
     const tex = tokens[idx].content
-    return `<span class="math-inline" data-tex="${escapeAttr(tex)}">${renderMathToHtml(tex)}</span>`
+    return `<span class="math-inline" data-tex="${escapeAttr(tex)}">${renderKatex ? renderMathToHtml(tex) : ''}</span>`
   }
   md.renderer.rules.math_block = (tokens, idx) => {
     const tex = tokens[idx].content
-    return `<div class="math-block" data-tex="${escapeAttr(tex)}">${renderMathToHtml(tex, { display: true })}</div>\n`
+    return `<div class="math-block" data-tex="${escapeAttr(tex)}">${renderKatex ? renderMathToHtml(tex, { display: true }) : ''}</div>\n`
   }
 }
 

@@ -111,6 +111,27 @@
     </dependencies>
 
     <build>
+        <!-- The agent inspects version-matched source, including from a standalone jar.
+             Only source files are bundled here; configuration, uploaded data and DB files are excluded. -->
+        <resources>
+            <resource><directory>src/main/resources</directory></resource>
+            <resource>
+                <directory>src/main/java</directory>
+                <targetPath>agent/project-source/backend/src/main/java</targetPath>
+                <includes><include>**/*.java</include></includes>
+            </resource>
+            <resource>
+                <directory>../frontend/src</directory>
+                <targetPath>agent/project-source/frontend/src</targetPath>
+                <includes><include>**/*.vue</include><include>**/*.js</include><include>**/*.css</include></includes>
+                <excludes><exclude>**/*.test.js</exclude></excludes>
+            </resource>
+            <resource>
+                <directory>src/main/resources</directory>
+                <targetPath>agent/project-source/backend/src/main/resources</targetPath>
+                <includes><include>note-edit-tool.json</include></includes>
+            </resource>
+        </resources>
         <plugins>
             <plugin>
                 <groupId>org.springframework.boot</groupId>

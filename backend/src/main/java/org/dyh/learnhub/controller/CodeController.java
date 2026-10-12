@@ -4,6 +4,7 @@ import lombok.RequiredArgsConstructor;
 import org.dyh.learnhub.common.Result;
 import org.dyh.learnhub.service.CodeImportService;
 import org.dyh.learnhub.service.CodeLibraryService;
+import org.dyh.learnhub.service.CodeAgenticSearchService;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -33,6 +34,7 @@ public class CodeController {
 
     private final CodeLibraryService code;
     private final CodeImportService importer;
+    private final CodeAgenticSearchService agenticSearch;
 
     // ---------------- 项目 ----------------
 
@@ -103,6 +105,12 @@ public class CodeController {
     }
 
 // ---------------- 文件夹导入 ----------------
+
+    @PostMapping("/agentic-search")
+    public Result<Map<String, Object>> agenticSearch(@RequestBody CodeAgenticSearchService.Request request) {
+        return Result.ok(agenticSearch.search(request));
+    }
+
 
     /**
      * 导入一个文件夹：前端读文本 + 相对路径，后端按语言识别并过滤噪声，逐文件入库建索引。

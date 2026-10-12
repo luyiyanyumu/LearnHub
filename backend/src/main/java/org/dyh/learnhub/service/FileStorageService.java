@@ -74,6 +74,7 @@ public class FileStorageService {
     private final LearningActivityService learningActivity;
     /** 改名时要同步 kb_chunk 里的冗余标题（检索结果展示用） */
     private final org.dyh.learnhub.mapper.KbChunkMapper kbChunkMapper;
+    private final FolderService folderService;
 
     /** 文件存放目录：后端工作目录下的 uploads/ */
     private Path storageDir() {
@@ -88,7 +89,11 @@ public class FileStorageService {
 
     /** 资料列表：支持分类 / 关键词过滤 */
     public List<Map<String, Object>> list(Long categoryId, String kw) {
-        return fileInfoMapper.selectList(listWrapper(categoryId, kw)).stream().map(this::toMap).collect(Collectors.toList());
+        return list(categoryId, kw, null);
+    }
+
+    public List<Map<String, Object>> list(Long categoryId, String kw, Long folderId) {
+        return fileInfoMapper.selectList(listWrapper(categoryId, kw, folderId)).stream().map(this::toMap).collect(Collectors.toList());
     }
 
     /**
@@ -104,9 +109,13 @@ public class FileStorageService {
      *                这里显式夹一次，免得以后有人调大那边时这里悄悄变成全量）
      */
     public Map<String, Object> page(Long categoryId, String kw, Integer current, Integer size) {
+        return page(categoryId, kw, current, size, null);
+    }
+
+    public Map<String, Object> page(Long categoryId, String kw, Integer current, Integer size, Long folderId) {
         long pageNo = current == null || current < 1 ? 1 : current;
         long pageSize = size == null || size < 1 ? 20 : Math.min(size, PAGE_SIZE_MAX);
-        Page<FileInfo> p = fileInfoMapper.selectPage(new Page<>(pageNo, pageSize), listWrapper(categoryId, kw));
+        Page<FileInfo> p = fileInfoMapper.selectPage(new Page<>(pageNo, pageSize), listWrapper(categoryId, kw, folderId));
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("list", p.getRecords().stream().map(this::toMap).toList());
         out.put("total", p.getTotal());
@@ -116,9 +125,14 @@ public class FileStorageService {
     }
 
     /** 列表与分页共用的过滤条件（两处必须一致，否则"翻页后条数对不上"这类 bug 极难查） */
-    private LambdaQueryWrapper<FileInfo> listWrapper(Long categoryId, String kw) {
+    private LambdaQueryWrapper<FileInfo> listWrapper(Long categoryId, String kw, Long folderId) {
         LambdaQueryWrapper<FileInfo> wrapper = Wrappers.<FileInfo>lambdaQuery()
                 .orderByDesc(FileInfo::getCreatedAt);
+        folderService.validateFilter("file", folderId);
+        if (folderId != null) {
+            if (folderId == 0) wrapper.isNull(FileInfo::getFolderId);
+            else wrapper.eq(FileInfo::getFolderId, folderId);
+        }
         if (categoryId != null && categoryId > 0) {
             wrapper.eq(FileInfo::getCategoryId, categoryId);
         }
@@ -176,6 +190,11 @@ public class FileStorageService {
     /** 上传文件：保存到磁盘 + 写入元数据 + **立刻抽正文**（抽不到也记录原因） */
     @Transactional
     public FileInfo upload(MultipartFile file, Long categoryId) {
+        return upload(file, categoryId, null);
+    }
+
+    @Transactional
+    public FileInfo upload(MultipartFile file, Long categoryId, Long folderId) {
         if (file == null || file.isEmpty()) {
             throw new IllegalArgumentException("请选择要上传的文件");
         }
@@ -187,7 +206,7 @@ public class FileStorageService {
         } catch (IOException e) {
             throw new IllegalStateException("读取上传内容失败: " + e.getMessage(), e);
         }
-        return uploadBytes(originName, bytes, categoryId);
+        return uploadBytes(originName, bytes, categoryId, folderId);
     }
 
     /**
@@ -200,9 +219,15 @@ public class FileStorageService {
      */
     @Transactional
     public FileInfo uploadBytes(String originName, byte[] bytes, Long categoryId) {
+        return uploadBytes(originName, bytes, categoryId, null);
+    }
+
+    @Transactional
+    public FileInfo uploadBytes(String originName, byte[] bytes, Long categoryId, Long folderId) {
         if (bytes == null || bytes.length == 0) {
             throw new IllegalArgumentException("文件内容为空");
         }
+        Long targetFolder = folderService.requireTarget("file", folderId);
         // cleanPath 只管路径分隔符；normalizeOriginName 再去控制字符并截到列上限。
         // 这里是**所有导入路径的唯一汇聚点**（网页上传 / 智能体存论文 / MCP / 生成 Word），
         // 所以放在这一处就够了，不必在每个调用方各写一遍。
@@ -224,6 +249,7 @@ public class FileStorageService {
         info.setSize((long) bytes.length);
         info.setExt(ext);
         info.setCategoryId(categoryId);
+        info.setFolderId(targetFolder);
         info.setTextStatus("pending");
         fileInfoMapper.insert(info);
         learningActivity.record("file", info.getId());
@@ -947,6 +973,7 @@ public class FileStorageService {
         m.put("readPage", info.getReadPage());
         m.put("readScale", info.getReadScale());
         m.put("readMode", info.getReadMode());
+        m.put("folderId", info.getFolderId());
         return m;
     }
 

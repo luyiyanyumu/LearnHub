@@ -1,6 +1,7 @@
 package org.dyh.learnhub.service;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dyh.learnhub.entity.CodeRepo;
@@ -210,18 +211,25 @@ public class CodeLibraryService {
 
     /** @param unassigned true = 只看"未归类"的片段（repoId 为空） */
     public List<Map<String, Object>> search(String q, String mode, String lang, Long repoId, boolean unassigned, int limit) {
+        return search(q, mode, lang, repoId, unassigned, null, limit);
+    }
+
+    /** Scope is applied in SQL before candidate limits, including symbol lookup. */
+    public List<Map<String, Object>> search(String q, String mode, String lang, Long repoId,
+                                          boolean unassigned, String path, int limit) {
         String query = q == null ? "" : q.trim();
         if (query.isEmpty()) {
-            return list(lang, repoId, limit);
+            return list(lang, repoId, unassigned, path, limit);
         }
         String m = StringUtils.hasText(mode) ? mode.trim() : "all";
+        int take = Math.max(1, Math.min(200, limit));
         // LinkedHashMap 去重：同一个片段可能同时命中符号与关键词
         Map<Long, Map<String, Object>> hit = new LinkedHashMap<>();
         if (m.equals("symbol") || m.equals("all")) {
-            searchBySymbol(query, hit);
+            searchBySymbol(query, lang, repoId, unassigned, path, hit);
         }
         if (m.equals("keyword") || m.equals("all")) {
-            searchByKeyword(query, hit);
+            searchByKeyword(query, lang, repoId, unassigned, path, hit);
         }
         List<Map<String, Object>> out = new ArrayList<>();
         for (Map<String, Object> row : hit.values()) {
@@ -237,24 +245,26 @@ public class CodeLibraryService {
             }
             out.add(row);
         }
-        return out.size() > limit ? new ArrayList<>(out.subList(0, limit)) : out;
+        return out.size() > take ? new ArrayList<>(out.subList(0, take)) : out;
     }
 
-    private void searchBySymbol(String query, Map<Long, Map<String, Object>> hit) {
+    private void searchBySymbol(String query, String lang, Long repoId, boolean unassigned, String path,
+                                Map<Long, Map<String, Object>> hit) {
         String esc = escapeLike(query);
-        List<CodeSymbol> syms = symbolMapper.selectList(Wrappers.<CodeSymbol>lambdaQuery()
+        List<CodeSymbol> syms = symbolMapper.selectList(symbolScope(lang, repoId, unassigned, path)
                 .and(w -> w.eq(CodeSymbol::getName, query).or().likeRight(CodeSymbol::getName, esc))
                 .orderByAsc(CodeSymbol::getName)
                 .last("LIMIT 100"));
         if (syms.isEmpty()) {
             // 前缀没命中时退一步做包含匹配（"WithHeadings" → splitWithHeadings）
-            syms = symbolMapper.selectList(Wrappers.<CodeSymbol>lambdaQuery()
+            syms = symbolMapper.selectList(symbolScope(lang, repoId, unassigned, path)
                     .like(CodeSymbol::getName, esc)
                     .last("LIMIT 100"));
         }
         for (CodeSymbol sym : syms) {
             Map<String, Object> row = hit.computeIfAbsent(sym.getSnippetId(), sid -> {
-                CodeSnippet s = snippetMapper.selectById(sid);
+                CodeSnippet s = snippetMapper.selectOne(snippetScope(lang, repoId, unassigned, path)
+                        .eq(CodeSnippet::getId, sid));
                 return s == null ? null : view(s);
             });
             if (row == null) {
@@ -270,12 +280,14 @@ public class CodeLibraryService {
         }
     }
 
-    private void searchByKeyword(String query, Map<Long, Map<String, Object>> hit) {
+    private void searchByKeyword(String query, String lang, Long repoId, boolean unassigned, String path,
+                                 Map<Long, Map<String, Object>> hit) {
         String esc = escapeLike(query);
-        List<CodeSnippet> rows = snippetMapper.selectList(Wrappers.<CodeSnippet>lambdaQuery()
+        List<CodeSnippet> rows = snippetMapper.selectList(snippetScope(lang, repoId, unassigned, path)
                 .and(w -> w.like(CodeSnippet::getTitle, esc)
                         .or().like(CodeSnippet::getExplainText, esc)
                         .or().like(CodeSnippet::getSymbols, esc)
+                        .or().like(CodeSnippet::getFilePath, esc)
                         .or().like(CodeSnippet::getCode, esc))
                 .orderByDesc(CodeSnippet::getUpdatedAt)
                 .last("LIMIT 100"));
@@ -304,10 +316,11 @@ public class CodeLibraryService {
     }
 
     public List<Map<String, Object>> list(String lang, Long repoId, boolean unassigned, int limit) {
-        List<CodeSnippet> rows = snippetMapper.selectList(Wrappers.<CodeSnippet>lambdaQuery()
-                .eq(StringUtils.hasText(lang), CodeSnippet::getLang, lang)
-                .isNull(unassigned, CodeSnippet::getRepoId)
-                .eq(!unassigned && repoId != null, CodeSnippet::getRepoId, repoId)
+        return list(lang, repoId, unassigned, null, limit);
+    }
+
+    public List<Map<String, Object>> list(String lang, Long repoId, boolean unassigned, String path, int limit) {
+        List<CodeSnippet> rows = snippetMapper.selectList(snippetScope(lang, repoId, unassigned, path)
                 .orderByDesc(CodeSnippet::getUpdatedAt)
                 .last("LIMIT " + Math.max(1, Math.min(200, limit))));
         List<Map<String, Object>> out = new ArrayList<>();
@@ -315,6 +328,75 @@ public class CodeLibraryService {
             out.add(view(s));
         }
         return out;
+    }
+
+    private static LambdaQueryWrapper<CodeSnippet> snippetScope(String lang, Long repoId,
+                                                                 boolean unassigned, String path) {
+        return Wrappers.<CodeSnippet>lambdaQuery()
+                .eq(StringUtils.hasText(lang), CodeSnippet::getLang, lang)
+                .isNull(unassigned, CodeSnippet::getRepoId)
+                .eq(!unassigned && repoId != null, CodeSnippet::getRepoId, repoId)
+                .like(StringUtils.hasText(path), CodeSnippet::getFilePath,
+                        StringUtils.hasText(path) ? escapeLike(path.trim()) : null);
+    }
+
+    private static LambdaQueryWrapper<CodeSymbol> symbolScope(String lang, Long repoId,
+                                                               boolean unassigned, String path) {
+        StringBuilder sql = new StringBuilder("EXISTS (SELECT 1 FROM code_snippet scoped "
+                + "WHERE scoped.id = code_symbol.snippet_id");
+        List<Object> values = new ArrayList<>();
+        if (StringUtils.hasText(lang)) {
+            sql.append(" AND scoped.lang = {").append(values.size()).append('}');
+            values.add(lang);
+        }
+        if (unassigned) sql.append(" AND scoped.repo_id IS NULL");
+        else if (repoId != null) {
+            sql.append(" AND scoped.repo_id = {").append(values.size()).append('}');
+            values.add(repoId);
+        }
+        if (StringUtils.hasText(path)) {
+            sql.append(" AND scoped.file_path LIKE {").append(values.size()).append('}');
+            values.add("%" + escapeLike(path.trim()) + "%");
+        }
+        return Wrappers.<CodeSymbol>lambdaQuery().apply(sql.append(')').toString(), values.toArray());
+    }
+
+    /** Never load an out-of-scope body. Used again when validating a search response. */
+    public Map<String, Object> scopedView(Long id, String lang, Long repoId, boolean unassigned) {
+        CodeSnippet snippet = snippetMapper.selectOne(snippetScope(lang, repoId, unassigned, null)
+                .eq(CodeSnippet::getId, id));
+        return snippet == null ? Map.of() : view(snippet);
+    }
+
+    /** A bounded complete-line window, with server-produced line numbers and quote. */
+    public Map<String, Object> readWindow(Long id, String lang, Long repoId, boolean unassigned,
+                                         int startLine, int endLine) {
+        CodeSnippet snippet = snippetMapper.selectOne(snippetScope(lang, repoId, unassigned, null)
+                .eq(CodeSnippet::getId, id));
+        if (snippet == null || snippet.getCode() == null) return Map.of();
+        String[] lines = snippet.getCode().split("\\r\\n|\\n|\\r", -1);
+        if (startLine < 1 || endLine < startLine || startLine > lines.length) return Map.of();
+        int end = (int) Math.min(lines.length, Math.min((long) endLine, (long) startLine + 79));
+        StringBuilder quote = new StringBuilder(), numbered = new StringBuilder();
+        int actualEnd = startLine - 1;
+        for (int line = startLine; line <= end; line++) {
+            String value = lines[line - 1];
+            if (quote.length() + value.length() + (actualEnd < startLine ? 0 : 1) > 4000) break;
+            if (actualEnd >= startLine) quote.append('\n');
+            quote.append(value);
+            numbered.append(line).append(": ").append(value).append('\n');
+            actualEnd = line;
+        }
+        if (actualEnd < startLine) return Map.of();
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("snippetId", id);
+        result.put("view", view(snippet));
+        result.put("startLine", startLine);
+        result.put("endLine", actualEnd);
+        result.put("quote", quote.toString());
+        result.put("numberedCode", numbered.toString());
+        result.put("hasMore", actualEnd < lines.length);
+        return result;
     }
 
     /** 统计：给界面显示"这块有多少东西"，也给智能体的工具描述用 */

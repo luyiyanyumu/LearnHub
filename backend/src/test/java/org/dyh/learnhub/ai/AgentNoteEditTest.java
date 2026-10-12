@@ -75,7 +75,7 @@ class AgentNoteEditTest {
         var action = new AgentPendingAction();
         action.setId(8L); action.setSessionId("s1"); action.setStatus("pending"); action.setToolName("edit_note");
         action.setArgsJson(ARGS); action.setSummary("删除旧字");
-        when(sessions.getAction(8L)).thenReturn(action);
+        when(sessions.claimAction(8L)).thenReturn(action);
         when(notes.editContent(eq(12L), any())).thenThrow(new IllegalArgumentException("笔记正文已变化"));
         var result = agent.executePendingAction(8L);
         assertEquals(false, result.get("ok"));

@@ -8,6 +8,7 @@ import { CellSelection, TableMap, cellAround } from '@tiptap/pm/tables'
 import StarterKit from '@tiptap/starter-kit'
 import { TaskList, TaskItem } from '@tiptap/extension-list'
 import { CodeBlockCm } from '../utils/codeBlockCm'
+import { setCodeBlockViewportActivity, clearCodeBlockViewportActivity } from '../utils/codeBlockViewport.js'
 import { Callout } from '../utils/calloutNode'
 import { Details, Summary } from '../utils/detailsNode'
 import { Superscript, Subscript, Highlight, FontStyle } from '../utils/inlineMarks'
@@ -33,6 +34,7 @@ import { runBlockTool, applyBlockFormat } from '../utils/blockToolbar'
 import { nextTableCell } from '../utils/tableNavigation'
 import { insertTableLineBreak } from '../utils/tableLineBreak'
 import { createDeferredSync } from '../utils/deferredSync'
+import { createExternalContentSync } from '../utils/externalContentSync'
 import { HeadingAnchorAttr, findNoteAnchor } from '../utils/headingAnchorAttr'
 import BlockActionMenu from './BlockActionMenu.vue'
 
@@ -115,7 +117,8 @@ function readTableContext(ed) {
   // A plain text caret in a table is for editing and only keeps the toolbar
   // visible while the editor still has focus. CellSelection remains visible
   // after a drag/Shift-click so the range can be acted on from the toolbar.
-  const toolbarHasFocus = document.activeElement?.closest?.('.block-table-toolbar')
+  const focusedToolbar = document.activeElement?.closest?.('.block-table-toolbar')
+  const toolbarHasFocus = focusedToolbar && previewRoot.value?.contains(focusedToolbar)
   if (!ed.view.hasFocus() && !toolbarHasFocus) return null
   const $cell = isCellSelection ? selection.$anchorCell : cellAround(selection.$from)
   if (!$cell) return null
@@ -162,7 +165,7 @@ function readTableContext(ed) {
 
 function refreshTableContext() {
   // 只读渲染不显示表格工具栏：这里直接清空，避免只读场景还去读选区/算表格上下文
-  tableContext.value = props.readonly ? null : readTableContext(editor.value)
+  tableContext.value = props.readonly || !props.active ? null : readTableContext(editor.value)
 }
 
 function selectCurrentCell() {
@@ -214,23 +217,69 @@ const ExcelTableNavigation = Extension.create({
  */
 const props = defineProps({
   content: { type: String, default: '' },
+  active: { type: Boolean, default: true },
+  visible: { type: Boolean, default: true },
   linkBase: { type: String, default: '' },
   readonly: { type: Boolean, default: false },
   compact: { type: Boolean, default: false },
   sourceLinesActive: { type: Boolean, default: true },
 })
-const emit = defineEmits(['update', 'outline', 'change'])
+const emit = defineEmits(['update', 'outline', 'change', 'layout'])
 const editor = shallowRef(null)
 const previewRoot = ref(null)
 const actions = ref(null)
 const tableContext = ref(null)
-const md = new MarkdownIt({ html: true, linkify: true, breaks: true }).use(mdCallout).use(mdAnchor).use(mdMath).use(markdownItSup).use(markdownItSub).use(markdownItMark).use(mdDataLine)
+const md = new MarkdownIt({ html: true, linkify: true, breaks: true }).use(mdCallout).use(mdAnchor).use(mdMath, { renderKatex: false }).use(markdownItSup).use(markdownItSub).use(markdownItMark).use(mdDataLine)
 
 /** 上次 emit 出去的 Markdown：用于识别"自己的回显"，避免 setContent 把光标重置 */
 let lastEmitted = ''
 let revealedHash = ''
 const toolbarTargets = new Set()
 const contentSync = createDeferredSync(syncDown)
+let lastPropContent = props.content || ''
+let layoutFrame = 0
+const externalSync = createExternalContentSync({
+  current: () => lastEmitted, apply: applyExternalContent, onExternal: contentSync.cancel,
+})
+
+function previewAvailable() { return props.active && props.visible && Boolean(editor.value) }
+
+function queueLayoutChange() {
+  if (!previewAvailable() || layoutFrame) return
+  layoutFrame = requestAnimationFrame(async () => {
+    layoutFrame = 0
+    await nextTick()
+    if (previewAvailable()) emit('layout')
+  })
+}
+
+function applyExternalContent(markdown) {
+  const ed = editor.value
+  if (!ed || ed.isDestroyed) return
+  contentSync.cancel()
+  invalidateToolbarTargets()
+  ed.commands.setContent(renderContent(markdown), { emitUpdate: false })
+  lastEmitted = markdown
+  refreshTableContext()
+  actions.value?.close()
+  nextTick(revealLinkedBlock)
+  queueLayoutChange()
+}
+
+function receiveExternalContent(markdown) {
+  externalSync.receive(markdown)
+}
+
+function flushExternalContent() {
+  externalSync.setAvailable(previewAvailable())
+  return externalSync.flush()
+}
+function prepareExternalContent() {
+  externalSync.setAvailable(previewAvailable())
+  return externalSync.prepare()
+}
+function pauseComposition() { contentSync.pause(); externalSync.pause() }
+function resumeComposition() { externalSync.resume(); contentSync.resume() }
 
 /** Convert saved Markdown tasks back into editable checkbox nodes. */
 function renderContent(markdown) {
@@ -302,8 +351,9 @@ function focusToolbarSelection(ed) {
 }
 
 function runTool(name, arg) {
+  if (!prepareExternalContent()) return false
   const ed = editor.value
-  if (!ed || ed.isDestroyed || props.readonly) return false
+  if (!ed || ed.isDestroyed || props.readonly || !previewAvailable()) return false
   captureCodeFocus({ target: document.activeElement })
   let applied = false
   if (name === 'markdown') {
@@ -316,8 +366,9 @@ function runTool(name, arg) {
 }
 
 function applyFormat(format) {
+  if (!prepareExternalContent()) return false
   const ed = editor.value
-  if (!ed || ed.isDestroyed || props.readonly) return false
+  if (!ed || ed.isDestroyed || props.readonly || !previewAvailable()) return false
   captureCodeFocus({ target: document.activeElement })
   const applied = applyBlockFormat(ed, format)
   if (applied) focusToolbarSelection(ed)
@@ -326,14 +377,17 @@ function applyFormat(format) {
 
 /** Dialogs retain a mapped selection instead of reading a caret after focus moves. */
 function captureToolbarTarget() {
+  if (!prepareExternalContent()) return null
   const ed = editor.value
-  if (!ed || ed.isDestroyed || props.readonly) return null
+  if (!ed || ed.isDestroyed || props.readonly || !previewAvailable()) return null
   captureCodeFocus({ target: document.activeElement })
   const selection = ed.state.selection
+  const selectedText = selection instanceof NodeSelection && selection.node.isBlock
+    ? '' : ed.state.doc.textBetween(selection.from, selection.to, '\n', '\n')
   const target = { bookmark: selection.getBookmark(), from: selection.from, to: selection.to, storedMarks: ed.state.storedMarks, invalid: false }
   toolbarTargets.add(target)
   const valid = () => {
-    if (target.invalid || ed.isDestroyed || editor.value !== ed) return false
+    if (target.invalid || ed.isDestroyed || editor.value !== ed || !previewAvailable() || externalSync.hasPending()) return false
     try {
       const restored = target.bookmark.resolve(ed.state.doc)
       return restored.from === target.from && restored.to === target.to
@@ -342,6 +396,8 @@ function captureToolbarTarget() {
   }
   const release = () => { target.invalid = true; toolbarTargets.delete(target) }
   const apply = (operation) => {
+    // A queued source replacement can invalidate this captured selection.
+    if (!prepareExternalContent()) return false
     if (!valid()) return false
     let restored
     try { restored = target.bookmark.resolve(ed.state.doc) } catch { release(); return false }
@@ -357,12 +413,12 @@ function captureToolbarTarget() {
     release()
     return result
   }
-  return { get valid() { return valid() }, release, runTool: (name, arg) => apply(() => runTool(name, arg)), applyFormat: (format) => apply(() => applyFormat(format)) }
+  return { selectedText, get valid() { return valid() }, release, runTool: (name, arg) => apply(() => runTool(name, arg)), applyFormat: (format) => apply(() => applyFormat(format)) }
 }
 
 function captureCodeFocus(event) {
   const ed = editor.value
-  if (!ed || props.readonly || !event.target?.closest?.('.code-block-cm')) return
+  if (!ed || props.readonly || !previewRoot.value?.contains(event.target) || !event.target?.closest?.('.code-block-cm')) return
   const block = findActionBlock(ed.view, event.target)
   if (!block || block.node.type.name !== 'codeBlock') return
   if (ed.state.selection instanceof NodeSelection && ed.state.selection.from === block.pos) return
@@ -370,6 +426,7 @@ function captureCodeFocus(event) {
 }
 
 function revealLinkedBlock() {
+  if (!previewAvailable()) return
   let hash = ''
   try { hash = decodeURIComponent(window.location.hash.slice(1)) } catch { return }
   if (!hash || hash === revealedHash) return
@@ -380,10 +437,16 @@ function revealLinkedBlock() {
   scroller.scrollTop += target.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 24
   target.animate?.([{ backgroundColor: 'rgba(30, 160, 140, .16)' }, { backgroundColor: 'transparent' }], { duration: 1800 })
 }
-function hashChanged() { revealedHash = ''; nextTick(revealLinkedBlock) }
+function hashChanged() {
+  if (!props.active) return
+  revealedHash = ''
+  nextTick(revealLinkedBlock)
+}
 
 function jumpToNoteAnchor(event) {
+  if (!props.active || !previewRoot.value?.contains(event.target)) return false
   const link = event.target?.closest?.('a[href]')
+  if (!previewRoot.value?.contains(link)) return false
   const href = link?.getAttribute('href')
   if (!findNoteAnchor(editor.value?.view.dom, href)) return false
   event.preventDefault()
@@ -393,7 +456,11 @@ function jumpToNoteAnchor(event) {
   nextTick(revealLinkedBlock)
   return true
 }
-function flushContent() {
+function flushContent(currentMarkdown) {
+  // Parent updates can precede the next Vue prop patch in this same tick.
+  if (typeof currentMarkdown === 'string') receiveExternalContent(currentMarkdown)
+  const source = flushExternalContent()
+  if (externalSync.hasPending()) return source
   contentSync.flush()
   return lastEmitted
 }
@@ -410,16 +477,23 @@ function flushOnBlur(event) {
  * `display=true` 用块级（独立成行），否则行内。只读渲染下不插入。
  */
 function insertMath(tex, display = false) {
+  if (!prepareExternalContent()) return false
   const ed = editor.value
   const source = String(tex == null ? '' : tex).trim()
-  if (!ed || ed.isDestroyed || props.readonly || !source) return false
+  if (!ed || ed.isDestroyed || props.readonly || !source || !previewAvailable()) return false
   const node = display ? { type: 'mathBlock', attrs: { tex: source } } : { type: 'mathInline', attrs: { tex: source } }
   return ed.chain().focus().insertContent(node).run()
 }
 
 defineExpose({ runTool, applyFormat, captureToolbarTarget, flushContent, insertMath,
   hasPendingContent: contentSync.hasPending,
-  undo: () => editor.value?.commands.undo(), redo: () => editor.value?.commands.redo() })
+  undo: () => runHistory('undo'), redo: () => runHistory('redo') })
+
+function runHistory(command) {
+  if (!prepareExternalContent()) return false
+  if (!previewAvailable() || props.readonly) return false
+  return editor.value?.commands[command]()
+}
 
 /** Refresh source anchors without replacing content or moving the editing selection. */
 function refreshDataLines(markdown) {
@@ -440,14 +514,17 @@ function refreshDataLines(markdown) {
     transaction.setNodeMarkup(pos, undefined, { ...node.attrs, dataLine: line })
   }
   ed.view.dispatch(transaction.setMeta('preventUpdate', true).setMeta('addToHistory', false))
+  queueLayoutChange()
 }
 
 function syncDown() {
   if (!editor.value || editor.value.isDestroyed) return
+  flushExternalContent()
+  if (externalSync.hasPending()) return
   const markdown = previewHtmlToMd(editor.value.getHTML())
   if (markdown === lastEmitted) return
   lastEmitted = markdown
-  if (props.sourceLinesActive) refreshDataLines(markdown)
+  if (previewAvailable() && props.sourceLinesActive) refreshDataLines(markdown)
   emit('update', markdown)
 }
 
@@ -490,10 +567,11 @@ async function openMathEditor(view, node, nodePos) {
 }
 
 onMounted(() => {
+  const initial = props.active && props.visible ? props.content || '' : ''
   editor.value = new Editor({
     editable: !props.readonly,
     extensions: [StarterKit.configure({ codeBlock: false, underline: false, link: { openOnClick: false } }), CodeBlockCm, Callout, Details, Summary, Underline, Superscript, Subscript, Highlight, FontStyle, TableKit, ExcelTableNavigation, DataLineAttr, BlockMeta, HeadingAnchorAttr, ToolbarAttrs, InlineImage, TaskList, EditableTaskItem, MathInline, MathBlock, BlockPaste],
-    content: renderContent(props.content),
+    content: renderContent(initial),
     editorProps: {
       // 关掉浏览器拼写检查：笔记里全是 StringBuffer / spring_factories / AutoConfiguration 这类
       // 标识符，contenteditable 默认开启拼写检查，它们会被英文词典逐条标红波浪线（中文不查，
@@ -508,17 +586,42 @@ onMounted(() => {
     onTransaction: handleTransaction,
     onSelectionUpdate: refreshTableContext,
   })
-  lastEmitted = props.content || ''
+  setCodeBlockViewportActivity(editor.value, props.active && props.visible)
+  lastEmitted = initial
+  lastPropContent = props.content || ''
+  receiveExternalContent(lastPropContent)
+  externalSync.setAvailable(previewAvailable())
   if (!props.readonly) refreshTableContext()
   window.addEventListener('hashchange', hashChanged)
   nextTick(revealLinkedBlock)
 })
 onBeforeUnmount(() => {
   contentSync.cancel()
+  externalSync.cancel()
+  if (layoutFrame) cancelAnimationFrame(layoutFrame)
   window.removeEventListener('hashchange', hashChanged)
   invalidateToolbarTargets()
+  clearCodeBlockViewportActivity(editor.value)
   editor.value?.destroy()
   editor.value = null
+})
+
+watch(() => props.active, active => {
+  refreshTableContext()
+  if (!active) { actions.value?.close(); return }
+  revealedHash = ''
+  nextTick(revealLinkedBlock)
+})
+
+watch([() => props.active, () => props.visible], () => {
+  setCodeBlockViewportActivity(editor.value, props.active && props.visible)
+  // Read both patched props before restoring visibility, avoiding an older queued render.
+  if (props.content !== lastPropContent) {
+    lastPropContent = props.content || ''
+    receiveExternalContent(lastPropContent)
+  }
+  externalSync.setAvailable(previewAvailable())
+  if (!previewAvailable() && layoutFrame) { cancelAnimationFrame(layoutFrame); layoutFrame = 0 }
 })
 
 /** Clean rich clipboard HTML without changing the editor's actual selection. */
@@ -539,15 +642,8 @@ const BlockPaste = Extension.create({
 watch(
   () => props.content,
   (v) => {
-    if (!editor.value) return
-    if (v === lastEmitted) return // 自己发出的回显，忽略
-    contentSync.cancel()
-    lastEmitted = v
-    invalidateToolbarTargets()
-    editor.value.commands.setContent(renderContent(v), { emitUpdate: false })
-    refreshTableContext()
-    actions.value?.close()
-    nextTick(revealLinkedBlock)
+    lastPropContent = v || ''
+    receiveExternalContent(lastPropContent)
   },
 )
 // 只读开关中途变化（同一个组件实例被复用）时，跟着切换编辑能力，避免留下可写视图
@@ -565,8 +661,9 @@ watch(
 // Source-line mappings are only needed for the visible source/preview pair.
 // Rebuild once when opening that pair instead of reparsing on every saved draft.
 watch(() => props.sourceLinesActive, (active) => {
-  if (!active || !editor.value) return
+  if (!active || !previewAvailable()) return
   flushContent()
+  if (externalSync.hasPending()) return
   refreshDataLines(lastEmitted)
 })
 </script>
@@ -576,10 +673,13 @@ watch(() => props.sourceLinesActive, (active) => {
     ref="previewRoot"
     class="block-preview"
     :class="{ 'is-readonly': readonly, 'is-compact': compact }"
+    @focusin.capture="flushExternalContent"
+    @pointerdown.capture="flushExternalContent"
+    @keydown.capture="flushExternalContent"
     @focusin="captureCodeFocus"
     @focusout="flushOnBlur"
-    @compositionstart="contentSync.pause()"
-    @compositionend="contentSync.resume()"
+    @compositionstart="pauseComposition"
+    @compositionend="resumeComposition"
     @pointermove="readonly ? null : actions?.hover($event)"
     @pointerleave="readonly ? null : actions?.leave()"
   >
@@ -710,7 +810,8 @@ watch(() => props.sourceLinesActive, (active) => {
 .block-preview.is-compact :deep(.code-block-cm-host .cm-editor),
 .block-preview.is-compact :deep(.code-block-cm-host .cm-editor .cm-scroller),
 .block-preview.is-compact :deep(.code-block-cm-host .cm-editor .cm-content),
-.block-preview.is-compact :deep(.code-block-cm-host .cm-editor .cm-gutters) {
+.block-preview.is-compact :deep(.code-block-cm-host .cm-editor .cm-gutters),
+.block-preview.is-compact :deep(.code-block-cm-host .cm-source-placeholder) {
   font-size: 12.5px;
 }
 .block-preview.is-compact :deep(.code-block-cm .cm-head) { gap: 6px; padding: 3px 8px; }

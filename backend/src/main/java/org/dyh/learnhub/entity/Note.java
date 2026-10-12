@@ -29,6 +29,9 @@ public class Note {
 
     private Long categoryId;
 
+    /** 收纳文件夹；NULL 表示未收纳，独立于知识分类。 */
+    private Long folderId;
+
     private LocalDateTime createdAt;
 
     private LocalDateTime updatedAt;

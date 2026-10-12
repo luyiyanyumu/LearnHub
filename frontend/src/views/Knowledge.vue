@@ -7,6 +7,7 @@ import '../utils/mdEditorSetup'
 import { fileApi, kbApi, knowledgeApi, kgApi, saveBlob, wikiApi } from '../api'
 import { fixHtmlQuotes } from '../utils/htmlQuotes'
 import { isDark } from '../composables/useTheme'
+import { mermaidFrameHtml } from '../utils/mermaidPreview.js'
 import KnowledgeGraph from '../components/KnowledgeGraph.vue'
 import KnowledgeSearchPanel from '../components/KnowledgeSearchPanel.vue'
 import WikiTopicNavigator from '../components/WikiTopicNavigator.vue'
@@ -1502,7 +1503,7 @@ onBeforeUnmount(() => {
             </details>
             <p v-if="wikiPage.contentMd" class="wiki-guide-note">模型生成的知识导览，关键结论请点击来源核对原文。</p>
             <div v-if="wikiPage.contentMd" ref="wikiBody" class="wiki-body md-doc" @click="onWikiClick">
-              <MdPreview :modelValue="wikiMd" :theme="isDark ? 'dark' : 'light'" previewTheme="github" :mdHeadingId="wikiHeadingId" @onHtmlChanged="locateWikiSection" />
+              <MdPreview :modelValue="wikiMd" :theme="isDark ? 'dark' : 'light'" :sanitize-mermaid="mermaidFrameHtml" previewTheme="github" :mdHeadingId="wikiHeadingId" @onHtmlChanged="locateWikiSection" />
             </div>
             <div v-else class="wiki-empty">
               <p>这个主题还没有 wiki 页。</p>
@@ -2218,24 +2219,7 @@ onBeforeUnmount(() => {
 .wiki-guide-note, .kitem-guide-note { color: var(--app-text-2); font-size: 12px; line-height: 1.6; }
 .wiki-guide-note { margin: 8px 0; }
 .wiki-body :deep(.wiki-section-target) { scroll-margin-top: 24px; background: var(--app-brand-soft); border-radius: 4px; }
-/* 来源引用（[笔记#3] / [速查卡#8] / [资料#2]）渲染成锚点后要看得出来能点：
-   md-editor 默认不给 # 锚点加样式，实测看着跟纯文本一样，用户不知道能跳回原文核对 */
-.wiki-body :deep(a[href^='#note-']),
-.wiki-body :deep(a[href^='#ref-']),
-.wiki-body :deep(a[href^='#file-']) {
-  color: var(--app-brand-deep);
-  background: var(--app-brand-soft);
-  border-radius: 4px;
-  padding: 0 4px;
-  text-decoration: none;
-  font-size: 0.92em;
-  white-space: nowrap;
-}
-.wiki-body :deep(a[href^='#note-']:hover),
-.wiki-body :deep(a[href^='#ref-']:hover),
-.wiki-body :deep(a[href^='#file-']:hover) {
-  text-decoration: underline;
-}
+/* 来源引用样式与笔记、代码区共用，见 style.css。 */
 .wiki-empty {
   padding: 26px 4px;
 }

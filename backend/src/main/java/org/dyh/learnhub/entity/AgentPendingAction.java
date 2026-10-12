@@ -31,7 +31,7 @@ public class AgentPendingAction {
     /** 给用户看的一行摘要 */
     private String summary;
 
-    /** pending / approved / rejected */
+    /** pending / approved / rejected / failed */
     private String status;
 
     private LocalDateTime createdAt;

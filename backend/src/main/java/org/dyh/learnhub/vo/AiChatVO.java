@@ -30,6 +30,15 @@ public class AiChatVO {
     /** 本轮对话中发生的工具操作记录（如“已创建笔记 xx”），前端可作气泡/角标提示 */
     private List<String> events = new ArrayList<>();
 
+    /** 本轮真实执行步骤的最终快照；SSE 以相同 id 推送状态更新。 */
+    private List<Map<String, Object>> progress = new ArrayList<>();
+
+    /** 本轮从接收请求到保存回答的实际耗时。 */
+    private Long elapsedMs;
+
+    /** Machine-readable termination reason and bounded counters, without prompts or tool arguments. */
+    private Map<String, Object> runSummary;
+
     /** 是否发生过工具调用（写操作） */
     private boolean toolUsed;
 

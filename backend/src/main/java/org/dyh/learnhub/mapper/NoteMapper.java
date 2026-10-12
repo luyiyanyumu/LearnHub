@@ -14,6 +14,11 @@ import java.util.List;
 @Mapper
 public interface NoteMapper extends BaseMapper<Note> {
 
+    @Select("<script>SELECT id FROM note WHERE id IN "
+            + "<foreach collection='ids' item='id' open='(' separator=',' close=')'>#{id}</foreach>"
+            + " ORDER BY id FOR UPDATE</script>")
+    List<Long> lockIdsForFolderMove(@Param("ids") List<Long> ids);
+
     /** 确认定向编辑时锁住正文，版本校验与写入在同一事务内完成。 */
     @Select("SELECT * FROM note WHERE id = #{id} FOR UPDATE")
     Note selectForEdit(@Param("id") Long id);

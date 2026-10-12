@@ -27,6 +27,7 @@ public class NoteVO {
     }
 
     private Long categoryId;
+    private Long folderId;
     private String categoryName;
     private List<Tag> tags;
     private LocalDateTime createdAt;

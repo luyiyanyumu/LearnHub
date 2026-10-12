@@ -42,7 +42,7 @@ class FormulaReaderCacheTest {
                 List.of(new PdfLayoutExtractor.PageLayout(1, 1, List.of(
                         new PdfLayoutExtractor.Block("formula", "detached original", 0, null, 1, rect,
                                 "x t", "partial", "geometry is uncertain")))), 20, 1));
-        files = new FileStorageService(mapper, null, null, extractor, null, null, null, null, null);
+        files = new FileStorageService(mapper, null, null, extractor, null, null, null, null, null, mock(FolderService.class));
     }
 
     @AfterEach void restore() { System.setProperty("user.dir", originalDir); }

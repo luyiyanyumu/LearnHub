@@ -13,6 +13,11 @@ import java.util.Map;
 @Mapper
 public interface FileInfoMapper extends BaseMapper<FileInfo> {
 
+    @Select("<script>SELECT id FROM file_info WHERE id IN "
+            + "<foreach collection='ids' item='id' open='(' separator=',' close=')'>#{id}</foreach>"
+            + " ORDER BY id FOR UPDATE</script>")
+    List<Long> lockIdsForFolderMove(@Param("ids") List<Long> ids);
+
     /** 解除某分类下所有资料文件的分类归属（删除分类前调用） */
     @Update("UPDATE file_info SET category_id = NULL WHERE category_id = #{categoryId}")
     int unbindFilesByCategory(Long categoryId);

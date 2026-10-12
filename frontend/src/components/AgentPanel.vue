@@ -1,9 +1,10 @@
 <script setup>
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { aiApi, categoryApi, noteApi, modelApi, settingsApi } from '../api'
 import { fixHtmlQuotes } from '../utils/htmlQuotes'
+import { mermaidFrameHtml } from '../utils/mermaidPreview.js'
 import {
   AGENT_NOTE_CONTEXT_EVENT,
   AGENT_NOTE_MERGE_EVENT,
@@ -14,6 +15,8 @@ import { AGENT_NOTE_UPDATED_EVENT, matchesOpenNote, parseActionResult } from '..
 import { retrievalChannels, retrievalGroups, retrievalKey, retrievalSourcePath, retrievalTitle, retrievalTooltip } from '../utils/retrievalDisplay'
 import { groundingDisplay } from '../utils/groundingDisplay'
 import { MODEL_CONFIGURATION_CHANGED_EVENT, chatProfiles, chatProfileSelection } from '../utils/modelProfileView'
+import AgentRunTrace from './AgentRunTrace.vue'
+import { createChatRunGate, interruptProgress, restoredProgress, upsertProgress } from '../utils/agentProgress.js'
 
 /**
  * Markdown 预览（md-editor-v3）体积很大：整包 + 样式约 310 KB，
@@ -94,14 +97,17 @@ const input = ref('')
 const inputRef = ref(null)
 const listRef = ref(null)
 const messages = ref([])
+const followingLatest = ref(true)
+const runGate = createChatRunGate()
+let viewRevision = 0
+let sessionLoadVersion = 0
 
-/** 最后一条助手回答的下标：用于「最新一轮的思考过程默认展开」 */
-const lastAssistantIndex = computed(() => {
-  for (let i = messages.value.length - 1; i >= 0; i--) {
-    if (messages.value[i].role === 'assistant') return i
-  }
-  return -1
-})
+function detachRun() {
+  viewRevision++
+  sessionLoadVersion++
+  runGate.invalidate()
+  busy.value = false
+}
 
 /**
  * 「我现在开着哪篇笔记」——由笔记编辑页广播（见 utils/agentNoteMerge.js）。
@@ -171,6 +177,7 @@ async function switchSession(id) {
     showSessions.value = false
     return
   }
+  detachRun()
   sessionId.value = id
   localStorage.setItem(SESSION_KEY, id)
   messages.value = []
@@ -212,6 +219,7 @@ async function removeSession(s) {
     await modelApi.removeSession(s.id)
     ElMessage.success('已删除')
     if (s.id === sessionId.value) {
+      detachRun()
       // 删的正是当前会话：清空面板，下一次提问自动开新会话
       sessionId.value = ''
       localStorage.removeItem(SESSION_KEY)
@@ -230,35 +238,44 @@ async function removeSession(s) {
  * 不做这一步会出现最别扭的状态：模型记得上一轮，面板却是空的。
  */
 async function loadSession() {
-  if (!sessionId.value) return
+  if (!sessionId.value || busy.value) return
+  const requestedId = sessionId.value
+  const revision = viewRevision
+  const loadVersion = ++sessionLoadVersion
+  const isCurrent = () => revision === viewRevision && loadVersion === sessionLoadVersion && requestedId === sessionId.value
   try {
-    const s = await aiApi.session(sessionId.value)
-    if (!s?.messages?.length) return
-    messages.value = s.messages.map((m, i) => ({
+    const s = await aiApi.session(requestedId)
+    if (!isCurrent()) return
+    messages.value = (s?.messages || []).map((m, i) => ({
       id: Date.now() + i,
       role: m.role,
       content: m.content,
       events: m.events || [],
+      progress: restoredProgress(m.progress, m.events),
+      elapsedMs: m.elapsedMs || 0,
       // 思考过程（thinking 模型才有）：刷新后由事件流还原，和当轮显示同一套渲染
       reasoning: m.reasoning || '',
       toolUsed: !!m.toolUsed,
     }))
     pending.value = s.pendingActions || []
-    scrollBottom()
+    scrollBottom(true)
   } catch (e) {
-    // 会话不存在（清过库 / 换了后端）：丢掉本地 id，下一次提问自动开新会话
-    sessionId.value = ''
-    localStorage.removeItem(SESSION_KEY)
+    if (!isCurrent()) return
+    // A transient network failure must not silently abandon the user's conversation.
+    if (e?.response?.status === 404) newChat()
   }
 }
 
 /** 新对话：只丢本地引用；旧会话仍留在库里（可审计、可回看） */
 function newChat() {
+  detachRun()
   sessionId.value = ''
   localStorage.removeItem(SESSION_KEY)
   messages.value = []
   pending.value = []
   input.value = ''
+  followingLatest.value = true
+  notifyCurrentSession()
 }
 
 /**
@@ -280,6 +297,11 @@ async function resolveAction(a, approve) {
     ElMessage.warning('当前笔记有未保存改动，请先保存，再重新生成定向编辑预览')
     return
   }
+  const ownerSession = sessionId.value
+  const ownerRevision = viewRevision
+  const ownerMessage = [...messages.value].reverse().find(m => m.role === 'assistant' && m.progress?.some(step => String(step.actionId) === String(a.id)))
+    || [...messages.value].reverse().find(m => m.role === 'assistant')
+  const isCurrent = () => ownerSession === sessionId.value && ownerRevision === viewRevision
   resolvingActions.value.add(a.id)
   try {
     let hint
@@ -305,9 +327,17 @@ async function resolveAction(a, approve) {
     }
     // 立刻把执行痕迹挂到最近一条回答的事件角标上：后端也会追加同样的事件，
     // 刷新后由 loadSession 恢复 —— 两处表现保持一致，不必等刷新才看到结果。
-    const last = [...messages.value].reverse().find((m) => m.role === 'assistant')
-    if (last) {
+    if (!isCurrent()) return
+    const last = ownerMessage
+    if (last && messages.value.includes(last)) {
       last.events = [...(last.events || []), hint]
+      last.progress = (last.progress || []).map(step => String(step.actionId) === String(a.id)
+        ? { ...step, status: approve && !succeeded ? 'error' : 'completed', detail: hint }
+        : step)
+      last.progress = upsertProgress(last.progress, {
+        id: `approval-${a.id}`, kind: 'update', status: approve && !succeeded ? 'error' : 'completed',
+        title: hint, toolName: a.toolName,
+      })
       // 同时改正文：那条回答里通常写着"请在下方卡片上点确认"，而卡片点完就消失了 ——
       // 只剩这句话会让人以为还没确认。补一行结果，读起来才自洽。
       const tail = approve
@@ -316,11 +346,10 @@ async function resolveAction(a, approve) {
       last.content = (last.content || '') + tail
       scrollBottom()
     }
-    pending.value = pending.value.filter((x) => x.id !== a.id)
+    if (isCurrent()) pending.value = pending.value.filter((x) => x.id !== a.id)
   } catch (e) {
-    // 失败（例如已被处理过）时也把它从列表里摘掉，避免反复点同一个死项；
-    // 错误提示已由请求拦截器统一弹出，这里不再重复打扰
-    pending.value = pending.value.filter((x) => x.id !== a.id)
+    // Network failures may leave the action pending; reload its authoritative state.
+    if (isCurrent()) void loadSession()
   } finally {
     resolvingActions.value.delete(a.id)
   }
@@ -333,9 +362,15 @@ const SUGGESTIONS = [
   'MQTT 消息会丢吗？',
 ]
 
-function scrollBottom() {
+function onMessageScroll() {
+  const list = listRef.value
+  if (list) followingLatest.value = list.scrollHeight - list.scrollTop - list.clientHeight < 90
+}
+
+function scrollBottom(force = false) {
+  if (force) followingLatest.value = true
   nextTick(() => {
-    if (listRef.value) listRef.value.scrollTop = listRef.value.scrollHeight
+    if (listRef.value && followingLatest.value) listRef.value.scrollTop = listRef.value.scrollHeight
   })
 }
 
@@ -385,15 +420,33 @@ async function send(text, ctx) {
   const msg = (text ?? input.value).trim()
   if (!msg || busy.value) return
   input.value = ''
+  sessionLoadVersion++
+  const run = runGate.begin()
   messages.value.push({ role: 'user', content: msg })
-  scrollBottom()
+  scrollBottom(true)
   busy.value = true
-  const holder = { role: 'assistant', loading: true, content: '' }
+  const holder = reactive({ id: Date.now(), role: 'assistant', loading: true, content: '', progress: [], startedAt: Date.now() })
   messages.value.push(holder)
   scrollBottom()
+  const acceptSession = id => {
+    if (!runGate.isCurrent(run) || !id || id === sessionId.value) return
+    sessionId.value = id
+    localStorage.setItem(SESSION_KEY, id)
+    notifyCurrentSession()
+    window.dispatchEvent(new CustomEvent('lh-agent-sessions-changed'))
+    void loadSessions()
+  }
+  const progress = (event, payload) => {
+    if (!runGate.isCurrent(run)) return
+    if (event === 'session') acceptSession(payload?.sessionId)
+    if (event === 'progress') {
+      holder.progress = upsertProgress(holder.progress, payload)
+      scrollBottom()
+    }
+  }
   try {
     // 上下文交给后端会话维护：只带 sessionId（首次为空，响应里会把新 id 带回来）
-    const res = await aiApi.chat({
+    const request = {
       message: msg,
       sessionId: sessionId.value,
       // 会话级模型：带上它后端就用这个档案（空 = 跟随任务分工表）
@@ -404,18 +457,23 @@ async function send(text, ctx) {
       noteTitle: ctx?.noteTitle ?? activeNote.value?.title ?? undefined,
       noteContext: ctx?.noteContext ?? activeNote.value?.context ?? undefined,
       noteDirty: (!ctx?.noteId || matchesOpenNote(ctx.noteId, activeNote.value?.noteId)) && !!activeNote.value?.dirty,
-    })
-    if (res.sessionId && res.sessionId !== sessionId.value) {
-      sessionId.value = res.sessionId
-      localStorage.setItem(SESSION_KEY, res.sessionId)
-      await loadSessions()
-      // 面板第一次提问会自动建会话：通知会话侧栏把它列出来（否则侧栏看不到这次新会话）
-      window.dispatchEvent(new CustomEvent('lh-agent-sessions-changed'))
-      notifyCurrentSession()
     }
+    let res
+    try {
+      res = await aiApi.chatStream(request, progress, run.controller.signal)
+    } catch (error) {
+      // Only endpoint absence permits fallback; retrying after a disconnect could duplicate work.
+      if (![404, 405].includes(error?.status) || !runGate.isCurrent(run)) throw error
+      holder.progress = upsertProgress(holder.progress, { id: 'compatibility', kind: 'phase', status: 'running', title: '正在等待回答', detail: '当前后端尚未支持实时进度' })
+      res = await aiApi.chat(request, run.controller.signal)
+    }
+    if (!runGate.isCurrent(run)) return
+    acceptSession(res.sessionId)
     holder.loading = false
     holder.content = res.reply || ''
     holder.events = res.events || []
+    holder.progress = restoredProgress(res.progress?.length ? res.progress : holder.progress.filter(item => item.id !== 'compatibility'), res.events)
+    holder.elapsedMs = res.elapsedMs || Date.now() - holder.startedAt
     holder.retrieved = res.retrieved || []
     holder.grounding = res.grounding
     holder.groundingStatus = groundingDisplay(res.grounding, holder.retrieved)
@@ -424,19 +482,34 @@ async function send(text, ctx) {
     holder.toolUsed = res.toolUsed
     // 本轮若发起了写操作，它们是"待确认"状态，攒到下面的确认卡片里
     if (res.pendingActions?.length) {
-      pending.value.push(...res.pendingActions)
+      const merged = new Map(pending.value.map(action => [action.id, action]))
+      res.pendingActions.forEach(action => merged.set(action.id, action))
+      pending.value = [...merged.values()]
     }
     holder.id = holder.id || Date.now()
     configured.value = true
   } catch (e) {
+    if (!runGate.isCurrent(run)) return
     holder.loading = false
     holder.content = ''
     holder.error = e.message || '请求失败'
+    holder.progress = interruptProgress(holder.progress)
+    holder.elapsedMs = Date.now() - holder.startedAt
   } finally {
-    busy.value = false
-    scrollBottom()
-    notifyLearningActivity()
+    if (runGate.isCurrent(run)) {
+      runGate.finish(run)
+      busy.value = false
+      scrollBottom()
+      notifyLearningActivity()
+      window.dispatchEvent(new CustomEvent('lh-agent-sessions-changed'))
+    }
   }
+}
+
+function onComposerKeydown(event) {
+  if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return
+  event.preventDefault()
+  void send()
 }
 
 /**
@@ -655,6 +728,7 @@ onMounted(() => {
   window.addEventListener('lh-agent-sessions-open', openSessionsFromEvent)
   // 智能体页的会话侧栏点了某条会话：切过去并载入它的历史
   window.addEventListener('lh-agent-switch', switchFromEvent)
+  window.addEventListener('lh-agent-session-model', sessionModelFromEvent)
   // 笔记编辑页广播「当前开着哪篇笔记」：决定回答后的主操作是「融入当前笔记」还是「保存为笔记」
   window.addEventListener(AGENT_NOTE_CONTEXT_EVENT, noteContextFromEvent)
   // 编辑页把融入结果回报过来（成功=预览已打开；失败=正文未改动，按钮要能重试）
@@ -664,12 +738,14 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  detachRun()
   window.removeEventListener('lh-agent-open', openFromEvent)
   window.removeEventListener(MODEL_CONFIGURATION_CHANGED_EVENT, loadModelProfiles)
   window.removeEventListener('lh-agent-compose', composeFromEvent)
   window.removeEventListener('lh-ask-agent', askFromEvent)
   window.removeEventListener('lh-agent-sessions-open', openSessionsFromEvent)
   window.removeEventListener('lh-agent-switch', switchFromEvent)
+  window.removeEventListener('lh-agent-session-model', sessionModelFromEvent)
   window.removeEventListener(AGENT_NOTE_CONTEXT_EVENT, noteContextFromEvent)
   window.removeEventListener(AGENT_NOTE_MERGE_RESULT_EVENT, mergeResultFromEvent)
 })
@@ -677,10 +753,17 @@ onBeforeUnmount(() => {
 /** 外部（会话侧栏）要求切换会话 */
 async function switchFromEvent(e) {
   const id = e?.detail?.id
+  if (id === '') { newChat(); return }
   if (!id || id === sessionId.value) {
     return
   }
   await switchSession(id)
+}
+
+function sessionModelFromEvent(e) {
+  if (e?.detail?.id === sessionId.value) {
+    chatProfile.value = chatProfileSelection(modelProfiles.value, e.detail.profileId)
+  }
 }
 
 /** 把"当前会话 + 它的模型"广播给会话侧栏，让侧栏能高亮并显示模型 */
@@ -826,12 +909,10 @@ function askFromEvent(e) {
         </header>
 
         <div v-if="!configured" class="cfg-tip">
-          智能体未启用：请在 <code>backend/src/main/resources/application.yml</code> 的
-          <code>ai.deepseek.api-key</code> 填入 API Key（或设置环境变量
-          <code>DEEPSEEK_API_KEY</code>）并重启后端。
+          配置聊天模型后即可开始对话。<router-link to="/settings">前往设置</router-link>
         </div>
 
-        <div ref="listRef" class="msg-list">
+        <div ref="listRef" class="msg-list" @scroll.passive="onMessageScroll">
           <div v-if="!messages.length" class="welcome">
             <p class="welcome-t">你好，我是你的代码学习搭子</p>
             <p class="welcome-s">可以问我任何编程/IT 问题；讲到值得沉淀的知识点，点「保存为笔记」就能存进工作台。</p>
@@ -844,24 +925,17 @@ function askFromEvent(e) {
             <template v-if="m.role === 'assistant'">
               <div class="avatar av-ai">A</div>
               <div class="bubble assistant">
-                <div v-if="m.loading" class="typing">
-                  <span></span><span></span><span></span>
+                <AgentRunTrace v-if="m.loading || m.progress?.length" :entries="m.progress || []"
+                  :running="!!m.loading" :started-at="m.startedAt || 0" :elapsed-ms="m.elapsedMs || 0" :failed="!!m.error" />
+                <div v-if="m.error" class="err" role="alert">
+                  <span>{{ m.error }}</span>
+                  <button v-if="sessionId" type="button" class="act-btn" @click="loadSession">重新读取会话</button>
                 </div>
-                <div v-else-if="m.error" class="err">{{ m.error }}</div>
-                <template v-else>
-                  <!-- 工具事件角标 -->
-                  <div v-if="m.events?.length" class="evt-list">
-                    <span v-for="(ev, j) in m.events" :key="j" class="evt">{{ ev }}</span>
-                  </div>
-                  <!--
-                    思考过程（thinking 模型的 reasoning_content）。
-                    默认**折叠**：它动辄几千字，摊开会把正文挤到看不见；
-                    但最新一轮默认展开 —— 用户点「发消息」后最想看的恰恰是"它到底怎么想的"。
-                  -->
-                  <details v-if="m.reasoning" class="think" :open="i === lastAssistantIndex">
+                <template v-if="!m.loading && !m.error">
+                  <details v-if="m.reasoning" class="think">
                     <summary class="think-head">
-                      <span class="think-title">思考过程</span>
-                      <span class="think-meta">{{ m.reasoning.length }} 字 · 点此{{ i === lastAssistantIndex ? '收起' : '展开' }}</span>
+                      <span class="think-title">模型思考记录</span>
+                      <span class="think-meta">{{ m.reasoning.length }} 字 · 展开查看</span>
                     </summary>
                     <div class="think-body">{{ m.reasoning }}</div>
                   </details>
@@ -876,7 +950,7 @@ function askFromEvent(e) {
                     </component>
                     <span v-if="group.key === 'guide'" class="ref-guide-note">请结合原文核对</span>
                   </div>
-                  <div class="md-body"><MdPreview :modelValue="fixHtmlQuotes(m.content || '')" :theme="isDark ? 'dark' : 'light'" previewTheme="github" /></div>
+                  <div v-if="m.content" class="md-body"><MdPreview :modelValue="fixHtmlQuotes(m.content)" :theme="isDark ? 'dark' : 'light'" :sanitize-mermaid="mermaidFrameHtml" previewTheme="github" /></div>
                   <div v-if="m.groundingStatus" class="grounding-line" :class="m.groundingStatus.status">
                     <details v-if="m.groundingStatus.note || m.groundingStatus.unsupported.length">
                       <summary>{{ m.groundingStatus.label }}</summary>
@@ -915,6 +989,12 @@ function askFromEvent(e) {
             <div v-else class="bubble user">{{ m.content }}</div>
           </div>
         </div>
+        <div v-if="!followingLatest && messages.length" class="latest-row">
+          <button type="button" class="latest-btn" @click="scrollBottom(true)">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 4v16m-6-6 6 6 6-6" /></svg>
+            回到最新消息
+          </button>
+        </div>
 
         <!-- 待确认的写操作：在点「确认执行」之前，后端不会动数据库 -->
         <div v-if="pending.length" class="pending-box">
@@ -928,10 +1008,10 @@ function askFromEvent(e) {
                   <div v-for="(c, index) in a.preview.changes" :key="index" class="edit-preview-change">
                     <div class="edit-preview-label">{{ index + 1 }}. {{ c.label }} · {{ c.count }} 处</div>
                     <div class="edit-preview-caption">修改前</div>
-                    <MdPreview v-if="c.action === 'format'" :editor-id="`edit-before-${a.id}-${index}`" :model-value="c.before || '（空）'" :theme="isDark ? 'dark' : 'light'" preview-theme="github" class="edit-preview-rendered edit-preview-before" />
+                    <MdPreview v-if="c.action === 'format'" :editor-id="`edit-before-${a.id}-${index}`" :model-value="c.before || '（空）'" :theme="isDark ? 'dark' : 'light'" :sanitize-mermaid="mermaidFrameHtml" preview-theme="github" class="edit-preview-rendered edit-preview-before" />
                     <pre v-else class="edit-preview-before">{{ c.before || '（空）' }}</pre>
                     <div class="edit-preview-caption">修改后</div>
-                    <MdPreview v-if="c.action === 'format'" :editor-id="`edit-after-${a.id}-${index}`" :model-value="c.after || '（空）'" :theme="isDark ? 'dark' : 'light'" preview-theme="github" class="edit-preview-rendered edit-preview-after" />
+                    <MdPreview v-if="c.action === 'format'" :editor-id="`edit-after-${a.id}-${index}`" :model-value="c.after || '（空）'" :theme="isDark ? 'dark' : 'light'" :sanitize-mermaid="mermaidFrameHtml" preview-theme="github" class="edit-preview-rendered edit-preview-after" />
                     <pre v-else class="edit-preview-after">{{ c.after || '（空）' }}</pre>
                   </div>
                 </div>
@@ -973,16 +1053,16 @@ function askFromEvent(e) {
               class="chat-input"
               rows="2"
               :placeholder="activeNote ? '例如：添加目录、删除第 2 处某词、把某个字加粗…' : '问我代码问题，或说「把 xxx 记成笔记」…'"
-              :disabled="busy"
-              @keydown.enter.exact.prevent="send()"
+              aria-label="发送给智能体的消息"
+              @keydown="onComposerKeydown"
             />
-            <button class="send-btn" type="button" :disabled="busy || !input.trim()" @click="send()">
+            <button class="send-btn" type="button" :disabled="busy || !input.trim()" :aria-label="busy ? '正在处理本轮消息' : '发送消息'" :title="busy ? '正在处理本轮消息' : '发送消息（Enter）'" @click="send()">
               <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M22 2 11 13M22 2l-7 20-4-9-9-4Z"></path>
+                <path d="M12 20V4m-7 7 7-7 7 7"></path>
               </svg>
             </button>
           </div>
-          <p class="foot-hint">AI 生成内容仅供参考 · 可帮你查笔记、沉淀笔记与速查卡</p>
+          <p class="foot-hint">{{ busy ? '正在处理，可先输入下一条消息' : 'Enter 发送 · Shift + Enter 换行' }}</p>
         </footer>
       </div>
     </div>
@@ -995,7 +1075,7 @@ function askFromEvent(e) {
           <el-option v-for="c in categories" :key="c.id" :label="'　'.repeat(c.depth) + c.name" :value="c.id" />
         </el-select>
         <div class="save-preview">
-          <MdPreview :modelValue="fixHtmlQuotes(saveForm.content || '*内容为空*')" :theme="isDark ? 'dark' : 'light'" previewTheme="github" />
+          <MdPreview :modelValue="fixHtmlQuotes(saveForm.content || '*内容为空*')" :theme="isDark ? 'dark' : 'light'" :sanitize-mermaid="mermaidFrameHtml" previewTheme="github" />
         </div>
       </div>
       <template #footer>
@@ -1061,7 +1141,7 @@ function askFromEvent(e) {
   top: 0;
   right: 0;
   bottom: 0;
-  width: 480px;
+  width: min(480px, 100vw);
   z-index: 2100;
   background: var(--app-card);
   border-left: 1px solid var(--app-border-weak);
@@ -1097,6 +1177,7 @@ function askFromEvent(e) {
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-height: 0;
 }
 /* 会话版块：新开/切换/删除 + 本会话的模型选择 */
 .session-bar {
@@ -1253,17 +1334,13 @@ function askFromEvent(e) {
   margin: 10px 14px 0;
   padding: 10px 12px;
   border-radius: 9px;
-  background: #fff7e6;
-  border: 1px solid #ffe0a3;
-  color: #8a5a00;
+  background: var(--el-color-warning-light-9);
+  border: 1px solid var(--el-color-warning-light-5);
+  color: var(--el-color-warning);
   font-size: 12px;
   line-height: 1.7;
 }
-html.dark .cfg-tip {
-  background: rgba(255, 209, 102, 0.12);
-  border-color: rgba(255, 209, 102, 0.35);
-  color: #ffd166;
-}
+.cfg-tip a { color: var(--app-brand-deep); margin-left: 6px; }
 .cfg-tip code {
   background: rgba(0, 0, 0, 0.06);
   padding: 0 4px;
@@ -1273,7 +1350,10 @@ html.dark .cfg-tip {
 
 .msg-list {
   flex: 1;
+  min-height: 0;
+  min-width: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 14px;
   display: flex;
   flex-direction: column;
@@ -1319,10 +1399,16 @@ html.dark .cfg-tip {
 .msg {
   display: flex;
   gap: 8px;
+  flex-shrink: 0;
+  min-width: 0;
 }
 .msg.user {
   justify-content: flex-end;
 }
+.embedded .msg-list { padding: 20px clamp(14px, 3vw, 36px); gap: 24px; }
+.embedded .msg, .embedded .welcome { width: 100%; max-width: 920px; margin-inline: auto; }
+.embedded .panel-foot { padding-inline: clamp(14px, 3vw, 36px); }
+.embedded .input-row { max-width: 920px; margin-inline: auto; }
 .avatar {
   width: 26px;
   height: 26px;
@@ -1600,8 +1686,39 @@ html.dark .cfg-tip {
   }
 }
 .err {
-  color: #e53e3e;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border-left: 2px solid var(--el-color-danger);
+  background: var(--el-color-danger-light-9);
+  border-radius: 6px;
+  color: var(--el-color-danger);
   font-size: 13px;
+}
+.latest-row { display: flex; justify-content: center; height: 0; z-index: 1; }
+.latest-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transform: translateY(-38px);
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 18px;
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--app-text-1) 8%, transparent);
+  background: var(--app-card);
+  color: var(--app-text-2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.latest-btn:hover { color: var(--app-brand-deep); border-color: var(--app-brand); }
+.latest-btn svg { width: 14px; height: 14px; }
+.act-btn:focus-visible, .send-btn:focus-visible, .latest-btn:focus-visible, .web-toggle:focus-visible {
+  outline: 2px solid var(--app-brand);
+  outline-offset: 3px;
 }
 
 .msg-actions {
@@ -1702,6 +1819,7 @@ html.dark .cfg-tip {
 }
 
 .panel-foot {
+  flex-shrink: 0;
   border-top: 1px solid var(--app-border);
   padding: 12px 14px 14px;
 }
@@ -1769,6 +1887,7 @@ html.dark .cfg-tip {
   color: var(--app-text-3);
 }
 .send-btn {
+  flex-shrink: 0;
   width: 38px;
   height: 38px;
   border: none;

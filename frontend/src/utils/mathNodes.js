@@ -17,7 +17,7 @@
  * `<annotation encoding="application/x-tex">` 里把 TeX 取回来 —— 与 htmlToMd 用的是同一招。
  */
 import { Node, mergeAttributes } from '@tiptap/core'
-import { renderMathToHtml } from './mdMath'
+import { renderMathToHtml } from './mdMath.js'
 
 /** 从 KaTeX 产物里取回 TeX 源码（没有就返回空串） */
 function texFromKatex(el) {
@@ -28,17 +28,23 @@ function texFromKatex(el) {
 /** 节点视图：用一个只读的 span/div 装 KaTeX 渲染结果 */
 function mathNodeView({ node, className }) {
   const dom = document.createElement(node.type.name === 'mathBlock' ? 'div' : 'span')
+  const display = node.type.name === 'mathBlock'
+  let renderedTex = String(node.attrs.tex ?? '')
   dom.className = className
-  dom.setAttribute('data-tex', node.attrs.tex || '')
-  dom.innerHTML = renderMathToHtml(node.attrs.tex, { display: node.type.name === 'mathBlock' })
+  dom.setAttribute('data-tex', renderedTex)
+  dom.innerHTML = renderMathToHtml(renderedTex, { display })
   dom.setAttribute('contenteditable', 'false')
   return {
     dom,
-    // 属性变了就重渲染（双击编辑改的就是它）
+    // Unrelated attribute/state updates keep the existing formula DOM.
     update: (updated) => {
       if (updated.type.name !== node.type.name) return false
-      dom.setAttribute('data-tex', updated.attrs.tex || '')
-      dom.innerHTML = renderMathToHtml(updated.attrs.tex, { display: updated.type.name === 'mathBlock' })
+      const tex = String(updated.attrs.tex ?? '')
+      if (tex !== renderedTex) {
+        dom.setAttribute('data-tex', tex)
+        dom.innerHTML = renderMathToHtml(tex, { display })
+        renderedTex = tex
+      }
       return true
     },
   }

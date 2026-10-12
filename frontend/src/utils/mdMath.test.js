@@ -1,7 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import MarkdownIt from 'markdown-it'
+import katex from 'katex'
 import { mdMath, renderMathToHtml } from './mdMath.js'
+import mdDataLine from './mdDataLine.js'
 
 const md = new MarkdownIt({ html: true, linkify: true, breaks: true }).use(mdMath)
 const html = (src) => md.render(src)
@@ -77,4 +79,35 @@ test('display math keeps the TeX annotation so htmlToMd can round-trip', () => {
   const out = renderMathToHtml('E=mc^2', { display: true })
   assert.match(out, /annotation encoding="application\/x-tex"/)
   assert.match(out, /E=mc\^2/)
+})
+
+test('editor source shells keep TeX and delimiters without calling KaTeX', () => {
+  const previous = katex.renderToString
+  let renders = 0
+  katex.renderToString = (...args) => { renders++; return previous(...args) }
+  try {
+    const editorMd = new MarkdownIt().use(mdMath, { renderKatex: false })
+    const output = editorMd.render('先看 $x < y$ 与 \\(z^2\\)\n\n$$\n\\begin{aligned} a&=b\\\\ c&=d\\end{aligned}\n$$\n\n\\[ \\text{"A"} \\]')
+    assert.equal(renders, 0)
+    assert.match(output, /<span class="math-inline" data-tex="x &lt; y"><\/span>/)
+    assert.match(output, /<span class="math-inline" data-tex="z\^2"><\/span>/)
+    assert.match(output, /<div class="math-block" data-tex="\\begin\{aligned\} a&amp;=b\\\\ c&amp;=d\\end\{aligned\}"><\/div>/)
+    assert.match(output, /data-tex="\\text\{&quot;A&quot;\}"/)
+    assert.ok(!output.includes('katex'))
+    // A separate default instance still provides fully rendered preview/export HTML.
+    assert.match(new MarkdownIt().use(mdMath).render('$E=mc^2$'), /class="katex"/)
+    assert.equal(renders, 1)
+  } finally { katex.renderToString = previous }
+})
+
+test('source shells preserve normal source-line mapping, code and literal dollar rules', () => {
+  const editorMd = new MarkdownIt({ html: true }).use(mdMath, { renderKatex: false }).use(mdDataLine)
+  const output = editorMd.render('## 合成标题\n\n正文 $x^2$\n\n```text\n$a+b$\n```\n\n$$\ny = x^2\n$$\n\n价格 \\$5 与 $6\n\n<p>原生块</p>')
+  assert.match(output, /<h2 data-line="0">/)
+  assert.match(output, /<p data-line="2">/)
+  assert.match(output, /<pre data-line="4"><code class="language-text">\$a\+b\$/)
+  assert.match(output, /<p data-line="12">价格 \$5 与 \$6<\/p>/)
+  assert.match(output, /<p data-line="14">原生块<\/p>/)
+  assert.match(output, /<div class="math-block" data-tex="y = x\^2"><\/div>/)
+  assert.equal((output.match(/class="math-inline"/g) || []).length, 1)
 })

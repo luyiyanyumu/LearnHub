@@ -34,8 +34,9 @@ public class FileController {
     /** 资料列表 */
     @GetMapping
     public Result<List<Map<String, Object>>> list(@RequestParam(required = false) Long categoryId,
-                                                  @RequestParam(required = false) String kw) {
-        return Result.ok(fileStorageService.list(categoryId, kw));
+                                                  @RequestParam(required = false) String kw,
+                                                  @RequestParam(required = false) Long folderId) {
+        return Result.ok(fileStorageService.list(categoryId, kw, folderId));
     }
 
     /**
@@ -50,16 +51,18 @@ public class FileController {
     @GetMapping("/page")
     public Result<Map<String, Object>> page(@RequestParam(required = false) Long categoryId,
                                             @RequestParam(required = false) String kw,
+                                            @RequestParam(required = false) Long folderId,
                                             @RequestParam(required = false) Integer page,
                                             @RequestParam(required = false) Integer size) {
-        return Result.ok(fileStorageService.page(categoryId, kw, page, size));
+        return Result.ok(fileStorageService.page(categoryId, kw, page, size, folderId));
     }
 
     /** 上传资料 */
     @PostMapping("/upload")
     public Result<Map<String, Object>> upload(@RequestParam("file") MultipartFile file,
-                                              @RequestParam(required = false) Long categoryId) {
-        return Result.ok(fileStorageService.toMap(fileStorageService.upload(file, categoryId)));
+                                              @RequestParam(required = false) Long categoryId,
+                                              @RequestParam(required = false) Long folderId) {
+        return Result.ok(fileStorageService.toMap(fileStorageService.upload(file, categoryId, folderId)));
     }
 
     /** 资料详情（含分类名、是否有正文、抽取状态） */

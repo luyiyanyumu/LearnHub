@@ -1,10 +1,11 @@
 import { Extension } from '@tiptap/core'
 import { Plugin, PluginKey } from '@tiptap/pm/state'
-import { Mapping } from '@tiptap/pm/transform'
+import { Mapping, ReplaceStep } from '@tiptap/pm/transform'
 
 export const MAX_BLOCK_INDENT = 6
 const BLOCK_TYPES = ['paragraph', 'heading']
 const INDENT_EM = 2
+const uniqueIdsKey = new PluginKey('blockMetaUniqueIds')
 
 export function normalizeBlockIndent(value) {
   const number = Number(value)
@@ -55,6 +56,32 @@ export function duplicateBlockIdUpdates(doc, nextId = createBlockId, retainedPos
   return updates
 }
 
+function hasDuplicateBlockIds(doc) {
+  const seen = new Set()
+  let duplicate = false
+  doc.descendants((node) => {
+    if (duplicate) return false
+    if (!BLOCK_TYPES.includes(node.type.name) || !isBlockId(node.attrs.blockId)) return
+    if (seen.has(node.attrs.blockId)) duplicate = true
+    else seen.add(node.attrs.blockId)
+  })
+  return duplicate
+}
+
+/** A closed text slice within one existing textblock cannot copy or change block ids. */
+function onlyChangesInlineText(transaction) {
+  return transaction.steps.every((step, index) => {
+    if (!(step instanceof ReplaceStep) || step.slice.openStart || step.slice.openEnd) return false
+    const doc = transaction.docs[index]
+    const from = doc.resolve(step.from)
+    const to = doc.resolve(step.to)
+    if (!from.parent.isTextblock || !from.sameParent(to)) return false
+    let textOnly = true
+    step.slice.content.forEach((node) => { if (!node.isText) textOnly = false })
+    return textOnly
+  })
+}
+
 /** Paragraph indentation and permanent block links survive Markdown/HTML round trips. */
 export const BlockMeta = Extension.create({
   name: 'blockMeta',
@@ -82,9 +109,17 @@ export const BlockMeta = Extension.create({
   },
   addProseMirrorPlugins() {
     return [new Plugin({
-      key: new PluginKey('blockMetaUniqueIds'),
+      key: uniqueIdsKey,
+      state: {
+        init: (_config, state) => hasDuplicateBlockIds(state.doc),
+        apply: (transaction, duplicate) => {
+          if (!transaction.docChanged || onlyChangesInlineText(transaction)) return duplicate
+          return hasDuplicateBlockIds(transaction.doc)
+        },
+      },
       appendTransaction(transactions, oldState, newState) {
         if (!transactions.some((transaction) => transaction.docChanged)) return null
+        if (!uniqueIdsKey.getState(newState)) return null
         // Keep links on the existing original even when its pasted copy precedes it.
         const mapping = new Mapping()
         for (const transaction of transactions) mapping.appendMapping(transaction.mapping)

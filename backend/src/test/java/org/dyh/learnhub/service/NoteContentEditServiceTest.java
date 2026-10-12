@@ -25,7 +25,7 @@ class NoteContentEditServiceTest {
     private final NoteMapper notes = mock(NoteMapper.class);
     private final LearningActivityService activity = mock(LearningActivityService.class);
     private final ApplicationEventPublisher events = mock(ApplicationEventPublisher.class);
-    private final NoteService service = new NoteService(notes, mock(CategoryMapper.class), mock(TagMapper.class), activity, events, new NoteContentEditor());
+    private final NoteService service = new NoteService(notes, mock(CategoryMapper.class), mock(TagMapper.class), activity, events, new NoteContentEditor(), mock(FolderService.class));
     private final Note note = new Note();
 
     @BeforeEach void fixture() {

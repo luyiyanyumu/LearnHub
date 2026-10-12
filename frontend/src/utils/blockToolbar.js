@@ -3,6 +3,8 @@ import { NodeSelection, Selection, TextSelection } from '@tiptap/pm/state'
 import { lift, toggleMark, wrapIn } from '@tiptap/pm/commands'
 import { wrapInList } from '@tiptap/pm/schema-list'
 import { closeHistory, redo, undo } from '@tiptap/pm/history'
+import { validateLinkHref } from './noteLinks.js'
+import { DEFAULT_FLOWCHART_SOURCE } from './flowchart.js'
 
 const inlineNames = { bold: 'bold', italic: 'italic', strike: 'strike', underline: 'underline', inlineCode: 'code' }
 
@@ -52,11 +54,12 @@ function blockFor(state, name, arg) {
   const { schema } = state
   const paragraph = content => schema.nodes.paragraph?.create(null, content)
   switch (name) {
+    case 'flowchart':
     case 'codeBlock': {
       const type = schema.nodes.codeBlock
       if (!type) return null
-      const code = selectedText(state)
-      const language = typeof arg === 'string' ? arg : null
+      const code = name === 'flowchart' ? DEFAULT_FLOWCHART_SOURCE : selectedText(state)
+      const language = name === 'flowchart' ? 'mermaid' : typeof arg === 'string' ? arg : null
       return type.isLeaf ? type.create({ code, language }) : type.create({ language }, code ? schema.text(code) : null)
     }
     case 'hr': return schema.nodes.horizontalRule?.create() || null
@@ -170,6 +173,29 @@ function link(editor, value) {
   return dispatch(editor, transaction)
 }
 
+function noteLink(editor, value) {
+  if (!inlineSelection(editor) || !validateLinkHref(value?.href)) return false
+  const { state } = editor
+  const type = state.schema.marks.link
+  if (!type) return false
+  const href = value.href.trim()
+  const original = selectedText(state)
+  const label = String(value.text ?? '') || original || href
+  const mark = type.create({ href })
+  const transaction = state.tr
+  if (!state.selection.empty && label === original) {
+    // Applying a link to the same words must retain bold, color and mixed marks.
+    transaction.addMark(state.selection.from, state.selection.to, mark)
+  } else {
+    const currentMarks = state.storedMarks || state.selection.$from.marks()
+    const marks = mark.addToSet(currentMarks)
+    // Some marks (for example inline code) explicitly exclude links.
+    if (!type.isInSet(marks)) return false
+    transaction.replaceSelectionWith(state.schema.text(label, marks), false)
+  }
+  return dispatch(editor, transaction)
+}
+
 function image(editor, value) {
   if (!inlineSelection(editor)) return false
   const src = String(value || '').trim()
@@ -188,8 +214,9 @@ export function runBlockTool(editor, name, arg) {
       return Boolean(mark && inlineSelection(editor) && command(editor, toggleMark(mark)))
     }
     if (name === 'link') return link(editor, arg)
+    if (name === 'noteLink') return noteLink(editor, arg)
     if (name === 'image') return image(editor, arg)
-    if (['codeBlock', 'table', 'hr', 'todo', 'details', 'callout'].includes(name)) return insertBlock(editor, name, arg)
+    if (['codeBlock', 'flowchart', 'table', 'hr', 'todo', 'details', 'callout'].includes(name)) return insertBlock(editor, name, arg)
     if (name === 'para' || /^h[1-6]$/.test(name)) {
       const type = editor.state.schema.nodes[name === 'para' ? 'paragraph' : 'heading']
       if (!type) return false

@@ -4,6 +4,7 @@ import MarkdownIt from 'markdown-it'
 import { EditorState } from '@codemirror/state'
 import { history, undo } from '@codemirror/commands'
 import { createSourceInsert } from './sourceToolbar.js'
+import { DEFAULT_FLOWCHART_SOURCE, DEFAULT_FLOWCHART_MARKDOWN } from './flowchart.js'
 
 const markdown = new MarkdownIt({ html: true })
 function apply(source, edit) {
@@ -64,6 +65,38 @@ test('selected code is moved into a fence that cannot be closed by embedded back
   assert.ok(markdown.render(result).includes('```x```\n</code>'))
 })
 
+test('flowcharts insert the shared Mermaid fence at the caret or selected range without changing nearby source', () => {
+  const source = 'BeforeSelectedAfter\n\nLater'
+  for (const [from, to] of [[6, 6], [6, 14]]) {
+    const edit = createSourceInsert(source, { from, to }, 'flowchart')
+    const result = apply(source, edit)
+    assert.equal(result, source.slice(0, from) + '\n\n' + DEFAULT_FLOWCHART_MARKDOWN + '\n\n' + source.slice(to))
+    assert.equal(selectedText(source, edit), DEFAULT_FLOWCHART_SOURCE)
+    const fence = markdown.parse(result, {}).find(token => token.type === 'fence')
+    assert.equal(fence.info, 'mermaid')
+    assert.equal(fence.content, DEFAULT_FLOWCHART_SOURCE + '\n')
+  }
+  const empty = createSourceInsert('', { from: 0, to: 0 }, 'flowchart')
+  assert.equal(apply('', empty), DEFAULT_FLOWCHART_MARKDOWN)
+  assert.equal(selectedText('', empty), DEFAULT_FLOWCHART_SOURCE)
+})
+
+test('flowchart source insertion and its editable selection undo together without touching another draft', () => {
+  const source = 'BeforeSelectedAfter'
+  let state = EditorState.create({ doc: source, selection: { anchor: 6, head: 14 }, extensions: [history()] })
+  const other = EditorState.create({ doc: 'Independent synthetic draft', extensions: [history()] })
+  const edit = createSourceInsert(state.doc.toString(), state.selection.main, 'flowchart')
+  state = state.update(edit).state
+  assert.equal(state.doc.sliceString(state.selection.main.from, state.selection.main.to), DEFAULT_FLOWCHART_SOURCE)
+  assert.equal(other.doc.toString(), 'Independent synthetic draft')
+  const view = { get state() { return state }, dispatch(tr) { state = tr.state } }
+  assert.equal(undo(view), true)
+  assert.equal(state.doc.toString(), source)
+  assert.equal(state.selection.main.anchor, 6)
+  assert.equal(state.selection.main.head, 14)
+  assert.equal(undo(view), false)
+})
+
 test('table insertion isolates the table and places the caret in the first empty data cell', () => {
   const source = 'LeftRight'
   const edit = createSourceInsert(source, { from: 4, to: 4 }, 'table')
@@ -107,6 +140,53 @@ test('inline links retain selected labels and escaped Markdown punctuation at th
   assert.ok(markdown.render(apply(source, edit)).includes('>[a]</a>'))
   const empty = createSourceInsert('前后', { from: 1, to: 1 }, 'link', 'https://example.com')
   assert.equal(selectedText('前后', empty), 'https://example.com')
+})
+
+test('note links insert the supplied label at the caret and escape literal Markdown and HTML characters', () => {
+  const source = '前文后文'
+  const label = '<b>章节</b> [1] *重点* _下划线_ `代码` \\ 中文'
+  const href = '/notes/12#section=A%26B&occurrence=2'
+  const edit = createSourceInsert(source, { from: 2, to: 2 }, 'noteLink', { href, text: label })
+  const result = apply(source, edit)
+  const tokens = markdown.parseInline(result, {})[0].children
+  const opened = tokens.findIndex(token => token.type === 'link_open')
+  assert.notEqual(opened, -1)
+  assert.equal(tokens[opened].attrGet('href'), href)
+  assert.equal(tokens[opened + 1].type, 'text')
+  assert.equal(tokens[opened + 1].content, label)
+  assert.equal(tokens[opened + 2].type, 'link_close')
+  assert.ok(result.startsWith('前文['))
+  assert.ok(result.endsWith('>)后文'))
+  assert.equal(edit.selection.anchor, result.length - 2)
+  assert.equal(edit.selection.head, edit.selection.anchor)
+  assert.equal(markdown.render(result).includes('<b>'), false)
+})
+
+test('note links replace only the captured range and restore source and selection with one undo', () => {
+  const source = '前文旧内容后文'
+  for (const [from, to] of [[2, 2], [2, 5]]) {
+    let state = EditorState.create({ doc: source, selection: { anchor: from, head: to }, extensions: [history()] })
+    const edit = createSourceInsert(state.doc.toString(), state.selection.main, 'noteLink', { href: '/notes/8', text: '新章节' })
+    state = state.update(edit).state
+    assert.equal(state.doc.toString(), source.slice(0, from) + '[新章节](</notes/8>)' + source.slice(to))
+    const view = { get state() { return state }, dispatch(tr) { state = tr.state } }
+    assert.equal(undo(view), true)
+    assert.equal(state.doc.toString(), source)
+    assert.equal(state.selection.main.anchor, from)
+    assert.equal(state.selection.main.head, to)
+    assert.equal(undo(view), false)
+  }
+})
+
+test('note links fall back to selected text or href and invalid targets produce no source edit', () => {
+  const source = '前目标后'
+  const selected = createSourceInsert(source, { from: 1, to: 3 }, 'noteLink', { href: '/notes/8' })
+  assert.equal(apply(source, selected), '前[目标](</notes/8>)后')
+  const caret = createSourceInsert(source, { from: 1, to: 1 }, 'noteLink', { href: '/notes/8', text: '' })
+  assert.equal(apply(source, caret), '前[/notes/8](</notes/8>)目标后')
+  for (const href of ['', 'javascript:alert(1)', '//example.com', '/notes/\n12', '/notes\\12']) {
+    assert.equal(createSourceInsert(source, { from: 1, to: 3 }, 'noteLink', { href, text: '章节' }), null)
+  }
 })
 
 test('images remain inline and select the alt text without changing surrounding content', () => {

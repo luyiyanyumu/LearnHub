@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import domino from '@mixmark-io/domino'
 import MarkdownIt from 'markdown-it'
-import { previewHtmlToMd } from './htmlToMd.js'
+import { findUnsupported, previewHtmlToMd } from './htmlToMd.js'
 import { mdMath, renderMathToHtml } from './mdMath.js'
 
 const md = new MarkdownIt({ html: true, breaks: true }).use(mdMath)
@@ -178,4 +178,54 @@ test('normal text escaping and code contents still follow their existing Markdow
   assert.equal(previewHtmlToMd('<p>x_y \\alpha [literal]</p>'), String.raw`x\_y \\alpha \[literal\]`)
   const code = String.raw`$$\begin{matrix} a \\ b \end{matrix}$$`
   assert.equal(previewHtmlToMd(`<pre><code class="language-tex">${code}</code></pre>`), `\`\`\`tex\n${code}\n\`\`\``)
+}))
+
+test('rendered md-editor Mermaid restores only retained source, excluding SVG labels and actions', () => withDocument(document => {
+  const source = 'flowchart TD\n  A["合成 & <开始>"] --> B["引用 `code`"]\n\n\n  B --> C[结束]'
+  const wrapper = document.createElement('p')
+  wrapper.className = 'md-editor-mermaid'
+  wrapper.setAttribute('data-content', source)
+  wrapper.innerHTML = '<svg id="mermaid-synthetic"><text>不是源码</text></svg><span class="md-editor-mermaid-copy">复制</span>'
+  assert.deepEqual(findUnsupported(wrapper.outerHTML), [])
+  const markdown = previewHtmlToMd(`<p>前文</p>${wrapper.outerHTML}<p>后文</p>`)
+  assert.equal(markdown, `前文\n\n\`\`\`mermaid\n${source}\n\`\`\`\n\n后文`)
+  assert.ok(!markdown.includes('不是源码'))
+  assert.ok(!markdown.includes('复制'))
+}))
+
+test('offline Mermaid export restores a single source fence rather than frames or duplicate hidden code', () => withDocument(document => {
+  const source = 'flowchart LR\n  A[合成输入] --> B[合成结果]'
+  const wrapper = document.createElement('div')
+  wrapper.className = 'note-mermaid-export'
+  wrapper.setAttribute('data-mermaid-source', source)
+  wrapper.innerHTML = '<iframe sandbox="" srcdoc="&lt;svg&gt;&lt;/svg&gt;"></iframe><pre hidden><code class="language-mermaid">duplicate</code></pre>'
+  assert.equal(previewHtmlToMd(wrapper.outerHTML), `\`\`\`mermaid\n${source}\n\`\`\``)
+  assert.deepEqual(findUnsupported(wrapper.outerHTML), [])
+}))
+
+test('pending or failed md-editor Mermaid tokens keep their source fence before an SVG exists', () => withDocument(document => {
+  const source = 'flowchart TD\n  A[合成输入] --> B[合成结果]'
+  const token = document.createElement('div')
+  token.className = 'md-editor-mermaid'
+  token.setAttribute('data-closed', 'true')
+  token.textContent = source
+  assert.deepEqual(findUnsupported(token.outerHTML), [])
+  assert.equal(previewHtmlToMd(token.outerHTML), `\`\`\`mermaid\n${source}\n\`\`\``)
+}))
+
+test('source-free Mermaid SVG is rejected while plain source code remains supported', () => withDocument(() => {
+  for (const html of [
+    '<p class="md-editor-mermaid"><svg id="synthetic"><text>labels</text></svg></p>',
+    '<p class="md-editor-mermaid" data-content=" "><svg id="mermaid-synthetic"></svg></p>',
+    '<svg id="learnhub-mermaid-synthetic"></svg>',
+  ]) assert.deepEqual(findUnsupported(html), ['Mermaid 图表'])
+  assert.deepEqual(findUnsupported('<pre><code class="language-mermaid">flowchart TD\nA --> B</code></pre>'), [])
+}))
+
+test('Mermaid source containing fences chooses a longer safe fence and retains blank lines', () => withDocument(document => {
+  const source = 'flowchart TD\n  A["``` synthetic ```"] --> B[结果]\n\n\n  B --> C[结束]'
+  const wrapper = document.createElement('p')
+  wrapper.className = 'md-editor-mermaid'
+  wrapper.setAttribute('data-content', source)
+  assert.equal(previewHtmlToMd(wrapper.outerHTML), `\`\`\`\`mermaid\n${source}\n\`\`\`\``)
 }))

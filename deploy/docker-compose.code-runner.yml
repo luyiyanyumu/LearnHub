@@ -1,0 +1,43 @@
+# Optional isolated Python tools. Use alongside docker-compose.yml (or release.yml).
+# Build the sandbox image first; it is never started as a long-lived service.
+# docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.code-runner.yml build code-runner code-sandbox
+# docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.code-runner.yml up -d code-runner backend
+services:
+  backend:
+    environment:
+      LEARNHUB_CODE_RUNNER_URL: http://code-runner:8081
+    networks: [code-runner-private]
+
+  code-runner:
+    build:
+      context: ..
+      dockerfile: tools/code-runner/Dockerfile
+    image: learn-hub-code-runner:local
+    restart: unless-stopped
+    environment:
+      LEARNHUB_SANDBOX_IMAGE: learn-hub-code-sandbox:local
+    # Only the trusted broker holds the engine socket. Generated code runs in
+    # disposable containers with no mounts, no network and no app credentials.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777,noexec,nosuid,nodev
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 1
+    networks: [code-runner-private]
+
+  code-sandbox:
+    profiles: [code-sandbox-build]
+    build:
+      context: ..
+      dockerfile: tools/code-runner/Dockerfile.sandbox
+    image: learn-hub-code-sandbox:local
+    network_mode: none
+
+networks:
+  code-runner-private:
+    internal: true

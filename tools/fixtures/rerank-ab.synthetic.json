@@ -1,0 +1,3646 @@
+{
+  "version": "1.0-synthetic-frozen",
+  "description": "由智能体编写并经另一智能体独立审阅的冻结合成重排评测集：40个中文为主的问题，8个领域各5题，每题12个独立完整候选，共480条。候选text均不超过120字符，适配生产QueryAwareExcerpt公平预算。relevance=2表示正确且充分回答问题核心条件，1表示正确但不完整的部分证据、前提或反证，0表示不相关、错误对象/条件或错误结论；rationale记录标注理由。推理仅传key/title/text，禁止传relevance/rationale。case id、候选key与候选顺序均固定且不暗示标签；gold在任何模型评分之前冻结，不得依据模型结果修改。全部内容合成，不含本机资料、数据库记录或真实ID。本集主要考察固定候选内的重排与条件辨析，不能推断召回率、端到端答案质量或真实用户分布表现；逻辑条件与反证题占比较高，结果可能偏向擅长推理的模型。",
+  "cases": [
+    {
+      "id": "q_793992f3bd77",
+      "category": "后端与接口",
+      "question": "合成接口 /v2/transfers 使用 X-Retry-Token。相同 token 且请求体相同的重试应直接返回第一次结果；相同 token 但请求体变化必须报冲突。哪个实现满足这两个条件？",
+      "items": [
+        {
+          "key": "d_63a57eebe1a9",
+          "title": "转账响应编号",
+          "text": "接口响应包含 transferId 和 traceId。traceId 每次请求新建，用于链路排查，不用于识别第一次转账结果。",
+          "relevance": 0,
+          "rationale": "响应追踪字段没有题目所需约束。"
+        },
+        {
+          "key": "d_cbeb945f43dc",
+          "title": "请求体去重",
+          "text": "转账入口用 bodyHash 去重，忽略 X-Retry-Token。相同请求体永久视为同一转账，不同请求体总能提交。",
+          "relevance": 0,
+          "rationale": "以请求体替代token，不能识别同token异体。"
+        },
+        {
+          "key": "d_be2105a99588",
+          "title": "流量限制",
+          "text": "网关每个租户每分钟允许 60 次转账请求，超限返回 429。限流窗口内的重复 token 仍会独立提交。",
+          "relevance": 0,
+          "rationale": "限流不等于业务幂等。"
+        },
+        {
+          "key": "d_8df10e6592b5",
+          "title": "GET 重试策略",
+          "text": "/v2/balances 为只读余额接口，网络失败最多重试两次。该接口不接收 X-Retry-Token，也不执行转账。",
+          "relevance": 0,
+          "rationale": "只读重试不能满足写接口幂等要求。"
+        },
+        {
+          "key": "d_83d2323b911f",
+          "title": "请求摘要字段",
+          "text": "转账记录的bodyHash来自规范化JSON，字段顺序和无意义空白不影响摘要。金额、收款人等业务字段进入摘要，用于辨别两次提交是否携带相同业务请求体。",
+          "relevance": 1,
+          "rationale": "摘要有帮助，但不覆盖完整幂等语义。"
+        },
+        {
+          "key": "d_f941abb3a3da",
+          "title": "客户端回放",
+          "text": "合成移动端超时重试会复用X-Retry-Token，用户主动新建转账时生成新token。令牌与一次用户操作绑定，断网恢复后也不应因重试换成另一枚令牌。",
+          "relevance": 1,
+          "rationale": "解释客户端复用规则，缺服务端冲突判断。"
+        },
+        {
+          "key": "d_c5fed2c96df4",
+          "title": "重试记录结构",
+          "text": "合成转账服务对 (租户, X-Retry-Token) 建唯一约束。命中记录后先比较 bodyHash，相等读取已存响应，不相等拒绝；首次成功与记录在同一事务提交。",
+          "relevance": 2,
+          "rationale": "明确同体复用、异体拒绝及租户隔离。"
+        },
+        {
+          "key": "d_1dbe8512729c",
+          "title": "访问令牌校验",
+          "text": "/v2/transfers 的 Bearer 令牌用于鉴权，过期返回 401。令牌验证通过后每次请求都创建一条新的转账记录。",
+          "relevance": 0,
+          "rationale": "鉴权令牌与重试令牌职责不同。"
+        },
+        {
+          "key": "d_e129ef9baf58",
+          "title": "转账入口记录",
+          "text": "/v2/transfers 把 X-Retry-Token 与规范化请求体摘要、首次结果一起保存。token 已存在且摘要相同就返回原结果；摘要不同返回 409，不再执行转账。",
+          "relevance": 2,
+          "rationale": "同时约束重复执行与异体冲突，直接回答。"
+        },
+        {
+          "key": "d_77f99875ac4a",
+          "title": "失败后补 token",
+          "text": "服务先执行转账，再检查 X-Retry-Token 是否已有记录；命中后返回旧响应，但已发生的第二次扣款不回滚。",
+          "relevance": 0,
+          "rationale": "表面返回旧结果，却重复产生副作用。"
+        },
+        {
+          "key": "d_1fe0afc7c8f7",
+          "title": "token 快速命中",
+          "text": "转账接口只缓存 token 到结果的映射。任意带相同 X-Retry-Token 的请求都返回旧结果，即使金额或收款人变化也不报错。",
+          "relevance": 0,
+          "rationale": "近似幂等，但明确违反异体冲突条件。"
+        },
+        {
+          "key": "d_781d07e7b8ec",
+          "title": "支付回调日志",
+          "text": "合成支付回调按 providerEventId 去重，重复事件被忽略。转账发起入口与该回调是不同服务，未共用其去重表。",
+          "relevance": 0,
+          "rationale": "相似去重机制作用于不同入口。"
+        }
+      ]
+    },
+    {
+      "id": "q_7dc52a17c118",
+      "category": "后端与接口",
+      "question": "合成报价接口要求：只有客户端提交的 quoteVersion 与当前报价不同才返回 412；库存不足返回 409，登录过期返回 401。哪段资料能准确说明这三个状态的分工？",
+      "items": [
+        {
+          "key": "d_10190f7d3e95",
+          "title": "库存错误说明",
+          "text": "合成下单接口实时检查请求数量与可用库存，不足时返回409并给可选数量。客户端保留购物车，让用户调整后重新提交；库存检查失败不会创建订单。",
+          "relevance": 1,
+          "rationale": "只有一个分工正确且不完整。"
+        },
+        {
+          "key": "d_27242baf37a9",
+          "title": "请求追踪编号",
+          "text": "所有错误响应都包含 requestId，以便支持人员定位日志。requestId 的生成不决定 HTTP 错误码。",
+          "relevance": 0,
+          "rationale": "通用响应字段与判断条件无关。"
+        },
+        {
+          "key": "d_3d223ef74642",
+          "title": "报价提交约定",
+          "text": "提交订单先验证身份，再核验 quoteVersion 和库存。身份失效返回 401，报价版本不匹配返回 412，库存不足返回 409；价格相同也不能绕过版本核验。",
+          "relevance": 2,
+          "rationale": "三个触发条件与状态均准确。"
+        },
+        {
+          "key": "d_03818ff70d10",
+          "title": "价格差异检查",
+          "text": "接口只比较提交单价与当前单价，相同则成功；单价变化返回 412。即使 quoteVersion 已过期，只要单价没变也允许下单。",
+          "relevance": 0,
+          "rationale": "以价格代替版本，违反题目唯一触发条件。"
+        },
+        {
+          "key": "d_c4aa0c6b971e",
+          "title": "统一冲突码",
+          "text": "报价版本不同或库存不足都返回 409；登录过期仍返回 401。客户端只根据错误消息区分价格和库存。",
+          "relevance": 0,
+          "rationale": "近似映射，却把版本冲突错误设为409。"
+        },
+        {
+          "key": "d_1e3bcc3b149b",
+          "title": "读取报价接口",
+          "text": "GET /quotes/current 总是返回当前 quoteVersion 和展示价。没有订单写入、库存预占或过期登录的错误处理约定。",
+          "relevance": 0,
+          "rationale": "读取接口字段不说明提交状态分工。"
+        },
+        {
+          "key": "d_5e6548a27845",
+          "title": "订单前置检查",
+          "text": "合成商店的错误映射表规定 AUTH_EXPIRED→401，QUOTE_STALE→412，STOCK_LOW→409。QUOTE_STALE 仅由提交版本不等于当前版本触发。",
+          "relevance": 2,
+          "rationale": "明确412唯一条件及其它错误分工。"
+        },
+        {
+          "key": "d_06a4f8f34bba",
+          "title": "库存缓存延迟",
+          "text": "库存展示缓存每五秒刷新，下单时读取实时库存并决定是否预占。页面显示数量与提交时实际数量可能不同，刷新缓存只是改善展示新鲜度。",
+          "relevance": 0,
+          "rationale": "缓存新鲜度不回答状态映射。"
+        },
+        {
+          "key": "d_45e2678f3ab1",
+          "title": "授权失败重试",
+          "text": "订单接口将登录过期返回 412，提示客户端刷新 token；版本过期返回 401。该规则属于另一套历史客户端协议。",
+          "relevance": 0,
+          "rationale": "相似术语但状态对调且协议不匹配。"
+        },
+        {
+          "key": "d_a0b79a6b6ea7",
+          "title": "优惠码验证",
+          "text": "无效优惠码返回 422，限时优惠到期返回 410。优惠码是折扣凭据，不能代替 quoteVersion。",
+          "relevance": 0,
+          "rationale": "讨论不同错误类型。"
+        },
+        {
+          "key": "d_764d974fdbb9",
+          "title": "报价版本字段",
+          "text": "quoteVersion是服务端递增编号，优惠规则调整也会改变它。客户端随报价提交该编号，价格展示与报价版本分别保存，避免只因数值价格未变而遗漏规则更新。",
+          "relevance": 1,
+          "rationale": "支持版本核验，缺完整状态分工。"
+        },
+        {
+          "key": "d_4104345defc1",
+          "title": "请求格式约定",
+          "text": "订单JSON缺少productId返回400，非法数量也由参数校验拦截。格式正确的请求才进入订单处理器，日志分别记录参数错误与后续业务检查结果。",
+          "relevance": 0,
+          "rationale": "参数错误不是所问三种业务条件。"
+        }
+      ]
+    },
+    {
+      "id": "q_9cc13fb95ccc",
+      "category": "后端与接口",
+      "question": "合成导出任务 POST /exports 返回 202 和 jobId。取消请求只表示停止继续产出，不能撤回已经下载的文件。需要向调用者解释异步完成与取消边界，哪些候选合适？",
+      "items": [
+        {
+          "key": "d_0ce0f40b08ec",
+          "title": "导入队列记录",
+          "text": "POST /imports 接收上传的 CSV 并返回 importId，后台验证数据。导入队列与 /exports 的完成状态没有共享约定。",
+          "relevance": 0,
+          "rationale": "异步模式相似但作用于导入。"
+        },
+        {
+          "key": "d_0974b315a6f5",
+          "title": "下载计数指标",
+          "text": "export_download_total 统计客户端下载次数。该指标既不表示任务已完成，也不能控制取消请求。",
+          "relevance": 0,
+          "rationale": "指标不能解释接口语义。"
+        },
+        {
+          "key": "d_0084df54fe5e",
+          "title": "状态轮询",
+          "text": "客户端每两秒查询/exports/{jobId}，状态有queued、running、completed、cancelled。终态前继续轮询，完成后展示下载入口；jobId用于定位同一次后台工作。",
+          "relevance": 1,
+          "rationale": "提供异步完成证据，缺取消边界。"
+        },
+        {
+          "key": "d_8781fc4dead0",
+          "title": "下载授权到期",
+          "text": "服务端下载 URL 十分钟后过期，新请求无法下载。已下载的文件不会消失，但该设置不是任务取消协议。授权校验发生在每次下载请求时，本地副本不受该校验控制。",
+          "relevance": 1,
+          "rationale": "下载链接过期与取消不同，但支持本地副本不会撤回这一部分。"
+        },
+        {
+          "key": "d_a4f2ca9fb6fc",
+          "title": "同步导出说明",
+          "text": "POST /exports 返回 202 时，文件已经生成并已自动下载完成；jobId 只用于后续审计，不需要查询状态。",
+          "relevance": 0,
+          "rationale": "出现相同状态码，却错误宣称已完成。"
+        },
+        {
+          "key": "d_2615fc75e5b9",
+          "title": "强制撤回",
+          "text": "取消导出后，服务端会删除任务产物以及每台客户端已经下载的副本；因此取消可保证任何人都无法再读取文件。",
+          "relevance": 0,
+          "rationale": "超出题目规定的取消能力边界。"
+        },
+        {
+          "key": "d_c2fd036b4fda",
+          "title": "导出任务生命周期",
+          "text": "POST /exports 的 202 表示任务已受理而非文件已完成，调用者用 jobId 查询状态。取消会阻止后续产出，已被客户端下载的文件仍然存在，不能撤回。",
+          "relevance": 2,
+          "rationale": "同时解释202语义、状态查询和取消边界。"
+        },
+        {
+          "key": "d_550ae0719aa8",
+          "title": "导出文件格式",
+          "text": "合成导出支持JSON和CSV，CSV使用UTF-8并在首行写字段名。JSON保留字段类型，导出设置可选择列顺序与文件编码，客户端按对应格式读取数据。",
+          "relevance": 0,
+          "rationale": "格式说明不回答生命周期。"
+        },
+        {
+          "key": "d_d3c30fcec972",
+          "title": "任务超时清理",
+          "text": "服务每晚删除超过七天的临时导出产物。清理只作用于服务器临时目录，不是取消任务的实时状态。临时目录回收由独立定时器运行，结果元数据另外保留。",
+          "relevance": 0,
+          "rationale": "定期清理与取消操作不同。"
+        },
+        {
+          "key": "d_3f69eacd69d9",
+          "title": "取消接口契约",
+          "text": "合成导出服务返回 jobId 后后台生成文件。DELETE /exports/{jobId} 将未完成任务标记 cancelRequested；已下载的本地文件不受影响，客户端仍需查询终态。",
+          "relevance": 2,
+          "rationale": "明确异步及取消不撤回既有下载。"
+        },
+        {
+          "key": "d_c8c2d23dd74a",
+          "title": "文件下载归属",
+          "text": "合成导出文件下载到客户端磁盘后由客户端管理，服务端不能删除本地副本。客户端可离线打开或自行删除，服务器产物的生命周期与本地副本分开管理。",
+          "relevance": 1,
+          "rationale": "支持取消边界，但缺异步接口解释。"
+        },
+        {
+          "key": "d_2d59b0b27d0a",
+          "title": "同步报告入口",
+          "text": "GET /reports/latest 返回缓存报告或 404，该入口没有 jobId，也不会创建新的后台导出任务。",
+          "relevance": 0,
+          "rationale": "不同同步入口不能解释所问协议。"
+        }
+      ]
+    },
+    {
+      "id": "q_af21ca13facf",
+      "category": "后端与接口",
+      "question": "Java 合成过滤器要让 null 名称返回 false，同时忽略大小写判断名称是否等于 'draft'，不要把包含 draft 的长字符串当作相等。哪个实现能满足？",
+      "items": [
+        {
+          "key": "d_48f369c64e52",
+          "title": "状态名称检查",
+          "text": "实现为 name != null && name.equalsIgnoreCase(\"draft\")。这是整体相等比较，不是 contains；合成样例 null/DrAfT/draft-v2 分别为 false/true/false。",
+          "relevance": 2,
+          "rationale": "完整覆盖三个约束。"
+        },
+        {
+          "key": "d_7b5f9a18db29",
+          "title": "引用身份比较",
+          "text": "Java 过滤器写为 name == \"draft\"。该比较检查对象引用，不能保证内容相同的动态字符串匹配。",
+          "relevance": 0,
+          "rationale": "引用相等不是内容等值。"
+        },
+        {
+          "key": "d_e5c5a7f1a6c0",
+          "title": "大小写等值笔记",
+          "text": "Java的equalsIgnoreCase比较整个字符串且忽略大小写，draft与DRAFT可视为相等。它不会让draft-copy与draft相等，也不等同于contains。",
+          "relevance": 1,
+          "rationale": "等值语义相关，但缺空值行为。"
+        },
+        {
+          "key": "d_b572a078534e",
+          "title": "SQL 草稿筛选",
+          "text": "数据库查询 WHERE status = 'draft' 读取草稿记录。数据库排序规则与 Java equalsIgnoreCase 不共用实现。",
+          "relevance": 0,
+          "rationale": "SQL筛选不能说明Java谓词。"
+        },
+        {
+          "key": "d_323f3d1346f4",
+          "title": "整数状态映射",
+          "text": "合成文档协议以整数0表示草稿、1表示发布，传输字段为stateCode。客户端将整数映射到展示标签，写入时提交枚举码，字符串标题独立存储。",
+          "relevance": 0,
+          "rationale": "另一种数据表示不回答现有谓词。"
+        },
+        {
+          "key": "d_07fe07ea831c",
+          "title": "草稿展示样式",
+          "text": "页面为草稿显示灰色标签，为发布显示青绿标签。展示配置没有对名称进行任何比较。用户可以切换草稿与发布筛选，标签颜色不随标题变化。",
+          "relevance": 0,
+          "rationale": "呈现规则不是后端字符串判断。"
+        },
+        {
+          "key": "d_e51e49e3a6e6",
+          "title": "区分大小写状态",
+          "text": "实现为 \"draft\".equals(name)，null 安全且排除 draft-copy，但 DRAFT 不会匹配。",
+          "relevance": 0,
+          "rationale": "空值和整体比较正确，大小写约束缺失。"
+        },
+        {
+          "key": "d_154102ad5f93",
+          "title": "标题长度限制",
+          "text": "标题校验接受1到80个字符，null返回错误提示。该校验并不检查是否等于draft。非法标题会提示输入错误，合法标题仍需继续其它状态校验。",
+          "relevance": 0,
+          "rationale": "一般字符串校验与所问条件无关。"
+        },
+        {
+          "key": "d_29593774b54c",
+          "title": "直接调用名称",
+          "text": "实现为 name.equalsIgnoreCase(\"draft\")，没有前置空值判断。它能比较DRAFT，但 null 会抛异常。",
+          "relevance": 0,
+          "rationale": "正确比较仍违反null返回false。"
+        },
+        {
+          "key": "d_42f17d25b28c",
+          "title": "名称谓词",
+          "text": "Java名称谓词使用 \"draft\".equalsIgnoreCase(name)。null返回false，DrAfT返回true，draft-copy返回false；比较整个字符串，不做子串匹配。",
+          "relevance": 2,
+          "rationale": "空值安全、大小写等值均满足。"
+        },
+        {
+          "key": "d_52d87b501822",
+          "title": "子串匹配实现",
+          "text": "过滤器使用 name != null && name.toLowerCase().contains(\"draft\")。它把 draft-copy 也判定为 true。",
+          "relevance": 0,
+          "rationale": "与要求近似，却错用包含关系。"
+        },
+        {
+          "key": "d_f0a38a8186c2",
+          "title": "空值防护",
+          "text": "Java名称过滤器在访问name的方法前先判断name!=null，空引用直接进入false分支。该防护在多个名称谓词中复用，避免为空值专门抛出异常。",
+          "relevance": 1,
+          "rationale": "只满足空值防护。"
+        }
+      ]
+    },
+    {
+      "id": "q_23f7a3bfc682",
+      "category": "后端与接口",
+      "question": "合成代码搜索按 repoId=7 和 lang=java 限定范围。为什么先取全库前100条再在内存过滤，会漏掉仓库7中的命中？应怎样安排过滤与限额？",
+      "items": [
+        {
+          "key": "d_b551a979daf1",
+          "title": "范围授权",
+          "text": "读取代码正文时服务端再次核对repoId和lang，scope不匹配则拒绝读取。模型提供的片段ID只用于定位，不能自行扩大当前请求绑定的仓库或语言范围。",
+          "relevance": 1,
+          "rationale": "范围校验相关但不解决搜索排序限额。"
+        },
+        {
+          "key": "d_b5d8bb790bdd",
+          "title": "候选计数",
+          "text": "监控分别记录过滤前和过滤后的候选数量，100条只剩2条时标记范围偏差供排查。日志带query与repoId，便于追溯候选在哪个阶段被限额或过滤。",
+          "relevance": 1,
+          "rationale": "有诊断信息，没有完整修复方法。"
+        },
+        {
+          "key": "d_c096b3c83cad",
+          "title": "搜索缓存键",
+          "text": "缓存键包含query、repoId和lang，避免跨仓库复用结果。即便缓存隔离，错误的全库截断仍会缓存漏召回结果。",
+          "relevance": 1,
+          "rationale": "缓存隔离不能修复截断，为漏召回原因提供有效部分证据。"
+        },
+        {
+          "key": "d_bdc7634c0266",
+          "title": "扩大固定上限",
+          "text": "继续先取全库前100条，若仓库7没有结果就认为仓库中不存在匹配代码；语言过滤只在展示时做。",
+          "relevance": 0,
+          "rationale": "重复错误流程并作不成立的无结果推断。"
+        },
+        {
+          "key": "d_892eed8e3c32",
+          "title": "查询后去重",
+          "text": "全库取前100后按代码标题去重，再过滤repoId=7。相同标题候选减少了，但未入选的仓库7条目仍无法恢复。",
+          "relevance": 1,
+          "rationale": "解释去重无法恢复被截断命中，覆盖原因但无完整范围修复。"
+        },
+        {
+          "key": "d_dc3b858faf80",
+          "title": "语言检测流程",
+          "text": "代码上传按扩展名推断语言，未知扩展名记为plaintext，用户可人工修正。索引保存语言枚举和文件路径，Java与JavaScript使用不同语言值。",
+          "relevance": 0,
+          "rationale": "写入语言识别与截断顺序不同。"
+        },
+        {
+          "key": "d_8be59c629620",
+          "title": "候选 SQL 范围",
+          "text": "全库排序前100可能被其它仓库占满，仓库7的相关项在101以后即使匹配也读不到。repoId=7、lang=java 必须进入 SQL WHERE，再排序与 LIMIT 100。",
+          "relevance": 2,
+          "rationale": "解释漏召回原因并给出正确过滤顺序。"
+        },
+        {
+          "key": "d_003022750d8f",
+          "title": "全文匹配方式",
+          "text": "合成索引对title和text执行词面匹配。采用OR还是AND影响匹配集合，但不决定repo过滤在LIMIT之前还是之后。",
+          "relevance": 0,
+          "rationale": "匹配算子与scope执行顺序不同。"
+        },
+        {
+          "key": "d_261852149c90",
+          "title": "代码导出范围",
+          "text": "ZIP导出会列出仓库7全部Java文件，不经过搜索排序。导出结果完整不能证明搜索候选完整。导出使用按仓库列举入口，文件路径和语言值随压缩包清单保存。",
+          "relevance": 0,
+          "rationale": "另一入口的完整性不能回答搜索问题。"
+        },
+        {
+          "key": "d_3746b840d2c7",
+          "title": "前端仓库标签",
+          "text": "代码卡片显示仓库名称，并允许用户点击切换仓库。标签展示没有约束后端查询。切换动作携带新仓库ID，当前卡片上的标签只承担展示职责。",
+          "relevance": 0,
+          "rationale": "UI提示不能修复SQL范围。"
+        },
+        {
+          "key": "d_ad50c21c4656",
+          "title": "仅隐藏外部结果",
+          "text": "服务允许全库候选进入重排，只在最后隐藏其它repo结果。模型读过其它仓库内容且仓库7候选仍可能未召回。",
+          "relevance": 0,
+          "rationale": "scope太晚，同时不满足候选范围。"
+        },
+        {
+          "key": "d_4fc1323e7a16",
+          "title": "检索范围绑定",
+          "text": "合成代码搜索在每次查询服务端绑定仓库和语言条件，再施加候选上限。先全库截断再过滤只能得到截断集合的子集，无法补回被范围外候选挤掉的命中。",
+          "relevance": 2,
+          "rationale": "说明截断不可恢复和scope先行。"
+        }
+      ]
+    },
+    {
+      "id": "q_e302bd50bb52",
+      "category": "数据库与查询",
+      "question": "合成报表必须列出所有客户，即使客户没有已支付订单也显示 paidCount=0。LEFT JOIN 后怎样放置 paid 条件并计数，才能保留这些客户？",
+      "items": [
+        {
+          "key": "d_92fde42094c7",
+          "title": "COUNT 星号",
+          "text": "LEFT JOIN的ON中筛选paid，然后使用COUNT(*)。没有已支付订单的客户仍产生一行，所以报表显示1而不是0。",
+          "relevance": 0,
+          "rationale": "保留客户但计数错误，是关键hard negative。"
+        },
+        {
+          "key": "d_fc941ca6f2b4",
+          "title": "外连接计数说明",
+          "text": "先以客户为左表，将已支付状态作为连接条件；再统计右表非空订单主键。不要在WHERE要求右表状态为paid，否则无订单客户被删除。",
+          "relevance": 2,
+          "rationale": "完整解释条件位置和零计数。"
+        },
+        {
+          "key": "d_852198199ba6",
+          "title": "订单金额汇总",
+          "text": "SELECT customer_id,SUM(amount) FROM orders WHERE state='paid' GROUP BY customer_id 只汇总已有支付订单客户的金额。",
+          "relevance": 0,
+          "rationale": "金额聚合及覆盖范围都不同。"
+        },
+        {
+          "key": "d_c120391eb7b2",
+          "title": "内连接报表",
+          "text": "customers JOIN orders 只返回存在匹配订单的客户，再筛选paid；该报表只用于列出购买过的客户。",
+          "relevance": 0,
+          "rationale": "内连接用途不满足全客户报表。"
+        },
+        {
+          "key": "d_8b7ed5a88dca",
+          "title": "客户页分页",
+          "text": "客户列表按客户ID分页，点击客户后加载独立订单详情。分页响应含客户名和联系信息，详情页另展示订单状态与金额，两个页面分别设置排序规则。",
+          "relevance": 0,
+          "rationale": "分页功能不回答汇总SQL。"
+        },
+        {
+          "key": "d_8335b2f52fa1",
+          "title": "客户订单汇总",
+          "text": "客户作LEFT JOIN，连接条件为o.customer_id=c.id AND o.state='paid'；按c.id分组并用COUNT(o.id)。无已支付订单的客户保留，计数为0。",
+          "relevance": 2,
+          "rationale": "条件在ON且计非空订单ID，零订单仍保留。"
+        },
+        {
+          "key": "d_8d075a0ea76f",
+          "title": "客户总数",
+          "text": "SELECT COUNT(*) FROM customers 返回全部客户数量，不输出逐客户已支付订单数。",
+          "relevance": 0,
+          "rationale": "粒度和指标均不匹配。"
+        },
+        {
+          "key": "d_2490ca0ca201",
+          "title": "状态写在WHERE",
+          "text": "客户LEFT JOIN订单后使用WHERE o.state='paid'，按c.id分组计COUNT(o.id)。该方案声称仍能显示全部客户及零支付计数，无匹配订单也不会被过滤。",
+          "relevance": 0,
+          "rationale": "术语相同但过滤掉题目要保留的客户。"
+        },
+        {
+          "key": "d_992b068b16f8",
+          "title": "未支付订单列表",
+          "text": "查询 state='pending' 的订单并展示客户名，用于提醒付款，不要求显示零订单客户。每条提醒含订单号与截止时间，客户回复后从提醒队列移除。",
+          "relevance": 0,
+          "rationale": "业务状态与目标反向。"
+        },
+        {
+          "key": "d_6a5d662b9b8d",
+          "title": "NULL 等值判断",
+          "text": "报表用 WHERE o.id = NULL 寻找未匹配订单；SQL中这个表达式不是IS NULL，不能可靠选出空占位行。",
+          "relevance": 0,
+          "rationale": "讨论空值但表达式错误且只列无订单客户。"
+        },
+        {
+          "key": "d_0522a3e855b4",
+          "title": "COUNT 表达式",
+          "text": "COUNT(o.id)只统计非NULL订单主键，不把LEFT JOIN生成的空占位行计成订单。订单主键在真实订单行必定非空，适合区分实际匹配与补齐行。",
+          "relevance": 1,
+          "rationale": "解决计数部分，缺连接条件位置。"
+        },
+        {
+          "key": "d_bfefcdc1f01b",
+          "title": "保留左侧记录",
+          "text": "LEFT JOIN 可以保留客户侧没有订单的记录。但后续WHERE如果筛选右表字段，仍可能把这些行剔除。",
+          "relevance": 1,
+          "rationale": "解释保留原则，未给完整支付计数。"
+        }
+      ]
+    },
+    {
+      "id": "q_484039849cbb",
+      "category": "数据库与查询",
+      "question": "合成座位池表 seats(id,remaining) 当前 remaining=1。两个事务同时读到1再各自减1可能超售，要求最后成功预订至多一次。哪个并发方案能保证？",
+      "items": [
+        {
+          "key": "d_4aa2f1c7e45d",
+          "title": "夜间对账",
+          "text": "夜间比较预订总数与座位余额，发现超售后人工取消一单。该方案允许两个事务先成功。补偿记录注明被取消订单和原因，客户此前已收到成功通知。",
+          "relevance": 0,
+          "rationale": "事后修复不满足成功至多一次。"
+        },
+        {
+          "key": "d_2a38982392a2",
+          "title": "订单唯一编号",
+          "text": "每笔预订分配不同UUID，唯一编号防止订单ID重复，但允许两个请求预订最后一个座位。编号用于订单追踪与客服查询，同一座位可以关联多个订单记录。",
+          "relevance": 0,
+          "rationale": "订单ID唯一与座位配额不同。"
+        },
+        {
+          "key": "d_1b58ef4c7f23",
+          "title": "余额约束",
+          "text": "座位表设置CHECK(remaining>=0)，提交负余额的写入会被约束拒绝。数据库将约束失败作为事务错误返回，应用需决定如何处理已生成的预订响应。",
+          "relevance": 1,
+          "rationale": "约束相关但缺完整成功协议。"
+        },
+        {
+          "key": "d_44694613e4e7",
+          "title": "座位行锁",
+          "text": "事务先 SELECT remaining FROM seats WHERE id=? FOR UPDATE，获得锁后检查余额再扣减并写预订；所有预订入口遵守相同锁协议。",
+          "relevance": 2,
+          "rationale": "同一行序列化检查与扣减。"
+        },
+        {
+          "key": "d_d94a9d00aa87",
+          "title": "条件扣减",
+          "text": "事务执行 UPDATE seats SET remaining=remaining-1 WHERE id=? AND remaining>0，受影响行数为1才确认预订，0则失败；预订记录与扣减同事务。",
+          "relevance": 2,
+          "rationale": "原子条件更新与成功判据防止双成功。"
+        },
+        {
+          "key": "d_1a3987786790",
+          "title": "提高隔离但不检查",
+          "text": "事务异常时应用仍返回成功，认为提高隔离级别后所有请求都会被自动重试并最终成功。响应码与事务提交结果未绑定，日志中的异常仅用于离线排查。",
+          "relevance": 0,
+          "rationale": "忽略失败结果，破坏成功判据。"
+        },
+        {
+          "key": "d_34de54da9106",
+          "title": "并发模拟记录",
+          "text": "合成并发测试在两个事务读余额后加屏障，两者同时看到remaining=1。释放屏障后记录两次预订的返回值和最终余额，用于复现读写竞争窗口。",
+          "relevance": 1,
+          "rationale": "能复现问题，不能保证至多一次成功。"
+        },
+        {
+          "key": "d_0334cf00268a",
+          "title": "支付额度行锁",
+          "text": "支付服务锁住用户钱包行防止余额透支，预订服务并不锁seats行。钱包锁不共享座位互斥范围。钱包按用户划分，不同用户请求同一座位时获得不同钱包锁。",
+          "relevance": 0,
+          "rationale": "锁对象不同不能保护同一座位。"
+        },
+        {
+          "key": "d_1ec0d9d1a015",
+          "title": "覆盖式减法",
+          "text": "事务读取旧值1，在应用算出0并执行SET remaining=0。两次更新都成功，两个预订都被接受，但最终余额看似正常。",
+          "relevance": 0,
+          "rationale": "丢失更新掩盖超售，硬负例。"
+        },
+        {
+          "key": "d_9bcebecc7df0",
+          "title": "库存展示刷新",
+          "text": "页面每秒刷新remaining展示，让用户尽快看见售罄。显示刷新不会串行化后端事务。展示请求是只读接口，实际预订由另一个写接口处理。",
+          "relevance": 0,
+          "rationale": "UI刷新不能提供并发保证。"
+        },
+        {
+          "key": "d_cb79a68dfb77",
+          "title": "只读快照",
+          "text": "每个事务用可重复读快照检查remaining=1，然后分别插入预订；没有行锁、条件扣减或唯一座位约束。",
+          "relevance": 0,
+          "rationale": "快照一致不等于互斥成功。"
+        },
+        {
+          "key": "d_7fb438f19dc5",
+          "title": "缓存预检",
+          "text": "两个请求各查缓存remaining=1，先返回预订成功，随后后台更新数据库。缓存命中不锁定座位。缓存刷新在预订响应发出后进行，多个请求可共享同一旧快照。",
+          "relevance": 0,
+          "rationale": "仍可能两个请求都成功。"
+        }
+      ]
+    },
+    {
+      "id": "q_2b895c2fdc5e",
+      "category": "数据库与查询",
+      "question": "合成查询 WHERE tenant_id=? AND state=? ORDER BY created_at DESC LIMIT 20，没有其它条件。哪个索引列顺序与这个等值过滤后按时间取最新的访问模式匹配？",
+      "items": [
+        {
+          "key": "d_ae607d852455",
+          "title": "排序扫描方向",
+          "text": "B树排序列可顺向或逆向扫描以生成有序结果，DESC展示通常可采用逆向读取。是否还需排序取决于过滤范围与索引列顺序，不能仅凭列名存在就断言。",
+          "relevance": 1,
+          "rationale": "相关排序事实但没有完整索引。"
+        },
+        {
+          "key": "d_dad572a3894e",
+          "title": "索引访问笔记",
+          "text": "固定tenant_id和state后，同一索引范围中的created_at有序。采用(tenant_id,state,created_at DESC)可顺序取最新20条。",
+          "relevance": 2,
+          "rationale": "完整给出适配索引及访问理由。"
+        },
+        {
+          "key": "d_3f19c8ee0934",
+          "title": "按更新时间索引",
+          "text": "索引(tenant_id,state,updated_at)用于按修改时间获取最新状态记录。修改旧订单会更新updated_at，而created_at保持原值，两个时间轴可以呈现不同顺序。",
+          "relevance": 0,
+          "rationale": "近似时间字段不能替代目标列。"
+        },
+        {
+          "key": "d_930d0ab6812c",
+          "title": "主键查找",
+          "text": "订单id为主键，按id查询可直接定位单条订单。订单导入允许保留旧创建时间，较大id不保证created_at更晚；管理页的点查与时间列表使用不同入口。",
+          "relevance": 0,
+          "rationale": "点查索引与该查询模式不同。"
+        },
+        {
+          "key": "d_c9ba92970ab5",
+          "title": "订单索引方案",
+          "text": "为该查询建立(tenant_id,state,created_at)联合索引，两个等值前缀确定范围后沿created_at逆向取20行；需要覆盖字段时再追加列。",
+          "relevance": 2,
+          "rationale": "等值前缀后排序列直接匹配。"
+        },
+        {
+          "key": "d_0bc53c1c4ada",
+          "title": "时间优先索引",
+          "text": "只建(created_at,tenant_id,state)，从全局最新记录向后检查租户和状态；其它租户很多时可能跳过大量行。",
+          "relevance": 0,
+          "rationale": "时间优先不满足所问等值前缀模式。"
+        },
+        {
+          "key": "d_e8282e14a7da",
+          "title": "状态单列",
+          "text": "仅state索引可定位状态，tenant过滤和created_at排序仍需额外处理；此方案未提供联合有序范围。",
+          "relevance": 0,
+          "rationale": "只覆盖一个过滤字段。"
+        },
+        {
+          "key": "d_44195edd66d5",
+          "title": "倒序显示设置",
+          "text": "列表布局使用CSS column-reverse把已收到的数据反向显示，客户端不重新请求数据。前端倒序只改变视觉位置，分页响应仍是服务器选出的同一批记录。",
+          "relevance": 0,
+          "rationale": "展示倒序不是数据库有序取数。"
+        },
+        {
+          "key": "d_a8202cdfb5d0",
+          "title": "前端缓存排序",
+          "text": "前端下载全租户订单再按created_at排序，显示20条。未限制state，也不减少数据库扫描。客户端保存这批全量数据供翻页，页面过滤控件随后处理状态。",
+          "relevance": 0,
+          "rationale": "改为全量应用排序且漏条件。"
+        },
+        {
+          "key": "d_b7841ca7c5c9",
+          "title": "租户前缀",
+          "text": "tenant_id作为联合索引前缀可定位单个租户范围，避免将全库不同租户记录一起扫描。多租户列表使用该前缀，索引后续列依据各查询过滤与排序设计。",
+          "relevance": 1,
+          "rationale": "部分过滤策略，缺完整排序结构。"
+        },
+        {
+          "key": "d_b241f6aa9362",
+          "title": "文本检索索引",
+          "text": "订单备注的全文索引用于搜索自然语言，不能使tenant/state等值后的时间排序有序。搜索响应含备注片段与匹配词，主要供客服按描述找订单。",
+          "relevance": 0,
+          "rationale": "不同类型索引与字段。"
+        },
+        {
+          "key": "d_9e043ec9a5ff",
+          "title": "租户时间状态",
+          "text": "建(tenant_id,created_at,state)并声称tenant和state都是连续等值前缀。时间列夹在中间，state并非该连续前缀。",
+          "relevance": 0,
+          "rationale": "相近列集合却解释错误，是硬负例。"
+        }
+      ]
+    },
+    {
+      "id": "q_74d992784330",
+      "category": "数据库与查询",
+      "question": "合成事件按 updated_at DESC,id DESC 分页。多个事件的更新时间相同，下一页游标应怎样比较，才能避免漏掉同时间的较小ID？",
+      "items": [
+        {
+          "key": "d_899763768eb2",
+          "title": "查询事件正文",
+          "text": "事件详情接口接收单个eventId，返回正文、创建时间与修改时间；多次查询互不关联，没有上一页或下一页的游标载荷。",
+          "relevance": 0,
+          "rationale": "点查不回答续页条件。"
+        },
+        {
+          "key": "d_43687ec22030",
+          "title": "页号偏移",
+          "text": "下一页采用OFFSET page*size，不使用游标；并发插入时偏移位置变化可导致重复或漏项。后台展示页沿用页号参数，用户跳页时直接重新计算偏移量。",
+          "relevance": 0,
+          "rationale": "不是所问复合游标方案。"
+        },
+        {
+          "key": "d_48c6e6fb99e3",
+          "title": "稳定次序",
+          "text": "同一updated_at下按唯一id降序打破平局，使每条事件在排序中都有确定位置。游标客户端显示毫秒时间和原始id，避免用格式化分钟文字区分同时间项。",
+          "relevance": 1,
+          "rationale": "解释tie-break，缺续页过滤。"
+        },
+        {
+          "key": "d_32d1314fc40c",
+          "title": "包含边界",
+          "text": "使用updated_at<=lastTime，不比较ID；上一页同时间事件会再次进入下一页。客户端展示全部响应条目，没有再按复合键去掉已显示边界行。",
+          "relevance": 0,
+          "rationale": "近似条件产生重复且不定位平局。"
+        },
+        {
+          "key": "d_c165a5c8efe2",
+          "title": "复合游标",
+          "text": "游标保存(lastTime,lastId)，下一页条件为updated_at<lastTime OR (updated_at=lastTime AND id<lastId)，排序仍updated_at DESC,id DESC。",
+          "relevance": 2,
+          "rationale": "正确字典序边界兼顾同时间ID。"
+        },
+        {
+          "key": "d_32cc6aa69cad",
+          "title": "独立条件相与",
+          "text": "下一页WHERE updated_at<lastTime AND id<lastId，较旧但较大ID事件也会被排除。",
+          "relevance": 0,
+          "rationale": "错误把字典序分支合为AND。"
+        },
+        {
+          "key": "d_03eaa5fa979f",
+          "title": "只比较时间",
+          "text": "下一页仅WHERE updated_at<lastTime，同时间但id更小的未读事件全部被排除。服务用时间戳作为唯一续页位置，同一时间的未读尾部无法表示。",
+          "relevance": 0,
+          "rationale": "正是题目要防止的漏项。"
+        },
+        {
+          "key": "d_45e757ded5e5",
+          "title": "事件续页条件",
+          "text": "降序复合键分页使用(updated_at,id)<(cursorTime,cursorId)，或等价展开条件；两个游标字段必须与ORDER BY一致。",
+          "relevance": 2,
+          "rationale": "复合键比较完整且与排序一致。"
+        },
+        {
+          "key": "d_da02a03d547f",
+          "title": "ID方向相反",
+          "text": "下一页使用updated_at<lastTime OR (updated_at=lastTime AND id>lastId)，但排序是id降序。",
+          "relevance": 0,
+          "rationale": "平局条件方向反了，是硬负例。"
+        },
+        {
+          "key": "d_ec015edb3d47",
+          "title": "游标载荷",
+          "text": "合成事件游标载荷包括更新时间与最后一条事件ID，服务端签名后交给客户端原样回传。两个字段共同标识最后看到的事件位置，避免只保留显示时间。",
+          "relevance": 1,
+          "rationale": "字段相关但没有实际边界判断。"
+        },
+        {
+          "key": "d_03d7f06d2f2b",
+          "title": "按创建时间续页",
+          "text": "游标保存created_at与id，查询却按updated_at排序。修改事件可能改变顺序，两个键不一致。",
+          "relevance": 0,
+          "rationale": "游标字段与排序字段不同。"
+        },
+        {
+          "key": "d_a62140f921e7",
+          "title": "修改时间显示",
+          "text": "界面把updated_at显示为人类可读分钟，游标不应拿显示字符串当精确时间戳。该资料只有展示规则。",
+          "relevance": 0,
+          "rationale": "格式提醒缺分页比较答案。"
+        }
+      ]
+    },
+    {
+      "id": "q_057a3857d0d2",
+      "category": "数据库与查询",
+      "question": "合成表 readings 中 value 为 [5,5,NULL,8]。报告分别要“有效读数个数”和“不同有效值个数”，应该用什么聚合，结果各是多少？",
+      "items": [
+        {
+          "key": "d_c35229dfb296",
+          "title": "平均读数",
+          "text": "AVG(value)=6用于展示平均有效读数，NULL被忽略。平均值不是两个要求的个数。报告将该值写入均值列，并同时展示最小值与最大值作趋势对照。",
+          "relevance": 0,
+          "rationale": "相关数据但指标不同。"
+        },
+        {
+          "key": "d_bf62b50bcfaa",
+          "title": "非空读取",
+          "text": "COUNT(value)忽略NULL并计入每个非空记录，重复有效值仍各占一次。采集报告用它统计有效采样条数，结果不是数值总和，也不意味着非空值已去重。",
+          "relevance": 1,
+          "rationale": "仅回答有效个数部分。"
+        },
+        {
+          "key": "d_be1915de3b67",
+          "title": "NULL 算一种值",
+          "text": "COUNT(value)=3，COUNT(DISTINCT value)=3，因为把NULL当作第三个不同有效值。",
+          "relevance": 0,
+          "rationale": "普通计数正确但去重计数误含NULL。"
+        },
+        {
+          "key": "d_f99955b64b6e",
+          "title": "读数统计",
+          "text": "有效个数用COUNT(value)=3，不同有效值用COUNT(DISTINCT value)=2。NULL不参与这两个计数，重复的5只在前者计两次。",
+          "relevance": 2,
+          "rationale": "两种聚合及结果都满足。"
+        },
+        {
+          "key": "d_adac78a8319b",
+          "title": "空读数查询",
+          "text": "WHERE value IS NULL 会找到一条空读数，用于补采；不统计有效或不同有效值。补采队列保存空读数时间戳，成功补采后追加新记录供追踪。",
+          "relevance": 0,
+          "rationale": "只查空值，与目标方向不同。"
+        },
+        {
+          "key": "d_87e9eb451979",
+          "title": "求和代替计数",
+          "text": "SUM(value)=18，报告把18称为有效读数个数；COUNT(value)=3被用作不同值个数。",
+          "relevance": 0,
+          "rationale": "聚合语义混淆。"
+        },
+        {
+          "key": "d_77a7fc0c440f",
+          "title": "采集频率",
+          "text": "传感器每十秒记录一次读数，通信丢包写NULL并附缺失原因。采集频率控制时间间隔，缺失记录仍保留时间戳，后续补采会新增一条记录。",
+          "relevance": 0,
+          "rationale": "背景信息不能回答统计表达式。"
+        },
+        {
+          "key": "d_0872df14caf4",
+          "title": "去重行数",
+          "text": "SELECT DISTINCT value包含5、8和NULL三行，直接数返回行数为3；它不同于COUNT(DISTINCT value)。",
+          "relevance": 1,
+          "rationale": "正确区分去重行集与有效值计数，提供相关对照证据。"
+        },
+        {
+          "key": "d_9361b80397f9",
+          "title": "按传感器分组",
+          "text": "报告按sensorId分组统计COUNT(*)，样例未提供sensorId且不区分NULL。每个传感器输出一个分组行，记录行数按设备身份分别累计。",
+          "relevance": 0,
+          "rationale": "新增分组粒度不回答给定序列。"
+        },
+        {
+          "key": "d_278436e4e0b2",
+          "title": "不同值统计",
+          "text": "COUNT(DISTINCT value)统计非NULL唯一值，相同数值被折叠。设备报告用该字段观察数值多样性，重复采样同一值只贡献一次，NULL不作为有效值。",
+          "relevance": 1,
+          "rationale": "仅回答不同值部分。"
+        },
+        {
+          "key": "d_8e80acb58d6c",
+          "title": "NULL 与去重",
+          "text": "对5、5、NULL、8，COUNT(value)计三个非空记录；COUNT(DISTINCT value)只计5和8两个值。COUNT(*)则另计全部四行。",
+          "relevance": 2,
+          "rationale": "完整区分行数、非空数、去重数。"
+        },
+        {
+          "key": "d_23cc0e825b5a",
+          "title": "全部行计数",
+          "text": "把有效读数个数定义为COUNT(*)=4，把不同有效值个数定义为COUNT(DISTINCT value)=2。",
+          "relevance": 0,
+          "rationale": "第二部分正确但第一部分误含NULL。"
+        }
+      ]
+    },
+    {
+      "id": "q_37649bad8c33",
+      "category": "图谱与知识检索",
+      "question": "合成图谱把“月桥缓存”和“MoonBridge Cache”归为同一实体，但引用必须保留每条关系的来源文档与对应原句。怎样合并才不会让原句与来源错配？",
+      "items": [
+        {
+          "key": "d_33800c47afde",
+          "title": "首条原句复用",
+          "text": "同一关系只保留第一次抽到的quote，sources合并为所有来源。回答时把首条quote引用到任意source即可。",
+          "relevance": 0,
+          "rationale": "合并后原句与其它来源可能错配。"
+        },
+        {
+          "key": "d_0a7e13002921",
+          "title": "摘要引用",
+          "text": "合并后为每条边生成一句新摘要，并把任意原文档列为引用；摘要不保留原句。新摘要由模型改写，来源字段从合并后的文档列表随机取一项。",
+          "relevance": 0,
+          "rationale": "不能保证引用句来自指定文档。"
+        },
+        {
+          "key": "d_be255de3eb64",
+          "title": "标题近似归并",
+          "text": "仅因文档标题都含缓存就把所有实体合并，不查月桥与MoonBridge是否为明确别名。该规则也会把不同产品的缓存节点混在一起，只要标题共享词即可。",
+          "relevance": 0,
+          "rationale": "宽泛词重合不构成实体同一性。"
+        },
+        {
+          "key": "d_9f1d513613fd",
+          "title": "删除英文实体",
+          "text": "合并时删除英文名及其关系，只留下中文节点，认为同义内容不需要保留来源。被删除英文节点的原文档仍可打开，但图内不再保留那些边记录。",
+          "relevance": 0,
+          "rationale": "归一时丢失关系证据。"
+        },
+        {
+          "key": "d_fe6f401ff501",
+          "title": "缓存TTL关系",
+          "text": "月桥缓存支持30秒TTL，到期删除键；主动读取不会延长这个TTL。合成客户端在写入时设置过期时长，展示面板分别记录写入时间和剩余有效期。",
+          "relevance": 0,
+          "rationale": "同名技术内容不回答合并过程。"
+        },
+        {
+          "key": "d_35175bbf96a8",
+          "title": "检索翻译",
+          "text": "查询时将MoonBridge翻译成月桥，再执行文本搜索；图谱仍有两个实体，关系存储未改。搜索入口只处理临时查询字符串，存量节点与关系不作迁移。",
+          "relevance": 0,
+          "rationale": "查询改写不能回答图谱合并规则。"
+        },
+        {
+          "key": "d_2b4224969d82",
+          "title": "别名登记",
+          "text": "实体别名表把月桥缓存与MoonBridge Cache映射到同一规范ID，查询两种名称都能定位同一节点。规范显示名与别名分别存储，新增别名不改变节点身份。",
+          "relevance": 1,
+          "rationale": "只解决实体归一，不含证据配对。"
+        },
+        {
+          "key": "d_ef51a6e98d1c",
+          "title": "证据定位字段",
+          "text": "图谱证据记录sourceKey与段落号，读取原文时可定位对应片段。引用展示包括文档名和段落位置，文档更新后需检查定位是否仍对应原来的文字。",
+          "relevance": 1,
+          "rationale": "定位相关但缺别名合并与原句绑定。"
+        },
+        {
+          "key": "d_51fb2f26e885",
+          "title": "别名与引用迁移",
+          "text": "MoonBridge Cache映射到月桥缓存的规范实体，合并同类边时追加{source,quote}证据记录，原记录的来源和原句作为一个整体迁移。",
+          "relevance": 2,
+          "rationale": "别名合并与证据配对均明确。"
+        },
+        {
+          "key": "d_add2dd6ecff0",
+          "title": "边数量指标",
+          "text": "仪表盘显示合并前后实体数、边数，用于观察压缩比例；计数不保证来源对应。压缩比例按节点数下降计算，审计表记录本次合并的时间与操作者。",
+          "relevance": 0,
+          "rationale": "统计指标没有证据绑定机制。"
+        },
+        {
+          "key": "d_25b1a3bbd798",
+          "title": "来源与原句分别排序",
+          "text": "关系分别保存排序后的source数组和quote数组，再按相同下标配对；原句顺序与来源顺序独立。两个数组分别在不同查询中生成，跨数组没有共同的证据记录ID。",
+          "relevance": 0,
+          "rationale": "看似完整却破坏证据配对。"
+        },
+        {
+          "key": "d_ac3f06b12740",
+          "title": "关系证据记录",
+          "text": "别名指向统一entityId；关系保存evidence列表，每项绑定sourceKey与quote。实体合并时迁移并去重完整证据对，不能分别合并来源集合和原句集合。",
+          "relevance": 2,
+          "rationale": "统一实体并保存来源原句配对。"
+        }
+      ]
+    },
+    {
+      "id": "q_1408cdcbbca6",
+      "category": "图谱与知识检索",
+      "question": "合成文档dA从“组件甲依赖组件乙”改成“不再依赖组件乙”，图中还存在人工确认的同名关系。增量重建怎样删除旧文档证据，同时不误删人工关系？",
+      "items": [
+        {
+          "key": "d_e3164f035204",
+          "title": "依赖可视化",
+          "text": "图中把依赖边画为实线，不依赖说明画为文字标签；颜色规则不决定增量清理。关系标签可以被用户点开查看详情，布局服务只改变屏幕坐标。",
+          "relevance": 0,
+          "rationale": "展示方式不回答证据生命周期。"
+        },
+        {
+          "key": "d_6b3aee63d9b4",
+          "title": "人工边批量审批",
+          "text": "管理员每天批准人工关系，这个流程不触碰dA的机器抽取记录。审批记录带确认时间与操作者，审核界面按待确认状态筛选人工提交。",
+          "relevance": 0,
+          "rationale": "不同操作不能回答增量删除边界。"
+        },
+        {
+          "key": "d_140af831c00f",
+          "title": "关系所有权",
+          "text": "边的证据记录区分document与manual，文档版本替换只覆盖dA-owned记录。新版否定不自动删除人工确认，冲突进入待核验状态。",
+          "relevance": 2,
+          "rationale": "来源所有权与人工冲突边界完整。"
+        },
+        {
+          "key": "d_5c21eae0822c",
+          "title": "文档版本标识",
+          "text": "机器抽取证据记录docVersion，便于区分dA的旧版和新版。版本号与抽取时间分别保存，文档重新发布后能查出哪些记录仍引用先前发布版本。",
+          "relevance": 1,
+          "rationale": "版本追踪相关但不完整。"
+        },
+        {
+          "key": "d_65861ee5ba37",
+          "title": "改实体名称",
+          "text": "将组件甲改名为组件甲新版以避开旧边，旧实体和旧关系仍可被检索。新旧节点具有不同ID，历史边继续连接旧ID，检索仍索引两个节点。",
+          "relevance": 0,
+          "rationale": "改名不撤销旧来源证据。"
+        },
+        {
+          "key": "d_d28455ed0358",
+          "title": "只追加新版",
+          "text": "保留dA旧版本依赖边并追加新版不依赖边，不撤销任何旧证据；查询无法判断哪版有效。查询只按边类型匹配，旧版与新版证据没有有效期或优先级。",
+          "relevance": 0,
+          "rationale": "append-only造成过期证据持续存在。"
+        },
+        {
+          "key": "d_85ba255a1ea3",
+          "title": "文档更新时间排序",
+          "text": "检索优先返回最新文档，但旧关系依然存在于图中。只排序不完成增量重建。返回卡片按日期排列，旧证据只是在列表后面而非失效或删除。",
+          "relevance": 0,
+          "rationale": "检索新鲜度不能删除旧证据。"
+        },
+        {
+          "key": "d_8322625d1175",
+          "title": "节点相似度",
+          "text": "计算组件甲和组件乙的文本相似度，超过阈值就保留边，忽略文档否定与manual来源。规则以相似度分值替代关系句判断，文档版本与人工审计记录未入条件。",
+          "relevance": 0,
+          "rationale": "相似度不能代替关系来源规则。"
+        },
+        {
+          "key": "d_1aa37ad55717",
+          "title": "按来源重建",
+          "text": "重建dA前仅撤销source=dA的抽取证据，再加入新版本证据；一条边若仍有manual证据或其它来源就保留，只有无证据边才清理。",
+          "relevance": 2,
+          "rationale": "删除指定旧来源且保护人工边。"
+        },
+        {
+          "key": "d_63ab93070a84",
+          "title": "人工确认标记",
+          "text": "人工创建关系带manual=true与确认人标记，界面可以按来源类型筛选。机器抽取关系单独标document及来源文档，两类记录在审计列表中可分别追踪。",
+          "relevance": 1,
+          "rationale": "只支持区分人工来源。"
+        },
+        {
+          "key": "d_caa70a737d20",
+          "title": "直接删除同名边",
+          "text": "发现dA的新句是否定后，删除组件甲→组件乙的所有边，包括人工来源与其它文档来源。该删除操作按端点和关系类型执行，不检查边证据的来源所有者。",
+          "relevance": 0,
+          "rationale": "否定处理过宽，误删独立人工关系。"
+        },
+        {
+          "key": "d_384e79362466",
+          "title": "全图重置",
+          "text": "更新dA时清空整个图再抽取dA，其它文档和人工关系都不保留。重建任务使用单文档输入，重跑后图中仅含dA当前能够抽出的内容。",
+          "relevance": 0,
+          "rationale": "重建范围过宽且丢独立数据。"
+        }
+      ]
+    },
+    {
+      "id": "q_7daddc38ad8a",
+      "category": "图谱与知识检索",
+      "question": "合成问题“月桥任务链卡住可能影响哪些模块”需要沿依赖关系找邻居，并为每条影响路径返回原文证据。只有社区摘要或节点相似度，为什么不足以支撑这个回答？",
+      "items": [
+        {
+          "key": "d_412c6f869ad8",
+          "title": "社区名列举",
+          "text": "回答直接列出所在社区的全部模块，宣称每个模块都受影响。社区成员不必互相依赖。系统以communityId分组输出模块，边的方向和关系类型未进入选择条件。",
+          "relevance": 0,
+          "rationale": "群组归属不能证明影响路径。"
+        },
+        {
+          "key": "d_7ef638ec09cd",
+          "title": "图布局参数",
+          "text": "力导向布局让关系图更易读，节点位置只是视觉计算，不表示真实传播距离。力导向算法以边吸引与节点排斥计算坐标，拖动节点不会改变关系。",
+          "relevance": 0,
+          "rationale": "布局位置不能支撑影响分析。"
+        },
+        {
+          "key": "d_e5f6ef629498",
+          "title": "任意原文背书",
+          "text": "沿边遍历得到模块后引用一篇同主题文章，文章不包含路径中各条依赖。引用选择只根据文章主题词，报告不保存每一跳对应的证据定位。",
+          "relevance": 0,
+          "rationale": "路径存在但引用不支持具体边。"
+        },
+        {
+          "key": "d_6545234c5ab3",
+          "title": "任务耗时聚合",
+          "text": "统计月桥任务链最近一周耗时分位数，用于判断性能波动，不提供模块间关系。指标按任务ID和日期分桶，仪表盘展示慢任务与历史基线对照。",
+          "relevance": 0,
+          "rationale": "同实体统计不回答影响链。"
+        },
+        {
+          "key": "d_a2f68763d9f0",
+          "title": "组件安装流程",
+          "text": "记录月桥组件的安装命令和默认端口，没有依赖边或影响方向。安装说明包括配置项、启动次序和健康检查URL，面向首次部署用户。",
+          "relevance": 0,
+          "rationale": "操作说明与路径问题不同。"
+        },
+        {
+          "key": "d_2ec50871b122",
+          "title": "反向无差别遍历",
+          "text": "把depends_on当无向边扩展，既列依赖者也列被依赖者，不区分故障传播方向。扩展器对边两端对称处理，每个相邻节点都拥有相同传播权重。",
+          "relevance": 0,
+          "rationale": "方向混淆造成近似但错误影响集合。"
+        },
+        {
+          "key": "d_31bc2cb59864",
+          "title": "局部关系上下文",
+          "text": "若A依赖B记为A→B，故障B的影响分析沿入边寻找A及其依赖者，路径每步附来源原句；社区概览与节点语义相似都不能代替定向依赖证据。",
+          "relevance": 2,
+          "rationale": "覆盖路径支持与摘要/相似度边界。"
+        },
+        {
+          "key": "d_6e272f21a578",
+          "title": "相似度等同依赖",
+          "text": "对月桥任务链节点找向量最近邻，把相似节点全部当作受影响模块，不读取任何有向边。近邻阈值控制返回数量，相似来源可以是术语说明或同类产品介绍。",
+          "relevance": 0,
+          "rationale": "相似关系冒充依赖路径。"
+        },
+        {
+          "key": "d_3d326ca88fd9",
+          "title": "依赖边方向",
+          "text": "depends_on边A→B表示A依赖B，B失败时应检查A等依赖者，A失败不自动证明B不可用。依赖箭头与故障传播方向需区分，反向边可用于影响查找。",
+          "relevance": 1,
+          "rationale": "提供方向约束但不完整。"
+        },
+        {
+          "key": "d_78bdff7437a1",
+          "title": "社区摘要用途",
+          "text": "社区摘要概览一组模块的共同主题，压缩时可能省略单条依赖关系。摘要可帮助理解总体结构，具体边方向与原句仍属于关系级数据，二者信息粒度不同。",
+          "relevance": 1,
+          "rationale": "支持摘要局限，缺完整路径证据。"
+        },
+        {
+          "key": "d_e2d5869dc4f1",
+          "title": "网页标题匹配",
+          "text": "合成影响页按标题含月桥返回文章，将标题中的模块词全部当作受影响模块。它声明标题共现足以证明有向传播，因此不读取depends_on或任何原文关系。",
+          "relevance": 0,
+          "rationale": "文本共现不是可证关系路径。"
+        },
+        {
+          "key": "d_200dd37d06b8",
+          "title": "影响路径检索",
+          "text": "depends_on边A→B表示A依赖B。月桥任务链故障时沿反向边找依赖者，返回有界影响路径及每条边原文；社区摘要不保具体依赖，相似节点不证明方向。",
+          "relevance": 2,
+          "rationale": "解释遍历证据与两种不足。"
+        }
+      ]
+    },
+    {
+      "id": "q_b460f4de0f0a",
+      "category": "图谱与知识检索",
+      "question": "合成全局检索同时取父社区P摘要与其三个子社区摘要，四份都重复同一段结论，挤掉另一个主题。希望保留不同主题覆盖而少重复，应该怎样选上下文？",
+      "items": [
+        {
+          "key": "d_3cead27027f2",
+          "title": "局部实体检索",
+          "text": "合成局部检索按实体名返回一跳邻居和关系原句，单次最多展开20条边。返回结构包含entityId、relation与sourceKey，供具体实体查询和关系卡片展示。",
+          "relevance": 0,
+          "rationale": "不同检索粒度没有回答所问策略。"
+        },
+        {
+          "key": "d_aaf7a38ff2a1",
+          "title": "只按长度选",
+          "text": "始终保留最长的四份摘要，不比较主题或内容；父子重复较长时仍全部入选。选择器仅依据摘要字符数降序取四项，未设置父子重叠或主题配额。",
+          "relevance": 0,
+          "rationale": "长度排序不解决重复覆盖。"
+        },
+        {
+          "key": "d_1f678ff6414e",
+          "title": "图颜色编码",
+          "text": "父社区用深色、子社区用浅色显示；渲染颜色不会改变给模型的摘要集合。社区面板可折叠子社区节点，图形布局与模型输入组装独立运行。",
+          "relevance": 0,
+          "rationale": "展示层与上下文选择不同。"
+        },
+        {
+          "key": "d_108e92478d85",
+          "title": "增大上下文窗口",
+          "text": "把四份摘要完整重复十次，让模型更容易注意到这段结论，不调整主题配额。模型收到相同来源的更多拷贝，预算增加全部花在已经覆盖的主题。",
+          "relevance": 0,
+          "rationale": "增加重复并不能提升覆盖。"
+        },
+        {
+          "key": "d_0aad183a01fe",
+          "title": "摘要相似度检查",
+          "text": "摘要相似度用于发现内容重合，父子社区都可能重复同一结论。系统记录重合比例与社区ID，审查员可据此检查不同摘要是否其实引用同一段内容。",
+          "relevance": 1,
+          "rationale": "只提供重复检测。"
+        },
+        {
+          "key": "d_5037b20d97eb",
+          "title": "只选父层",
+          "text": "无条件丢弃所有子社区，无论用户是否问具体细节；再选父社区中同一主题的多个近重复摘要。层级规则固定作用于所有问题，保留的父摘要仍可能有相同结论。",
+          "relevance": 0,
+          "rationale": "层级单选未解决主题重复且过于绝对。"
+        },
+        {
+          "key": "d_d149da2a289d",
+          "title": "全部父子保留",
+          "text": "父P和三个子社区都排在最前面，重复结论出现四次可提升置信度，不给其它主题预算。父子重复项分别计算权重，来源内容相同也不参与预算去重检查。",
+          "relevance": 0,
+          "rationale": "重复证据误加权并延续挤占问题。"
+        },
+        {
+          "key": "d_b9a28ad79aaf",
+          "title": "层级摘要选择",
+          "text": "上下文预算按主题分配，父摘要已覆盖子结论时不再重复塞三个子摘要；若需细节可用子摘要替换父摘要，而非同时占满预算。",
+          "relevance": 2,
+          "rationale": "具体处理父子重叠并释放其它主题空间。"
+        },
+        {
+          "key": "d_e69023f23d63",
+          "title": "社区编号生成",
+          "text": "每个社区生成随机UUID，唯一编号防止数据库主键冲突，不检测摘要内容重复。UUID用于更新时定位社区记录，父子关系另存parentId字段。",
+          "relevance": 0,
+          "rationale": "标识唯一不等于证据内容不同。"
+        },
+        {
+          "key": "d_5a7ae787cbf4",
+          "title": "社区覆盖预算",
+          "text": "对父子重叠摘要按内容去重，在同一主题链选择预算内最合适层级，再为其它主题留配额；保留必要来源，不能把父子重复项当独立证据加权。",
+          "relevance": 2,
+          "rationale": "去重、层级选择和主题覆盖均回答。"
+        },
+        {
+          "key": "d_b7e9ebd429d3",
+          "title": "将重复改写",
+          "text": "把四份同一结论换词改写成四段，再都加入上下文；事实和覆盖没有增加。改写后各段使用不同措辞，系统据字面差异把它们看作独立内容。",
+          "relevance": 0,
+          "rationale": "字面去重假象，没有新主题证据。"
+        },
+        {
+          "key": "d_1546dbb2bccb",
+          "title": "社区层级信息",
+          "text": "每个社区记录parentId，P的三个子社区能由层级表定位。父摘要覆盖多个子主题，子摘要包含更细粒度内容，同一结论可能同时存在于这两个层级。",
+          "relevance": 1,
+          "rationale": "结构信息相关但缺选择策略。"
+        }
+      ]
+    },
+    {
+      "id": "q_5cfb14a70eb6",
+      "category": "图谱与知识检索",
+      "question": "合成系统检索到一篇文章标题与问题很像，但正文没有支持“组件Z支持在线迁移”的句子。如何处理该具体能力断言和引用，才不会虚构依据？",
+      "items": [
+        {
+          "key": "d_58764ca5c869",
+          "title": "来源可访问性",
+          "text": "来源校验先确认文章链接可访问，遇到404记录失效并提示重新定位。可访问检查与正文支持核验使用不同状态，避免将死链混进可点开的来源清单。",
+          "relevance": 1,
+          "rationale": "来源可达相关但不足以证明断言。"
+        },
+        {
+          "key": "d_53a28d1fa818",
+          "title": "多数标题投票",
+          "text": "五篇相似标题都提到组件Z，所以按多数票确认在线迁移；正文没有支持句也无需核对。标题票数是唯一判断项，版本、适用条件和正文段落都不参与投票。",
+          "relevance": 0,
+          "rationale": "候选数量不能替代事实证据。"
+        },
+        {
+          "key": "d_3834de9c814d",
+          "title": "来源整篇覆盖",
+          "text": "引用整篇文章就表示整篇支持答案，任何未出现的能力都可从标题推断。回答为整段统一挂一个来源编号，句级支持关系没有核验记录。",
+          "relevance": 0,
+          "rationale": "引用范围扩大不创造支持证据。"
+        },
+        {
+          "key": "d_0f8a745afe7e",
+          "title": "离线迁移说明",
+          "text": "正文明确写组件Z只能停机导出后离线迁移；这不能支持在线迁移能力。合成操作手册要求停止写入、导出快照再手工导入新环境，迁移期间服务不可用。",
+          "relevance": 1,
+          "rationale": "离线限定是在线能力的反证，未给出完整回答引用处理。"
+        },
+        {
+          "key": "d_956c5e9be84b",
+          "title": "标题直接背书",
+          "text": "文章标题含组件Z和迁移，就回答支持在线迁移并引用该文章，不要求正文出现支持句。引用展示能正常跳转文章，因此系统把链接可用误当能力核验通过。",
+          "relevance": 0,
+          "rationale": "题目中的高相似标题伪证据。"
+        },
+        {
+          "key": "d_8dcf4c4cb9c0",
+          "title": "回答约束",
+          "text": "当前材料只能说明组件Z存在，不能确认在线迁移。回答区分已知事实与待核验能力，附引用的句子必须能在来源中定位。",
+          "relevance": 2,
+          "rationale": "证据范围内回答且引用可追溯。"
+        },
+        {
+          "key": "d_0189d335df16",
+          "title": "其它组件能力",
+          "text": "组件Y在合成资料中支持在线迁移，Z与Y名字相似但不是同一产品。Y与Z的合成产品编号不同，Y的手册单独列出不中断服务迁移步骤。",
+          "relevance": 0,
+          "rationale": "正确事实作用于错误实体。"
+        },
+        {
+          "key": "d_c1e93044e908",
+          "title": "迁移成本分析",
+          "text": "合成迁移报告估算人工搬运数据的工时，包括导出、格式整理与人工校验。总成本随文件数量和字段映射复杂度增加，预算表把人时与硬件费用分列。",
+          "relevance": 0,
+          "rationale": "同主题内容不支持具体能力。"
+        },
+        {
+          "key": "d_f17e632a7315",
+          "title": "标题相关性",
+          "text": "相似标题用于候选召回，正文可能讨论不同能力或历史版本。标题检索按词与向量相似度排序，模型读正文后才能判断命中的文章支持哪些具体事实。",
+          "relevance": 1,
+          "rationale": "指出召回与证据差别，缺最终处理。"
+        },
+        {
+          "key": "d_f3e2e52b25eb",
+          "title": "补造原文句子",
+          "text": "为了让回答完整，生成“组件Z支持在线迁移”的引号句，再把它归到检索文章下。系统将生成句塞进证据列表，不记录该句是否存在于下载的正文。",
+          "relevance": 0,
+          "rationale": "直接虚构引文。"
+        },
+        {
+          "key": "d_f8ec09122a9f",
+          "title": "断言证据核验",
+          "text": "逐条核对能力断言与原文；没有支持组件Z在线迁移的句子就说明证据不足，不把相似标题当依据，也不为这个结论附伪造引用。",
+          "relevance": 2,
+          "rationale": "明确缺证据时限制断言与引用。"
+        },
+        {
+          "key": "d_ac032de9cd9b",
+          "title": "客户端版本列表",
+          "text": "组件Z版本列表包含1.0和1.1，没有更新说明或迁移能力字段。版本表另列发布日期与安装包大小，用于客户端展示和下载选择。",
+          "relevance": 0,
+          "rationale": "实体相关但证据无法回答能力。"
+        }
+      ]
+    },
+    {
+      "id": "q_21a7cf1ad1bd",
+      "category": "机器学习与评测",
+      "question": "合成重排评测使用等级0/1/2，增益 g(r)=2^r−1，位置折扣为1/log2(i+1)。比较前三位等级A=[2,0,1]和B=[1,2,0]，哪种nDCG@3更高，为什么？",
+      "items": [
+        {
+          "key": "d_126ce0f58dfd",
+          "title": "训练损失记录",
+          "text": "模型训练使用pairwise logistic loss，根据正负文档分数差优化参数。训练损失日志不记录这两个候选排列的nDCG。",
+          "relevance": 0,
+          "rationale": "训练目标不是给定排序指标计算。"
+        },
+        {
+          "key": "d_37c0b85f6df6",
+          "title": "延迟取样",
+          "text": "A排序返回12毫秒，B返回8毫秒；计时衡量响应速度。是否更快与按给定等级计算的nDCG不是同一目标。",
+          "relevance": 0,
+          "rationale": "耗时数值不回答准确率排序。"
+        },
+        {
+          "key": "d_ae6a5ea119bb",
+          "title": "归一化分母方案",
+          "text": "分别把A自身和B自身当各自理想排序，再将DCG除以自身，得到都为1。该归一化没有使用共同最优等级排列。",
+          "relevance": 0,
+          "rationale": "错误分母把任意排序都变满分。"
+        },
+        {
+          "key": "d_07a355595c32",
+          "title": "召回率日志",
+          "text": "两个排列都来自相同候选池，相关文档是否进入候选池没有变化。召回模块记录Recall@20，与前三位内部顺序分开统计。",
+          "relevance": 0,
+          "rationale": "候选召回与排序位置指标不同。"
+        },
+        {
+          "key": "d_55344b372280",
+          "title": "折损增益计算",
+          "text": "采用$g(r)=2^r-1$与$1/\\log_2(i+1)$时，A的DCG为$3+1/2=3.5$，B为$1+3/\\log_2 3\\approx2.893$；共用理想DCG，所以A更高。",
+          "relevance": 2,
+          "rationale": "正确等级增益、位置折扣和排序结论。"
+        },
+        {
+          "key": "d_13d99b7a4113",
+          "title": "二元命中比较",
+          "text": "A和B都包含两个非零候选，按Hit@3两者同为1。评测只记录前三位是否有相关项，不区分等级2与等级1的位置。",
+          "relevance": 0,
+          "rationale": "Hit正确但不能回答nDCG差异。"
+        },
+        {
+          "key": "d_be842a9939da",
+          "title": "三位排序对照",
+          "text": "理想等级为[2,1,0]，IDCG约3.631。按规定公式，A的nDCG约0.964，B约0.797；将等级2放首位的收益大于后移等级1的损失。",
+          "relevance": 2,
+          "rationale": "数值与比较完整正确。"
+        },
+        {
+          "key": "d_658204958054",
+          "title": "反向折扣规则",
+          "text": "把越后面的结果权重设得越大，B的等级2位于第二位，因此判B更优。该排序器的权重规则并非1/log2(i+1)。",
+          "relevance": 0,
+          "rationale": "相近比较使用相反折扣。"
+        },
+        {
+          "key": "d_234dbee501c6",
+          "title": "归一化定义",
+          "text": "nDCG用同一候选集的理想排序DCG作分母，便于跨问题比较。若理想DCG为零则需预先规定零值约定，不能用任意常数替换。",
+          "relevance": 1,
+          "rationale": "说明分母与可比性，未算两种排序。"
+        },
+        {
+          "key": "d_6c235d0701c4",
+          "title": "均值误差表",
+          "text": "回归任务使用MAE衡量数值预测误差，误差越小越好。该表不包含相关等级、排序位置或理想DCG字段。",
+          "relevance": 0,
+          "rationale": "回归指标不是重排增益。"
+        },
+        {
+          "key": "d_80521f3215ee",
+          "title": "等级增益表",
+          "text": "本评测把等级0、1、2分别映射到增益0、1、3；相关等级不是直接拿来相加。位置折扣另由排名位置决定，前位得到更大权重。",
+          "relevance": 1,
+          "rationale": "增益定义正确但没有完成A/B比较。"
+        },
+        {
+          "key": "d_b25c12511b8f",
+          "title": "等级总和",
+          "text": "A与B前三位等级之和都为3，因此两者nDCG一定相等；此计算直接相加等级，没有加入位置折扣或指数增益。",
+          "relevance": 0,
+          "rationale": "忽略题设折扣，硬负例。"
+        }
+      ]
+    },
+    {
+      "id": "q_9177c6ff9181",
+      "category": "机器学习与评测",
+      "question": "合成发布政策写“普通发布必须先审批；仅紧急回滚可免审批”。要验证断言“普通发布允许不审批”，应判支持、矛盾还是证据不足？",
+      "items": [
+        {
+          "key": "d_e9b3a56a87f3",
+          "title": "发布规则解析",
+          "text": "前提对普通发布设必要条件“先审批”。假设声称普通发布可跳过该条件，所以是矛盾；紧急回滚属于不同操作，不能作为普通发布的许可。",
+          "relevance": 2,
+          "rationale": "必要条件与操作范围推理完整。"
+        },
+        {
+          "key": "d_3bd62654942d",
+          "title": "语义相似标注",
+          "text": "前提与断言都提普通发布和审批，向量相似度很高，就给支持标签；排序相似分数不读取条件方向。相同名词提升了文档相似度，条件中的必须与允许未进入判定特征。",
+          "relevance": 0,
+          "rationale": "相关性不等于蕴含，硬负例。"
+        },
+        {
+          "key": "d_b42aa16cd2bb",
+          "title": "紧急发布区别",
+          "text": "合成紧急修复仍属普通发布，只缩短审批时限；它不是紧急回滚。该术语表用于区分新版本修复与版本恢复。回滚回到已发布版本，修复则引入新代码，两者在任务类型字段区分。",
+          "relevance": 1,
+          "rationale": "正确界定紧急修复与回滚，提供例外作用域证据。"
+        },
+        {
+          "key": "d_635925fe2126",
+          "title": "政策蕴含核验",
+          "text": "普通发布必须审批，免审批只适用于紧急回滚。断言把例外扩展到普通发布，与政策矛盾，应判contradiction而非支持或仅证据不足。",
+          "relevance": 2,
+          "rationale": "识别明确冲突与例外作用范围。"
+        },
+        {
+          "key": "d_2ae78fbc8755",
+          "title": "自动部署窗口",
+          "text": "普通发布安排在工作日14点至16点，流水线在窗口外排队。窗口限制针对时间，不等于免审批许可。",
+          "relevance": 0,
+          "rationale": "同发布主题但判断维度不同。"
+        },
+        {
+          "key": "d_fc2567872cc8",
+          "title": "审批人职责",
+          "text": "合成审批人检查变更说明并记录审批时间，审批通过后通知发布人。资料只描述审批角色的流程和记录字段。",
+          "relevance": 0,
+          "rationale": "角色流程不能判断给定断言。"
+        },
+        {
+          "key": "d_dfcbf1fe56b9",
+          "title": "三分类标注",
+          "text": "支持表示前提可推出断言，矛盾表示前提推出断言不成立，证据不足表示两者均不能推出。标注需要比较完整条件，而非只看共享词。",
+          "relevance": 1,
+          "rationale": "标签定义有用但未判此例。"
+        },
+        {
+          "key": "d_e3274aa6c6ee",
+          "title": "例外覆盖全部",
+          "text": "资料出现“可免审批”，所以普通发布允许不审批；不区分该短语限定的紧急回滚，直接将断言标为支持。标注过程只抽取许可短语，不把普通发布与回滚操作分别绑定条件。",
+          "relevance": 0,
+          "rationale": "抓关键短语却丢作用域。"
+        },
+        {
+          "key": "d_3e5d314f3830",
+          "title": "规则来源标记",
+          "text": "发布政策文档带版本号policy-3和合成作者标记，系统按版本显示。来源元数据本身不决定断言支持或矛盾。",
+          "relevance": 0,
+          "rationale": "来源字段不是内容逻辑判断。"
+        },
+        {
+          "key": "d_430df533d974",
+          "title": "例外适用对象",
+          "text": "政策将普通发布和紧急回滚分别定义，紧急回滚目的是恢复上一版。免审批权限绑定紧急回滚操作，不是绑定所有操作的用户身份。",
+          "relevance": 1,
+          "rationale": "解释例外范围，未给NLI最终标签。"
+        },
+        {
+          "key": "d_21a2af8a7250",
+          "title": "没有负面证据",
+          "text": "政策没有逐字写“普通发布禁止不审批”，因此断言必须标证据不足。该标注器不处理“必须”的逻辑含义。规则要求所有矛盾样本必须出现逐字否定句，忽略必要条件推论。",
+          "relevance": 0,
+          "rationale": "把明确必要条件错误视为未知。"
+        },
+        {
+          "key": "d_8883dae8ec96",
+          "title": "历史无审批记录",
+          "text": "某次普通发布日志漏了审批字段，运营人员计划补录。记录缺失不能证明政策允许省略审批，实际许可仍由政策决定。",
+          "relevance": 1,
+          "rationale": "明确记录缺失不构成许可，为政策断言核验提供部分证据。"
+        }
+      ]
+    },
+    {
+      "id": "q_d8552fdc606c",
+      "category": "机器学习与评测",
+      "question": "合成A/B试验为每题固定相同12个候选、同样120字符文本预算，只比较LLM listwise与Cross-Encoder重排。若nDCG提升，能否宣称端到端问答准确率也提升？应如何解释结论？",
+      "items": [
+        {
+          "key": "d_c40edb8b677c",
+          "title": "重排试验边界",
+          "text": "固定候选池和文本预算的nDCG差异只支持该集合上的重排质量比较。召回、完整文档理解和最终答案未测，不能直接宣称端到端问答准确率提升。",
+          "relevance": 2,
+          "rationale": "准确限制重排证据能支持的结论。"
+        },
+        {
+          "key": "d_3095238c5b0f",
+          "title": "gold 作为提示",
+          "text": "把grade与rationale发给LLM帮助它排序，Cross只收到文本。高nDCG被解释为模型理解更好，而非标签泄露。",
+          "relevance": 0,
+          "rationale": "gold输入造成泄露和不公平。"
+        },
+        {
+          "key": "d_b2a549592ff9",
+          "title": "全部问题外推",
+          "text": "只评测合成题就保证真实用户所有领域问答同样改善，不区分候选难度、语言、问题分布和答案生成。试验未采集真实分布或未见领域样本，却将全产品质量保证写入结论。",
+          "relevance": 0,
+          "rationale": "合成固定集不能作全领域端到端保证。"
+        },
+        {
+          "key": "d_53ae6ac664e2",
+          "title": "延迟排名",
+          "text": "把响应时间更短的模型称为准确率更高，忽略所有相关等级。延迟与排序质量分别具有不同优化方向。",
+          "relevance": 0,
+          "rationale": "混淆速度与准确率。"
+        },
+        {
+          "key": "d_eb0c91b5a9f0",
+          "title": "只给一方全文",
+          "text": "LLM接收完整正文，Cross接收120字符摘要；将LLM胜出全部解释为listwise结构优势。试验没有给Cross追加同等正文预算，候选的关键信息可能只在LLM输入中。",
+          "relevance": 0,
+          "rationale": "信息预算混淆模型机制比较。"
+        },
+        {
+          "key": "d_e802aa2a8b05",
+          "title": "候选公平性",
+          "text": "每题两模型看到同一候选集合，文本均以120字符为上限，防止一方看到更多条件。试验记录输入哈希便于复查截断一致性。",
+          "relevance": 1,
+          "rationale": "说明公平控制，缺指标外推边界。"
+        },
+        {
+          "key": "d_d4e3f382df40",
+          "title": "候选召回统计",
+          "text": "另一个实验比较BM25与向量检索各自召回的文档集合，记录Recall@50；它会改变候选池，不是本题的排序对照。",
+          "relevance": 0,
+          "rationale": "召回阶段实验与固定池重排不同。"
+        },
+        {
+          "key": "d_f873b690cab4",
+          "title": "排序等同答案",
+          "text": "相关文档首位率变高，就宣布最终答案准确率提高同样百分点；回答模型是否引用该文档无需测量。报告不记录实际生成答案、错误断言或引用支持率，结论仅来自文档顺序。",
+          "relevance": 0,
+          "rationale": "重排指标直接等同答案质量。"
+        },
+        {
+          "key": "d_0c06f5904bf8",
+          "title": "开放搜索对照",
+          "text": "LLM可额外上网补候选，Cross只能使用固定12条；再比较两者nDCG，并称试验隔离重排算法差异。",
+          "relevance": 0,
+          "rationale": "输入不一致，不能隔离排序效果。"
+        },
+        {
+          "key": "d_72833b8bdecc",
+          "title": "人工主观体验",
+          "text": "评测员阅读两种UI后觉得第一种更顺手，评分只记录满意度。该试验没有候选相关性标签或排序输出。",
+          "relevance": 0,
+          "rationale": "体验满意度不是固定候选重排准确率。"
+        },
+        {
+          "key": "d_0f382c558aea",
+          "title": "答案核对指标",
+          "text": "最终回答评测可检查断言正确、引用支持与问题覆盖，需要把实际答案和来源交给评分器。排序指标与这些答案指标分别保存。",
+          "relevance": 1,
+          "rationale": "相关后续评测，但未直接限制当前结论。"
+        },
+        {
+          "key": "d_b961c21a8d5d",
+          "title": "分阶段评测",
+          "text": "两模型接收相同key/title/text，gold仅用于评分。此试验隔离排序阶段；问答质量还需单独运行检索与回答评测，不能由nDCG单独推出。",
+          "relevance": 2,
+          "rationale": "说明公平输入及端到端结论所需证据。"
+        }
+      ]
+    },
+    {
+      "id": "q_ddc44c74dcfc",
+      "category": "机器学习与评测",
+      "question": "合成训练集中有“月桥缓存怎样设置TTL”，测试集中出现其改写“如何让MoonBridge条目30秒后失效”。已确认两者同一实体和同一知识点。如何划分数据以减少泄露？",
+      "items": [
+        {
+          "key": "d_aaad3d99d9c2",
+          "title": "只按语言分组",
+          "text": "所有中文题放训练、英文题放测试，中文中的英文实体别名改写仍可能包含相同知识点。划分程序以字符脚本判语言，没有建立同事实的跨语言问法关联。",
+          "relevance": 0,
+          "rationale": "语言边界不能保证知识隔离。"
+        },
+        {
+          "key": "d_fcfec60db725",
+          "title": "召回索引刷新",
+          "text": "每天重新构建文本向量索引，确保最新资料可检索；样本分组和训练测试隔离不由索引版本决定。",
+          "relevance": 0,
+          "rationale": "索引新鲜度不回答样本隔离。"
+        },
+        {
+          "key": "d_939266f3c1f5",
+          "title": "随机候选重排",
+          "text": "保持问题划分不变，只打乱每题候选顺序；问题和事实依旧跨集合共享。候选排列每轮改变，训练模型已见过的TTL事实和测试问题保持不变。",
+          "relevance": 0,
+          "rationale": "顺序扰动不修复训练测试内容泄露。"
+        },
+        {
+          "key": "d_fba7fd113283",
+          "title": "训练轮数限制",
+          "text": "把训练轮数减少一半，避免过拟合；同一知识点的改写仍在测试集中，评测独立性没有改变。训练和测试文件的记录归属完全保留，重复事实的覆盖边界未调整。",
+          "relevance": 0,
+          "rationale": "优化训练强度不等于解决数据泄露。"
+        },
+        {
+          "key": "d_1d7fa3f36592",
+          "title": "知识点分组拆分",
+          "text": "先用别名归一把月桥与MoonBridge映射到同实体，再将同一TTL知识点的原问与改写归为一组；整组放入训练或测试，不能跨集合。",
+          "relevance": 2,
+          "rationale": "同时识别别名与语义改写并分组隔离。"
+        },
+        {
+          "key": "d_9b61de8c47c2",
+          "title": "测试答案隐藏",
+          "text": "测试候选不包含grade字段，保证评测时不直接读取标签；但模型可能已在训练阶段见过同一问法簇。",
+          "relevance": 0,
+          "rationale": "运行时标签隐藏与训练内容泄露不同。"
+        },
+        {
+          "key": "d_3c24fb8e782a",
+          "title": "移除题目标题",
+          "text": "删除问题标题，只保留question文本和候选；两题的TTL语义仍相同。该操作减少元数据而不改变集合归属。",
+          "relevance": 0,
+          "rationale": "删元数据不能消除事实重复。"
+        },
+        {
+          "key": "d_ae16fb06f053",
+          "title": "近重复组",
+          "text": "标注同一事实来源的问法簇，包含中英文别名与同义表达；按簇而非按单条问题随机拆分，测试集避免出现训练事实的直接改写。",
+          "relevance": 2,
+          "rationale": "按同知识点簇拆分防止泄露。"
+        },
+        {
+          "key": "d_1c63a320ac9a",
+          "title": "别名规范表",
+          "text": "实体规范表将月桥缓存与MoonBridge Cache映射到entity-cache，原始问法仍保存。规范实体ID可用于发现中英文别名题，TTL、淘汰和持久化知识点分别标注。",
+          "relevance": 1,
+          "rationale": "只提供发现重复的前置条件。"
+        },
+        {
+          "key": "d_f5a9304878b6",
+          "title": "随机条目划分",
+          "text": "不建立重复组，逐题独立随机分到训练或测试。同一TTL问法簇可能跨集合，模型见过几乎相同事实。抽样程序只考虑记录行号，簇内改写独立参与随机抽签。",
+          "relevance": 0,
+          "rationale": "常见随机划分仍存在题设泄露。"
+        },
+        {
+          "key": "d_49171b1703c3",
+          "title": "原始样本审计",
+          "text": "为每题保存来源片段哈希和人工知识点标签，便于追踪相同证据生成的不同问法；划分结果仍需单独检查。",
+          "relevance": 1,
+          "rationale": "有溯源支持但无隔离方案。"
+        },
+        {
+          "key": "d_221bf9c63bd4",
+          "title": "仅精确文本去重",
+          "text": "只删除字符串完全一样的问题；中文原问与英文别名改写文字不同，保留在不同集合并认为已排除泄露。去重键仅为question原始字符串，不使用规范实体或知识点标签。",
+          "relevance": 0,
+          "rationale": "精确去重漏语义与别名重复。"
+        }
+      ]
+    },
+    {
+      "id": "q_2da8c893b67f",
+      "category": "机器学习与评测",
+      "question": "合成listwise排序器对候选顺序敏感：同一题打乱12条输入后，Top1变化很大。评测应如何区分候选位置偏置与真实相关性优势？",
+      "items": [
+        {
+          "key": "d_b403d084015b",
+          "title": "每轮更换正文",
+          "text": "打乱顺序时同时改写候选正文和gold，让每轮包含不同证据；结果变化全部归因输入位置。每轮的信息内容、相关等级和输入位置同时改变，三个因素没有控制变量。",
+          "relevance": 0,
+          "rationale": "内容变化混淆位置因素。"
+        },
+        {
+          "key": "d_b09fb7e96697",
+          "title": "按标题字数排序",
+          "text": "每题始终按标题长度排列，认为固定规则天然公平；模型偏爱前位时仍可能与标题长度混淆。题目顺序固定不变，候选位置由标题字数决定，没有随机扰动对照。",
+          "relevance": 0,
+          "rationale": "单一固定顺序不足以诊断偏置。"
+        },
+        {
+          "key": "d_63ae4045ddde",
+          "title": "推理解释长度",
+          "text": "统计模型理由文字长度，理由更长就认为理解更深；理由长度不测排序是否随候选位置改变。统计表只含字数和耗时，未保存输入候选的位置与最终排序映射。",
+          "relevance": 0,
+          "rationale": "解释长度不是位置鲁棒指标。"
+        },
+        {
+          "key": "d_77074bc255d8",
+          "title": "位置就是key",
+          "text": "候选key固定写成第1名、第2名，并随输入位置变化；统计时无法追踪同一文档跨排列的表现。排序返回的位置名随排列重新分配，记录身份无法跨轮次对齐。",
+          "relevance": 0,
+          "rationale": "不稳定标识破坏位置偏置追踪。"
+        },
+        {
+          "key": "d_b1d63b86cd74",
+          "title": "增加模型温度",
+          "text": "将采样温度调高，让每次输出更多样；候选输入顺序仍固定，随机性变化不能单独证明位置鲁棒。输出多样性来自采样参数，模型是否偏爱输入前位没有单独实验。",
+          "relevance": 0,
+          "rationale": "输出随机性与输入位置偏置不同。"
+        },
+        {
+          "key": "d_6f7c771d44c4",
+          "title": "增加候选数",
+          "text": "把12条候选扩到100条，记录更长输入的耗时；候选池变化与顺序因素同时发生，无法隔离原有偏置。新增候选包含不同难度和来源，原12条输入的内容环境也随之变化。",
+          "relevance": 0,
+          "rationale": "改变候选集合混淆位置评测。"
+        },
+        {
+          "key": "d_182c1e31128b",
+          "title": "输出键核验",
+          "text": "排序输出必须映射回原候选key，缺失或重复key需记录异常。映射正确是顺序扰动统计的前提，但不能独立衡量位置偏置。",
+          "relevance": 1,
+          "rationale": "可靠性前置条件，缺扰动评测。"
+        },
+        {
+          "key": "d_1c798d0aabed",
+          "title": "挑选最佳结果",
+          "text": "同题试二十次顺序，只汇报最高nDCG的那次，其它低质量结果丢弃；该结果被称稳定性能。输入排列种子在试验后选择，失败排列不计入均值或方差。",
+          "relevance": 0,
+          "rationale": "择优报告不能代表鲁棒性。"
+        },
+        {
+          "key": "d_0ba7d0e7b027",
+          "title": "顺序扰动试验",
+          "text": "对每题固定候选内容和gold，使用多个预先冻结的排列，比较Top1稳定性及nDCG分布。候选key不随位置改名，才能发现输入位置偏置。",
+          "relevance": 2,
+          "rationale": "控制内容标签并测排列敏感性。"
+        },
+        {
+          "key": "d_58d8c7179231",
+          "title": "种子记录",
+          "text": "评测记录每题候选输入顺序和随机种子，以便复现listwise输出；单次种子日志本身没有稳定性结论。",
+          "relevance": 1,
+          "rationale": "复现信息相关但缺多次比较。"
+        },
+        {
+          "key": "d_f3f8317b724b",
+          "title": "位置鲁棒性",
+          "text": "给两排序器相同的候选排列种子，多次打乱输入，汇报质量均值、离散度与位置相关趋势；不要仅取最有利的一次排序作为优势。",
+          "relevance": 2,
+          "rationale": "公平扰动和分布报告覆盖真实优势区分。"
+        },
+        {
+          "key": "d_f0c8a979bf64",
+          "title": "按gold排输入",
+          "text": "先把grade2候选固定放第一位，再让模型排序；高Top1被认为是相关性理解优势，不做其它排列。排序输入位置与标注等级人为相关，高相关项总拥有相同前置位置。",
+          "relevance": 0,
+          "rationale": "位置与gold关联会隐藏偏置。"
+        }
+      ]
+    },
+    {
+      "id": "q_1ce8dcc2cf17",
+      "category": "前端与编辑器",
+      "question": "合成笔记编辑器使用中文输入法，composition期间可能连续触发input。要求不要把尚未确认的拼音当正文保存，确认选字后保存一次，应怎样协调自动保存？",
+      "items": [
+        {
+          "key": "d_7947f445c390",
+          "title": "显示占位符",
+          "text": "正文为空时显示“开始输入”，用户输入内容后隐藏提示。占位符不是用户正文，不参与笔记导出或保存快照。",
+          "relevance": 0,
+          "rationale": "空态展示规则与组合保存不同。"
+        },
+        {
+          "key": "d_3add06b6fac4",
+          "title": "只忽略结束事件",
+          "text": "compositionend事件被过滤，其余input都照常提交。这样不会重复处理结束事件，但组合期间的拼音仍可进入自动保存。",
+          "relevance": 0,
+          "rationale": "过滤方向错误，是硬负例。"
+        },
+        {
+          "key": "d_c6edf915940b",
+          "title": "输入法事件顺序",
+          "text": "浏览器以compositionstart、若干compositionupdate和compositionend表示一轮组合输入，最终确认的汉字通常在组合结束时可从编辑区域读取。",
+          "relevance": 1,
+          "rationale": "解释事件但缺自动保存协调。"
+        },
+        {
+          "key": "d_aaa1512b6d5e",
+          "title": "输入组合处理",
+          "text": "compositionstart设composing=true；组合期间input只更新编辑视图，不提交自动保存。compositionend清标记并以最终正文触发一次去抖保存，随后普通输入照常处理。",
+          "relevance": 2,
+          "rationale": "保护未确认文本并在结束后保存最终值。"
+        },
+        {
+          "key": "d_55376db66932",
+          "title": "剪贴板输入",
+          "text": "编辑器为粘贴HTML剥除Office私有标签并保留代码块语言，粘贴事件读取text/html。该入口服务于外部富文本导入。",
+          "relevance": 0,
+          "rationale": "粘贴处理是不同输入路径。"
+        },
+        {
+          "key": "d_19fa9b1e3809",
+          "title": "长度差异保存",
+          "text": "只有正文比上次保存长才提交，删除与等长替换一律忽略。拼音换为汉字时长度可能缩短，最终文字可能未保存。",
+          "relevance": 0,
+          "rationale": "长度启发式不保证最终确认保存。"
+        },
+        {
+          "key": "d_c3133c2efdf4",
+          "title": "去抖调度",
+          "text": "普通键入停止300毫秒后提交最新内容，连续键入会刷新定时器。保存状态分为dirty、saving、saved，用于显示草稿与已保存版本的差异。",
+          "relevance": 1,
+          "rationale": "去抖相关但未处理输入法组合。"
+        },
+        {
+          "key": "d_5652614b52d8",
+          "title": "自动保存状态机",
+          "text": "编辑器记录组合输入状态，调度器在composing时暂停提交，结束事件读取当前完整正文。取消旧定时器后只安排一次最终快照，避免保存候选拼音。",
+          "relevance": 2,
+          "rationale": "状态与调度协议覆盖两条件。"
+        },
+        {
+          "key": "d_808f4528b694",
+          "title": "每次input提交",
+          "text": "编辑器在每个input事件直接保存textContent，compositionupdate期间也可写入服务器。去抖延迟为零，以保证键入后的最快持久化。",
+          "relevance": 0,
+          "rationale": "会保存尚未确认文本，条件相反。"
+        },
+        {
+          "key": "d_288cd41a3e5a",
+          "title": "按回车保存",
+          "text": "只监听Enter键提交正文，不监听compositionend；输入法选字也可能使用Enter，这个快捷键无法区分确认候选与提交笔记。",
+          "relevance": 0,
+          "rationale": "按键代替组合事件产生冲突。"
+        },
+        {
+          "key": "d_0ad4017225d8",
+          "title": "拼写检查",
+          "text": "合成编辑器关闭spellcheck，防止技术词被红线标记。关闭拼写检查不会改变composition事件的提交时机。",
+          "relevance": 0,
+          "rationale": "拼写检查与输入法提交不同。"
+        },
+        {
+          "key": "d_eddf48e1a404",
+          "title": "撤销键设置",
+          "text": "Ctrl+Z撤销编辑器历史事务，Ctrl+Shift+Z重做；组合确认应在浏览器与编辑器历史栈间保持兼容，不改变组合阶段持久化策略。",
+          "relevance": 0,
+          "rationale": "快捷键相关却不能提供所需保存协调。"
+        }
+      ]
+    },
+    {
+      "id": "q_431f81fc7f88",
+      "category": "前端与编辑器",
+      "question": "合成工作台同时打开笔记A与B。切换到B后A的未保存正文必须保留，Ctrl+S只保存B。组件生命周期和快捷键作用域应怎样设计？",
+      "items": [
+        {
+          "key": "d_9172cdb4af3e",
+          "title": "标题重命名",
+          "text": "笔记标题修改后更新页签标签，并在保存成功时通知列表刷新。标题更新不决定正文实例是否卸载或Ctrl+S的目标。",
+          "relevance": 0,
+          "rationale": "相邻功能不覆盖两个核心条件。"
+        },
+        {
+          "key": "d_67a2584bbfb5",
+          "title": "切换自动提交",
+          "text": "离开A就立即保存A，保存失败仍丢弃A组件。用户没有保存意图时也产生写入，且失败后草稿无法恢复。",
+          "relevance": 0,
+          "rationale": "不能保证未保存正文保留。"
+        },
+        {
+          "key": "d_1d4994a9d4e1",
+          "title": "浏览器页签行为",
+          "text": "浏览器每个页签有独立页面内存，刷新会重新加载应用。应用内部的A/B文档页签并非两个浏览器页面。",
+          "relevance": 0,
+          "rationale": "混淆浏览器页签和应用页签。"
+        },
+        {
+          "key": "d_99a52d6e24ec",
+          "title": "单份共享正文",
+          "text": "A和B的编辑器绑定同一个content变量，切换时用B服务器正文覆盖它。所有页签标题独立，但正文和dirty状态共享。",
+          "relevance": 0,
+          "rationale": "共享正文破坏多笔记草稿隔离。"
+        },
+        {
+          "key": "d_b5bcbbb34bf5",
+          "title": "草稿版本字段",
+          "text": "每份笔记的本地草稿包含content、dirty和baseVersion，保存成功后更新基线。独立版本可用于检测外部更新与未保存修改冲突。",
+          "relevance": 1,
+          "rationale": "有独立草稿基础，缺切换和快捷键协议。"
+        },
+        {
+          "key": "d_9b2cdef805c3",
+          "title": "所有页签响应",
+          "text": "A、B组件都注册window keydown，每次Ctrl+S无条件调用各自保存函数。活动笔记之外的A也会收到同一个事件。",
+          "relevance": 0,
+          "rationale": "保留组件却泄露快捷键作用域。"
+        },
+        {
+          "key": "d_593f734ffd93",
+          "title": "切换强制卸载",
+          "text": "点击B时卸载A组件，新开A时重新从服务器取正文。A未保存的修改没有写入共享草稿，因此切回后恢复旧内容。",
+          "relevance": 0,
+          "rationale": "清空未保存状态，与题目相反。"
+        },
+        {
+          "key": "d_b682a0cd0f7f",
+          "title": "快捷键注册",
+          "text": "页面注册Ctrl+S覆盖浏览器保存网页动作，并preventDefault。快捷键处理器可以读取当前路由的笔记ID来选择保存目标。",
+          "relevance": 1,
+          "rationale": "支持目标选择，但未保证A草稿生命周期。"
+        },
+        {
+          "key": "d_a27244ae3c75",
+          "title": "页签编辑实例",
+          "text": "为A、B各保留独立编辑实例和草稿，切换仅改变active不卸载A。全局Ctrl+S处理先检查当前active，只有B执行保存并读取B的正文。",
+          "relevance": 2,
+          "rationale": "草稿保留与快捷键当前页作用域都满足。"
+        },
+        {
+          "key": "d_a3d920b8c59e",
+          "title": "仅保留标题",
+          "text": "页签缓存笔记标题与图标，正文每次进入都重新加载。缓存页签元数据并不包含内容或撤销历史。",
+          "relevance": 0,
+          "rationale": "缓存对象错误，是硬负例。"
+        },
+        {
+          "key": "d_a94177a05dec",
+          "title": "多文档状态",
+          "text": "工作台按noteKey保存草稿与撤销状态，切换时保留编辑会话。保存快捷键路由到activeNoteKey，后台页签监听器不触发自身保存。",
+          "relevance": 2,
+          "rationale": "独立状态并定向当前笔记。"
+        },
+        {
+          "key": "d_f4a7ad5a191d",
+          "title": "搜索抽屉状态",
+          "text": "工作台搜索抽屉在关闭后保留关键词，下次打开继续搜索。抽屉关键词状态与笔记草稿存储分别管理。",
+          "relevance": 0,
+          "rationale": "其它UI状态不能解决正文切换。"
+        }
+      ]
+    },
+    {
+      "id": "q_3b14cf47745a",
+      "category": "前端与编辑器",
+      "question": "合成笔记的 Mermaid 图允许改源码并重新绘图。保存再打开后必须仍能编辑原代码，不应把SVG标签文字当源码。序列化时需要保留什么？",
+      "items": [
+        {
+          "key": "d_120a8803246a",
+          "title": "源码载体",
+          "text": "渲染包装节点保留data-mermaid-source，序列化读取该属性恢复mermaid围栏，忽略SVG与工具按钮。若没有原码，应报告不能安全还原。",
+          "relevance": 2,
+          "rationale": "可追溯源码载体和还原边界完整。"
+        },
+        {
+          "key": "d_7e1a4e2a066d",
+          "title": "语言属性",
+          "text": "代码块的language属性区分javascript和mermaid，重开时用于选择视图。语言名必须与代码内容分别存储，不能仅靠标题推断。",
+          "relevance": 1,
+          "rationale": "语言载体相关，未明确SVG/源码取值。"
+        },
+        {
+          "key": "d_2b45737c38e1",
+          "title": "语法校验反馈",
+          "text": "Mermaid解析失败时显示错误并保留代码编辑入口，用户可修正括号后重试。反馈不应把失败内容覆盖为错误消息。",
+          "relevance": 1,
+          "rationale": "支持保留代码但未定义保存格式。"
+        },
+        {
+          "key": "d_a8fb537b2066",
+          "title": "只存截图",
+          "text": "将图表截成PNG保存在笔记里，删除mermaid代码。重新打开可以查看图片，但无法直接编辑原图的节点与边语法。",
+          "relevance": 0,
+          "rationale": "只保图像违反可编辑源码要求。"
+        },
+        {
+          "key": "d_393902a011ec",
+          "title": "JS语法高亮",
+          "text": "JavaScript代码块以CodeMirror高亮并显示行号，行号不保存进源码。该实现没有Mermaid绘图节点或原码回写约定。",
+          "relevance": 0,
+          "rationale": "另一代码语言的视图不是所问节点规则。"
+        },
+        {
+          "key": "d_ef88eb20425d",
+          "title": "HTML内嵌按钮",
+          "text": "把图表复制、缩放和报错按钮的HTML一并保存，认为整个DOM就是用户内容。重新打开会出现重复工具文字。",
+          "relevance": 0,
+          "rationale": "装饰DOM并非原始代码。"
+        },
+        {
+          "key": "d_5b26e67f1d0f",
+          "title": "只存语言名",
+          "text": "节点记录language='mermaid'，code字段写空字符串；图形仅保留在当前内存。刷新后语言仍在，但没有重绘内容。",
+          "relevance": 0,
+          "rationale": "保语言不保原码，是硬负例。"
+        },
+        {
+          "key": "d_459c23dc3891",
+          "title": "SVG文字回写",
+          "text": "保存时取SVG.textContent作为Markdown，节点标签及按钮文字拼成正文；原始箭头、条件边和布局声明不再保留。",
+          "relevance": 0,
+          "rationale": "视觉标签不能还原源码。"
+        },
+        {
+          "key": "d_285802a9b17b",
+          "title": "默认模板覆盖",
+          "text": "每次打开Mermaid节点都写入默认A-->B模板，避免语法错误。已有用户节点与条件边被模板覆盖。",
+          "relevance": 0,
+          "rationale": "能绘图却丢失用户源码。"
+        },
+        {
+          "key": "d_56056438f6e9",
+          "title": "图形节点持久化",
+          "text": "节点保存language='mermaid'与完整code字符串，SVG只作临时视图。导出或保存序列化为带语言的围栏，再打开从该原代码重绘，不从SVG文字反推。",
+          "relevance": 2,
+          "rationale": "保留完整原码并隔离SVG视图。"
+        },
+        {
+          "key": "d_2a5b235cd704",
+          "title": "主题颜色设置",
+          "text": "合成图形使用青绿边框并根据深浅色调整背景，颜色只改变显示配置。原始节点关系与源码无需随主题切换改写。",
+          "relevance": 0,
+          "rationale": "显示主题不能回答持久化载体。"
+        },
+        {
+          "key": "d_0b4894a791a1",
+          "title": "流程图布局说明",
+          "text": "flowchart LR表示从左至右布局，TD表示从上至下；节点名称与边定义仍由Mermaid文本描述，布局说明没有序列化协议。",
+          "relevance": 0,
+          "rationale": "源码语法背景不回答保存设计。"
+        }
+      ]
+    },
+    {
+      "id": "q_c74155fa2014",
+      "category": "前端与编辑器",
+      "question": "合成搜索框先发query='缓存'请求R1，后发query='图谱'请求R2。R2先完成、R1后完成，页面必须显示图谱结果且loading不被旧请求改变。怎样处理竞态？",
+      "items": [
+        {
+          "key": "d_0e4180b43ae8",
+          "title": "增加防抖间隔",
+          "text": "搜索输入去抖一秒才发请求，但用户间隔两秒输入缓存和图谱后仍会产生两个并发请求。防抖不保证响应顺序。",
+          "relevance": 1,
+          "rationale": "正确解释防抖不能保证响应顺序，提供竞态原因的部分证据。"
+        },
+        {
+          "key": "d_93b186fc2c98",
+          "title": "结果条数限制",
+          "text": "列表最多展示20条结果以减少渲染成本。R1和R2都截到20条，旧结果仍可能覆盖新结果。",
+          "relevance": 0,
+          "rationale": "候选数量与请求新鲜度不同。"
+        },
+        {
+          "key": "d_3bf05d9d2f3c",
+          "title": "页面缓存键",
+          "text": "缓存按query分别存储结果，避免关键词间缓存串用。异步回调如果不检查活动请求，仍会把错误关键词的缓存结果显示。",
+          "relevance": 1,
+          "rationale": "正确区分query缓存隔离与活动请求校验，提供有效部分证据。"
+        },
+        {
+          "key": "d_9d3d6e2abf68",
+          "title": "最后完成覆盖",
+          "text": "任何成功回调都把结果写入列表，因此R1最后完成时显示缓存结果。页面按完成顺序而非用户最新意图决定展示。",
+          "relevance": 0,
+          "rationale": "直接违反最新查询优先。"
+        },
+        {
+          "key": "d_b74e59e50dff",
+          "title": "禁止中文搜索",
+          "text": "搜索框仅允许ASCII字符，缓存和图谱输入都会被拒绝。它通过删掉功能回避竞态，不能满足题设搜索行为。",
+          "relevance": 0,
+          "rationale": "功能限制不满足所问场景。"
+        },
+        {
+          "key": "d_492c329efee8",
+          "title": "关键词快照",
+          "text": "请求参数取发起时的关键词快照，日志可准确对应缓存和图谱请求。快照让排查更清晰，但不自动决定哪次回调能更新界面。",
+          "relevance": 1,
+          "rationale": "请求绑定正确，缺最新请求判断。"
+        },
+        {
+          "key": "d_eb3b064e5b8a",
+          "title": "只检查关键词非空",
+          "text": "回调只要当前搜索框非空就更新结果；R1看到图谱非空仍可以把缓存结果写入。关键词非空不代表请求对应当前意图。",
+          "relevance": 0,
+          "rationale": "状态检查条件太弱。"
+        },
+        {
+          "key": "d_c4ab273b9454",
+          "title": "重试错误提示",
+          "text": "网络失败时显示可重试按钮并保留输入关键词；重试功能没有规定旧请求是否能更新当前结果和loading。",
+          "relevance": 0,
+          "rationale": "错误交互不同于竞态正确性。"
+        },
+        {
+          "key": "d_8f10207de44c",
+          "title": "取消网络请求",
+          "text": "搜索变化时对上一请求调用AbortController.abort，减少过时网络工作。某些请求已完成或后端忽略取消，回调仍需单独判是否过期。",
+          "relevance": 1,
+          "rationale": "取消相关但不提供完整UI状态更新协议。"
+        },
+        {
+          "key": "d_2a4bf7102c33",
+          "title": "最新查询令牌",
+          "text": "每次搜索创建token并设为activeToken；异步回调先确认仍活动才提交结果或清loading。取消旧网络请求可减少浪费，但token校验保正确性。",
+          "relevance": 2,
+          "rationale": "取消与结果核验边界完整。"
+        },
+        {
+          "key": "d_17b08a401975",
+          "title": "搜索请求序号",
+          "text": "发请求递增seq，成功、错误和finally均只在seq等于当前序号时更新UI。R1较旧即使最后返回，也不能覆盖R2结果、错误或loading。",
+          "relevance": 2,
+          "rationale": "检查所有状态通道避免旧请求覆盖。"
+        },
+        {
+          "key": "d_d66def3cc311",
+          "title": "只保护列表",
+          "text": "成功回调检查seq以保护列表，但每个请求finally都无条件置loading=false；旧请求结束时仍会改变当前加载状态。",
+          "relevance": 0,
+          "rationale": "部分防护漏finally，是硬负例。"
+        }
+      ]
+    },
+    {
+      "id": "q_c797ce0e2521",
+      "category": "前端与编辑器",
+      "question": "合成内部笔记链接 /notes/42#section=设计&occurrence=2 指向第二个“设计”章节。当前笔记有草稿，点击后要保留草稿并定位目标同名章节，哪些资料直接支持？",
+      "items": [
+        {
+          "key": "d_3b2fa5731d6c",
+          "title": "标题重复规则",
+          "text": "章节扫描按出现顺序编号，同名设计标题可有序号1和2。单独用标题字符串无法唯一确定目标位置，需要结合出现序号。",
+          "relevance": 1,
+          "rationale": "定位规则相关，缺草稿保留。"
+        },
+        {
+          "key": "d_2ef6f8ac15de",
+          "title": "文档链接跳转",
+          "text": "工作台保留当前草稿再激活目标笔记42，不卸载编辑会话；解析section=设计与occurrence=2，按同名章节出现序号定位第二个标题。",
+          "relevance": 2,
+          "rationale": "草稿保留与重复标题定位完整。"
+        },
+        {
+          "key": "d_7a9e93f51a1d",
+          "title": "章节目标解析",
+          "text": "链接携带noteId、标题文本和同名序号，路由开文档后等待标题渲染，再定位第二个设计章节。切换仅改变active，原草稿留在其文档状态中。",
+          "relevance": 2,
+          "rationale": "包含异步定位与草稿生命周期。"
+        },
+        {
+          "key": "d_7cc33057b460",
+          "title": "只找数字锚点",
+          "text": "把URL的42当作DOM标题ID，直接查#42，不读取section或occurrence。文档ID与章节标题标识不是同一层对象。",
+          "relevance": 0,
+          "rationale": "混淆文档身份与章节位置。"
+        },
+        {
+          "key": "d_9b05be4fdc78",
+          "title": "未保存状态",
+          "text": "工作台将dirty正文与服务器保存基线分开，切换文档时不自动覆盖本地草稿。已保存副本更新由用户确认是否替换。",
+          "relevance": 1,
+          "rationale": "草稿保护相关，缺具体章节定位。"
+        },
+        {
+          "key": "d_a728d6425c2c",
+          "title": "导出标题目录",
+          "text": "HTML导出生成标题目录供离线跳转，导出文件不拥有工作台草稿状态。离线目录与应用内部文档路由各自解析。",
+          "relevance": 0,
+          "rationale": "不同上下文不能满足草稿导航要求。"
+        },
+        {
+          "key": "d_5d6593f98c28",
+          "title": "导航前重置",
+          "text": "点击内部链接时清空当前编辑器并重新加载服务器正文，再跳到目标章节。未保存修改未进入任何草稿存储。",
+          "relevance": 0,
+          "rationale": "定位可能正确但草稿被丢弃。"
+        },
+        {
+          "key": "d_650e112dcc23",
+          "title": "笔记列表排序",
+          "text": "笔记列表按更新时间降序，最近编辑的记录优先展示；列表排序不改变笔记内部重复标题的出现序号。",
+          "relevance": 0,
+          "rationale": "列表顺序与章节序号不同。"
+        },
+        {
+          "key": "d_41323bf1d6eb",
+          "title": "忽略出现序号",
+          "text": "打开笔记42后querySelector找到第一个设计标题就滚动，忽略occurrence=2；标题文本虽相同，章节位置并不相同。",
+          "relevance": 0,
+          "rationale": "近似锚点算法定位错误章节。"
+        },
+        {
+          "key": "d_098ccc61b41c",
+          "title": "外部链接确认",
+          "text": "example.invalid外部链接另开页签，保留当前浏览器页面。该流程只处理外部URL，不解释内部同名章节解析。",
+          "relevance": 0,
+          "rationale": "外链行为不是内部文档定位。"
+        },
+        {
+          "key": "d_182295f87b65",
+          "title": "只显示链接文本",
+          "text": "笔记中将链接绘成青绿引用标签，标签可被键盘聚焦。样式和可聚焦性不决定点击后的草稿存储或章节选择。",
+          "relevance": 0,
+          "rationale": "展示无导航协议。"
+        },
+        {
+          "key": "d_5e8aa03400d2",
+          "title": "浏览器全页跳转",
+          "text": "链接使用location.href重新加载整个应用，本地内存草稿没有持久化。新页面能打开笔记42，但原未保存内容消失。",
+          "relevance": 0,
+          "rationale": "全页重载不满足草稿保护。"
+        }
+      ]
+    },
+    {
+      "id": "q_6fe1cd9e9999",
+      "category": "系统与并发",
+      "question": "合成缓存热键刚过期，数百请求同时回源。希望同一进程内最多一个请求加载该键，其它请求等待共享结果，且不同键可并行，哪个机制满足？",
+      "items": [
+        {
+          "key": "d_b3a702e507dd",
+          "title": "静态资源缓存",
+          "text": "浏览器按URL保存脚本，资源哈希改变时重新下载；这属于客户端静态资源缓存，和服务器热键回源门闩使用不同存储与生命周期。",
+          "relevance": 0,
+          "rationale": "缓存层和对象不匹配。"
+        },
+        {
+          "key": "d_09afbbe79130",
+          "title": "错误永久缓存",
+          "text": "加载失败后永不清除inFlight失败Promise；之后所有同键请求都返回该错误，不能重新加载。该方案声称可防击穿且保持失败恢复能力。",
+          "relevance": 0,
+          "rationale": "不释放失败状态破坏重新加载。"
+        },
+        {
+          "key": "d_ff44fcc7be2e",
+          "title": "逐键飞行合并",
+          "text": "按cacheKey维护inFlight Promise，首请求加载，同行键复用同一Promise；完成或失败后清理该项。不同键有不同Promise，因此可并行回源。",
+          "relevance": 2,
+          "rationale": "同键共享单次加载且不同键不互斥。"
+        },
+        {
+          "key": "d_115f48ab1cc7",
+          "title": "过期抖动",
+          "text": "给各缓存项TTL增加随机抖动，让不同键不同时过期。此方案降低群体回源峰值，对一个已经过期的热键仍可能有多个并发加载。",
+          "relevance": 1,
+          "rationale": "降低峰值但不保证题设同键单加载。"
+        },
+        {
+          "key": "d_7be77298a105",
+          "title": "全局互斥加载",
+          "text": "整个进程只有一把加载锁，任意缓存键都先获取它。它可限制同键回源，但键A加载期间键B也必须等待，不能保证不同键并行。",
+          "relevance": 0,
+          "rationale": "只满足同键约束，违反不同键并行。"
+        },
+        {
+          "key": "d_361737aaf8ca",
+          "title": "源站异步队列",
+          "text": "所有回源请求进入队列但不去重，同一个键仍排入数百任务；调度器可以并发执行这些相同任务，返回结果分别通知请求者。",
+          "relevance": 0,
+          "rationale": "排队并不等于逐键合并。"
+        },
+        {
+          "key": "d_0a09ee0d2d9a",
+          "title": "按用户合并",
+          "text": "inFlight以userId为键，同一用户请求会共享结果；不同用户同时请求同一个cacheKey仍分别回源。用户分组与题设缓存键分组不一致。",
+          "relevance": 0,
+          "rationale": "合并维度错误。"
+        },
+        {
+          "key": "d_3d4c516433f2",
+          "title": "只增缓存容量",
+          "text": "把内存缓存容量从1千项增到1万项，减少容量淘汰。热键因TTL过期仍会变空，并发请求未经过共享加载状态。",
+          "relevance": 0,
+          "rationale": "容量扩容不能处理过期并发。"
+        },
+        {
+          "key": "d_feb0accccb92",
+          "title": "访问计数限流",
+          "text": "每个客户端每秒最多五次请求，超限返回429。来自数百客户端的同键首请求都可通过，且未共享加载结果。",
+          "relevance": 0,
+          "rationale": "客户端限流无法保证同键单加载。"
+        },
+        {
+          "key": "d_216d5a46cadd",
+          "title": "无锁先查后写",
+          "text": "每个请求发现缓存为空后立即回源，再把结果写缓存；认为写入最终只保留一份就表示加载只发生一次。实际多个请求已访问源站。",
+          "relevance": 0,
+          "rationale": "结果单份不等于单次加载。"
+        },
+        {
+          "key": "d_6477a5fa9683",
+          "title": "单键请求门闩",
+          "text": "每个键独立建加载状态与等待者列表，只有状态由idle变loading者访问源站，其余等待完成结果；异常也唤醒等待者并释放该键状态。",
+          "relevance": 2,
+          "rationale": "逐键合并与完成/失败释放完整。"
+        },
+        {
+          "key": "d_de6f3d5e54b4",
+          "title": "热点请求观察",
+          "text": "监控同一cacheKey的并发回源数、源站延迟和等待者数量，可以识别缓存击穿并检查合并效果。统计按键聚合以免不同键被混为一个热点。",
+          "relevance": 1,
+          "rationale": "诊断证据相关但非互斥机制。"
+        }
+      ]
+    },
+    {
+      "id": "q_2cdd9e33b9d7",
+      "category": "系统与并发",
+      "question": "合成模型调用总预算8秒，首轮耗时6秒后遇到可重试错误。下一次重试与退避怎样安排，才不把单次8秒超时误当整个请求8秒限制？",
+      "items": [
+        {
+          "key": "d_38bc5f77904d",
+          "title": "固定尝试次数",
+          "text": "限制最多两次调用，但每次允许8秒并可退避4秒。两次上限控制数量，却没有把整个请求时长约束到8秒。",
+          "relevance": 1,
+          "rationale": "正确说明次数限制不能代替总deadline，未给完整预算协议。"
+        },
+        {
+          "key": "d_2c667063a3ab",
+          "title": "预算传递",
+          "text": "首轮后只剩约2秒，不能给重试另一个8秒。先扣退避消耗，再以剩余额度限制调用；若已到截止时间，直接结束而非追加新尝试。",
+          "relevance": 2,
+          "rationale": "明确题设数字及退避与调用边界。"
+        },
+        {
+          "key": "d_b3255ea70424",
+          "title": "连接池空闲回收",
+          "text": "连接池在空闲30秒后关闭连接，避免资源长期占用。空闲连接寿命不是本次模型请求的8秒截止时间。",
+          "relevance": 0,
+          "rationale": "生命周期参数与请求deadline不同。"
+        },
+        {
+          "key": "d_53b8d4d555c9",
+          "title": "退避不计预算",
+          "text": "设置重试调用timeout=2秒，但在调用前额外sleep3秒，退避不参与deadline；总耗时至少11秒仍报告预算内。",
+          "relevance": 0,
+          "rationale": "调用限额正确但遗漏退避时间。"
+        },
+        {
+          "key": "d_524d5b4578e4",
+          "title": "绝对截止时间",
+          "text": "请求开始记录deadline，重试前计算remaining；退避和调用都计入总预算，剩余不足就停止，下一次调用timeout不超过剩余，返回后也检查deadline。",
+          "relevance": 2,
+          "rationale": "统一总预算并在所有阶段检查剩余。"
+        },
+        {
+          "key": "d_061bbbba1243",
+          "title": "退避耗时记录",
+          "text": "每次重试的等待时间进入同一请求的elapsed指标，便于观察退避占比。总耗时包含排队、网络调用与等待，不只包含成功响应时间。",
+          "relevance": 1,
+          "rationale": "预算计量有用但无截止执行方案。"
+        },
+        {
+          "key": "d_e3c29e7c3c6b",
+          "title": "重新计时重试",
+          "text": "首轮耗6秒后，把下一轮timeout仍设8秒并从零计时；认为只要任何一次调用不超过8秒，整个请求就满足8秒限制。",
+          "relevance": 0,
+          "rationale": "单轮超时冒充总请求预算。"
+        },
+        {
+          "key": "d_7980a5e5308f",
+          "title": "无限重试连接",
+          "text": "遇到可重试错误一直重复，直到成功再返回。失败率较高时总耗时没有上界，不能满足短请求的总体时间限制。",
+          "relevance": 0,
+          "rationale": "没有总预算的重试。"
+        },
+        {
+          "key": "d_fcaafc8665e3",
+          "title": "调用吞吐量",
+          "text": "批量任务每分钟最多执行100次模型调用，超出后排队。吞吐限制控制请求数量，不保证每次请求从进入到结束的时长。",
+          "relevance": 0,
+          "rationale": "速率控制与时间预算不同。"
+        },
+        {
+          "key": "d_b1de2c6ab4dd",
+          "title": "只优化日志",
+          "text": "日志只记录最后一次尝试时长，省略首轮6秒和重试退避。指标看似不超过8秒，用户实际等待时间没有改变。",
+          "relevance": 0,
+          "rationale": "隐藏耗时不是预算控制。"
+        },
+        {
+          "key": "d_4d5faf6c9c5c",
+          "title": "单次超时定义",
+          "text": "HTTP请求timeout限制一次尝试等待时间，重试会创建或再次发送请求。计时器若每轮重新设8秒，多轮累计可超过一次用户请求的预算。",
+          "relevance": 1,
+          "rationale": "解释单次与总时限差异，缺完整安排。"
+        },
+        {
+          "key": "d_efc1683e6bf0",
+          "title": "只在发起时检查",
+          "text": "重试前看到remaining=2秒就调用，客户端内部另有长重试；调用返回后不检查deadline并正常报告完成，即使已超过总8秒。",
+          "relevance": 0,
+          "rationale": "共享客户端重试可越预算且漏返回检查。"
+        }
+      ]
+    },
+    {
+      "id": "q_c557dc9c8af1",
+      "category": "系统与并发",
+      "question": "合成订单提交要同时写订单并发出OrderCreated事件。进程可能在数据库提交后、消息发送前崩溃。要避免订单已存但事件永远丢失，同时消费重复事件不重复扣积分，怎么设计？",
+      "items": [
+        {
+          "key": "d_cfc2953b28e6",
+          "title": "待发事件巡检",
+          "text": "服务监控outbox最旧未发送记录的年龄，并对积压报警。巡检有助发现发送器失效，事件记录还需与订单保持一致持久化。",
+          "relevance": 1,
+          "rationale": "发件箱运营证据但未覆盖消费协议。"
+        },
+        {
+          "key": "d_9db3418eaa1d",
+          "title": "事务发件箱",
+          "text": "同一数据库事务写订单与outbox事件；独立发送器持续重试未确认事件。消费者用eventId幂等去重，积分变更与消费标记同事务，允许传输重发。",
+          "relevance": 2,
+          "rationale": "解决提交后崩溃丢事件和重复消费副作用。"
+        },
+        {
+          "key": "d_ff7db1d4a449",
+          "title": "订单展示轮询",
+          "text": "前端每秒查询订单状态，已创建时显示成功。轮询能看到数据库订单，却不能确保积分系统收到创建事件。",
+          "relevance": 0,
+          "rationale": "展示可见性不能补可靠事件链。"
+        },
+        {
+          "key": "d_a1334a8f4bdb",
+          "title": "只求一次投递",
+          "text": "消息服务宣称发送端只调用一次send，失败也不重试；这种做法避免主动重发，却可能把崩溃后的未发事件永久留空。",
+          "relevance": 0,
+          "rationale": "放弃重试不满足不丢事件。"
+        },
+        {
+          "key": "d_7628c65a7355",
+          "title": "业务记录分两事务",
+          "text": "消费者先独立提交已处理标记，再另起事务扣积分；中间崩溃后重试发现标记而跳过，积分永远未扣。",
+          "relevance": 0,
+          "rationale": "去重标记与积分不原子，是硬负例。"
+        },
+        {
+          "key": "d_bdb5fc2144ca",
+          "title": "先发后写订单",
+          "text": "先发送OrderCreated再提交订单，写订单失败也不撤回事件。消费者可能为不存在的订单扣积分，提交与事件没有原子关联。",
+          "relevance": 0,
+          "rationale": "颠倒顺序产生另一种不一致。"
+        },
+        {
+          "key": "d_6a305af4f658",
+          "title": "去重只在日志",
+          "text": "消费者将eventId写日志但每次都扣积分，认为日志里重复ID可供以后审计就足够。业务变更没有条件保护。",
+          "relevance": 0,
+          "rationale": "识别记录不等于幂等副作用。"
+        },
+        {
+          "key": "d_60afc8b162a9",
+          "title": "积分重复补偿",
+          "text": "每次重发都扣积分，夜间再合并重复扣减。白天重复副作用真实发生，不满足消费重复事件不重复扣积分。",
+          "relevance": 0,
+          "rationale": "事后对账不能满足实时幂等。"
+        },
+        {
+          "key": "d_1681cafff3e6",
+          "title": "投递语义",
+          "text": "合成消息系统采用至少一次投递，确认丢失时会重发同eventId。业务端需要识别重复，不能把重发一概当作不同订单或独立积分操作。",
+          "relevance": 1,
+          "rationale": "支持消费去重必要性，缺订单与事件事务。"
+        },
+        {
+          "key": "d_a6cf09627dbd",
+          "title": "事件压缩配置",
+          "text": "消息采用压缩减少网络字节，字段OrderCreated和eventId压缩前后相同。压缩不使数据库提交与发送成为原子动作。",
+          "relevance": 0,
+          "rationale": "传输编码不是可靠提交协议。"
+        },
+        {
+          "key": "d_47bc1458d6b8",
+          "title": "可靠事件链",
+          "text": "同一数据库事务写订单和持久待发事件，发送器失败后可补发。消费者在同一事务检查eventId、扣积分并写消费标记，重复事件不再扣减。",
+          "relevance": 2,
+          "rationale": "两个关键原子边界与补发、消费去重均显式满足。"
+        },
+        {
+          "key": "d_d3bb9d981ef1",
+          "title": "提交后内存消息",
+          "text": "订单事务提交后把事件放进进程内存，再异步发送；崩溃会清空内存。方案声称数据库订单存在就能自动恢复这份内存消息。",
+          "relevance": 0,
+          "rationale": "关键崩溃窗口仍导致永久丢事件。"
+        }
+      ]
+    },
+    {
+      "id": "q_839f7c7fc622",
+      "category": "系统与并发",
+      "question": "合成日志管道内存队列最多100条，消费者变慢时生产者不能阻塞业务线程。允许丢调试日志但错误日志要另存可靠通道，并可观测丢弃量，应该采用哪种背压策略？",
+      "items": [
+        {
+          "key": "d_2989dc86a508",
+          "title": "队列水位监控",
+          "text": "指标记录调试队列长度、入队率、出队率和丢弃数，便于识别慢消费者。监控采样不阻塞业务线程，按日志等级分别统计。",
+          "relevance": 1,
+          "rationale": "观测相关但未规定完整入队/可靠策略。"
+        },
+        {
+          "key": "d_95f2468719a2",
+          "title": "分级有界队列",
+          "text": "调试日志用容量100的队列和非阻塞offer，满时丢弃并增加计数。错误日志走独立可靠持久通道，业务线程不等待慢调试消费者，也不无界堆积。",
+          "relevance": 2,
+          "rationale": "满足容量、非阻塞、分级可靠和观测。"
+        },
+        {
+          "key": "d_1a2b359ed248",
+          "title": "错误也静默丢弃",
+          "text": "所有等级都使用offer，满时直接忽略返回false，不记录计数。错误日志与调试日志同样被丢，既不可靠也不可观测。",
+          "relevance": 0,
+          "rationale": "违反等级保护和观测要求。"
+        },
+        {
+          "key": "d_7c8f70f26daf",
+          "title": "全部阻塞等待",
+          "text": "所有日志用容量100的队列，满时业务线程执行put等待空位。内存有界且不丢日志，但慢消费者可阻塞订单请求。",
+          "relevance": 0,
+          "rationale": "容量正确但违反业务线程非阻塞。"
+        },
+        {
+          "key": "d_c15882b00a95",
+          "title": "重试写调试队列",
+          "text": "offer失败后业务线程循环重试直到成功，间隔sleep10毫秒。表面使用非阻塞API，但调用者循环仍会阻塞业务路径。",
+          "relevance": 0,
+          "rationale": "API非阻塞被外层等待抵消。"
+        },
+        {
+          "key": "d_ff05a6ee67bc",
+          "title": "只减少线程数",
+          "text": "把消费者线程从四个减为一个以降低竞争，生产者策略仍是无界追加。慢消费和内存增长没有得到预算约束。",
+          "relevance": 0,
+          "rationale": "线程调整不提供指定背压机制。"
+        },
+        {
+          "key": "d_e3e02a60d1df",
+          "title": "无限内存缓冲",
+          "text": "将队列改为无界，生产者永不等待且不丢弃。消费者持续变慢时内存可无限增加，不满足100条容量。",
+          "relevance": 0,
+          "rationale": "非阻塞却违反有界预算。"
+        },
+        {
+          "key": "d_457d3eea11f3",
+          "title": "日志过载协议",
+          "text": "普通调试日志达到100条后拒绝新项并记录drop_total；错误事件提交持久化缓冲，由独立工作者重试。两个等级的拥塞策略明确分开。",
+          "relevance": 2,
+          "rationale": "分级丢弃与可靠通道完整。"
+        },
+        {
+          "key": "d_030e21196b12",
+          "title": "非阻塞入队",
+          "text": "offer在容量已满时立即返回false，调用者可决定丢弃或改投其它通道。相比阻塞put，它不会等待消费者释放队列位置。",
+          "relevance": 1,
+          "rationale": "解释非阻塞方法，缺分级持久及计数。"
+        },
+        {
+          "key": "d_b0a15e7b16d6",
+          "title": "采样丢弃全部等级",
+          "text": "对所有日志仅保留百分之一，队列更轻；错误日志也随机丢弃，不能作为独立可靠的故障记录通道。",
+          "relevance": 0,
+          "rationale": "统一采样不满足错误可靠性。"
+        },
+        {
+          "key": "d_5b39a869ac48",
+          "title": "错误优先覆盖",
+          "text": "队列满时用错误日志覆盖旧项，但被覆盖错误也可能是错误日志；没有独立持久通道，仍无法保证错误事件保留。",
+          "relevance": 0,
+          "rationale": "优先级近似机制不保证可靠错误通道。"
+        },
+        {
+          "key": "d_134e57af0b62",
+          "title": "磁盘展示轮转",
+          "text": "日志文件每天轮转并在界面显示最近一百条。显示条数不约束生产队列容量，也不定义队列满时的业务线程行为。",
+          "relevance": 0,
+          "rationale": "文件展示数量与内存背压不同。"
+        }
+      ]
+    },
+    {
+      "id": "q_ad969bf7fc18",
+      "category": "系统与并发",
+      "question": "合成Java工作者捕获InterruptedException后要退出当前处理，并让上层仍能看到线程已被中断；不能把它当普通失败继续重试。应该怎样处理？",
+      "items": [
+        {
+          "key": "d_fc82880d3d48",
+          "title": "仅记录日志",
+          "text": "捕获后打印异常消息并return，没有恢复中断标记。日志可能记录取消经过，但上层线程状态不能据此判断已被中断。",
+          "relevance": 0,
+          "rationale": "日志不能替代线程中断标志。"
+        },
+        {
+          "key": "d_d05fefbf8cf3",
+          "title": "中断状态查询",
+          "text": "isInterrupted读取线程中断标志但不清除，Thread.interrupted读取当前线程并清除。使用哪一个会影响上层能否继续观察取消信号。",
+          "relevance": 1,
+          "rationale": "状态语义相关，缺捕获后的完整协议。"
+        },
+        {
+          "key": "d_b0d03f6cb9dc",
+          "title": "吞掉异常重试",
+          "text": "catch (InterruptedException e) 后不恢复标记，继续下一次任务或网络重试。上层看到的中断状态已清除，工作者仍忙碌。",
+          "relevance": 0,
+          "rationale": "直接违反恢复与退出要求。"
+        },
+        {
+          "key": "d_91cc7dc8bb13",
+          "title": "恢复后继续任务",
+          "text": "捕获后调用interrupt，再无条件进入正常重试循环。虽恢复标记，但中断被当可重试故障，当前处理没有结束。",
+          "relevance": 0,
+          "rationale": "只满足恢复，违反退出及禁重试。"
+        },
+        {
+          "key": "d_85d6a405ad28",
+          "title": "设置本地布尔量",
+          "text": "捕获后只令局部cancelled=true并return，未恢复线程标记。这个局部变量离开方法即不可见，上层线程状态仍不显示中断。",
+          "relevance": 0,
+          "rationale": "退出正确但传播方式不满足题设。"
+        },
+        {
+          "key": "d_4c04bc206939",
+          "title": "中断退出路径",
+          "text": "catch (InterruptedException e) { Thread.currentThread().interrupt(); return; } 恢复中断标记后终止当前处理，上层可检查isInterrupted决定停止后续工作。",
+          "relevance": 2,
+          "rationale": "恢复状态并退出，满足传播中断意图。"
+        },
+        {
+          "key": "d_fe7290e360fe",
+          "title": "异常分类",
+          "text": "工作者将InterruptedException与网络超时分为不同错误类型，中断表示协作取消意图，网络超时则可能允许预算内重试。",
+          "relevance": 1,
+          "rationale": "分类有帮助，缺恢复标记与退出。"
+        },
+        {
+          "key": "d_6feddeebb374",
+          "title": "协作取消约定",
+          "text": "中断等待会抛InterruptedException并清除标记。工作者捕获后再次interrupt当前线程，然后结束本轮，禁止走普通失败的重试分支。",
+          "relevance": 2,
+          "rationale": "明确清标记原因及退出和不重试。"
+        },
+        {
+          "key": "d_3709f49cf571",
+          "title": "监控存活线程",
+          "text": "监控使用isAlive判断工作线程是否仍存在，存活线程也可能已被中断。线程生命状态与中断意图不是同一状态位。",
+          "relevance": 0,
+          "rationale": "混淆生命周期与中断标志。"
+        },
+        {
+          "key": "d_cc8a4e8911a6",
+          "title": "清除标记收尾",
+          "text": "捕获后先interrupt，接着调用Thread.interrupted清除状态才return；上层检查isInterrupted得到false。",
+          "relevance": 0,
+          "rationale": "收尾再次清除中断信号。"
+        },
+        {
+          "key": "d_29a0dc580d75",
+          "title": "普通超时处理",
+          "text": "SocketTimeoutException可在预算内重试并累计失败计数，超时不必设置Java线程中断标志。这是网络故障的独立处理分支。",
+          "relevance": 0,
+          "rationale": "另一异常路径不能回答中断捕获规则。"
+        },
+        {
+          "key": "d_57ffc1e29bcd",
+          "title": "强制终止线程",
+          "text": "捕获后直接销毁工作线程资源并忽略finally清理，认为取消无需释放当前任务句柄。该约定不采用协作中断传播。",
+          "relevance": 0,
+          "rationale": "强制销毁不是所问安全状态传播。"
+        }
+      ]
+    },
+    {
+      "id": "q_e05907b36cec",
+      "category": "业务规则与流程",
+      "question": "合成差旅制度规定：境内销售出差≤3天、总额≤5000元且预算内，按直属经理→财务审批；经理同行时该节点换为部门负责人。现申请3天、4800元、预算未超且经理同行，应该走什么顺序？",
+      "items": [
+        {
+          "key": "d_ce4e06ccdeee",
+          "title": "金额与预算阈值",
+          "text": "境内销售行程不超过3天、总额不超过5000元且未超预算时，无需增加总监审批；财务在业务审批通过之后检查原始票据和付款账户。",
+          "relevance": 1,
+          "rationale": "支持基础分支和财务顺序，缺同行替代。"
+        },
+        {
+          "key": "d_9973e506819b",
+          "title": "行程拆分规则",
+          "text": "同一申请可拆成每天1600元的三张单据，各单据按一天短途流程审批。经理同行不影响单日费用核准，三张单据均只需直属经理签批。",
+          "relevance": 0,
+          "rationale": "拆单规避完整行程审批且遗漏财务。"
+        },
+        {
+          "key": "d_5fb96fab97db",
+          "title": "境外行程节点",
+          "text": "境外销售差旅即使只有3天、总额4800元且预算内，也须经部门负责人、合规专员和财务审批。同行经理的意见只作为行程附件保存。",
+          "relevance": 0,
+          "rationale": "境外分支作用域与题目境内不符。"
+        },
+        {
+          "key": "d_3a7029683b6c",
+          "title": "票据归档说明",
+          "text": "差旅行程结束后，申请人按发生日期上传交通与住宿票据。财务将原件号关联到费用记录，并按季度导出已付款申请供内部定期抽查使用。",
+          "relevance": 0,
+          "rationale": "归档规则不提供所问审批路径。"
+        },
+        {
+          "key": "d_a9d0f0afc418",
+          "title": "差旅审批分支",
+          "text": "境内销售出差不超过3天且总额不超过5000元、未超预算时，先由直属经理再由财务审批；经理同行则该环节改由部门负责人签批，顺序不变。",
+          "relevance": 2,
+          "rationale": "金额、天数、预算和同行替代顺序齐全。"
+        },
+        {
+          "key": "d_4aff6bb4a43c",
+          "title": "签批节点说明",
+          "text": "对3天、4800元且预算内的境内销售差旅，同行经理不能签批自己的行程。申请按部门负责人、财务的顺序完成，财务确认后方可付款。",
+          "relevance": 2,
+          "rationale": "直接给出本题替代节点与完整顺序。"
+        },
+        {
+          "key": "d_4f5ed13eaa55",
+          "title": "节点执行顺序",
+          "text": "预算内的境内销售差旅在经理同行时，由财务先批准付款，随后部门负责人补签业务意见。3天且4800元的申请允许付款后补齐签批记录。",
+          "relevance": 0,
+          "rationale": "将要求的业务先财务后顺序反转。"
+        },
+        {
+          "key": "d_54f3c7c41aba",
+          "title": "销售行程审批",
+          "text": "境内销售行程达到3天或总额达到4800元时，都进入总监审批分支。无论是否超预算，申请必须依次经直属经理、总监和财务签批。",
+          "relevance": 0,
+          "rationale": "错误阈值导致多加总监且未替代同行经理。"
+        },
+        {
+          "key": "d_3588e8651122",
+          "title": "审批角色替代",
+          "text": "差旅申请的直属经理审批节点遇到经理本人同行时，应替换为部门负责人。同行人员不得代替该负责人签批，后续既有审批节点仍须执行。",
+          "relevance": 1,
+          "rationale": "支持同行替代，未给本分支后续角色。"
+        },
+        {
+          "key": "d_212c80c060bd",
+          "title": "财务自动核准",
+          "text": "境内销售差旅不超过3天、总额不超过5000元且预算内时，系统直接交财务审批。直属经理是否同行不改变流程，部门负责人不参与。",
+          "relevance": 0,
+          "rationale": "删去必要业务审批节点。"
+        },
+        {
+          "key": "d_86267af3dee4",
+          "title": "预算调整节点",
+          "text": "境内销售差旅发生预算超支时，先由预算负责人批准额度调整，再由部门负责人和财务审批。4800元是否超过5000元不影响超支分支。",
+          "relevance": 0,
+          "rationale": "仅适用于预算超支而本题未超支。"
+        },
+        {
+          "key": "d_561ae8132586",
+          "title": "同行行程处理",
+          "text": "经理与申请人同一行程时，经理可合并签批两人的费用申请。境内销售3天且预算内的4800元行程，仍按直属经理、财务的顺序流转。",
+          "relevance": 0,
+          "rationale": "直接保留不能签批的同行经理。"
+        }
+      ]
+    },
+    {
+      "id": "q_9843a1f0dbc8",
+      "category": "业务规则与流程",
+      "question": "合成月订阅规则：首购与续费均有付款后48小时且未用权益的退款申请窗口，按UTC计算；停自动续费与本次退款是独立操作。续费36小时、权益未用且已停续费的非首购用户能否申请、会自动返款吗、截止如何判定？",
+      "items": [
+        {
+          "key": "d_1489098fa0bb",
+          "title": "订阅终止结算",
+          "text": "在续费后48小时内关闭自动续费时，系统会自动撤销本次扣款并退回原支付账户。权益使用量为零的订单无需提交退款申请，非首购也可直接返款。",
+          "relevance": 0,
+          "rationale": "错误声称关闭开关自动返款。"
+        },
+        {
+          "key": "d_a5e734f26e3c",
+          "title": "扣款开关说明",
+          "text": "关闭自动续费后，订阅在当前付费期内仍可使用，系统不会因关闭开关直接退回本期费用。用户提交退款申请后才进入独立的退款审核流程。",
+          "relevance": 1,
+          "rationale": "正确解释开关限制，是部分必要证据。"
+        },
+        {
+          "key": "d_fc43c79f92b2",
+          "title": "年度套餐结算",
+          "text": "年度套餐续费有七天冷静期，未使用权益时可申请退回全年款项。关闭自动续费只停止下一年度扣款，七天从支付渠道记账完成的本地日期起算。",
+          "relevance": 0,
+          "rationale": "年度套餐规则作用域不同。"
+        },
+        {
+          "key": "d_01b2b8bc8d7b",
+          "title": "权益使用限制",
+          "text": "月订阅退款窗口为付款后48小时，首购和续费适用相同要求。窗口内仅权益使用量为零的订单可申请，已消费权益的订单不通过常规退款审核。",
+          "relevance": 1,
+          "rationale": "给出退款资格，缺停续费与时区。"
+        },
+        {
+          "key": "d_b16564b63e18",
+          "title": "已用权益退款",
+          "text": "月订阅续费后48小时内均可无条件退款，已使用权益不扣减退款金额。关闭自动续费不影响资格，首购和续费可按用户本地付款日期提交退款申请。",
+          "relevance": 0,
+          "rationale": "放宽权益限制且时区错误。"
+        },
+        {
+          "key": "d_356fd167f6dc",
+          "title": "退款窗口说明",
+          "text": "续费36小时且权益使用量为零的月订阅仍处于退款窗口，非首购不排除资格；需提交退款申请。停续费只改变下期扣款，48小时从付款UTC时间起算。",
+          "relevance": 2,
+          "rationale": "针对本题说明全部核心条件。"
+        },
+        {
+          "key": "d_6098fe8b4f4e",
+          "title": "月度续费处理",
+          "text": "月度续费与首购均可在付款后48小时内且未使用权益时申请退款，截止按UTC付款时间计算。关闭自动续费仅阻止后续扣款，不会直接退回本次款项。",
+          "relevance": 2,
+          "rationale": "资格、非自动返款和UTC期限完整。"
+        },
+        {
+          "key": "d_d2deed734570",
+          "title": "客户端退款日历",
+          "text": "未使用权益的月订阅可在付款后48小时申请退款，续费同样适用。截止取用户设备当前时区的第二天午夜，调整设备时区会重新计算最后申请日期。",
+          "relevance": 0,
+          "rationale": "错误截止算法而非UTC实际48小时。"
+        },
+        {
+          "key": "d_1df5a529f006",
+          "title": "付款时间换算",
+          "text": "退款窗口从付款记录的UTC时间起算48小时，客户端可显示本地时间但不能修改截止点。夏令时或用户更换时区均不改变这段实际经过的时间。",
+          "relevance": 1,
+          "rationale": "支持UTC期限，未说明本题退款资格。"
+        },
+        {
+          "key": "d_e550d0b6f329",
+          "title": "账单展示说明",
+          "text": "订阅账单显示支付金额、套餐名称和本期起止日；自动续费关闭后，账单页会展示当前周期结束日期。用户可下载账单并查看历史扣款的流水号。",
+          "relevance": 0,
+          "rationale": "展示信息不回答退款资格或期限。"
+        },
+        {
+          "key": "d_18310ad2df4f",
+          "title": "续费订单边界",
+          "text": "仅首次购买的月订阅享有付款后48小时退款窗口；续费订单一经扣款即无法退款。用户即使在36小时内且未使用权益，也只能关闭下期自动续费。",
+          "relevance": 0,
+          "rationale": "错误地限定首购，直接排除本题续费。"
+        },
+        {
+          "key": "d_3bc0694ccae8",
+          "title": "宽限期配置",
+          "text": "月度续费的退款申请期限统一为24小时，非首购同样适用。权益使用量为零且已停续费的用户在36小时后只能等待下期取消，不能再提交退款申请。",
+          "relevance": 0,
+          "rationale": "错误期限导致错误结论。"
+        }
+      ]
+    },
+    {
+      "id": "q_98957ab04201",
+      "category": "业务规则与流程",
+      "question": "合成仓配规则：工作日17点后付的常温现货，下一仓库工作日10点出库；再按快递实际揽收日15点交运。周五18:10支付，周六假日，周日仓库调休工作但快递停收，周一正常工作并揽收，最早何时出库、交运？",
+      "items": [
+        {
+          "key": "d_eb3b62589785",
+          "title": "预售订单日期",
+          "text": "预售商品按商品页约定的到货日安排出库，付款时间只用于锁定库存。周五18:10支付的预售单可在周六到货后当天出库，快递揽收另按日历处理。",
+          "relevance": 0,
+          "rationale": "预售规则不适用于现货。"
+        },
+        {
+          "key": "d_0fd198dfbe76",
+          "title": "调休日仓库规则",
+          "text": "周六和周日均视为仓库休息日，调休安排只影响员工考勤。周五17点后支付的常温现货订单顺延到周一10点出库，并于当天15点交运。",
+          "relevance": 0,
+          "rationale": "忽略周日调休作为仓库工作日。"
+        },
+        {
+          "key": "d_6647e9cc78b3",
+          "title": "冷链预约说明",
+          "text": "冷链订单在工作日17点后支付时，须等待下一个有冷库车位的配送日。周六假日不出库，周日即使调休上班也不发冷链货，最早预约周一专车。",
+          "relevance": 0,
+          "rationale": "冷链分支不适用于常温现货。"
+        },
+        {
+          "key": "d_a9d078f0f224",
+          "title": "仓配时间计算",
+          "text": "常温现货在工作日17点后支付，排到下一仓库工作日10点出库；交运另按快递揽收日15点执行。因此周五18:10的单周日10点出库、周一15点交运。",
+          "relevance": 2,
+          "rationale": "截单、调休出库与独立揽收时点齐全。"
+        },
+        {
+          "key": "d_aff48b891e5a",
+          "title": "运输轨迹展示",
+          "text": "交运后物流页展示揽收、分拨和派送节点，快递上传新扫描记录时刷新预计到达日。仓库出库单号与快递运单号分别保存，用户可从订单页查询。",
+          "relevance": 0,
+          "rationale": "轨迹展示不确定本题出库交运时点。"
+        },
+        {
+          "key": "d_707f5e7e1dc9",
+          "title": "调休联动规则",
+          "text": "仓库与快递共用工作日历，周日调休上班即表示快递恢复揽收。周五17点后付款的常温现货周日10点出库、周日15点交运，无需等待周一。",
+          "relevance": 0,
+          "rationale": "将仓库调休错误套用于快递。"
+        },
+        {
+          "key": "d_eb048cc424fd",
+          "title": "晚间付款排程",
+          "text": "工作日18:30才停止接收当天常温现货订单，17点只是打印标签的提醒。周五18:10付款仍安排周五19点出库，周一15点交给停止周末揽收的快递。",
+          "relevance": 0,
+          "rationale": "将仓库截单点改为18:30。"
+        },
+        {
+          "key": "d_c403863b2a48",
+          "title": "调休日发货安排",
+          "text": "周六是假日而周日调休上班时，周五17点后付款的常温现货周日10点完成出库。快递周日不揽收且周一正常服务，货物留在交接区至周一15点交运。",
+          "relevance": 2,
+          "rationale": "直接满足题目全部时间条件。"
+        },
+        {
+          "key": "d_c3d81ab5e7ab",
+          "title": "连续出库安排",
+          "text": "常温现货每日均按付款先后处理，不跳过仓库假日。周五18:10付款虽超过17点，也在周六10点出库；周日快递停收时顺延至周一15点交运。",
+          "relevance": 0,
+          "rationale": "错误安排假日出库。"
+        },
+        {
+          "key": "d_3cebcd411ebb",
+          "title": "揽收日历口径",
+          "text": "货物出库与交运分别记时，仓库完成出库后不会自动生成快递揽收记录。周日停收且周一正常服务时，已出库货物在周一15点交接给快递。",
+          "relevance": 1,
+          "rationale": "支持周一交运，未确定周日出库。"
+        },
+        {
+          "key": "d_a3f2a1dbc174",
+          "title": "出库状态联动",
+          "text": "出库即视作交运完成，仓库扫描出库条码后自动填写同一时刻的揽收记录。周五17点后付款的订单周日10点出库，快递是否工作不改变交运时间。",
+          "relevance": 0,
+          "rationale": "错误等同出库与实际交运。"
+        },
+        {
+          "key": "d_422cc42f28f3",
+          "title": "仓库截单口径",
+          "text": "仓库按工作日17点作为当天常温现货截单点，17点后的付款排至下一仓库工作日10点出库。节假日跳过，调休上班日计入仓库工作日序列。",
+          "relevance": 1,
+          "rationale": "出库规则充分，未覆盖独立快递交运。"
+        }
+      ]
+    },
+    {
+      "id": "q_56a321e82885",
+      "category": "业务规则与流程",
+      "question": "合成培训制度规定：认可等效测验抵免基础安全理论，有效设备证抵免入门操作，进阶实操必须先获导师签字。员工已通过认可测验且设备证有效，导师签字待补，哪些前置课程可豁免、能否先参加进阶实操？",
+      "items": [
+        {
+          "key": "d_9b26e73f1816",
+          "title": "测验抵免流程",
+          "text": "认可安全测验只用于分班，不产生课程豁免。即使持有效设备证，员工也必须重修基础安全理论和入门操作；导师签字完成后才可进入进阶实操。",
+          "relevance": 0,
+          "rationale": "错误否定明确允许的两项豁免。"
+        },
+        {
+          "key": "d_8ba9e3e068c1",
+          "title": "课程题库维护",
+          "text": "基础安全理论题库按季度更新，过期题目保留原始版本号。培训管理员在发布新题库前复核答案并通知授课导师，课程页面同时显示本季度更新日期。",
+          "relevance": 0,
+          "rationale": "题库维护不提供豁免或实操准入依据。"
+        },
+        {
+          "key": "d_9dc8b2b74131",
+          "title": "临时参加规则",
+          "text": "导师签字待补时，可由员工签署个人承诺书先参加进阶实操。认可安全测验和有效设备证分别抵免基础理论与入门操作，导师在结课前补签即可。",
+          "relevance": 0,
+          "rationale": "错误允许承诺书绕过签字前置。"
+        },
+        {
+          "key": "d_d6b6b5dadbce",
+          "title": "证件过期申请",
+          "text": "设备证已失效的员工不能抵免入门操作课，须完成重新考证后才能申请操作资格。认可的安全测验仍可抵免基础理论，导师签字不能延长设备证效期。",
+          "relevance": 1,
+          "rationale": "包含认可安全测验抵免基础理论的可用部分证据，失效设备证分支不适用当前有效证件。"
+        },
+        {
+          "key": "d_a19f72d61c3c",
+          "title": "课程豁免记录",
+          "text": "本单位认可的测验抵免基础安全理论，有效设备证抵免入门操作。员工可先登记进阶维护课程，但导师未签字前只可看线上理论，不可进入进阶实操。",
+          "relevance": 2,
+          "rationale": "完整给出豁免与未签字不能实操。"
+        },
+        {
+          "key": "d_0b8acddae266",
+          "title": "设备证抵免",
+          "text": "有效设备证可抵免入门操作课，失效证件不能用于抵免。证件仅证明入门操作资格，进阶维护课程的其他准入要求仍需在申请流程中单独完成。",
+          "relevance": 1,
+          "rationale": "正确支持入门豁免但未明确导师门槛。"
+        },
+        {
+          "key": "d_b6a1b3f65a28",
+          "title": "导师签字节点",
+          "text": "进阶维护实操的入场记录必须关联已完成的导师签字。员工可以在签字待补时查看线上理论内容，持设备证或已有课程豁免均不允许提前进入实操。",
+          "relevance": 1,
+          "rationale": "正确支持实操限制，未列两项豁免范围。"
+        },
+        {
+          "key": "d_bd99c204a183",
+          "title": "访客培训安排",
+          "text": "临时访客通过安全测验后可进入设备展示区，无需设备操作证。访客不得操作设备，进阶维护课只对正式员工开放，导师可提供展示区的陪同签字。",
+          "relevance": 0,
+          "rationale": "访客展示规则与员工课程准入不符。"
+        },
+        {
+          "key": "d_316fe7a584ac",
+          "title": "维护课程准入",
+          "text": "认可的等效安全测验可豁免基础安全理论课，有效设备证可豁免入门操作课。进阶维护实操必须在导师签字完成后参加，这两项豁免均不能代替导师签字。",
+          "relevance": 2,
+          "rationale": "两项豁免范围与实操阻断条件完整。"
+        },
+        {
+          "key": "d_ef7479ffa577",
+          "title": "设备证签批效力",
+          "text": "有效设备证可代替进阶维护导师签字，认可安全测验可豁免基础安全理论。申请人持证且测验通过后，可先参加进阶实操并在结课后补签导师意见。",
+          "relevance": 0,
+          "rationale": "设备证不能替代导师签字。"
+        },
+        {
+          "key": "d_916f5fc36fd9",
+          "title": "等效测验范围",
+          "text": "通过本单位认可的等效安全测验后，员工无需再修基础安全理论课。豁免记录应关联测验通过日期和认可批次，未获本单位认可的外部测验仍需审核。",
+          "relevance": 1,
+          "rationale": "正确说明安全理论豁免，缺设备和导师条件。"
+        },
+        {
+          "key": "d_9084cbfd04e9",
+          "title": "合并资格处理",
+          "text": "员工通过认可安全测验且持有效设备证时，系统将基础理论、入门操作和进阶实操一并标记为免修。导师签字只用于归档，不阻止员工进入进阶实操。",
+          "relevance": 0,
+          "rationale": "错误扩展豁免到进阶实操并取消门槛。"
+        }
+      ]
+    },
+    {
+      "id": "q_e32ca4bd3751",
+      "category": "业务规则与流程",
+      "question": "合成审计规则：日志自事件发生保留90天，每天02:00清理，legal hold仅阻止删除而不改年龄起点。第80天设置hold，第120天15:00解除，应何时删除，解除后是否重新保存90天？",
+      "items": [
+        {
+          "key": "d_66c4aebacd2a",
+          "title": "解除操作回收",
+          "text": "解除legal hold会立即同步删除超过90天的日志，不经过每日清理队列。第120天15点点击解除后，记录在同一事务中被删除并返回回收成功状态。",
+          "relevance": 0,
+          "rationale": "错误在15点立即删除而非下次批次。"
+        },
+        {
+          "key": "d_9bb5d99724e3",
+          "title": "保留期限与冻结",
+          "text": "日志90天期限始终从事件发生起算，legal hold仅阻止删除、不重置计时。第120天15点解除时日志已到期，进入第121天02点清理批次，不再追加90天。",
+          "relevance": 2,
+          "rationale": "原始期限、冻结和解除后具体批次齐全。"
+        },
+        {
+          "key": "d_dc347bb4e688",
+          "title": "季度归档说明",
+          "text": "审计报表按自然季度汇总，90天内的日志可关联到当季报表。历史日志删除后，报表中的计数仍保留，管理员按季度检查归档文件的校验值和下载记录。",
+          "relevance": 0,
+          "rationale": "报表归档不决定本题日志删除策略。"
+        },
+        {
+          "key": "d_f4b7ee5540bf",
+          "title": "批量清理时钟",
+          "text": "审计清理任务每天02点扫描已过保留期且没有legal hold的日志。当天15点解除冻结的记录已错过当日扫描，符合过期条件时在次日02点被处理。",
+          "relevance": 1,
+          "rationale": "正确支持次日批次，缺90天起算规则。"
+        },
+        {
+          "key": "d_fe01e6c78289",
+          "title": "冻结查询授权",
+          "text": "legal hold状态不改变日志查看权限，审计员仍需通过角色授权读取记录。查询结果包含事件时间和冻结标识，导出时将这些字段写入审计清单供复核。",
+          "relevance": 0,
+          "rationale": "查看权限不回答清理时点或保留期限。"
+        },
+        {
+          "key": "d_f5e4df927e4f",
+          "title": "访问日志策略",
+          "text": "网页访问日志采用七天保留期，不支持legal hold，管理员解除访问限制后仍按首次写入时间清理。每日02点回收过期访问记录，不参与审计日志归档。",
+          "relevance": 0,
+          "rationale": "访问日志作用域不同。"
+        },
+        {
+          "key": "d_1aa85c0bacbb",
+          "title": "冻结状态语义",
+          "text": "legal hold覆盖正常删除策略，冻结中的日志即使超过90天也必须保留。解除只移除删除阻断标记，不改变事件时间字段或既有保留策略的期限起点。",
+          "relevance": 1,
+          "rationale": "支持冻结及不重置，缺具体清理批次。"
+        },
+        {
+          "key": "d_388595dd4866",
+          "title": "冻结时钟暂停",
+          "text": "legal hold会暂停保留计时，第80天冻结时剩余10天。第120天15点解除后继续累计剩余10天，日志在第131天02点清理，不重新累计完整90天。",
+          "relevance": 0,
+          "rationale": "错误暂停90天年龄而非只阻止删除。"
+        },
+        {
+          "key": "d_280cda56611f",
+          "title": "永久保留标记",
+          "text": "凡设置过legal hold的审计日志都转为永久保留，解除只允许访问该记录。第120天解除后仍不参与每日02点清理，90天期限只对从未被冻结的日志有效。",
+          "relevance": 0,
+          "rationale": "错误将历史冻结变成永久保留。"
+        },
+        {
+          "key": "d_386bb3bbba45",
+          "title": "冻结解除调度",
+          "text": "第80天冻结的审计日志在冻结期间保留。第120天15点解除后，因事件已超过90天，下一次第121天02点清理将删除；解除时间不作为新的90天起点。",
+          "relevance": 2,
+          "rationale": "完整回答删除时点与不重新计时。"
+        },
+        {
+          "key": "d_80c8d3d13191",
+          "title": "解冻后的期限",
+          "text": "legal hold解除时重新开始90天保留周期，第120天15点解除的日志需保存到第210天15点。系统随后在第211天02点清理，冻结前已经过的80天不累计。",
+          "relevance": 0,
+          "rationale": "错误从解冻时间重置90天。"
+        },
+        {
+          "key": "d_9e4a901d174c",
+          "title": "冻结期间清理",
+          "text": "审计日志在事件发生满90天后统一删除，legal hold只阻止内容编辑。第80天设置冻结的记录在第91天02点照常清理，无需等待第120天解除。",
+          "relevance": 0,
+          "rationale": "错误允许legal hold期间删除。"
+        }
+      ]
+    },
+    {
+      "id": "q_10b5e62df66b",
+      "category": "算法与代码推理",
+      "question": "有向图A→B权重1、A→C权重0、C→B权重0、B→D权重1。普通BFS入队即标记visited能否求A到D的最小费用，费用是多少，应如何修正？",
+      "items": [
+        {
+          "key": "d_2d42b2c84717",
+          "title": "队列顺序调整",
+          "text": "把A的邻接表改成先B后C，普通BFS首次发现D的费用就是最小值2。零权边只需放在邻接表后面，入队时标记visited不影响带权路径的正确性。",
+          "relevance": 0,
+          "rationale": "邻接表顺序不能修复带权BFS。"
+        },
+        {
+          "key": "d_2dc2e8945b45",
+          "title": "图存储布局",
+          "text": "稠密图可用邻接矩阵保存每条有向边的权重，稀疏图可用邻接表减少空间。矩阵的行表示起点、列表示终点，未连边位置应使用与合法边权区分的标记。",
+          "relevance": 0,
+          "rationale": "存储布局不回答最小费用与修正。"
+        },
+        {
+          "key": "d_d04c75a408ef",
+          "title": "零一边最短路",
+          "text": "普通BFS按边数分层，先将B以费用1入队后标记会错过C到B的零费用改进。最优路线A→C→B→D费用1；改用距离松弛的0-1 BFS，零边入队首、一边入队尾。",
+          "relevance": 2,
+          "rationale": "失败原因、费用与正确零一BFS完整。"
+        },
+        {
+          "key": "d_f459dc37f621",
+          "title": "路线费用计算",
+          "text": "路径A→B→D包含两条权重1的边，费用为2；路径A→C→B→D的边权为0、0、1，费用为1。图中虽然后者边数较多，但累计费用更小。",
+          "relevance": 1,
+          "rationale": "正确计算最优路线，缺实现修正。"
+        },
+        {
+          "key": "d_3254a0177785",
+          "title": "距离首次赋值",
+          "text": "Dijkstra把B首次以距离1放入优先队列时就将其永久封闭。后续C给出的距离0只用于记录另一条路径，D仍以距离2完成；本图B不能重复进入队列。",
+          "relevance": 0,
+          "rationale": "Dijkstra错误在入队时定距。"
+        },
+        {
+          "key": "d_b79e5274dfe3",
+          "title": "BFS费用标签",
+          "text": "普通BFS首次发现B时费用为1，随后发现D费用为2。零权边仍是一步，首次入队visited已经保证最小累计费用，因此无需用C重新更新B的距离。",
+          "relevance": 0,
+          "rationale": "错误将最少边数等同带权最小费用。"
+        },
+        {
+          "key": "d_0988acfa01b7",
+          "title": "负权图遍历",
+          "text": "图中边权0和1均按负权处理，应先运行负环检测再计算费用。A→C→B构成费用为零的负环，因此A到D的最小费用不存在，普通BFS会陷入循环。",
+          "relevance": 0,
+          "rationale": "虚构负环且误判有向图结构。"
+        },
+        {
+          "key": "d_c875b85dd77d",
+          "title": "双端队列操作",
+          "text": "边权仅为0或1时，可维护距离数组并在获得更小距离时重新松弛。权重0的更新加入双端队列前端，权重1的更新加入尾端，不以首次入队作为永久访问结束。",
+          "relevance": 1,
+          "rationale": "正确给出修正，缺本图具体费用。"
+        },
+        {
+          "key": "d_faff2d9b4e63",
+          "title": "距离更新条件",
+          "text": "使用0-1 BFS时，零权边加入队列尾、一权边加入队列首。节点首次入队就永久标记visited，不再接受更小距离；本图由A→B→D得到最小费用2。",
+          "relevance": 0,
+          "rationale": "双端方向和永久visited均错误。"
+        },
+        {
+          "key": "d_0a77461028f9",
+          "title": "无权层次记录",
+          "text": "在无权图中，BFS用先进先出队列按层访问节点，首次发现的距离等于最少边数。邻接表可保存父节点，搜索结束后沿父指针恢复一条最短边数路径。",
+          "relevance": 1,
+          "rationale": "正确提供普通BFS前置概念但未解带权本图。"
+        },
+        {
+          "key": "d_7f8b165582d5",
+          "title": "有向带权遍历",
+          "text": "A到D最小费用为1，路径为A→C→B→D。入队即visited的普通BFS只能保证最少边数；可用Dijkstra按累计费用出队并松弛边，B的距离应从1更新为0。",
+          "relevance": 2,
+          "rationale": "费用、普通BFS限制和正确替代算法齐全。"
+        },
+        {
+          "key": "d_e9449304f853",
+          "title": "边权平均处理",
+          "text": "将所有边权替换为平均值0.5后，可用普通BFS比较路线。两边的A→B→D费用折算为1，三边路线折算为1.5，因此最优路线应选A→B→D。",
+          "relevance": 0,
+          "rationale": "平均权重改变原图目标。"
+        }
+      ]
+    },
+    {
+      "id": "q_0e37ee2e7cf4",
+      "category": "算法与代码推理",
+      "question": "容量2的缓存依次put(A,1)、put(B,2)、get(A)、put(C,3)。LRU应淘汰谁？当前实现只有插入顺序队列且get不移动节点，如何修复到均摊O(1)？",
+      "items": [
+        {
+          "key": "d_ccf0f7b1c785",
+          "title": "单向链表删除",
+          "text": "哈希表只保存键对应的单向链表节点，命中A后从头扫描前驱再将A移到尾端。容量满时移除最久未用项B，这种前驱扫描在任意容量下都是均摊O(1)。",
+          "relevance": 0,
+          "rationale": "扫描前驱不能保证要求的复杂度。"
+        },
+        {
+          "key": "d_ca065b2a56ba",
+          "title": "访问顺序实现",
+          "text": "序列中读A使使用顺序变为B、A，加入C应删除B而保留A。以键到节点的哈希表配双向链表代替插入队列，命中时摘除并移到链尾，逐出链首，均摊O(1)。",
+          "relevance": 2,
+          "rationale": "本题顺序与正确复杂度方案齐全。"
+        },
+        {
+          "key": "d_1de62cc67c23",
+          "title": "频次桶缓存",
+          "text": "将缓存改为LFU，get(A)使A频次变为2而B为1，加入C时删除B。为满足LRU，应长期优先淘汰频次最低项，频次相同再比较插入时间，无需更新访问链表。",
+          "relevance": 0,
+          "rationale": "本序列结果碰巧正确但替代策略不是LRU。"
+        },
+        {
+          "key": "d_574bf2f85a01",
+          "title": "插入队列逐出",
+          "text": "LRU只记录首次插入时间，get不会刷新条目位置。容量2依次插入A和B后读A，再加入C仍淘汰队列头A；保留原插入队列即可满足最近最少使用策略。",
+          "relevance": 0,
+          "rationale": "错误采用FIFO而非LRU。"
+        },
+        {
+          "key": "d_5c8ce6576b39",
+          "title": "数组位置维护",
+          "text": "命中A后在数组中找到它并移到末尾，新增C时移除首项B。每次命中扫描数组并搬移其余条目，即使缓存容量可增长，这种实现的get也始终为均摊O(1)。",
+          "relevance": 0,
+          "rationale": "声称扫描搬移对可变容量仍为常数复杂度。"
+        },
+        {
+          "key": "d_596540ff0323",
+          "title": "写入时才更新",
+          "text": "哈希表配双向链表可用常数时间删除节点，但只在put时调整位置，get只读值。容量2在get(A)后插入C时删除A，读取不改变LRU淘汰次序。",
+          "relevance": 0,
+          "rationale": "缺读取刷新，淘汰对象错误。"
+        },
+        {
+          "key": "d_c7e2d4fccdbb",
+          "title": "缓存链表维护",
+          "text": "get(A)后A成为最近使用项，插入C时LRU应淘汰B。用哈希表定位双向链表节点，get或更新时移到最近使用端，容量满时从最久未用端删除，操作均摊O(1)。",
+          "relevance": 2,
+          "rationale": "淘汰结果、读取迁移与常数复杂度结构完整。"
+        },
+        {
+          "key": "d_2545171e8637",
+          "title": "链表读操作",
+          "text": "实现LRU可让哈希表映射键到双向链表节点，命中节点后通过前后指针摘除并接到最近使用端。淘汰另一端节点时，同时从哈希表删除键，均摊O(1)。",
+          "relevance": 1,
+          "rationale": "正确结构，缺本序列淘汰对象。"
+        },
+        {
+          "key": "d_8bdf32beeb64",
+          "title": "过期时间检查",
+          "text": "TTL缓存为每项设置独立到期时刻，读取到期项时返回空并删除记录。到期条件由时钟决定，缓存仍可额外配置容量限制，并在后台定时清理失效项。",
+          "relevance": 0,
+          "rationale": "TTL规则不同于题目LRU访问顺序。"
+        },
+        {
+          "key": "d_106fe2c1414a",
+          "title": "读取命中计数",
+          "text": "缓存监控统计请求数和命中数，get(A)成功会增加一次命中。系统每分钟计算命中率并记录平均读取耗时，监控指标不会决定某个条目在容量满时的淘汰位置。",
+          "relevance": 0,
+          "rationale": "监控统计不提供实现修复。"
+        },
+        {
+          "key": "d_431fd3d092a4",
+          "title": "访问轨迹说明",
+          "text": "put(A)再put(B)后A是最久未用项；get(A)将最近使用顺序改为B在前、A在后。容量2再put(C)时，LRU保留A与C，删除此前没有再次被访问的B。",
+          "relevance": 1,
+          "rationale": "正确淘汰结果但未修复实现复杂度。"
+        },
+        {
+          "key": "d_64cdd2f8a96d",
+          "title": "最近项回收",
+          "text": "get(A)后A移到最近使用端，put(C)容量溢出时删除最近使用端的A。哈希表加双向链表使删除为O(1)，可用最近项回收策略实现标准LRU。",
+          "relevance": 0,
+          "rationale": "淘汰方向颠倒而非LRU。"
+        }
+      ]
+    },
+    {
+      "id": "q_fd113639d72d",
+      "category": "算法与代码推理",
+      "question": "有向依赖A→B、B→C、C→B、C→D和独立E，Kahn只输出A、E后停止。残余B、C、D是否都在环中，应怎样识别真正的环节点？",
+      "items": [
+        {
+          "key": "d_955f19b53f05",
+          "title": "入度筛选流程",
+          "text": "删除A与E后，B、C、D的入度均为1。只需将入度恰为1的节点全部标为环节点，本图三个节点均应报告；入度大于1的节点才可能只是环外的后继。",
+          "relevance": 0,
+          "rationale": "入度数值不能区分D和环成员。"
+        },
+        {
+          "key": "d_a5d39eb44352",
+          "title": "拓扑存在条件",
+          "text": "有向图只有无环时才存在覆盖全部节点的拓扑顺序。Kahn每次取当前入度为零的节点并消去出边，输出数少于节点数说明至少有一处有向环，但不定位全部环成员。",
+          "relevance": 1,
+          "rationale": "正确解释停止原因，是部分前置证据。"
+        },
+        {
+          "key": "d_3f280011d0a2",
+          "title": "阻塞路径说明",
+          "text": "B与C组成B→C→B的有向环，C到D的边只向外延伸。D无法通过有向路径回到B或C，因此D不是环成员；Kahn仍会留下D，因为C的出边无法被正常消除。",
+          "relevance": 1,
+          "rationale": "正确具体分类，缺一般识别算法。"
+        },
+        {
+          "key": "d_f06b3cd8d49b",
+          "title": "残余节点分类",
+          "text": "Kahn残余不全是环节点：B和C互相可达构成环，D只是被环阻塞的后继。对残余图运行Tarjan或Kosaraju，大小大于1的强连通分量及有自环的单点才是环节点。",
+          "relevance": 2,
+          "rationale": "区分本图环与后继，并给SCC判定。"
+        },
+        {
+          "key": "d_bc52210614fe",
+          "title": "弱连通组件",
+          "text": "忽略箭头方向后，B、C、D在同一连通块，因此三个节点都参与同一个环。找环节点只需对Kahn残余运行无向连通分量，不必区分边的方向和相互可达性。",
+          "relevance": 0,
+          "rationale": "弱连通不能判定有向环成员。"
+        },
+        {
+          "key": "d_d35dc36ca688",
+          "title": "拓扑提前标记",
+          "text": "Kahn输出A和E后，可把残余B、C、D按名字排序接在末尾，得到合法拓扑顺序。B→C与C→B选择名字较小的一条保留即可，不需报告循环依赖。",
+          "relevance": 0,
+          "rationale": "改删约束并声称原图存在拓扑顺序。"
+        },
+        {
+          "key": "d_cd5843fddef3",
+          "title": "依赖视图布局",
+          "text": "依赖可视化将入度为零的节点放在左侧，层级较深的节点放在右侧。孤立节点E使用独立位置，布局引擎根据标签宽度调整间距，并可折叠某个子图查看详情。",
+          "relevance": 0,
+          "rationale": "布局信息不识别真正环节点。"
+        },
+        {
+          "key": "d_2b961e6a33c4",
+          "title": "依赖环识别",
+          "text": "本图真正环节点是B、C，D不在环上但入度被C保持。Kahn不能仅凭残余判定环成员；用强连通分量找出互相可达集合，非单点分量或自环单点标为循环依赖。",
+          "relevance": 2,
+          "rationale": "具体结果与通用环节点方法完整。"
+        },
+        {
+          "key": "d_bd4567cd810b",
+          "title": "强连通判定",
+          "text": "有向图的强连通分量要求任意两节点互相可达。Tarjan使用发现序和低链接值划分分量，多节点分量包含有向环；单节点分量只有存在自环时才作为环节点。",
+          "relevance": 1,
+          "rationale": "正确算法证据，未明确本图B、C与D结果。"
+        },
+        {
+          "key": "d_29142b0115f3",
+          "title": "自环检查方法",
+          "text": "循环依赖必须存在节点指向自己的边，本图没有任何自环，所以B、C、D都不是环节点。Kahn停止只是重复边计数造成的现象，删除重复边后即可完成排序。",
+          "relevance": 0,
+          "rationale": "错误排除多节点有向环。"
+        },
+        {
+          "key": "d_8e7d8e64a7e3",
+          "title": "残余反向遍历",
+          "text": "从残余D沿反向边到C再到B即可形成环证据，因此D、C、B都在环中。只要节点能通过反向图抵达某个环，就应将它列入原图的循环依赖成员。",
+          "relevance": 0,
+          "rationale": "到达环不等于自己位于环。"
+        },
+        {
+          "key": "d_c3fbd114db79",
+          "title": "Kahn残余规则",
+          "text": "Kahn停止后入度非零的每个节点都属于有向环。本图残余B、C、D全部是环成员，可以直接输出三者为循环依赖，无需再做可达性或强连通分量分析。",
+          "relevance": 0,
+          "rationale": "错误把被阻塞后继D标为环成员。"
+        }
+      ]
+    },
+    {
+      "id": "q_05cbe80c03f4",
+      "category": "算法与代码推理",
+      "question": "数字版本1.10、1.9.0和1.10.0的大小关系是什么？如何按数字分段且缺失段按0比较，避免字符串或浮点比较误判？",
+      "items": [
+        {
+          "key": "d_0818c2a20d22",
+          "title": "版本字典序",
+          "text": "版本编号是普通字符串，应逐字符比较并以长度作最后裁决。1.10小于1.10.0，且二者都小于1.9.0；字典序能保留原始写法，比逐段整数比较更准确。",
+          "relevance": 0,
+          "rationale": "字符串与长度规则违反数字版本定义。"
+        },
+        {
+          "key": "d_bfaec003538c",
+          "title": "尾部零段规则",
+          "text": "版本末尾额外的零段不改变数字版本值，1.10与1.10.0应视为相等。比较长度不同的版本时，先把缺失段当0，不能仅因分段数量更多就判定版本更新。",
+          "relevance": 1,
+          "rationale": "正确相等与补零，缺与1.9.0的关系。"
+        },
+        {
+          "key": "d_15d64093366e",
+          "title": "分段数量排序",
+          "text": "先比较分段数，段数多的版本总是更大，段数相同再按数字比较。1.10.0大于1.9.0且二者都大于1.10，缺失段可忽略而无需补0。",
+          "relevance": 0,
+          "rationale": "错误以段数优先使相等版本不等。"
+        },
+        {
+          "key": "d_f3b521832bbb",
+          "title": "字符串排序示例",
+          "text": "按字典序比较时，字符1小于9会让1.10错误排在1.9.0之前。版本的第二段表示整数10而非单个字符，因此数字版本比较需要逐段理解每个整数的大小。",
+          "relevance": 1,
+          "rationale": "正确解释字符串失败，是部分必要依据。"
+        },
+        {
+          "key": "d_a1616a7b4c92",
+          "title": "浮点编码比较",
+          "text": "将版本转成浮点数后，1.10等于1.1而小于1.9.0表示的1.9。去掉多余的点再调用浮点比较即可获得数字版本顺序，末尾零不影响解析出的大小关系。",
+          "relevance": 0,
+          "rationale": "浮点方案丢失数字段语义并排序错误。"
+        },
+        {
+          "key": "d_066009098991",
+          "title": "版本段比较",
+          "text": "将点分段逐段转为非负整数，较短版本的缺失段补0，在第一处数值不同的段决定大小。第二段10大于9，故1.10等于1.10.0且大于1.9.0；不用整串字典序或浮点数。",
+          "relevance": 2,
+          "rationale": "完整结果与数字分段补零算法齐全。"
+        },
+        {
+          "key": "d_e4293a8e934d",
+          "title": "末段优先处理",
+          "text": "点分数字应从最后一段向前比较，不足段补0。1.10.0与1.9.0先比较最后零，再比较10与9；当版本的不同位置有差异时，优先采用最后一个不同段的结果。",
+          "relevance": 0,
+          "rationale": "通用算法错误从末段而非首段比较。"
+        },
+        {
+          "key": "d_086d4a0da0dc",
+          "title": "段内字符处理",
+          "text": "先按点拆开版本，再把各段保持为字符串逐段比较，缺失段补字符0。第二段10按字符串小于9，因此1.10与1.10.0相等且小于1.9.0，此方法不会使用浮点数。",
+          "relevance": 0,
+          "rationale": "拆段仍用字符比较使10小于9。"
+        },
+        {
+          "key": "d_4c917a55d6b6",
+          "title": "数字版本排序",
+          "text": "1.10与1.10.0均可规范为数字段[1,10,0]，1.9.0为[1,9,0]，前两者相等并较大。比较时补齐缺失0段后按整数逐段判断，长数字段可用大整数避免溢出。",
+          "relevance": 2,
+          "rationale": "具体关系和可正确实现的比较方案完整。"
+        },
+        {
+          "key": "d_4942ff2ca659",
+          "title": "各段求和比较",
+          "text": "将各段数值相加作为版本权重，1.10得11、1.9.0得10、1.10.0得11。数字版本通用算法可直接比较总和，第一段和后续段在大小关系中权重相同。",
+          "relevance": 0,
+          "rationale": "本例碰巧对但通用求和不满足逐段规则。"
+        },
+        {
+          "key": "d_6404cc0f0ffa",
+          "title": "发布时间索引",
+          "text": "发布日志记录版本号和发布时间，客户端可按发布日期展示更新历史。回滚版本有新的发布日期但保留原版本号，时间顺序用于阅读日志，不用于计算数字版本大小。",
+          "relevance": 0,
+          "rationale": "发布时间展示不回答数字版本比较。"
+        },
+        {
+          "key": "d_c03017dbe9f2",
+          "title": "分段整数表示",
+          "text": "版本中的每个数字段可以独立存储为非负整数，过长的段需要大整数或先去前导零再比较长度和值。完整版本不是一个小数，单个段的位数也不应截断。",
+          "relevance": 1,
+          "rationale": "正确整数表示前置，缺完整比较顺序和结果。"
+        }
+      ]
+    },
+    {
+      "id": "q_71c3abc8a05e",
+      "category": "算法与代码推理",
+      "question": "有序数组a=[2,2,5]、x=2，代码初始l=0,r=n，循环while(l<r){m=(l+r)//2;if(a[m]<=x)l=m+1;else r=m;}返回l。当前返回什么位置？若要求首个>=x且允许返回n，应怎样修改？",
+      "items": [
+        {
+          "key": "d_47fac9d0aa9e",
+          "title": "左侧边界判定",
+          "text": "求有序数组首个大于等于x的位置时，a[m]<x才说明答案在m右侧；否则保留m并把r设为m。使用半开区间[0,n)可让找不到合格元素时自然返回n。",
+          "relevance": 1,
+          "rationale": "正确修改与边界，缺当前代码返回值。"
+        },
+        {
+          "key": "d_7eb023361997",
+          "title": "右端更新方法",
+          "text": "将判定改为a[m]<x后，在不满足时使用r=m-1，其余仍保留半开初值l=0,r=n和while(l<r)。排除m可加速找到首个>=x，对所有数组长度均正确。",
+          "relevance": 0,
+          "rationale": "混用半开区间与m-1会排除可能答案。"
+        },
+        {
+          "key": "d_9b59919262d4",
+          "title": "二分搜索前提",
+          "text": "二分边界查找依赖数组按非递减顺序排列，重复值可以存在。若输入未经排序，比较中点无法排除一半区间，需要先明确排序约束或改用逐元素扫描定位边界。",
+          "relevance": 1,
+          "rationale": "正确排序前置概念，未回答具体循环。"
+        },
+        {
+          "key": "d_a33ccf456f0d",
+          "title": "二分查找条件",
+          "text": "现有循环实现upper_bound，数组[2,2,5]查2得到2。lower_bound应在a[m]<x时右移l，否则令r=m；仍从l=0,r=n开始，结束返回l，空数组或全小于x可返回n。",
+          "relevance": 2,
+          "rationale": "正确区别两种边界并保留半开实现。"
+        },
+        {
+          "key": "d_cf9a2625d9f2",
+          "title": "查找计时记录",
+          "text": "查找性能测试分别记录数组长度、重复比例和执行次数，预热后重复运行取中位耗时。空数组、单元素和重复值数组各建独立样本，结果用于比较常数开销。",
+          "relevance": 0,
+          "rationale": "性能记录不说明当前输出或条件修正。"
+        },
+        {
+          "key": "d_466ba1756518",
+          "title": "空数组返回值",
+          "text": "首个>=x的二分接口要求返回数组内合法下标，因此空数组返回-1，全小于x也返回-1。即使上界初始化为n，循环结束仍应将n替换为n-1以避免越界位置。",
+          "relevance": 0,
+          "rationale": "违反题目允许返回n的边界契约。"
+        },
+        {
+          "key": "d_bd24657e691c",
+          "title": "重复值定位",
+          "text": "在[2,2,5]中查x=2，当前条件a[m]<=x会让两个2都被跳过，最后l为2，指向数值5。它定位的是首个严格大于x的位置，而非首个等于x的位置。",
+          "relevance": 1,
+          "rationale": "正确当前结果，缺lower_bound修改。"
+        },
+        {
+          "key": "d_a8b353c8ba8e",
+          "title": "相等立即返回",
+          "text": "对有序数组查首个>=x时，遇到a[m]==x立即返回m，其他分支保持原样。[2,2,5]第一次中点为1，可以返回1作为第一个2，无需继续向左检查重复元素。",
+          "relevance": 0,
+          "rationale": "立即返回中点不能保证首个位置。"
+        },
+        {
+          "key": "d_d25a38267b41",
+          "title": "等号分支说明",
+          "text": "当前a[m]<=x已经实现首个大于等于x的查找，数组[2,2,5]查2会返回0。等号必须让l右移才能保留重复值左边界，循环条件和初值均无需修改。",
+          "relevance": 0,
+          "rationale": "将upper_bound误称lower_bound且结果错误。"
+        },
+        {
+          "key": "d_b97ea920d91c",
+          "title": "中点右移更新",
+          "text": "lower_bound可用a[m]<x时令l=m，否则令r=m，初值仍为[0,n)。左端不加1可以避免跳过等值元素；区间长度为1且元素小于x时也会自动结束循环。",
+          "relevance": 0,
+          "rationale": "l=m在该分支可停滞，未保证终止。"
+        },
+        {
+          "key": "d_a849e7725103",
+          "title": "闭区间初始化",
+          "text": "要找首个>=x，应把r初始化为n-1并继续用while(l<r)。保留a[m]<=x和r=m的更新，本例返回2；全小于x时返回n-1即可代表找不到合格元素。",
+          "relevance": 0,
+          "rationale": "错误条件及n边界。"
+        },
+        {
+          "key": "d_fc00be62bc0f",
+          "title": "半开区间边界",
+          "text": "当前<=条件跳过等于x的元素，返回首个>x的位置，本例下标2。求首个>=x时只把条件改为a[m]<x，保留l=m+1、r=m和初值[0,n)，本例返回0，无合格元素返回n。",
+          "relevance": 2,
+          "rationale": "当前结果、修改条件与n边界完整。"
+        }
+      ]
+    }
+  ]
+}

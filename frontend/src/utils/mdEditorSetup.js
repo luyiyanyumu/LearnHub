@@ -25,8 +25,12 @@ import hljs from 'highlight.js'
 import katex from 'katex'
 import mdCallout from './mdCallout'
 import mdAnchor from './mdAnchor'
+import { mermaidAdapter, mermaidConfig as createMermaidConfig, readMermaidTheme } from './mermaidPreview.js'
 
 config({
+  mermaidConfig(base) {
+    return createMermaidConfig(readMermaidTheme(base.theme === 'dark'))
+  },
   // 支持 :::名称 … ::: 彩色提示块（语雀等平台粘贴兼容）
   markdownItConfig(md) {
     md.use(mdCallout)
@@ -39,6 +43,7 @@ config({
   //   用完整版 highlight.js（与 mdToHtml.js 同一份依赖）：语言注册表只有一份，
   //   未知语言内部会回落 highlightAuto，不会抛错。
   editorExtensions: {
+    mermaid: { instance: mermaidAdapter, enableZoom: false },
     highlight: { instance: hljs },
     // ★ 数学公式（LaTeX）：必须给**本地** katex 实例。md-editor 的默认配置指向
     //   https://unpkg.com/katex@0.16.33/…（见其 config.mjs），而本应用是自托管/离线部署

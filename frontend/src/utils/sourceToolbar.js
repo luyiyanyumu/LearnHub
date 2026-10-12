@@ -1,3 +1,6 @@
+import { createMarkdownLink } from './noteLinks.js'
+import { DEFAULT_FLOWCHART_SOURCE, DEFAULT_FLOWCHART_MARKDOWN } from './flowchart.js'
+
 /** Build a CodeMirror edit at the supplied selection without changing the source elsewhere. */
 export function createSourceInsert(source, selection, name, arg) {
   const text = String(source ?? '')
@@ -38,6 +41,11 @@ export function createSourceInsert(source, selection, name, arg) {
       const escaped = label.replace(/\\/g, '\\\\').replace(/\[/g, '\\[').replace(/\]/g, '\\]')
       return edit('[' + escaped + '](' + linkDestination(url) + ')', 1, 1 + escaped.length)
     }
+    case 'noteLink': {
+      const label = String(arg?.text ?? '') || selected || String(arg?.href ?? '')
+      const insert = createMarkdownLink(label, arg?.href)
+      return insert ? edit(insert) : null
+    }
     case 'image': {
       const url = String(arg ?? '').trim()
       if (!url) return null
@@ -52,6 +60,10 @@ export function createSourceInsert(source, selection, name, arg) {
       const start = fence.length + lang.length + 1
       const body = fence + lang + '\n' + selected + '\n' + fence
       return block(body, start, start + selected.length)
+    }
+    case 'flowchart': {
+      const start = '```mermaid\n'.length
+      return block(DEFAULT_FLOWCHART_MARKDOWN, start, start + DEFAULT_FLOWCHART_SOURCE.length)
     }
     case 'table': {
       const body = '| 列A | 列B |\n| --- | --- |\n|  |  |'

@@ -31,7 +31,7 @@ class FileMathLayoutTest {
         var mapper = mock(FileInfoMapper.class);
         when(mapper.selectById(7L)).thenReturn(info);
         files = new FileStorageService(mapper, null, new DocumentTextService(), new PdfLayoutExtractor(),
-                new WordLayoutExtractor(), new TextMathLayout(), null, null, null);
+                new WordLayoutExtractor(), new TextMathLayout(), null, null, null, mock(FolderService.class));
     }
     @AfterEach void restoreDirectory() { System.setProperty("user.dir", previousDirectory); }
 

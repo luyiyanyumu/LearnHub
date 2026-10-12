@@ -30,9 +30,10 @@ public class NoteController {
     public Result<PageResult<NoteVO>> page(@RequestParam(required = false) Long categoryId,
                                            @RequestParam(required = false) Long tagId,
                                            @RequestParam(required = false) String kw,
+                                           @RequestParam(required = false) Long folderId,
                                            @RequestParam(defaultValue = "1") long page,
                                            @RequestParam(defaultValue = "10") long size) {
-        return Result.ok(noteService.page(categoryId, tagId, kw, page, size));
+        return Result.ok(noteService.page(categoryId, tagId, kw, page, size, folderId));
     }
 
     @GetMapping("/{id}")

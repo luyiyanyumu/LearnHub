@@ -61,6 +61,27 @@ const KEEP_TAGS = [
   'kbd', 'abbr', 'small', 'big', 'summary',
 ]
 
+/** Rendered diagrams retain their source; never reconstruct it from SVG labels. */
+function restoreMermaidNodes(box) {
+  box.querySelectorAll('.md-editor-mermaid, [data-mermaid-source]').forEach((node) => {
+    if (!box.contains(node)) return // A source wrapper may already replace its descendants.
+    let source = node.hasAttribute('data-mermaid-source')
+      ? node.getAttribute('data-mermaid-source')
+      : node.getAttribute('data-content')
+    // MdPreview leaves the original token as plain text while rendering, and
+    // also after a parse error. That text is source; rendered SVG labels are not.
+    if (source == null && node.classList.contains('md-editor-mermaid')
+      && !node.hasAttribute('data-processed') && !node.querySelector('svg')) source = node.textContent
+    if (typeof source !== 'string' || !source.trim()) return
+    const pre = document.createElement('pre')
+    const code = document.createElement('code')
+    code.className = 'language-mermaid'
+    code.textContent = source
+    pre.appendChild(code)
+    node.replaceWith(pre)
+  })
+}
+
 let service = null
 
 function getService() {
@@ -180,6 +201,9 @@ function normalize(html) {
   const box = document.createElement('div')
   box.innerHTML = String(html || '')
 
+  // MdPreview SVG/actions and offline export frames are views, not note content.
+  restoreMermaidNodes(box)
+
   // 1) 剥掉装饰节点与 data-line 定位属性
   box.querySelectorAll(DROP_SELECTOR).forEach((n) => n.remove())
   box.querySelectorAll('[data-line]').forEach((n) => n.removeAttribute('data-line'))
@@ -284,12 +308,13 @@ function restoreMath(markdown, fragments) {
   return restored
 }
 
-/** 预览区里是否存在无法反推的内容（mermaid 图、内嵌 HTML 组件等） */
+/** Only a diagram without retained source is unsafe to turn back into Markdown. */
 export function findUnsupported(html) {
   const box = document.createElement('div')
   box.innerHTML = String(html || '')
+  restoreMermaidNodes(box)
   const found = []
-  if (box.querySelector('.md-editor-mermaid, svg[id^="mermaid"]')) found.push('Mermaid 图表')
+  if (box.querySelector('.md-editor-mermaid svg, svg[id^="mermaid"], svg[id^="learnhub-mermaid-"]')) found.push('Mermaid 图表')
   return found
 }
 

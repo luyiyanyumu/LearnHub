@@ -1,17 +1,22 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { useRoute } from 'vue-router'
-import { categoryApi, fileApi, saveBlob } from '../api'
+import { useRoute, useRouter } from 'vue-router'
+import { categoryApi, fileApi, folderApi, saveBlob } from '../api'
+import FolderExplorerToolbar from '../components/FolderExplorerToolbar.vue'
+import FolderMoveDialog from '../components/FolderMoveDialog.vue'
 import PdfReader from '../components/PdfReader.vue'
 import DocTextView from '../components/DocTextView.vue'
 import OriginalDocumentView from '../components/OriginalDocumentView.vue'
 import ReaderTranslation from '../components/ReaderTranslation.vue'
 import { documentKind } from '../utils/documentKind'
 import { createSourceRouteReader } from '../utils/sourceRouteReader'
+import { flattenFolderOptions } from '../utils/folders'
+import { folderExplorerQuery, folderExplorerRows, folderExplorerScope, isExplorerFolder } from '../utils/folderExplorer'
 
 const loading = ref(false)
 const route = useRoute()
+const router = useRouter()
 const uploading = ref(false)
 const list = ref([])
 /** 分页状态。列表一次只渲染一页（而不是全量）——原因见 fileApi.page 的注释。 */
@@ -20,6 +25,99 @@ const categories = ref([])
 const query = ref({ categoryId: undefined, kw: '' })
 const uploadCategoryId = ref(undefined)
 const uploadInput = ref(null)
+const folders = ref([])
+const foldersLoading = ref(false)
+const selectedFolder = ref(folderExplorerScope(route.query))
+const folderToolbar = ref(null)
+const table = ref(null)
+const selectedRows = ref([])
+const moveVisible = ref(false)
+const moveIds = ref([])
+const moveLabel = ref('')
+let listSeq = 0
+let foldersSeq = 0
+const folderPaths = computed(() => new Map(flattenFolderOptions(folders.value).map(folder => [folder.id, folder.path])))
+const explorerRows = computed(() => folderExplorerRows(folders.value, list.value, {
+  scope: selectedFolder.value, keyword: query.value.kw, kind: 'file',
+}))
+const visibleFolderCount = computed(() => explorerRows.value.filter(isExplorerFolder).length)
+
+function folderPath(id) {
+  return id ? folderPaths.value.get(Number(id)) || '文件夹' : '未收纳'
+}
+
+const currentFolderTitle = computed(() => selectedFolder.value == null
+  ? '全部资料'
+  : selectedFolder.value === 0 ? '资料库' : folderPath(selectedFolder.value))
+const hasFilter = computed(() => !!(query.value.categoryId || query.value.kw))
+const emptyMessage = computed(() => hasFilter.value
+  ? '当前文件夹没有匹配的资料，试试清除筛选条件'
+  : selectedFolder.value == null ? '资料库还是空的，上传第一份资料开始收纳' : '这个文件夹还没有资料，可上传或从其他文件夹移入')
+
+async function loadFolders() {
+  const seq = ++foldersSeq
+  foldersLoading.value = true
+  try {
+    const data = await folderApi.list('file')
+    if (seq !== foldersSeq) return
+    folders.value = Array.isArray(data) ? data : data?.list || []
+    if (selectedFolder.value > 0 && !folders.value.some(folder => Number(folder.id) === Number(selectedFolder.value))) {
+      selectedFolder.value = 0
+    }
+  } finally {
+    if (seq === foldersSeq) foldersLoading.value = false
+  }
+}
+
+async function refreshCollection() {
+  await Promise.all([loadFolders(), load()])
+}
+
+function openMove(rows = selectedRows.value) {
+  const files = rows.filter(row => !isExplorerFolder(row))
+  if (!files.length) return
+  moveIds.value = files.map(row => row.id)
+  moveLabel.value = '资料'
+  moveVisible.value = true
+}
+
+async function onMoved() {
+  selectedRows.value = []
+  table.value?.clearSelection()
+  await refreshCollection()
+}
+
+watch(() => route.query, value => {
+  selectedFolder.value = folderExplorerScope(value)
+})
+
+watch(selectedFolder, scope => {
+  if (folderExplorerScope(route.query) !== scope) {
+    router.replace({ path: route.path, query: folderExplorerQuery(route.query, scope), hash: route.hash })
+  }
+  pager.value.page = 1
+  load()
+})
+
+function openExplorerRow(row, _column, event) {
+  const control = event?.target?.closest?.('button, a, input, textarea, [role="button"], .el-select')
+  if (control && !control.classList?.contains('folder-name')) return
+  if (isExplorerFolder(row)) selectedFolder.value = Number(row.id)
+  else openReader(row)
+}
+
+function onSelectionChange(rows) {
+  const visible = new Set(explorerRows.value.filter(row => !isExplorerFolder(row)).map(row => row.__explorerKey))
+  selectedRows.value = loading.value ? [] : rows.filter(row => !isExplorerFolder(row) && visible.has(row.__explorerKey))
+}
+
+function selectableFile(row) {
+  return !isExplorerFolder(row)
+}
+
+function manageExplorerFolder(action, row) {
+  if (isExplorerFolder(row)) folderToolbar.value?.manageFolder(action, row)
+}
 
 /**
  * 数字格式化统一走 Intl：手拼字符串会把 1234567 显示成 `1234567`（该是 `1,234,567`），
@@ -88,18 +186,21 @@ const devData = ref(new URLSearchParams(window.location.search).get('data') || '
 
 async function setDevData(key) {
   devData.value = key
-  const url = new URL(window.location.href)
-  url.searchParams.set('data', key)
-  window.history.replaceState({}, '', url)
+  await router.replace({ path: route.path, query: { ...route.query, data: key }, hash: route.hash })
   await load()
 }
 
 async function load() {
+  const seq = ++listSeq
   loading.value = true
+  selectedRows.value = []
+  table.value?.clearSelection()
   try {
     if (devData.value && devData.value !== 'demo') {
       const m = await import('../dev/worstCaseFiles')
-      const all = m.pickFixture(devData.value) || []
+      if (seq !== listSeq) return
+      const fixture = m.pickFixture(devData.value) || []
+      const all = selectedFolder.value == null ? fixture : fixture.filter(row => Number(row.folderId || 0) === selectedFolder.value)
       // 最坏数据集也走同一套分页逻辑 —— 这样 `1,000 rows` 这个状态看到的就是修复后的行为
       pager.value.total = all.length
       const start = (pager.value.page - 1) * pager.value.size
@@ -107,18 +208,21 @@ async function load() {
       return
     }
     const params = { ...query.value, page: pager.value.page, size: pager.value.size }
+    if (selectedFolder.value != null) params.folderId = selectedFolder.value
     if (!params.categoryId) delete params.categoryId
     if (!params.kw) delete params.kw
     const r = await fileApi.page(params)
+    if (seq !== listSeq) return
     list.value = r.list || []
     pager.value.total = r.total || 0
-    // 删掉最后一页的最后一条后会停在一个空页上（第 3 页，但只剩 2 页数据）→ 自动退回上一页
-    if (!list.value.length && pager.value.page > 1 && pager.value.total > 0) {
-      pager.value.page -= 1
-      await load()
+    // A bulk move/delete can remove several pages; clamp directly instead of requesting each empty page.
+    const lastPage = Math.max(1, Math.ceil(pager.value.total / pager.value.size))
+    if (pager.value.page > lastPage) {
+      pager.value.page = lastPage
+      if (pager.value.total > 0) await load()
     }
   } finally {
-    loading.value = false
+    if (seq === listSeq) loading.value = false
   }
 }
 
@@ -150,20 +254,27 @@ function pickUpload() {
 }
 
 async function onFileChosen(e) {
-  const files = e.target.files
-  if (!files || !files.length) return
+  const files = Array.from(e.target.files || [])
+  if (!files.length) return
+  // A batch keeps its original destination even when the user opens another folder mid-upload.
+  const destination = selectedFolder.value
+  const categoryId = uploadCategoryId.value || null
+  let uploaded = 0
   uploading.value = true
   try {
     for (const f of files) {
-      await fileApi.upload(f, uploadCategoryId.value || null)
+      await fileApi.upload(f, categoryId, destination > 0 ? destination : null)
+      uploaded += 1
       ElMessage.success(`已上传：${f.name}`)
     }
-    e.target.value = ''
-    // 新资料按 createdAt 倒序排在最前 → 回第 1 页才看得到刚上传的那份
-    pager.value.page = 1
-    load()
   } finally {
+    e.target.value = ''
     uploading.value = false
+    if (uploaded) {
+      // Keep a newly chosen view's pagination; only the upload destination returns to page one.
+      if (selectedFolder.value === destination) pager.value.page = 1
+      await refreshCollection()
+    }
   }
 }
 
@@ -268,6 +379,7 @@ const paragraphs = computed(() =>
   splitParas(readerText.value).map((p, i) => ({ key: i, text: p })))
 
 async function openReader(row) {
+  if (isExplorerFolder(row)) return
   readRoute.cancel()
   const seq = ++readerSeq
   reader.value = row
@@ -321,16 +433,18 @@ function statusHint() {
   return '未抽取正文。'
 }
 async function onDownload(row) {
+  if (isExplorerFolder(row)) return
   const resp = await fileApi.download(row.id)
   saveBlob(resp.data, row.originName)
   ElMessage.success('已开始下载')
 }
 
 async function onDelete(row) {
+  if (isExplorerFolder(row)) return
   await ElMessageBox.confirm(`确定删除资料「${row.originName}」吗？删除后不可恢复。`, '提示', { type: 'warning' })
   await fileApi.remove(row.id)
   ElMessage.success('已删除')
-  load()
+  await refreshCollection()
 }
 
 /** 正文抽取状态 → 徽标文案（这几档含义不同，不能只显示"成功/失败"） */
@@ -362,6 +476,7 @@ function textTagType(status) {
 
 /** 手填说明：抽不出正文的资料（扫描件/图片/压缩包）就靠它参与检索 */
 async function onEditSummary(row) {
+  if (isExplorerFolder(row)) return
   const { value } = await ElMessageBox.prompt(
     '写几句说明。抽不出正文的资料（扫描版 PDF / 图片 / 压缩包）就靠它进知识库检索。',
     '资料说明',
@@ -379,6 +494,7 @@ async function onEditSummary(row) {
 
 /** 改文件名：只改基名（扩展名不许改 —— 抽正文按扩展名选解析器，改了会解析错） */
 async function onRename(row) {
+  if (isExplorerFolder(row)) return
   const ext = row.ext ? `.${row.ext}` : ''
   const base = ext && String(row.originName || '').toLowerCase().endsWith(ext.toLowerCase())
     ? row.originName.slice(0, -ext.length)
@@ -401,6 +517,7 @@ async function onRename(row) {
 }
 
 async function onReextract(row) {
+  if (isExplorerFolder(row)) return
   const r = await fileApi.reextract(row.id)
   ElMessage.success(`已重新抽取：${textLabel(r)}`)
   load()
@@ -408,6 +525,7 @@ async function onReextract(row) {
 
 /** 改分类：资料按分类进知识图谱，所以"归类"就是把资料接进图的那一步 */
 async function onChangeCategory(row, categoryId) {
+  if (isExplorerFolder(row)) return
   await fileApi.updateCategory(row.id, categoryId || null)
   ElMessage.success(categoryId ? '已归类' : '已取消分类')
   load()
@@ -422,13 +540,15 @@ watch(() => route.query.read, value => readRoute.open(value), { immediate: true,
 
 onMounted(async () => {
   window.addEventListener('lh-meta-changed', loadCats)
-  await loadCats()
+  await Promise.all([loadCats(), loadFolders()])
   await load()
 })
 
 onBeforeUnmount(() => {
   readRoute.dispose()
   ++readerSeq
+  ++listSeq
+  ++foldersSeq
   window.removeEventListener('lh-meta-changed', loadCats)
 })
 </script>
@@ -437,8 +557,37 @@ onBeforeUnmount(() => {
   <div class="page">
     <div class="toolbar">
       <h2 class="page-h2">资料库</h2>
-      <span class="tip">PDF / Word / Excel / PPT / 代码 / 文本 上传即**抽正文**，正文会进入知识库检索、主题 wiki 与 GraphRAG</span>
+      <span class="tip">按文件夹收纳原文，抽取正文参与知识库检索</span>
       <div class="spacer"></div>
+      <el-select v-model="uploadCategoryId" placeholder="上传分类（可选）" clearable style="width: 160px">
+        <el-option v-for="c in categories" :key="c.id" :label="catLabel(c)" :value="c.id" />
+      </el-select>
+      <el-button type="primary" :loading="uploading" :title="`上传到：${selectedFolder > 0 ? currentFolderTitle : '未收纳'}`" @click="pickUpload">
+        <span class="btn-ico"><svg viewBox="0 0 24 24"><path d="M12 16V4.5M6.5 10 12 4.5 17.5 10M4.5 19.5h15" /></svg></span>上传资料
+      </el-button>
+      <input ref="uploadInput" type="file" multiple hidden @change="onFileChosen" />
+    </div>
+
+    <el-card class="library-content" shadow="never">
+        <FolderExplorerToolbar
+          ref="folderToolbar"
+          v-model="selectedFolder"
+          kind="file"
+          :folders="folders"
+          :loading="foldersLoading"
+          @changed="refreshCollection"
+        />
+        <div class="collection-head">
+          <div class="collection-title">
+            <span v-if="visibleFolderCount">{{ visibleFolderCount }} 个文件夹</span>
+            <span>{{ NUM.format(pager.total) }} 份资料</span>
+          </div>
+          <div v-if="selectedRows.length" class="selection-actions">
+            <span>已选 {{ selectedRows.length }} 份</span>
+            <el-button size="small" @click="openMove()">移动到</el-button>
+            <el-button size="small" text @click="table?.clearSelection()">取消选择</el-button>
+          </div>
+          <div class="spacer"></div>
       <el-input
         v-model="query.kw"
         placeholder="搜索文件名 / 说明 / 正文"
@@ -452,47 +601,60 @@ onBeforeUnmount(() => {
         </template>
       </el-input>
       <el-select v-model="query.categoryId" placeholder="全部分类" clearable style="width: 140px" @change="search">
-        <el-option v-for="c in categories" :key="c.id" :label="'　'.repeat(c.depth) + c.name" :value="c.id" />
+        <el-option v-for="c in categories" :key="c.id" :label="catLabel(c)" :value="c.id" />
       </el-select>
-      <el-button v-if="query.categoryId || query.kw" @click="resetFilter">重置</el-button>
-      <el-select v-model="uploadCategoryId" placeholder="上传到分类（可选）" clearable style="width: 160px">
-        <el-option v-for="c in categories" :key="c.id" :label="'　'.repeat(c.depth) + c.name" :value="c.id" />
-      </el-select>
-      <el-button type="primary" :loading="uploading" @click="pickUpload">
-        <span class="btn-ico"><svg viewBox="0 0 24 24"><path d="M12 16V4.5M6.5 10 12 4.5 17.5 10M4.5 19.5h15" /></svg></span>上传资料
-      </el-button>
-      <input ref="uploadInput" type="file" multiple hidden @change="onFileChosen" />
-    </div>
-
-    <el-card shadow="never" v-loading="loading">
-      <el-table :data="list">
-        <el-table-column label="文件名" min-width="240">
+          <el-button v-if="hasFilter" @click="resetFilter">重置</el-button>
+        </div>
+      <el-table
+        ref="table"
+        :data="explorerRows"
+        row-key="__explorerKey"
+        :row-class-name="({ row }) => isExplorerFolder(row) ? 'explorer-folder-row' : ''"
+        v-loading="loading"
+        @selection-change="onSelectionChange"
+        @row-dblclick="openExplorerRow"
+      >
+        <el-table-column type="selection" width="46" :selectable="selectableFile" />
+        <el-table-column label="名称" min-width="240">
           <template #default="{ row }">
-            <!--
-              裁到 2 行 + title 悬停看全名：origin_name 的列上限是 255 字符，
-              不裁的话一行能长到十几行（一行吃掉大半屏）；裁了就必须给 title，
-              否则"截断了却没处读全文"。
-            -->
-            <span class="fname" :title="row.originName">{{ row.originName }}</span>
+            <button
+              v-if="isExplorerFolder(row)"
+              type="button"
+              class="folder-name"
+              :title="`双击或按 Enter 打开：${row.name}`"
+              @keydown.enter.stop.prevent="openExplorerRow(row)"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
+              <span>{{ row.name }}</span>
+            </button>
+            <template v-else>
+              <span class="fname" :title="row.originName">{{ row.originName }}</span>
+              <span v-if="selectedFolder == null" class="folder-location" :title="folderPath(row.folderId)">{{ folderPath(row.folderId) }}</span>
+            </template>
           </template>
         </el-table-column>
         <el-table-column label="类型" width="90">
           <template #default="{ row }">
-            <el-tag size="small" type="info" effect="plain">{{ row.ext || '其他' }}</el-tag>
+            <span v-if="isExplorerFolder(row)" class="folder-kind">文件夹</span>
+            <el-tag v-else size="small" type="info" effect="plain">{{ row.ext || '其他' }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="正文" min-width="180">
           <template #default="{ row }">
-            <el-tooltip v-if="row.textError" :content="row.textError" placement="top">
-              <el-tag size="small" :type="textTagType(row.textStatus)" effect="plain">{{ textLabel(row) }}</el-tag>
-            </el-tooltip>
-            <el-tag v-else size="small" :type="textTagType(row.textStatus)" effect="plain">{{ textLabel(row) }}</el-tag>
-            <div v-if="row.summary" class="fsummary">{{ row.summary }}</div>
+            <span v-if="isExplorerFolder(row)" class="folder-detail">{{ NUM.format(row.itemCount || 0) }} 份资料<span v-if="row.childrenCount"> · {{ row.childrenCount }} 个子文件夹</span></span>
+            <template v-else>
+              <el-tooltip v-if="row.textError" :content="row.textError" placement="top">
+                <el-tag size="small" :type="textTagType(row.textStatus)" effect="plain">{{ textLabel(row) }}</el-tag>
+              </el-tooltip>
+              <el-tag v-else size="small" :type="textTagType(row.textStatus)" effect="plain">{{ textLabel(row) }}</el-tag>
+              <div v-if="row.summary" class="fsummary">{{ row.summary }}</div>
+            </template>
           </template>
         </el-table-column>
         <el-table-column label="分类" width="150">
           <template #default="{ row }">
             <el-select
+              v-if="!isExplorerFolder(row)"
               :model-value="row.categoryId || undefined"
               placeholder="未分类"
               clearable
@@ -505,10 +667,10 @@ onBeforeUnmount(() => {
           </template>
         </el-table-column>
         <el-table-column label="大小" width="100">
-          <template #default="{ row }"><span class="num">{{ fmtSize(row.size) }}</span></template>
+          <template #default="{ row }"><span class="num">{{ isExplorerFolder(row) ? '—' : fmtSize(row.size) }}</span></template>
         </el-table-column>
-        <el-table-column label="上传时间" width="165">
-          <template #default="{ row }"><span class="num">{{ time(row.createdAt) }}</span></template>
+        <el-table-column label="修改 / 上传时间" width="165">
+          <template #default="{ row }"><span class="num">{{ time(isExplorerFolder(row) ? row.updatedAt || row.createdAt : row.createdAt) }}</span></template>
         </el-table-column>
         <!--
           操作列：主操作留在行内，次要操作（说明 / 重命名 / 重抽）收进 ⋯。
@@ -518,23 +680,34 @@ onBeforeUnmount(() => {
         -->
         <el-table-column label="操作" width="196" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="openReader(row)">阅读</el-button>
-            <el-button link type="primary" @click="onDownload(row)">下载</el-button>
-            <el-dropdown trigger="click">
-              <el-button link type="primary" aria-label="更多操作">⋯</el-button>
+            <el-button v-if="isExplorerFolder(row)" link type="primary" @click="openExplorerRow(row)">打开</el-button>
+            <template v-else>
+              <el-button link type="primary" @click="openReader(row)">阅读</el-button>
+              <el-button link type="primary" @click="onDownload(row)">下载</el-button>
+            </template>
+            <el-dropdown trigger="click" @click.stop @dblclick.stop>
+              <el-button link type="primary" :aria-label="isExplorerFolder(row) ? '文件夹操作' : '资料更多操作'">⋯</el-button>
               <template #dropdown>
                 <el-dropdown-menu>
-                  <el-dropdown-item @click="onEditSummary(row)">说明</el-dropdown-item>
-                  <el-dropdown-item @click="onRename(row)">重命名</el-dropdown-item>
-                  <el-dropdown-item v-if="row.textStatus !== 'ok'" @click="onReextract(row)">重抽正文</el-dropdown-item>
+                  <template v-if="isExplorerFolder(row)">
+                    <el-dropdown-item @click="manageExplorerFolder('create', row)">新建子文件夹</el-dropdown-item>
+                    <el-dropdown-item @click="manageExplorerFolder('rename', row)">重命名</el-dropdown-item>
+                    <el-dropdown-item :disabled="!!row.childrenCount" @click="manageExplorerFolder('delete', row)">{{ row.childrenCount ? '含子文件夹，暂不可删除' : '删除文件夹' }}</el-dropdown-item>
+                  </template>
+                  <template v-else>
+                    <el-dropdown-item @click="openMove([row])">移动到文件夹</el-dropdown-item>
+                    <el-dropdown-item @click="onEditSummary(row)">说明</el-dropdown-item>
+                    <el-dropdown-item @click="onRename(row)">重命名</el-dropdown-item>
+                    <el-dropdown-item v-if="row.textStatus !== 'ok'" @click="onReextract(row)">重抽正文</el-dropdown-item>
+                  </template>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
-            <el-button link type="danger" @click="onDelete(row)">删除</el-button>
+            <el-button v-if="!isExplorerFolder(row)" link type="danger" @click="onDelete(row)">删除</el-button>
           </template>
         </el-table-column>
         <template #empty>
-          <el-empty description="资料库还是空的，点右上角上传第一份资料" :image-size="80" />
+          <el-empty :description="emptyMessage" :image-size="80" />
         </template>
       </el-table>
 
@@ -552,6 +725,14 @@ onBeforeUnmount(() => {
         />
       </div>
     </el-card>
+    <FolderMoveDialog
+      v-model="moveVisible"
+      kind="file"
+      :folders="folders"
+      :ids="moveIds"
+      :label="moveLabel"
+      @moved="onMoved"
+    />
   </div>
 
     <!--
@@ -751,6 +932,21 @@ onBeforeUnmount(() => {
   box-shadow: 0 1px 3px rgb(0 0 0 / 14%);
 }
 .tip { font-size: 12px; color: var(--app-text-3); }
+.library-content { min-width: 0; }
+.library-content :deep(.el-card__body) { padding: 14px 16px; }
+.collection-head { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 10px 0; }
+.collection-title { display: flex; align-items: center; gap: 10px; min-width: 0; max-width: 100%; }
+.collection-title > span { flex-shrink: 0; font-size: 12px; color: var(--app-text-3); }
+.selection-actions { display: flex; align-items: center; gap: 8px; color: var(--app-brand); font-size: 12px; }
+.selection-actions .el-button + .el-button { margin-left: 0; }
+.folder-location { display: block; margin-top: 4px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--app-text-3); font-size: 12px; }
+.folder-name { display: inline-flex; align-items: center; gap: 9px; max-width: 100%; padding: 3px 0; border: 0; border-radius: 5px; background: transparent; color: var(--app-text-1); font: inherit; font-weight: 500; text-align: left; cursor: pointer; }
+.folder-name svg { width: 22px; height: 22px; flex-shrink: 0; fill: var(--app-brand-soft); stroke: var(--app-brand); stroke-width: 1.6; }
+.folder-name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder-name:focus-visible { outline: 2px solid var(--app-brand); outline-offset: 3px; }
+.folder-kind, .folder-detail { color: var(--app-text-3); font-size: 12px; }
+.library-content :deep(.explorer-folder-row) { cursor: pointer; }
+.library-content :deep(.explorer-folder-row .el-table-column--selection .el-checkbox) { visibility: hidden; }
 /* 文件名：裁 2 行 + 只在必要时断行。
    原来只有 `word-break: break-all` —— 那是"任意两个字符之间都能断"，于是 approved 会被切成
    appro/ved，明明有空格和连字符可断。overflow-wrap: anywhere 只在真的放不下时才断。
@@ -766,7 +962,7 @@ onBeforeUnmount(() => {
 /* 参与"一眼比大小"的数字用等宽数字，值变化时列不会左右跳 */
 .num { font-variant-numeric: tabular-nums; }
 /* 分页条：右对齐、给表格一点呼吸 */
-.fpage { display: flex; justify-content: flex-end; margin-top: 12px; }
+.fpage { display: flex; justify-content: flex-end; max-width: 100%; margin-top: 12px; overflow-x: auto; scrollbar-width: thin; }
 .fsummary { margin-top: 4px; font-size: 12px; line-height: 1.5; color: var(--app-text-3); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .spacer { flex: 1 1 auto; }
 :global(.reader-dialog.el-dialog) { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }
@@ -791,8 +987,17 @@ onBeforeUnmount(() => {
 .para-text { margin: 6px 0 0; font-size: 15px; line-height: 1.95; color: var(--app-text-1); white-space: pre-wrap; overflow-wrap: anywhere; }
 .warn-line { margin: 0 8px 8px; font-size: 12.5px; color: #b45309; }
 @media (max-width: 800px) {
+  .collection-title { flex-basis: 100%; }
+  .collection-head :deep(.el-input) { flex: 1 1 200px; }
+  .library-content :deep(.el-card__body) { padding: 12px; }
+  .fpage { justify-content: flex-start; }
   :global(.reader-dialog.el-dialog) { padding: 10px; }
   .reader-meta { gap: 5px; }
   .para { padding: 0 16px; }
+}
+@media (max-width: 760px) {
+  .library-content :deep(.el-table-fixed-column--right) { position: static !important; right: auto !important; box-shadow: none !important; }
+  .library-content :deep(.el-table-fixed-column--right::before),
+  .library-content :deep(.el-table-fixed-column--right::after) { display: none !important; }
 }
 </style>

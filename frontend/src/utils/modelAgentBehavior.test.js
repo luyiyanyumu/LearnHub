@@ -9,6 +9,8 @@ import * as noteEdit from './agentNoteEdit.js'
 import * as retrievalDisplay from './retrievalDisplay.js'
 import { fixHtmlQuotes } from './htmlQuotes.js'
 import { groundingDisplay } from './groundingDisplay.js'
+import { mermaidFrameHtml } from './mermaidPreview.js'
+import * as agentProgress from './agentProgress.js'
 
 const source = readFileSync(new URL('../components/AgentPanel.vue', import.meta.url), 'utf8')
 const compiled = compileScript(parse(source).descriptor, { id: 'agent-model-behavior-test' }).content
@@ -32,6 +34,8 @@ test('restored sessions retain their chat profile when model profiles arrive bef
     '../api': { aiApi: { async status() { return { configured: true } }, async session() { return { messages: [] } } },
       modelApi: { sessions: () => sessions.promise, profiles: () => profiles.promise }, settingsApi: { async get() { return {} } }, categoryApi: {}, noteApi: {} },
     '../utils/htmlQuotes': { fixHtmlQuotes }, '../utils/agentNoteMerge': noteMerge,
+    '../utils/mermaidPreview.js': { mermaidFrameHtml },
+    '../utils/agentProgress.js': agentProgress,
     '../utils/agentNoteEdit': noteEdit, '../utils/retrievalDisplay': retrievalDisplay,
     '../utils/groundingDisplay': { groundingDisplay }, '../utils/modelProfileView': profileView,
     '../composables/useTheme': { isDark: vue.ref(false) },

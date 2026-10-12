@@ -1,7 +1,8 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { codeApi } from '../api'
+import request, { codeApi } from '../api'
+import { codeEvidenceWindow, codeSearchStatus, codeSearchStepLabel, createCodeRequestGate, createCodeSearchLoader } from '../utils/codeAgenticSearch.js'
 
 /**
  * 代码库（左侧导航第 7 个版块）。
@@ -18,16 +19,25 @@ const view = ref('projects')          // projects | snippets
 const currentRepo = ref(null)         // 当前项目；{id:null,name:'未归类'} 表示未归类
 const searching = ref(false)          // 片段层是否处于"全局搜索结果"状态
 
-const mode = ref('all')
+const mode = ref('agentic')
 const keyword = ref('')
 const langFilter = ref('')
 const rows = ref([])
 const repos = ref([])
 const stats = ref({ snippets: 0, repos: 0, symbols: 0, langs: [] })
 const loading = ref(false)
+const searchError = ref('')
+const agentic = ref(null)
+const searchStepsOpen = ref([])
 
 const detail = ref(null)
 const detailLoading = ref(false)
+const detailError = ref('')
+const detailEvidence = ref(null)
+const evidenceAnchor = ref(null)
+const detailGate = createCodeRequestGate()
+const formGate = createCodeRequestGate()
+const metadataGate = createCodeRequestGate()
 const form = ref(null)
 const saving = ref(false)
 const repoForm = ref(null)
@@ -40,10 +50,42 @@ const LANGS = ['java', 'python', 'js', 'ts', 'vue', 'go', 'sql', 'shell', 'yaml'
 const LIST_LIMIT = 500
 
 const modeHint = computed(() => ({
+  agentic: '用自然语言描述要找的实现；模型会多轮检索并阅读原文，可能需要一些时间。空输入可直接浏览片段。',
   symbol: '按符号名精确/前缀匹配，命中给出所在行 —— 问"在哪定义"用这个',
   keyword: '按标题 / 说明 / 标识符 / 正文模糊匹配 —— 问"我写过什么"用这个',
-  all: '先按符号找，再按关键词补 —— 默认（推荐）',
+  all: '先按符号找，再按关键词补',
 }[mode.value] || ''))
+const inputHint = computed(() => mode.value === 'agentic'
+  ? (view.value === 'projects' || searching.value ? '描述要找的实现，如：哪些代码会在失败后重试？（回车检索）' : `在「${pageTitle.value}」中描述要找的实现（回车检索）`)
+  : (view.value === 'projects' || searching.value ? '全库检索：符号名或关键词（回车）' : `在「${pageTitle.value}」内检索：符号名或关键词（回车）`))
+const agenticStatus = computed(() => codeSearchStatus(agentic.value?.status))
+const detailCode = computed(() => codeEvidenceWindow(detail.value?.code, detailEvidence.value))
+
+const searchLoader = createCodeSearchLoader({
+  agenticSearch: codeApi.agenticSearch,
+  search: (q, params, signal) => request.get('/code/search', { params: { q, ...params }, signal, silentError: true }),
+  list: (params, signal) => request.get('/code/snippets', { params, signal, silentError: true }),
+  onState(state) {
+    loading.value = state.loading
+    searchError.value = state.error
+    rows.value = state.rows
+    agentic.value = state.agentic
+  },
+})
+
+function closeDetail() {
+  detailGate.invalidate()
+  detail.value = null
+  detailLoading.value = false
+  detailError.value = ''
+  detailEvidence.value = null
+}
+
+watch([keyword, mode, langFilter, currentRepo, view], () => {
+  searchLoader.invalidate()
+  searchStepsOpen.value = []
+  closeDetail()
+}, { flush: 'sync' })
 
 const repoById = computed(() => Object.fromEntries(repos.value.map((r) => [r.id, r])))
 const orphanCount = computed(() => {
@@ -59,12 +101,16 @@ const pageTitle = computed(() => {
 })
 
 async function loadAll() {
+  const pending = metadataGate.begin()
+  if (!pending) return
   try {
-    const [s, r] = await Promise.all([codeApi.stats(), codeApi.repos()])
+    const config = { signal: pending.signal, silentError: true }
+    const [s, r] = await Promise.all([request.get('/code/stats', config), request.get('/code/repos', config)])
+    if (!pending.isCurrent()) return
     stats.value = s || { snippets: 0, repos: 0, symbols: 0, langs: [] }
     repos.value = r || []
   } catch (e) {
-    /* 拦截器已提示 */
+    if (pending.isCurrent()) ElMessage.error(e?.message || '项目列表加载失败')
   }
 }
 
@@ -89,39 +135,18 @@ function backToProjects() {
   loadAll()
 }
 
-async function runSearch() {
-  loading.value = true
-  try {
-    const params = { mode: mode.value, limit: LIST_LIMIT }
-    if (langFilter.value) {
-      params.lang = langFilter.value
-    }
-    const q = keyword.value.trim()
-    if (view.value === 'projects') {
-      // 项目层检索 = 全库检索（此时没有"当前项目"的概念）
-      searching.value = true
-      view.value = 'snippets'
-      currentRepo.value = null
-    } else if (!searching.value && currentRepo.value) {
-      // 项目内检索：限定在本项目
-      if (currentRepo.value.id == null) {
-        params.unassigned = true
-      } else {
-        params.repoId = currentRepo.value.id
-      }
-    }
-    if (q) {
-      rows.value = await codeApi.search(q, params)
-    } else if (searching.value && !currentRepo.value) {
-      rows.value = await codeApi.snippets(params)
-    } else {
-      rows.value = await codeApi.snippets(params)
-    }
-  } catch (e) {
-    rows.value = []
-  } finally {
-    loading.value = false
+async function runSearch(event) {
+  if (event?.isComposing) return
+  if (view.value === 'projects') {
+    searching.value = true
+    view.value = 'snippets'
+    currentRepo.value = null
   }
+  closeDetail()
+  searchStepsOpen.value = []
+  const scopedRepo = !searching.value ? currentRepo.value : null
+  await searchLoader.search({ query: keyword.value, mode: mode.value, lang: langFilter.value,
+    repoId: scopedRepo?.id, unassigned: !!scopedRepo && scopedRepo.id == null })
 }
 
 function resetFilters() {
@@ -130,25 +155,42 @@ function resetFilters() {
   runSearch()
 }
 
-async function openDetail(row) {
+async function openDetail(row, evidence = row.evidence?.[0]) {
+  const pending = detailGate.begin()
+  if (!pending) return
   detailLoading.value = true
+  detailError.value = ''
+  detailEvidence.value = evidence || (row.hitLine ? { startLine: row.hitLine, endLine: row.hitLine } : null)
   detail.value = row
   try {
-    detail.value = await codeApi.snippet(row.id)
+    const full = await request.get(`/code/snippets/${row.id}`, { signal: pending.signal, silentError: true })
+    if (!pending.isCurrent()) return
+    detail.value = full
+    await nextTick()
+    if (pending.isCurrent() && detailCode.value.startLine) evidenceAnchor.value?.scrollIntoView({ block: 'center' })
   } catch (e) {
-    /* 拦截器已提示 */
+    if (pending.isCurrent()) detailError.value = e?.message || '原文加载失败，请重试'
   } finally {
-    detailLoading.value = false
+    if (pending.isCurrent()) detailLoading.value = false
   }
 }
 
+function onCardKey(event, open) {
+  if (event.target !== event.currentTarget || !['Enter', ' '].includes(event.key)) return
+  event.preventDefault()
+  open()
+}
+
 function openForm(row) {
+  const pending = formGate.begin()
   if (row) {
     form.value = { ...row, code: '', explainText: '' }
-    codeApi.snippet(row.id).then((d) => {
-      if (form.value && form.value.id === d.id) {
+    request.get(`/code/snippets/${row.id}`, { signal: pending.signal, silentError: true }).then((d) => {
+      if (pending.isCurrent() && form.value?.id === d.id) {
         form.value = { ...form.value, ...d }
       }
+    }).catch((e) => {
+      if (pending.isCurrent()) ElMessage.error(e?.message || '片段加载失败')
     })
   } else {
     form.value = {
@@ -198,7 +240,7 @@ async function removeSnippet(row, e) {
   try {
     await codeApi.removeSnippet(row.id)
     if (detail.value?.id === row.id) {
-      detail.value = null
+      closeDetail()
     }
     ElMessage.success('已删除')
     await loadAll()
@@ -408,6 +450,13 @@ const KIND_LABEL = {
 onMounted(async () => {
   await loadAll()
 })
+watch(form, value => { if (!value) formGate.invalidate() }, { flush: 'sync' })
+onBeforeUnmount(() => {
+  searchLoader.dispose()
+  detailGate.dispose()
+  formGate.dispose()
+  metadataGate.dispose()
+})
 </script>
 
 <template>
@@ -450,7 +499,8 @@ onMounted(async () => {
         <el-button size="small" text @click="openRepoForm(null)">＋ 新建项目</el-button>
       </div>
       <div class="repo-grid">
-        <div v-for="r in repos" :key="r.id" class="repo-card" @click="enterRepo(r)">
+        <div v-for="r in repos" :key="r.id" class="repo-card" role="button" tabindex="0"
+             :aria-label="`打开项目 ${r.name}`" @click="enterRepo(r)" @keydown="onCardKey($event, () => enterRepo(r))">
           <div class="repo-card-top">
             <span class="repo-card-name">{{ r.name }}</span>
             <span class="tag">{{ r.snippets }} 段</span>
@@ -466,7 +516,8 @@ onMounted(async () => {
           </div>
         </div>
         <!-- 未归类：不属于任何项目的片段 -->
-        <div v-if="orphanCount" class="repo-card" @click="enterRepo({ id: null, name: '未归类' })">
+        <div v-if="orphanCount" class="repo-card" role="button" tabindex="0" aria-label="打开未归类片段"
+             @click="enterRepo({ id: null, name: '未归类' })" @keydown="onCardKey($event, () => enterRepo({ id: null, name: '未归类' }))">
           <div class="repo-card-top">
             <span class="repo-card-name">未归类</span>
             <span class="tag">{{ orphanCount }} 段</span>
@@ -480,14 +531,15 @@ onMounted(async () => {
 
       <!-- 项目层的全库检索 -->
       <div class="search-bar">
-        <el-input v-model="keyword" placeholder="全库检索：符号名或关键词（回车）" clearable
-                  style="flex: 1" @keydown.enter="runSearch" />
-        <el-radio-group v-model="mode" size="small">
+        <el-input v-model="keyword" :placeholder="inputHint" clearable aria-label="代码检索问题或关键词"
+                  class="search-input" @keydown.enter="runSearch" />
+        <el-radio-group v-model="mode" size="small" aria-label="代码检索方式">
+          <el-radio-button value="agentic">智能检索</el-radio-button>
           <el-radio-button value="all">全部</el-radio-button>
           <el-radio-button value="symbol">符号</el-radio-button>
           <el-radio-button value="keyword">关键词</el-radio-button>
         </el-radio-group>
-        <el-select v-model="langFilter" placeholder="语言" clearable size="small" style="width: 110px">
+        <el-select v-model="langFilter" placeholder="语言" clearable size="small" style="width: 110px" aria-label="按语言过滤">
           <el-option v-for="l in LANGS" :key="l" :label="l" :value="l" />
         </el-select>
         <el-button size="small" type="primary" :loading="loading" @click="runSearch">检索</el-button>
@@ -505,15 +557,15 @@ onMounted(async () => {
       </div>
 
       <div class="search-bar">
-        <el-input v-model="keyword"
-                  :placeholder="searching ? '继续在全库检索…' : `在「${pageTitle}」内检索：符号名或关键词（回车）`"
-                  clearable style="flex: 1" @keydown.enter="runSearch" />
-        <el-radio-group v-model="mode" size="small">
+        <el-input v-model="keyword" :placeholder="inputHint" aria-label="代码检索问题或关键词"
+                  clearable class="search-input" @keydown.enter="runSearch" />
+        <el-radio-group v-model="mode" size="small" aria-label="代码检索方式">
+          <el-radio-button value="agentic">智能检索</el-radio-button>
           <el-radio-button value="all">全部</el-radio-button>
           <el-radio-button value="symbol">符号</el-radio-button>
           <el-radio-button value="keyword">关键词</el-radio-button>
         </el-radio-group>
-        <el-select v-model="langFilter" placeholder="语言" clearable size="small" style="width: 110px">
+        <el-select v-model="langFilter" placeholder="语言" clearable size="small" style="width: 110px" aria-label="按语言过滤">
           <el-option v-for="l in LANGS" :key="l" :label="l" :value="l" />
         </el-select>
         <el-button size="small" type="primary" :loading="loading" @click="runSearch">检索</el-button>
@@ -521,9 +573,37 @@ onMounted(async () => {
       </div>
       <p class="hint mode-hint">{{ modeHint }}</p>
 
+      <p v-if="loading && mode === 'agentic' && keyword.trim()" class="hint" role="status">正在检索候选并阅读代码…</p>
+      <el-alert v-if="searchError" :title="searchError" type="error" :closable="false" show-icon />
+      <section v-if="agentic" class="agentic-summary" aria-label="智能检索归纳" aria-live="polite">
+        <div class="agentic-meta">
+          <b>模型归纳</b>
+          <el-tag :type="agenticStatus.type" size="small">{{ agenticStatus.label }}</el-tag>
+          <span v-if="agentic.model" class="hint">{{ agentic.model }}</span>
+          <span class="hint">{{ agentic.rounds }} 轮 · {{ rows.length }} 个候选</span>
+        </div>
+        <p v-if="agenticStatus.description" class="agentic-notice">{{ agenticStatus.description }}</p>
+        <p v-if="agentic.answer" class="agentic-answer">{{ agentic.answer }}</p>
+        <p v-else-if="agentic.status !== 'fallback'" class="hint">暂无模型归纳，可查看下方候选原文。</p>
+        <el-collapse v-if="agentic.steps.length" v-model="searchStepsOpen" class="agentic-steps">
+          <el-collapse-item name="steps" :title="`搜索步骤（${agentic.steps.length}）`">
+            <ol class="step-list">
+              <li v-for="(step, i) in agentic.steps" :key="i">
+                <b>{{ codeSearchStepLabel(step) }}</b>
+                <span v-if="step.query"> · {{ step.query }}</span>
+                <span v-if="step.count != null"> · {{ step.count }} 个候选</span>
+                <span v-if="step.title"> · {{ step.title }}</span>
+                <span v-if="step.startLine"> · L{{ step.startLine }}<template v-if="step.endLine && step.endLine !== step.startLine">–{{ step.endLine }}</template></span>
+              </li>
+            </ol>
+          </el-collapse-item>
+        </el-collapse>
+      </section>
+
       <div class="code-body">
         <div v-loading="loading" class="result-list">
-          <div v-for="r in rows" :key="r.id" class="result-card" @click="openDetail(r)">
+          <div v-for="r in rows" :key="r.id" class="result-card" role="button" tabindex="0"
+               :aria-label="`打开代码原文：${r.title}`" @click="openDetail(r)" @keydown="onCardKey($event, () => openDetail(r))">
             <div class="card-top">
               <span class="card-title">{{ r.title }}</span>
               <span v-if="r.lang" class="tag lang">{{ r.lang }}</span>
@@ -534,6 +614,15 @@ onMounted(async () => {
               <span v-if="searching && r.repoName" class="tag">{{ r.repoName }}</span>
             </div>
             <p class="card-explain">{{ r.explainBrief || '（未写说明）' }}</p>
+            <p v-if="r.reason" class="result-reason"><b>入选说明：</b>{{ r.reason }}</p>
+            <div v-if="r.evidence?.length" class="result-evidence" @click.stop>
+              <span class="hint">已读取的代码依据</span>
+              <div v-for="(evidence, i) in r.evidence" :key="i" class="evidence-item">
+                <el-button class="code-source-link" size="small" text type="primary" :aria-label="`打开 ${r.title} 第 ${evidence.startLine} 至 ${evidence.endLine} 行`"
+                           @click.stop="openDetail(r, evidence)">L{{ evidence.startLine }}–{{ evidence.endLine }} · 打开原文</el-button>
+                <pre class="evidence-quote"><code>{{ evidence.quote }}</code></pre>
+              </div>
+            </div>
             <div class="card-foot">
               <span v-if="r.filePath" class="hint">{{ r.filePath }}</span>
               <span class="hint">{{ r.lineCount }} 行</span>
@@ -542,16 +631,17 @@ onMounted(async () => {
               <el-button size="small" text @click="removeSnippet(r, $event)">删除</el-button>
             </div>
           </div>
-          <p v-if="!rows.length && !loading" class="hint empty">
-            没有内容 —— 换个关键词；或点右上「上传文件夹」导入代码
+          <p v-if="!rows.length && !loading && !searchError" class="hint empty">
+            {{ mode === 'agentic' && agentic ? '没有找到可核对的候选，请补充实现细节或改用关键词检索。' : '没有内容 —— 换个关键词；或点右上「上传文件夹」导入代码' }}
           </p>
         </div>
 
         <aside v-if="detail" v-loading="detailLoading" class="detail">
           <div class="detail-head">
             <b>{{ detail.title }}</b>
-            <el-button size="small" text @click="detail = null">收起</el-button>
+            <el-button size="small" text @click="closeDetail">收起</el-button>
           </div>
+          <el-alert v-if="detailError" :title="detailError" type="error" :closable="false" show-icon />
           <p v-if="detail.explainText" class="detail-explain">{{ detail.explainText }}</p>
           <div class="detail-links">
             <a v-if="detail.sourceUrl" :href="detail.sourceUrl" target="_blank" rel="noreferrer">出处</a>
@@ -569,7 +659,9 @@ onMounted(async () => {
             <span class="hint">{{ detail.lang }} · {{ detail.lineCount }} 行</span>
             <el-button size="small" text @click="copyCode(detail.code)">复制代码</el-button>
           </div>
-          <pre class="code-block"><code>{{ detail.code }}</code></pre>
+          <p v-if="detailCode.startLine" class="hint evidence-location">已定位原文 L{{ detailCode.startLine }}–{{ detailCode.endLine }}</p>
+          <el-alert v-if="!detailLoading && !detailError && detailCode.changed" title="原文已变化，请重新检索；当前展示最新代码。" type="warning" :closable="false" show-icon />
+          <pre class="code-block" tabindex="0" aria-label="代码原文，可横向滚动"><code>{{ detailCode.before }}<span v-if="detailCode.startLine" ref="evidenceAnchor" class="code-evidence-highlight">{{ detailCode.highlight }}</span>{{ detailCode.after }}</code></pre>
         </aside>
       </div>
     </template>
@@ -709,19 +801,93 @@ onMounted(async () => {
   grid-column: 1 / -1;
   padding: 14px 0;
 }
-.repo-link {
-  color: var(--app-brand-deep);
-  font-size: 12px;
-  text-decoration: none;
-}
-.repo-link:hover {
-  text-decoration: underline;
-}
 .search-bar {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+.search-input {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+.agentic-summary {
+  padding: 14px 16px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius);
+  background: var(--app-card);
+  min-width: 0;
+}
+.agentic-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.agentic-answer,
+.agentic-notice,
+.result-reason {
+  color: var(--app-text-2);
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.agentic-answer {
+  margin: 10px 0;
+  white-space: pre-wrap;
+}
+.agentic-notice,
+.result-reason {
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+.agentic-steps {
+  margin-top: 10px;
+  --el-collapse-header-bg-color: var(--app-card);
+  --el-collapse-content-bg-color: var(--app-card);
+}
+.step-list {
+  padding-left: 24px;
+  margin: 0;
+  color: var(--app-text-2);
+  overflow-wrap: anywhere;
+}
+.step-list li + li { margin-top: 6px; }
+.result-evidence {
+  margin-top: 10px;
+  cursor: default;
+}
+.evidence-item + .evidence-item { margin-top: 8px; }
+.code-source-link.el-button {
+  --el-button-text-color: var(--app-brand-deep);
+  --el-button-hover-text-color: var(--app-brand-deep);
+  --el-button-active-text-color: var(--app-brand-deep);
+  --el-fill-color-light: var(--app-brand-soft);
+  --el-fill-color: var(--app-brand-soft);
+  height: auto;
+  border: none;
+  line-height: inherit;
+  vertical-align: baseline;
+}
+.evidence-quote {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--app-code-bg);
+  color: var(--app-text-1);
+  overflow: auto;
+  max-height: 180px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.evidence-location { margin: 8px 0 0; }
+.code-evidence-highlight {
+  background: var(--app-brand-soft);
+  color: var(--app-brand-deep);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  outline: 1px solid color-mix(in srgb, var(--app-brand) 35%, transparent);
 }
 .mode-hint {
   margin: -4px 0 0;
@@ -759,6 +925,7 @@ onMounted(async () => {
   background: var(--app-card);
   cursor: pointer;
   transition: border-color var(--dur-fast) ease;
+  min-width: 0;
 }
 .result-card:hover {
   border-color: color-mix(in srgb, var(--app-brand) 40%, transparent);
@@ -820,6 +987,7 @@ onMounted(async () => {
   padding: 12px;
   min-height: 0;
   overflow-y: auto;
+  min-width: 0;
 }
 .detail-head {
   display: flex;
@@ -838,9 +1006,6 @@ onMounted(async () => {
   flex-wrap: wrap;
   font-size: 12px;
 }
-.detail-links a {
-  color: var(--app-brand-deep);
-}
 .symbol-list {
   display: flex;
   flex-wrap: wrap;
@@ -857,7 +1022,7 @@ onMounted(async () => {
 .code-block {
   margin: 6px 0 0;
   padding: 10px;
-  background: var(--app-bg);
+  background: var(--app-code-bg);
   border: 1px solid var(--app-border-weak);
   border-radius: 8px;
   font-size: 12px;
@@ -882,5 +1047,22 @@ onMounted(async () => {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12.5px;
   line-height: 1.6;
+}
+@media (max-width: 980px) {
+  .code-body:has(.detail) { grid-template-columns: minmax(0, 1fr); }
+  .detail { max-height: 70vh; }
+}
+@media (max-width: 600px) {
+  .head { flex-direction: column; }
+  .head-actions { flex-wrap: wrap; }
+  .section-head, .crumb { flex-wrap: wrap; }
+  .repo-grid { grid-template-columns: minmax(0, 1fr); }
+  .search-input { flex-basis: 100%; }
+  .search-bar :deep(.el-radio-group) { display: flex; width: 100%; }
+  .search-bar :deep(.el-radio-button) { flex: 1; min-width: 0; }
+  .search-bar :deep(.el-radio-button__inner) { width: 100%; padding-left: 8px; padding-right: 8px; }
+  .card-title, .detail-head b, .repo-card-name { overflow-wrap: anywhere; }
+  .card-foot > .hint { overflow-wrap: anywhere; min-width: 0; }
+  .agentic-summary { padding: 12px; }
 }
 </style>

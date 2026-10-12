@@ -15,6 +15,17 @@ public class NoteDTO {
 
     private Long categoryId;
 
+    private Long folderId;
+
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    private boolean folderIdProvided;
+
+    /** 省略表示保留现有目录；显式 null/0 才移回未收纳。 */
+    public void setFolderId(Long folderId) {
+        this.folderId = folderId;
+        this.folderIdProvided = true;
+    }
+
     /** 关联标签 id 列表 */
     private List<Long> tagIds;
 }

@@ -3,7 +3,8 @@ import test from 'node:test'
 import { getSchema } from '@tiptap/core'
 import StarterKit from '@tiptap/starter-kit'
 import { EditorState } from '@tiptap/pm/state'
-import { DOMParser as ProseMirrorDOMParser } from '@tiptap/pm/model'
+import { DOMParser as ProseMirrorDOMParser, Node as ProseMirrorNode } from '@tiptap/pm/model'
+import { history, redo, undo } from '@tiptap/pm/history'
 import MarkdownIt from 'markdown-it'
 import domino from '@mixmark-io/domino'
 import { BlockMeta, createBlockId, duplicateBlockIdUpdates, isBlockId, normalizeBlockIndent, parseBlockIndent } from './blockMeta.js'
@@ -87,6 +88,92 @@ test('pasting a linked block before the original keeps the link on the original'
   assert.notEqual(next.doc.child(0).attrs.blockId, 'block-original')
   assert.equal(next.doc.child(0).textContent, 'Pasted')
   assert.equal(next.doc.child(1).textContent, 'Original')
+})
+
+test('ordinary text insertion, deletion and replacement do not scan the whole document', (t) => {
+  const paragraphs = Array.from({ length: 1500 }, (_, index) => schema.node('paragraph',
+    { blockId: index % 20 === 0 ? `block-synthetic-${index}` : null }, schema.text(`Synthetic paragraph ${index}`)))
+  let state = EditorState.create({ doc: schema.node('doc', null, paragraphs), plugins: BlockMeta.config.addProseMirrorPlugins() })
+  const descendants = ProseMirrorNode.prototype.descendants
+  let wholeDocumentScans = 0
+  t.mock.method(ProseMirrorNode.prototype, 'descendants', function (...args) {
+    if (this.type.name === 'doc') wholeDocumentScans++
+    return descendants.apply(this, args)
+  })
+  for (let index = 0; index < 30; index++) {
+    const transaction = state.tr.insertText('字', 1).delete(2, 3).insertText('替换', 3, 5)
+    const result = state.applyTransaction(transaction)
+    assert.equal(result.transactions.length, 1)
+    state = result.state
+  }
+  assert.equal(wholeDocumentScans, 0)
+  assert.equal(state.doc.childCount, 1500)
+  assert.equal(state.doc.firstChild.attrs.blockId, 'block-synthetic-0')
+})
+
+test('structural paste after the text fast path still deduplicates and retains the original link', (t) => {
+  const original = schema.node('paragraph', { blockId: 'block-original' }, schema.text('Original'))
+  let state = EditorState.create({ doc: schema.node('doc', null, original), plugins: BlockMeta.config.addProseMirrorPlugins() })
+  state = state.applyTransaction(state.tr.insertText(' edited', original.nodeSize - 1)).state
+  const descendants = ProseMirrorNode.prototype.descendants
+  let wholeDocumentScans = 0
+  t.mock.method(ProseMirrorNode.prototype, 'descendants', function (...args) {
+    if (this.type.name === 'doc') wholeDocumentScans++
+    return descendants.apply(this, args)
+  })
+  const copy = schema.node('paragraph', { blockId: 'block-original' }, schema.text('Pasted'))
+  state = state.applyTransaction(state.tr.insert(0, copy)).state
+  assert.ok(wholeDocumentScans > 0)
+  assert.equal(state.doc.child(1).attrs.blockId, 'block-original')
+  assert.notEqual(state.doc.child(0).attrs.blockId, 'block-original')
+  assert.ok(isBlockId(state.doc.child(0).attrs.blockId))
+  assert.equal(state.doc.child(1).textContent, 'Original edited')
+  wholeDocumentScans = 0
+  state = state.applyTransaction(state.tr.insertText(' next', 1)).state
+  assert.equal(wholeDocumentScans, 0)
+})
+
+test('an initially duplicated document is repaired even when its first edit is only text', () => {
+  const paragraphs = ['First', 'Second'].map(text => schema.node('paragraph', { blockId: 'block-initial' }, schema.text(text)))
+  const state = EditorState.create({ doc: schema.node('doc', null, paragraphs), plugins: BlockMeta.config.addProseMirrorPlugins() })
+  const next = state.applyTransaction(state.tr.insertText('Updated ', 1)).state
+  assert.equal(next.doc.child(0).attrs.blockId, 'block-initial')
+  assert.notEqual(next.doc.child(1).attrs.blockId, 'block-initial')
+  assert.ok(isBlockId(next.doc.child(1).attrs.blockId))
+  assert.equal(next.doc.child(0).textContent, 'Updated First')
+})
+
+test('attribute changes introducing a duplicate are checked while split behavior is unchanged', () => {
+  assert.equal(BlockMeta.config.addGlobalAttributes()[0].attributes.blockId.keepOnSplit, false)
+  const first = schema.node('paragraph', { blockId: 'block-original' }, schema.text('First'))
+  const second = schema.node('paragraph', { blockId: 'block-second' }, schema.text('Second'))
+  let state = EditorState.create({ doc: schema.node('doc', null, [first, second]), plugins: BlockMeta.config.addProseMirrorPlugins() })
+  state = state.applyTransaction(state.tr.setNodeMarkup(first.nodeSize, undefined, { ...second.attrs, blockId: 'block-original' })).state
+  assert.equal(state.doc.firstChild.attrs.blockId, 'block-original')
+  assert.ok(isBlockId(state.doc.child(1).attrs.blockId))
+  assert.notEqual(state.doc.child(1).attrs.blockId, 'block-original')
+  state = state.applyTransaction(state.tr.split(3)).state
+  const ids = []
+  state.doc.descendants(node => { if (isBlockId(node.attrs.blockId)) ids.push(node.attrs.blockId) })
+  assert.equal(new Set(ids).size, ids.length)
+  assert.equal(state.doc.firstChild.attrs.blockId, 'block-original')
+})
+
+test('undo and redo of a pasted linked paragraph keep the original target and distinct copy', () => {
+  const original = schema.node('paragraph', { blockId: 'block-original' }, schema.text('Original'))
+  let state = EditorState.create({ doc: schema.node('doc', null, original), plugins: [...BlockMeta.config.addProseMirrorPlugins(), history()] })
+  const copy = schema.node('paragraph', { blockId: 'block-original' }, schema.text('Pasted'))
+  state = state.applyTransaction(state.tr.insert(0, copy)).state
+  const dispatch = transaction => { state = state.applyTransaction(transaction).state }
+  assert.equal(undo(state, dispatch), true)
+  assert.equal(state.doc.childCount, 1)
+  assert.equal(state.doc.firstChild.attrs.blockId, 'block-original')
+  assert.equal(state.doc.firstChild.textContent, 'Original')
+  assert.equal(redo(state, dispatch), true)
+  assert.equal(state.doc.childCount, 2)
+  assert.equal(state.doc.child(1).attrs.blockId, 'block-original')
+  assert.notEqual(state.doc.firstChild.attrs.blockId, 'block-original')
+  assert.ok(isBlockId(state.doc.firstChild.attrs.blockId))
 })
 
 test('preview serialization and Markdown reparsing preserve linked formatting and empty link targets', () => {
