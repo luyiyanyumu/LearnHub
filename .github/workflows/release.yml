@@ -116,7 +116,7 @@ jobs:
         run: npm ci
       - name: Frontend tests
         working-directory: frontend
-        run: node --test src/utils/*.test.js
+        run: node --test src/*/*.test.js
       - name: Frontend production build
         working-directory: frontend
         run: npm run build

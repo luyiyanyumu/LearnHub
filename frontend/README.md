@@ -27,12 +27,13 @@ npm run preview
 
 构建产物输出到 `dist/`，预览地址为 `http://localhost:4174`。`preview` 用于检查构建结果。
 
-工具函数测试使用 Node.js 内置测试运行器。在 `frontend/` 目录中执行：
+前端测试使用 Node.js 内置测试运行器，一次覆盖 `src/` 下各子目录的 `*.test.js`。在 `frontend/` 目录中执行：
 
 ```powershell
-$testFiles = Get-ChildItem src/utils -Filter *.test.js | ForEach-Object { $_.FullName }
-node --test $testFiles
+node --test src/*/*.test.js
 ```
+
+新增子目录中的测试会自动纳入，无需修改这条命令（该 glob 由 node 自行展开，需 Node 22+）。
 
 ## 接口代理与部署
 

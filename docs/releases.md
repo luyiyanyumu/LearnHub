@@ -93,7 +93,7 @@ mvn -B -f backend/pom.xml verify
 LEARNHUB_MIGRATION_TESTS=true LEARNHUB_MIGRATION_TEST_IMAGE=mysql:8.4 mvn -B -f backend/pom.xml -Dtest=DatabaseMigrationTest test
 cd frontend
 npm ci
-node --test src/utils/*.test.js
+node --test src/*/*.test.js
 npm run build
 ```
 
