@@ -1,5 +1,5 @@
 <script setup>
-import { computed, h, nextTick, render, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, h, nextTick, render, onBeforeUnmount, onMounted, reactive, ref, useId, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { MdEditor, MdPreview } from 'md-editor-v3'
@@ -7,7 +7,8 @@ import MarkdownIt from 'markdown-it'
 // 编辑器全局初始化 + 样式（原来在 main.js，为了不占首屏挪到这里；
 // 本页是路由懒加载的，静态 import 不会影响首屏）
 import '../utils/mdEditorSetup'
-import { aiApi, categoryApi, tagApi, noteApi, saveBlob } from '../api'
+import { aiApi, categoryApi, tagApi, noteApi, folderApi, saveBlob } from '../api'
+import { normalizeFolderScope, flattenFolderOptions } from '../utils/folders'
 import { fixHtmlQuotes } from '../utils/htmlQuotes'
 import { stripLeadingDocTitle } from '../utils/mdTitle'
 import {
@@ -34,25 +35,47 @@ import { stripFontSizeInHtml } from '../utils/fontSize'
 import FormatBar from '../components/FormatBar.vue'
 import CodeBlockEditor from '../components/CodeBlockEditor.vue'
 import BlockPreview from '../components/BlockPreview.vue'
+import NoteLinkDialog from '../components/NoteLinkDialog.vue'
+import { parseNoteLink, findLinkedHeadingIndex, validateLinkHref } from '../utils/noteLinks.js'
+import { findNoteAnchor } from '../utils/headingAnchorAttr.js'
+import { promoteNoteTab, updateNoteTab, isNoteEditorRoute } from '../composables/useNoteTabs.js'
 import { findTable, addRow, deleteRow, addCol, deleteCol, setHeaderRow, alignColumn, deleteTable } from '../utils/mdTable'
 import { ensureColgroup, findColgroup } from '../utils/tableResize'
-import { boundScrollAnchors, mapScrollPosition, normalizeScrollAnchors } from '../utils/scrollAnchors'
+import { createPreviewGeometryCache, activeHeadingIndex, mapSparseScroll } from '../utils/previewGeometry'
+import { createDeferredSync } from '../utils/deferredSync'
 import { createSourceInsert } from '../utils/sourceToolbar'
+import { DEFAULT_FLOWCHART_SOURCE } from '../utils/flowchart.js'
+import { mermaidFrameHtml } from '../utils/mermaidPreview.js'
 import { AGENT_NOTE_UPDATED_EVENT, matchesOpenNote } from '../utils/agentNoteEdit'
 
 const route = useRoute()
 const router = useRouter()
 
-const id = computed(() => route.params.id)
+const props = defineProps({
+  noteId: { type: [String, Number], default: undefined },
+  noteQuery: { type: Object, default: null },
+  tabKey: { type: String, default: '' },
+  active: { type: Boolean, default: true },
+})
+const emit = defineEmits(['tab-state'])
+const managedTab = computed(() => Boolean(props.tabKey))
+const noteQuery = computed(() => props.noteQuery || route.query)
+const id = computed(() => managedTab.value ? props.noteId : route.params.id)
 const isNew = computed(() => !id.value)
-const loading = ref(false)
+const editorDomId = `note-editor-${useId().replace(/[^a-zA-Z0-9_-]/g, '-')}`
+const loading = ref(true)
+const loadError = ref('')
+const noteReady = ref(false)
 const saving = ref(false)
 const editorRef = ref(null)
 const blockPreviewRef = ref(null)
 const editorWrapRef = ref(null)
 const categories = ref([])
 const tags = ref([])
-const form = ref({ title: '', content: '', categoryId: undefined, tagIds: [] })
+const folders = ref([])
+const folderOptions = computed(() => flattenFolderOptions(folders.value))
+const savedFolderId = ref(0)
+const form = ref({ title: '', content: '', categoryId: undefined, folderId: 0, tagIds: [] })
 const titleInputRef = ref(null)
 // Tool popovers can take focus; retain the editor that last held the caret.
 let toolbarSide = 'preview'
@@ -66,17 +89,26 @@ function formFingerprint(f = form.value) {
     title: f.title || '',
     content: f.content || '',
     categoryId: f.categoryId ?? null,
+    folderId: f.folderId || null,
     tagIds: [...(f.tagIds || [])].sort(),
   })
 }
 const savedSnapshot = ref('')
+// Decode the saved snapshot once; typing must not stringify the whole note.
+const savedForm = computed(() => savedSnapshot.value ? JSON.parse(savedSnapshot.value) : null)
 const agentEditConflict = ref(false)
 /**
  * 「有未保存改动」= 表单与上次保存的指纹不同，**或者**预览里还有没反推回源码的改动。
  * 后半句是单栏阅读模式（默认模式）的安全网：那一栏里敲的字先落在 DOM 上、失焦才反推回 Markdown，
  * 只看指纹的话用户敲完还没离开正文时状态仍是「已保存」，点返回不会被拦，改动会静默丢掉。
  */
-const dirty = computed(() => previewUnsynced.value || formFingerprint() !== savedSnapshot.value)
+const dirty = computed(() => {
+  if (previewUnsynced.value || !savedForm.value) return true
+  const current = form.value, saved = savedForm.value
+  return (current.title || '') !== saved.title || (current.content || '') !== saved.content
+    || (current.categoryId ?? null) !== saved.categoryId || (current.folderId || null) !== saved.folderId
+    || JSON.stringify([...(current.tagIds || [])].sort()) !== JSON.stringify(saved.tagIds)
+})
 
 /** 刚创建并跳转过来的笔记 id：用来跳过随之而来的那次重复加载 */
 let justCreatedId = null
@@ -181,6 +213,7 @@ const previewUnsynced = ref(false)
 
 /** 用户在预览里选中文字时记住选区；点工具条失焦后据此恢复 */
 function onPreviewSelectionChange() {
+  if (!props.active) return
   if (!previewEditing.value) return
   const el = previewEl()
   const sel = window.getSelection()
@@ -325,6 +358,7 @@ function ensurePreviewEditing() {
 }
 
 function onPreviewKeydown(e) {
+  if (!props.active) return
   if (!previewEditing.value) return
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
     e.preventDefault()
@@ -583,6 +617,7 @@ function aiApply() {
  * 广播里的 context 只是"提问背景"，后端还会再截到 1500 字注入。
  */
 function publishAgentNote() {
+  if (!props.active) return
   window.dispatchEvent(new CustomEvent(AGENT_NOTE_CONTEXT_EVENT, {
     detail: {
       noteId: id.value ? Number(id.value) : null,
@@ -600,7 +635,7 @@ async function onAgentNoteUpdated(e) {
   if (!matchesOpenNote(id.value, noteId)) return
   if (dirty.value) {
     agentEditConflict.value = true
-    ElMessage.warning('智能体已更新库中正文，本地草稿已保留，请加载最新正文后再编辑')
+    if (props.active) ElMessage.warning('智能体已更新库中正文，本地草稿已保留，请加载最新正文后再编辑')
     return
   }
   try {
@@ -754,6 +789,7 @@ async function mergeIntoSections({ answer, question }) {
  * 所以下面每个 reply(false) 分支都必须自己有一句提示，漏一个就是静默失败。
  */
 async function onAgentMerge(e) {
+  if (!props.active) return
   flushBlockContent()
   const d = e?.detail || {}
   const noteId = d.noteId || null
@@ -832,9 +868,24 @@ async function onAgentMerge(e) {
 }
 
 
-async function loadMeta() {
-  categories.value = flatten(await categoryApi.tree())
-  tags.value = await tagApi.list()
+let metaLoadSeq = 0
+async function loadMeta({ foldersOnly = false } = {}) {
+  const seq = ++metaLoadSeq
+  async function loadPart(fetchData, apply) {
+    try {
+      const data = await fetchData()
+      if (!editorDisposed && seq === metaLoadSeq) apply(data)
+    } catch {
+      // The request interceptor reports errors. Optional metadata must not
+      // prevent reading a note, or discard other successfully loaded options.
+    }
+  }
+  const categoryReady = loadPart(() => categoryApi.tree(), data => { categories.value = flatten(data) })
+  const tagsReady = loadPart(() => tagApi.list(), data => { tags.value = Array.isArray(data) ? data : [] })
+  const foldersReady = loadPart(() => folderApi.list('note'), data => { folders.value = Array.isArray(data) ? data : [] })
+  // Only folders are needed to validate a new draft's destination. Slow
+  // category and tag requests continue independently of its editable template.
+  await (foldersOnly ? foldersReady : Promise.all([categoryReady, tagsReady, foldersReady]))
 }
 function flatten(nodes, depth = 0, out = []) {
   for (const n of nodes || []) {
@@ -851,6 +902,8 @@ function flatten(nodes, depth = 0, out = []) {
 let loadSeq = 0
 
 async function loadNote() {
+  loadError.value = ''
+  noteReady.value = false
   agentEditConflict.value = false
   // 每次点进一篇笔记都从「单栏阅读」开始（用户要求）：源码对照需要显式进
   readingMode.value = true
@@ -860,12 +913,16 @@ async function loadNote() {
     loadSeq++
     // 新笔记预置骨架模板：等于把《美化规范》变成可填空的表单，
     // 顺手也就有了「新建笔记模板」这个入口（老笔记可用「更多 → 插入模板」）。
-    form.value = { title: '', content: NEW_NOTE_TEMPLATE, categoryId: undefined, tagIds: [] }
+    const requestedFolder = normalizeFolderScope(noteQuery.value.folderId)
+    const folderId = requestedFolder > 0 && folders.value.some(folder => folder.id === requestedFolder) ? requestedFolder : 0
+    form.value = { title: '', content: NEW_NOTE_TEMPLATE, categoryId: undefined, folderId, tagIds: [] }
+    savedFolderId.value = folderId
     loading.value = false
     // 注意顺序：先铺模板再取指纹，这样刚建的空笔记不算「有未保存改动」，不会一进来就弹离开确认
     savedSnapshot.value = formFingerprint()
+    noteReady.value = true
     // 新建时自动聚焦标题，省一次手点（同时覆盖「编辑 A → 新建」的复用场景）
-    nextTick(() => titleInputRef.value?.focus())
+    nextTick(() => { if (props.active) titleInputRef.value?.focus() })
     return
   }
   const seq = ++loadSeq
@@ -878,14 +935,21 @@ async function loadNote() {
       // 修复粘贴内容里 HTML 标签内的弯引号，否则预览会把 <font style=”…”> 当纯文本显示
       content: fixHtmlQuotes(n.content || ''),
       categoryId: n.categoryId ?? undefined,
+      folderId: n.folderId || 0,
       tagIds: (n.tags || []).map((t) => t.id),
     }
+    savedFolderId.value = form.value.folderId
+  } catch (error) {
+    if (seq === loadSeq) loadError.value = error?.message || '笔记加载失败，请重试'
+    return
   } finally {
     if (seq === loadSeq) loading.value = false
   }
   if (seq !== loadSeq) return
   savedSnapshot.value = formFingerprint()
+  noteReady.value = true
   publishAgentNote()
+  queueNoteLinkReveal()
 }
 
 /**
@@ -936,8 +1000,15 @@ function onPasteCapture(e) {
 
 /** 最近一次保存成功的时刻（「✓ 已保存 13:42」用） */
 const lastSavedAt = ref(null)
+/**
+ * 最近一次保存失败的原因。
+ * <p>以前保存失败只弹一条 toast，滑走就没痕迹：状态位会继续显示「未保存」，
+ * 用户以为"再点一次就行"，实际可能一直在静默失败。失败必须留在状态位上。
+ */
+const saveError = ref('')
 
 async function save() {
+  if (saving.value || loading.value || loadError.value || !noteReady.value) return
   if (agentEditConflict.value) {
     ElMessage.warning('库中正文已更新，请先点击「加载最新正文」，避免旧草稿覆盖智能体的改动')
     return
@@ -950,6 +1021,7 @@ async function save() {
   // 预览里还有没反推回源码的改动时，直接保存会把它丢掉 —— 先自动同步（失败则中止保存）
   if (previewUnsynced.value && !useBlockPreview && !syncPreviewToSource(true)) return
   saving.value = true
+  saveError.value = ''
   try {
     const payload = {
       title: form.value.title.trim(),
@@ -957,6 +1029,10 @@ async function save() {
       categoryId: form.value.categoryId || null,
       tagIds: form.value.tagIds || [],
     }
+    const folderAtSave = form.value.folderId || 0
+    // Only write an existing note's location when the user changes it here.
+    // Saving an old open editor must not undo a move performed from the list.
+    if (isNew.value || folderAtSave !== savedFolderId.value) payload.folderId = folderAtSave || null
     if (isNew.value) {
       const titleAtSave = form.value.title
       const created = await noteApi.add(payload)
@@ -969,14 +1045,22 @@ async function save() {
         previewUnsynced.value = false
       }
       justCreatedId = String(created.id)
+      savedFolderId.value = folderAtSave
       lastSavedAt.value = new Date()
       ElMessage.success('笔记已创建')
-      router.replace(`/notes/${created.id}`)
+      const query = { ...noteQuery.value }
+      delete query.draft
+      if (managedTab.value) {
+        promoteNoteTab(props.tabKey, created.id, query)
+        updateNoteTab(props.tabKey, { title: form.value.title, dirty: dirty.value })
+      }
+      if (props.active) router.replace({ path: `/notes/${created.id}`, query })
     } else {
       // 保存**前**先记指纹：保存期间用户若继续打字，指纹会变，那时状态必须仍然是「未保存」。
       // 原来在 await 之后才取指纹，会把"保存期间新打的字"误标成已保存（服务端并没有这些内容）。
       const fingerprintAtSave = formFingerprint()
       await noteApi.update(id.value, payload)
+      savedFolderId.value = folderAtSave
       savedSnapshot.value = fingerprintAtSave
       // 清掉「预览里有未反推回源码的改动」标记。
       //
@@ -990,13 +1074,18 @@ async function save() {
       lastSavedAt.value = new Date()
       ElMessage.success('已保存')
     }
+  } catch (e) {
+    // 保存失败：内容还在编辑器里、dirty 仍为真，但必须让失败看得见并可重试，
+    // 否则「未保存」和「保存失败」在界面上长得一样。
+    saveError.value = e?.message || '保存失败'
   } finally {
     saving.value = false
   }
 }
 
 async function onBack() {
-  router.push('/notes')
+  const scope = normalizeFolderScope(noteQuery.value.folderId)
+  router.push({ path: '/notes', query: scope === null ? {} : { folderId: String(scope) } })
 }
 
 /** 导出当前笔记：md 或自包含 html（html 渲染器懒加载，不拖首屏） */
@@ -1013,7 +1102,7 @@ async function exportNote(fmt = 'md') {
     const body = stripLeadingDocTitle(form.value.content, title)
     if (fmt === 'html') {
       const { renderNoteHtml } = await import('../utils/mdToHtml')
-      const html = renderNoteHtml({ title, content: body })
+      const html = await renderNoteHtml({ title, content: body })
       const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
       saveBlob(blob, `${safe}.html`)
       ElMessage.success('已导出为 HTML 网页文件')
@@ -1030,6 +1119,7 @@ async function exportNote(fmt = 'md') {
 
 /** Ctrl/⌘+S：整页接管浏览器的「保存网页」，统一走保存笔记 */
 function onGlobalKeydown(e) {
+  if (!props.active) return
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
     e.preventDefault()
     if (!saving.value) save()
@@ -1077,6 +1167,7 @@ function onToolsWheel(e) {
 }
 
 function measureLayout() {
+  if (!props.active) return
   const w = editorWrapRef.value?.clientWidth || window.innerWidth
   const prev = layoutMode.value
   layoutMode.value = w >= 1280 ? 'wide' : w >= 860 ? 'mid' : 'tab'
@@ -1111,6 +1202,10 @@ const showEditorPane = computed(() => {
   if (layoutMode.value === 'tab') return editorTab.value === 'edit'
   return true
 })
+// Avoid constructing a hidden CodeMirror editor on the default reading view.
+// Once used, keep it mounted so mode and note-tab switches retain its history.
+const sourceEditorMounted = ref(false)
+watch(showEditorPane, visible => { if (visible) sourceEditorMounted.value = true }, { flush: 'sync' })
 const showPreviewPane = computed(() => {
   if (readingMode.value) return true
   if (layoutMode.value === 'tab') return editorTab.value === 'preview'
@@ -1149,7 +1244,8 @@ function startDrag(e) {
 
 // ---- 大纲：解析标题 / 平滑滚动 / 滚动同步 ----
 const outlineMarkdown = new MarkdownIt({ html: true, breaks: true })
-const outline = computed(() => {
+const outline = ref([])
+function refreshOutline() {
   const items = []
   const tokens = outlineMarkdown.parse(form.value.content || '', {})
   const container = document.createElement('div')
@@ -1169,8 +1265,15 @@ const outline = computed(() => {
       }
     }
   }
-  return items
-})
+  outline.value = items
+}
+const outlineSync = createDeferredSync(refreshOutline)
+const previewLayoutSync = createDeferredSync(() => nextTick(onPreviewLayoutChange), { delay: 180 })
+watch(() => form.value.content, () => outlineSync.schedule())
+watch(() => props.active, active => {
+  if (active) outlineSync.resume()
+  else outlineSync.pause()
+}, { immediate: true })
 
 const activeIdx = ref(-1)
 let outlineScrollTarget = null
@@ -1183,7 +1286,12 @@ let outlineScrollTarget = null
  * 笔记本上把左侧导航和右侧智能体面板一开就够不到 1280px，等于永远没有大纲入口。
  */
 const outlineDrawer = ref(false)
-function openOutlineDrawer() { outlineDrawer.value = true }
+function prepareOutline() {
+  flushBlockContent()
+  outlineSync.cancel()
+  refreshOutline()
+}
+function openOutlineDrawer() { prepareOutline(); outlineDrawer.value = true }
 function closeOutlineDrawer() { outlineDrawer.value = false }
 /** 抽屉里点条目：先关抽屉、下一帧再滚动，避免关闭动画与滚动打架导致目标位置算错 */
 function jumpFromDrawer(idx) {
@@ -1198,6 +1306,7 @@ function jumpFromDrawer(idx) {
  */
 const outlineShown = computed(() => (layoutMode.value === 'wide' ? outlineOpen.value : outlineDrawer.value))
 function toggleOutline() {
+  if (!outlineShown.value) prepareOutline()
   if (layoutMode.value === 'wide') {
     outlineOpen.value = !outlineOpen.value
   } else {
@@ -1205,7 +1314,14 @@ function toggleOutline() {
   }
 }
 
-function scrollToHeading(idx) {
+async function scrollToHeading(idx) {
+  if (!props.active || editorDisposed) return
+  if (!showPreviewPane.value) editorTab.value = 'preview'
+  await nextTick()
+  if (!props.active || editorDisposed) return
+  flushBlockContent()
+  await nextTick()
+  if (!props.active || editorDisposed) return
   const pv = pvScrollRef.value
   if (!pv) return
   const target = pv.querySelectorAll('.md-editor-preview h1, .md-editor-preview h2, .md-editor-preview h3, .tiptap h1, .tiptap h2, .tiptap h3')[idx]
@@ -1217,7 +1333,15 @@ function scrollToHeading(idx) {
 }
 
 let scrollRaf = 0
+const previewGeometry = createPreviewGeometryCache()
+function onPreviewLayoutChange() {
+  previewGeometry.invalidate()
+  if (!props.active || !showPreviewPane.value) return
+  onPreviewScroll()
+  queueScrollSync()
+}
 function onPreviewScroll() {
+  if (!props.active || !showPreviewPane.value) return
   const pv = pvScrollRef.value
   if (pv && scrollSyncSource === 'preview') {
     queueScrollSync()
@@ -1226,14 +1350,8 @@ function onPreviewScroll() {
   scrollRaf = requestAnimationFrame(() => {
     scrollRaf = 0
     const el = pvScrollRef.value
-    if (!el) return
-    const heads = el.querySelectorAll('.md-editor-preview h1, .md-editor-preview h2, .md-editor-preview h3, .tiptap h1, .tiptap h2, .tiptap h3')
-    let cur = -1
-    for (let i = 0; i < heads.length; i++) {
-      if (topWithin(heads[i], el) - el.scrollTop - 40 <= 0) cur = i
-      else break
-    }
-    activeIdx.value = cur
+    if (!el || !props.active || !showPreviewPane.value) return
+    activeIdx.value = activeHeadingIndex(previewGeometry.read(el).headings, el.scrollTop + 40)
   })
 }
 
@@ -1256,28 +1374,20 @@ function topWithin(el, scroller) {
     - scroller.clientTop + scroller.scrollTop
 }
 
-function scrollAnchors(ed, pv) {
+function scrollAnchorSource(ed) {
   const view = editorRef.value?.getEditorView?.()
-  if (!view || view.scrollDOM !== ed) return []
+  if (!view || view.scrollDOM !== ed) return null
+  const editorTop = ed.getBoundingClientRect().top + ed.clientTop - ed.scrollTop
   // 已渲染行的几何位置精确；远处的行由 CodeMirror 高度图估计，滚入后再校正。
   const rendered = new Map()
   for (const el of view.contentDOM.querySelectorAll('.cm-line')) {
     const line = view.state.doc.lineAt(view.posAtDOM(el, 0)).number - 1
-    rendered.set(line, topWithin(el, ed))
+    rendered.set(line, el.getBoundingClientRect().top - editorTop)
   }
   // documentTop 指向第一行，包含内容顶部 padding；.cm-content 的 rect 不包含这部分。
-  const sourceOffset = view.documentTop - ed.getBoundingClientRect().top
-    - ed.clientTop + ed.scrollTop
-  const points = []
-  for (const el of pv.querySelectorAll('.md-editor-preview [data-line], .tiptap [data-line]')) {
-    const line = Number(el.dataset.line)
-    if (!Number.isInteger(line) || line < 0 || line >= view.state.doc.lines) continue
-    if (!el.getClientRects().length || el.getBoundingClientRect().height <= 0) continue
-    const source = rendered.get(line)
-      ?? view.lineBlockAt(view.state.doc.line(line + 1).from).top + sourceOffset
-    points.push({ line, source, preview: topWithin(el, pv) })
-  }
-  return normalizeScrollAnchors(points)
+  const sourceOffset = view.documentTop - editorTop
+  return point => rendered.get(point.line)
+    ?? view.lineBlockAt(view.state.doc.line(point.line + 1).from).top + sourceOffset
 }
 
 /** 隐藏或没有滚动空间的单栏不联动。 */
@@ -1302,10 +1412,12 @@ function syncPanes(ed, pv, from) {
   const target = from === 'editor' ? pv : ed
   const sourceMax = source.scrollHeight - source.clientHeight
   const targetMax = target.scrollHeight - target.clientHeight
-  const points = scrollAnchors(ed, pv)
-  const ranged = points.length ? boundScrollAnchors(points,
-    ed.scrollHeight - ed.clientHeight, pv.scrollHeight - pv.clientHeight) : []
-  const mapped = mapScrollPosition(ranged, source.scrollTop, from === 'editor' ? 'source' : 'preview')
+  const view = cmView(ed)
+  const measureSource = scrollAnchorSource(ed)
+  const anchors = view ? previewGeometry.read(pv).anchors : []
+  const mapped = measureSource ? mapSparseScroll(anchors, source.scrollTop,
+    from === 'editor' ? 'source' : 'preview', measureSource,
+    ed.scrollHeight - ed.clientHeight, pv.scrollHeight - pv.clientHeight, view.state.doc.lines) : null
   setSyncedScroll(target, Math.max(0, Math.min(targetMax,
     mapped ?? source.scrollTop / sourceMax * targetMax)))
 }
@@ -1314,14 +1426,17 @@ let scrollSyncSource = 'editor'
 let scrollSyncTimer = 0
 let scrollSyncRaf = 0
 let scrollResizeObserver = null
+let boundSourceScroller = null
+let sourceScrollBindSeq = 0
 function queueScrollSync() {
   clearTimeout(scrollSyncTimer)
+  if (!props.active || !showEditorPane.value || !showPreviewPane.value) return
   if (scrollSyncRaf) return
   scrollSyncRaf = requestAnimationFrame(() => {
     scrollSyncRaf = 0
     const ed = editorScrollEl()
     const pv = pvScrollRef.value
-    if (!ed || !pv || !bothScrollable(ed, pv)) return
+    if (!props.active || !showEditorPane.value || !showPreviewPane.value || !ed || !pv || !bothScrollable(ed, pv)) return
     syncPanes(ed, pv, scrollSyncSource)
     scheduleScrollResync()
   })
@@ -1331,6 +1446,7 @@ function queueScrollSync() {
 function scheduleScrollResync() {
   clearTimeout(scrollSyncTimer)
   scrollSyncTimer = setTimeout(() => {
+    if (!props.active || !showEditorPane.value || !showPreviewPane.value) return
     const ed = editorScrollEl()
     const pv = pvScrollRef.value
     // 大纲跳转期间，内嵌代码编辑器可能重新测量换行高度；以标题的新位置收尾。
@@ -1358,18 +1474,49 @@ function onEditorScroll() {
 function bindEditorScroll() {
   const el = editorScrollEl()
   if (!el) return false
+  if (boundSourceScroller === el) return true
+  if (boundSourceScroller) {
+    boundSourceScroller.removeEventListener('scroll', onEditorScroll)
+    scrollResizeObserver?.unobserve(boundSourceScroller)
+  }
   el.addEventListener('scroll', onEditorScroll, { passive: true })
+  boundSourceScroller = el
+  scrollResizeObserver?.observe(el)
   return true
 }
 
+async function bindVisibleSourceEditor() {
+  const seq = ++sourceScrollBindSeq
+  await nextTick()
+  for (let attempt = 0; attempt < 10; attempt++) {
+    if (editorDisposed || seq !== sourceScrollBindSeq || !props.active || !showEditorPane.value) return
+    if (bindEditorScroll()) {
+      queueScrollSync()
+      return
+    }
+    await new Promise(resolve => requestAnimationFrame(resolve))
+  }
+}
+
+watch([showEditorPane, () => props.active, editorRef], ([visible, active]) => {
+  if (visible && active) bindVisibleSourceEditor()
+  else sourceScrollBindSeq++
+}, { flush: 'post' })
+
 // 切回双栏、拖动分隔条或编辑正文后，使用新的排版位置重新对齐。
 watch([showEditorPane, showPreviewPane], () => {
+  previewGeometry.invalidate()
   if (showEditorPane.value && showPreviewPane.value) {
     scrollSyncSource = 'preview'
     nextTick(queueScrollSync)
   }
 })
-watch(() => form.value.content, () => nextTick(queueScrollSync))
+watch(() => form.value.content, () => {
+  // BlockPreview reports its completed render. The legacy preview needs a
+  // deferred layout notification too, rather than a full scan for every key.
+  if (!useBlockPreview) previewLayoutSync.schedule()
+})
+watch(isDark, () => nextTick(onPreviewLayoutChange))
 
 // ---- 模式切换 ----
 function toggleFocus() {
@@ -1492,6 +1639,7 @@ function mdLinePrefix(prefix) {
   })
 }
 function mdTool(name, arg) {
+  if (name === 'link' && arg === undefined) return openNoteLinkDialog()
   if (name === 'undo' || name === 'redo') return mdUndoRedo(name === 'redo')
   const target = captureToolbarContext()
   if (['link', 'image'].includes(name) && arg === undefined) {
@@ -1502,6 +1650,112 @@ function mdTool(name, arg) {
   }
   return target.runTool(name, arg)
 }
+
+const noteLinkVisible = ref(false)
+const noteLinkText = ref('')
+let noteLinkTarget = null
+function releaseNoteLinkTarget() {
+  noteLinkTarget?.release?.()
+  noteLinkTarget = null
+}
+function openNoteLinkDialog() {
+  releaseNoteLinkTarget()
+  noteLinkTarget = captureToolbarContext()
+  noteLinkText.value = noteLinkTarget.selectedText || ''
+  flushBlockContent()
+  noteLinkVisible.value = true
+}
+function insertNoteLink(link) {
+  if (!props.active || !noteLinkTarget) return
+  const applied = noteLinkTarget.runTool('noteLink', link)
+  releaseNoteLinkTarget()
+  if (applied !== false) {
+    flushBlockContent()
+    ElMessage.success('已插入链接')
+  }
+}
+watch(noteLinkVisible, visible => { if (!visible) releaseNoteLinkTarget() })
+
+/** Internal links use the same workspace as the list, retaining both drafts. */
+const NOTE_LINK_NAVIGATE_EVENT = 'lh-note-link-navigate'
+let noteLinkPointer = null
+function onNoteLinkPointerDown(event) {
+  noteLinkPointer = { x: event.clientX, y: event.clientY, dragged: false }
+}
+function onNoteLinkPointerMove(event) {
+  if (noteLinkPointer && Math.hypot(event.clientX - noteLinkPointer.x, event.clientY - noteLinkPointer.y) > 6) {
+    noteLinkPointer.dragged = true
+  }
+}
+function onNoteLinkClick(event) {
+  if (!props.active || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return
+  const anchor = event.target?.closest?.('a[href]')
+  if (!anchor || !pvScrollRef.value?.contains(anchor)) return
+  const href = anchor.getAttribute('href')
+  const parsed = parseNoteLink(href)
+  const external = /^(?:https?:|mailto:)/i.test(href?.trim() || '') && validateLinkHref(href)
+  if (!parsed && !external) return
+  event.preventDefault()
+  event.stopPropagation()
+  // Inserting a link can leave its label selected. Only a pointer drag suppresses navigation.
+  if (event.detail > 0 && noteLinkPointer?.dragged) return
+  if (external && !parsed) {
+    window.open(href.trim(), '_blank', 'noopener,noreferrer')
+    return
+  }
+  router.push({ path: `/notes/${parsed.noteId}`, hash: parsed.hash }).then(async () => {
+    await nextTick()
+    if (route.path !== `/notes/${parsed.noteId}` || route.hash !== parsed.hash) return
+    window.dispatchEvent(new CustomEvent(NOTE_LINK_NAVIGATE_EVENT, {
+      detail: { noteId: parsed.noteId, hash: parsed.hash },
+    }))
+  })
+}
+function onNoteLinkNavigate(event) {
+  if (Number(id.value) === event.detail?.noteId && route.hash === event.detail?.hash) queueNoteLinkReveal(true)
+}
+
+let noteLinkRevealTimer = null
+let noteLinkRevealSeq = 0
+let revealedNoteLink = ''
+let forcedNoteLinkReveal = false
+let editorDisposed = false
+function queueNoteLinkReveal(force = false) {
+  if (force) forcedNoteLinkReveal = true
+  clearTimeout(noteLinkRevealTimer)
+  const seq = ++noteLinkRevealSeq
+  if (!props.active || !id.value || !route.hash || loading.value || loadError.value || editorDisposed) return
+  const parsed = parseNoteLink(`/notes/${id.value}${route.hash}`)
+  if (!parsed?.heading && !parsed?.anchorId) return
+  force = force || forcedNoteLinkReveal
+  forcedNoteLinkReveal = false
+  const key = `${id.value}:${route.hash}`
+  if (!force && key === revealedNoteLink) return
+  // A chapter link must reveal the document even when its cached tab shows only source.
+  if (!showPreviewPane.value) editorTab.value = 'preview'
+  const attempt = async count => {
+    await nextTick()
+    if (seq !== noteLinkRevealSeq || !props.active || editorDisposed) return
+    const scroller = pvScrollRef.value
+    const headings = [...(scroller?.querySelectorAll('.tiptap h1,.tiptap h2,.tiptap h3,.tiptap h4,.tiptap h5,.tiptap h6,.md-editor-preview h1,.md-editor-preview h2,.md-editor-preview h3,.md-editor-preview h4,.md-editor-preview h5,.md-editor-preview h6') || [])]
+    const index = findLinkedHeadingIndex(headings, parsed)
+    const target = parsed.heading ? headings[index] : findNoteAnchor(scroller, `#${encodeURIComponent(parsed.anchorId)}`)
+    if (scroller && target) {
+      for (let parent = target.parentElement; parent && parent !== scroller; parent = parent.parentElement) {
+        if (parent.tagName === 'DETAILS') parent.open = true
+      }
+      scroller.scrollTop = Math.max(0, topWithin(target, scroller) - 24)
+      target.animate?.([{ backgroundColor: 'rgba(30, 160, 140, .18)' }, { backgroundColor: 'transparent' }], { duration: 1800 })
+      revealedNoteLink = key
+    } else if (count < 20) noteLinkRevealTimer = setTimeout(() => attempt(count + 1), 60)
+    else {
+      revealedNoteLink = key
+      ElMessage.info('链接指向的章节已更名或不存在，已打开目标笔记')
+    }
+  }
+  attempt(0)
+}
+watch(() => route.hash, () => { if (props.active) queueNoteLinkReveal() })
 
 function usesPreviewToolbar() {
   return readingMode.value || (!showEditorPane.value && showPreviewPane.value)
@@ -1534,6 +1788,7 @@ function captureToolbarContext() {
           return result
         }
         return {
+          selectedText: target.selectedText || '',
           release: () => target.release(),
           runTool: (name, arg) => apply(() => target.runTool(name, arg)),
           applyFormat: format => apply(() => target.applyFormat(format)),
@@ -1546,6 +1801,7 @@ function captureToolbarContext() {
     const range = savedPreviewRange?.cloneRange()
     const restore = () => { if (range) savedPreviewRange = range.cloneRange() }
     return {
+      selectedText: range?.toString() || '',
       runTool(name, arg) { restore(); return previewMdTool(name, arg) },
       applyFormat(format) { restore(); return previewApplyFormat(format) },
     }
@@ -1563,6 +1819,7 @@ function captureToolbarContext() {
     return true
   }
   return {
+    selectedText: selection ? view.state.doc.sliceString(selection.main.from, selection.main.to) : '',
     runTool(name, arg) { return restore() && runSourceTool(name, arg) },
     applyFormat(format) { return restore() && applySourceFormat(format) },
   }
@@ -1587,6 +1844,16 @@ function onCodeBlockClick() {
   const target = captureToolbarContext()
   target.runTool('codeBlock', '')
   target.release?.()
+}
+
+function onFlowchartClick() {
+  if (!props.active) return
+  const target = captureToolbarContext()
+  try {
+    if (target.runTool('flowchart') !== false) flushBlockContent()
+  } finally {
+    target.release?.()
+  }
 }
 
 // ---- 撤销 / 重做 ----
@@ -1714,6 +1981,7 @@ function pickAlign(key) {
 }
 /** 点下拉以外区域收起（与块手柄的 onDocMouseDown 同一套路） */
 function onDocDownToolMenus(e) {
+  if (!props.active) return
   if (e.target.closest?.('.tb-dd') || e.target.closest?.('.tb-menu')) return
   paraMenuOpen.value = false
   alignMenuOpen.value = false
@@ -1881,7 +2149,7 @@ const lastCodeLang = ref('java')
  * （`.block-preview .tiptap`），于是"改了没反应"。**两套渲染器的排版规则必须成对修改**：
  * 字号变量在 style.css（--md-h*），块编辑器在 BlockPreview.vue，md-editor 在 style.css。
  */
-const useBlockPreview = new URLSearchParams(window.location.search).get('editor') !== 'md'
+const useBlockPreview = noteQuery.value.editor !== 'md'
 const blockLinkBase = computed(() => id.value
   ? new URL(router.resolve({ name: 'noteEdit', params: { id: id.value } }).href, window.location.origin).href
   : '')
@@ -1892,7 +2160,7 @@ function onBlockPreviewChange() {
 }
 
 function flushBlockContent() {
-  if (useBlockPreview) blockPreviewRef.value?.flushContent?.()
+  if (useBlockPreview) blockPreviewRef.value?.flushContent?.(form.value.content)
 }
 
 function onSourceFocusIn() {
@@ -1910,6 +2178,7 @@ function onSourcePointerDown() {
 function onBlockPreviewUpdate(markdown) {
   form.value.content = markdown
   previewUnsynced.value = true
+  nextTick(onPreviewLayoutChange)
   publishAgentNote()
 }
 
@@ -2094,7 +2363,7 @@ function decorateCodeRowNumbers() {
   // 预览里的自动行号已下线：后处理 DOM 的路子反复出问题（重排会把行号吞进内容、打字会丢光标）。
   // 行号改由「双击代码块」的 CodeMirror 弹窗提供；预览保持 md-editor 的原样渲染。
   return
-  const codes = [...document.querySelectorAll('.pv-md .md-editor-code pre code')]
+  const codes = [...(editorWrapRef.value?.querySelectorAll('.pv-md .md-editor-code pre code') || [])]
   if (!codes.length) return
   const lineCount = (c) => (c.textContent || '').replace(/\n$/, '').split('\n').length
   // 已拆好就零写入返回（本函数由 MutationObserver 调用，写 DOM 会自触发成死循环）
@@ -2204,13 +2473,14 @@ if (!useBlockPreview) {
 // 只观察 childList（不观察 attributes），而 decorate 只在**首次**给某个块加节点，
 // 之后只改 style.top/dataset —— 不会触发自身再次回调，不存在死循环。
 let rowNumberObserver = null
+let rowAttachTimer = null
 
 onMounted(() => {
   if (useBlockPreview) return
   const attach = () => {
-    const host = document.querySelector('.pv-md')
+    const host = editorWrapRef.value?.querySelector('.pv-md')
     if (!host) {
-      setTimeout(attach, 300)
+      rowAttachTimer = setTimeout(attach, 300)
       return
     }
     rowNumberObserver = new MutationObserver(() => decorateCodeRowNumbers())
@@ -2221,6 +2491,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  clearTimeout(rowAttachTimer)
   rowNumberObserver?.disconnect()
   rowNumberObserver = null
 })
@@ -2489,6 +2760,15 @@ function previewWrap(before, after, placeholder = '文本') {
 /** Markdown 工具条 → 预览区等价操作（Turndown 可反向还原的标签/命令） */
 function previewMdTool(name, arg) {
   switch (name) {
+    case 'flowchart': {
+      const pre = document.createElement('pre')
+      const code = document.createElement('code')
+      code.className = 'language-mermaid'
+      code.textContent = DEFAULT_FLOWCHART_SOURCE
+      pre.append(code)
+      return previewInsertBlock(pre, true)
+    }
+    case 'noteLink': return previewInsertHtml(`<a href="${escapeHtml(arg.href)}">${escapeHtml(arg.text)}</a>`)
     case 'undo': return previewUndoRedo(false)
     case 'redo': return previewUndoRedo(true)
     case 'bold': return previewExec('bold')
@@ -2737,6 +3017,7 @@ function toggleBlockMenu() {
 }
 /** 点击菜单/手柄以外的任何地方 → 收起手柄 */
 function onDocMouseDown(e) {
+  if (!props.active) return
   if (!blockHandle.visible) return
   if (e.target.closest?.('.block-handle')) return
   hideBlockHandle()
@@ -2967,6 +3248,8 @@ async function blockOp(cmd) {
 const fmtTime = (d) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 const saveState = computed(() => {
   if (saving.value) return { cls: 'saving', text: '正在保存…' }
+  // 失败优先于「未保存」：失败是可行动的（可重试），未保存只是状态描述
+  if (saveError.value) return { cls: 'failed', text: '保存失败', title: saveError.value }
   if (lastSavedAt.value && !dirty.value) return { cls: 'saved', text: `已保存 ${fmtTime(lastSavedAt.value)}` }
   // 刚打开、还没在本会话里保存过：此时**已经和库里一致**，不能因为 lastSavedAt 是空就说「未保存」——
   // 那会让人以为"打开笔记就产生了改动"（实测四个笔记全这样）。只有真的改过才提示未保存。
@@ -3263,6 +3546,7 @@ watch(id, async (now, before) => {
 
 /** 有未保存改动时离开，先问一句（避免误点返回丢内容） */
 onBeforeRouteLeave(async () => {
+  if (managedTab.value) return true // The workspace keeps this editor mounted.
   if (!dirty.value || saving.value) return true
   try {
     await ElMessageBox.confirm('当前笔记有未保存的改动，确定离开吗？', '未保存的改动', {
@@ -3276,31 +3560,86 @@ onBeforeRouteLeave(async () => {
   }
 })
 
+async function prepareTabClose() {
+  if (saving.value || aiBusy.value) {
+    ElMessage.info('请等待保存完成或先取消 AI 处理')
+    return false
+  }
+  flushBlockContent()
+  if (!noteReady.value) return true
+  if (!dirty.value) return true
+  try {
+    await ElMessageBox.confirm(`「${form.value.title || '新建笔记'}」有未保存的改动，关闭后将丢弃这些改动。`, '关闭笔记', {
+      type: 'warning', confirmButtonText: '丢弃改动并关闭', cancelButtonText: '保留笔记',
+    })
+    return true
+  } catch { return false }
+}
+defineExpose({ prepareTabClose })
+
+watch([() => form.value.title, dirty, noteReady], () => {
+  if (noteReady.value) emit('tab-state', { title: form.value.title, dirty: dirty.value })
+})
+
+function onBeforeUnload(event) {
+  if (!noteReady.value || !dirty.value) return
+  event.preventDefault()
+  event.returnValue = ''
+}
+watch(() => props.active, async active => {
+  if (!active) {
+    flushBlockContent()
+    if (!useBlockPreview && previewUnsynced.value) syncPreviewToSource(true)
+    clearTimeout(noteLinkRevealTimer)
+    noteLinkRevealSeq++
+    noteLinkVisible.value = false
+    releaseNoteLinkTarget()
+    if (!isNoteEditorRoute(route)) {
+      focusMode.value = false
+      window.dispatchEvent(new CustomEvent(AGENT_NOTE_CONTEXT_EVENT, { detail: null }))
+    }
+  } else {
+    await nextTick()
+    if (!props.active || editorDisposed) return
+    measureLayout()
+    queueScrollSync()
+    publishAgentNote()
+    queueNoteLinkReveal()
+  }
+})
+
 onMounted(async () => {
+  window.addEventListener('beforeunload', onBeforeUnload)
   window.addEventListener('lh-meta-changed', loadMeta)
   window.addEventListener('keydown', onGlobalKeydown)
   window.addEventListener('resize', measureLayout)
+  window.addEventListener(NOTE_LINK_NAVIGATE_EVENT, onNoteLinkNavigate)
   // 悬浮面板的「融入当前笔记」把 Markdown 追加进正文（见 onAgentMerge）
   window.addEventListener(AGENT_NOTE_MERGE_EVENT, onAgentMerge)
   window.addEventListener(AGENT_NOTE_UPDATED_EVENT, onAgentNoteUpdated)
   document.addEventListener('mousedown', onDocDownToolMenus)
-  await loadMeta()
-  loadNote()
+  const initializingNew = isNew.value
+  const startupSeq = loadSeq
+  // Existing note content is the first request and never waits for metadata.
+  const noteReadyTask = initializingNew ? null : loadNote()
+  const metadataReady = loadMeta({ foldersOnly: initializingNew })
+  if (initializingNew) {
+    await metadataReady
+    if (editorDisposed || startupSeq !== loadSeq) return
+    await loadNote()
+  } else await noteReadyTask
+  if (editorDisposed) return
   await nextTick()
   measureLayout()
   // 宽屏默认展开大纲（有标题才会显示内容，空内容时大纲区自然为空态）
   if (layoutMode.value === 'wide' && /^#{1,3}\s/m.test(form.value.content || '')) {
     outlineOpen.value = true
   }
-  // 源码区 ↔ 预览区 滚动联动：CodeMirror 滚动容器可能晚一拍出现，重试几帧
-  for (let i = 0; i < 10 && !bindEditorScroll(); i++) {
-    await new Promise((r) => requestAnimationFrame(r))
-  }
-  scrollResizeObserver = new ResizeObserver(queueScrollSync)
-  const sourceScroller = editorScrollEl()
+  scrollResizeObserver = new ResizeObserver(onPreviewLayoutChange)
   const previewBody = pvScrollRef.value?.querySelector('.pv-inner')
-  if (sourceScroller) scrollResizeObserver.observe(sourceScroller)
+  if (boundSourceScroller) scrollResizeObserver.observe(boundSourceScroller)
   if (previewBody) scrollResizeObserver.observe(previewBody)
+  if (showEditorPane.value && props.active) bindVisibleSourceEditor()
   // 表格操作栏：跟随光标位置（键盘/鼠标移动后刷新是否处于表格内）
   editorWrapRef.value?.addEventListener('keyup', updateTableState)
   editorWrapRef.value?.addEventListener('mouseup', updateTableState)
@@ -3311,17 +3650,26 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  editorDisposed = true
+  sourceScrollBindSeq++
+  loadSeq++
+  noteLinkRevealSeq++
+  clearTimeout(noteLinkRevealTimer)
+  clearTimeout(previewBlurTimer)
+  releaseNoteLinkTarget()
+  window.removeEventListener('beforeunload', onBeforeUnload)
   window.removeEventListener('lh-meta-changed', loadMeta)
   window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('resize', measureLayout)
+  window.removeEventListener(NOTE_LINK_NAVIGATE_EVENT, onNoteLinkNavigate)
   window.removeEventListener(AGENT_NOTE_MERGE_EVENT, onAgentMerge)
   window.removeEventListener(AGENT_NOTE_UPDATED_EVENT, onAgentNoteUpdated)
   // 离开笔记页：广播"现在没开笔记"，面板的主操作随之回退成「保存为笔记」
-  window.dispatchEvent(new CustomEvent(AGENT_NOTE_CONTEXT_EVENT, { detail: null }))
+  if (props.active) window.dispatchEvent(new CustomEvent(AGENT_NOTE_CONTEXT_EVENT, { detail: null }))
   document.removeEventListener('mousedown', onDocDownToolMenus)
   document.removeEventListener('keydown', onPreviewKeydown)
-  const ed = editorScrollEl()
-  if (ed) ed.removeEventListener('scroll', onEditorScroll)
+  if (boundSourceScroller) boundSourceScroller.removeEventListener('scroll', onEditorScroll)
+  boundSourceScroller = null
   editorWrapRef.value?.removeEventListener('keyup', updateTableState)
   editorWrapRef.value?.removeEventListener('mouseup', updateTableState)
   pvScrollRef.value?.removeEventListener('mousemove', onTableResizeMove)
@@ -3329,6 +3677,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('mousemove', onTableResizeDrag)
   window.removeEventListener('mouseup', onTableResizeUp)
   clearTimeout(scrollSyncTimer)
+  outlineSync.cancel()
+  previewLayoutSync.cancel()
   scrollResizeObserver?.disconnect()
   if (scrollRaf) cancelAnimationFrame(scrollRaf)
   if (scrollSyncRaf) cancelAnimationFrame(scrollSyncRaf)
@@ -3338,7 +3688,7 @@ onBeforeUnmount(() => {
     aiAbort.abort()
     aiAbort = null
   }
-  focusMode.value = false // 专注模式是页面级状态，离开必须复位，否则侧栏消失
+  if (props.active) focusMode.value = false
 })
 </script>
 
@@ -3353,6 +3703,10 @@ onBeforeUnmount(() => {
     组件自身（BlockPreview / CM 组件）另外再声明一次，保证脱离本页也不会误开。
   -->
   <div class="edit-page" :class="{ 'is-focus': focusMode, 'is-reading': readingMode }" v-loading="loading" spellcheck="false">
+    <el-alert v-if="loadError" :title="loadError" type="error" :closable="false" show-icon>
+      <el-button text @click="loadNote">重试加载</el-button>
+    </el-alert>
+    <NoteLinkDialog v-model="noteLinkVisible" :current-note-id="id" :current-title="form.title" :current-content="form.content" :initial-text="noteLinkText" @insert="insertNoteLink" />
     <!-- ======== 顶部第一行：返回 · 标题 · 分类 · 标签 · 保存状态 · AI助手 · 更多 · 保存 ========
          阅读模式**保留**这一行（用户要求：阅读时工具栏不消失，并冻结在顶部）；只把右端的
          「保存」旁边多一个「退出阅读」，因为原来的极简顶栏已经去掉了。 -->
@@ -3365,6 +3719,10 @@ onBeforeUnmount(() => {
 
       <input ref="titleInputRef" v-model="form.title" class="title-input" placeholder="输入笔记标题…" maxlength="200" />
 
+      <el-select v-model="form.folderId" class="mini-select folder" aria-label="笔记文件夹" title="笔记所属文件夹，修改后保存生效" filterable>
+        <el-option label="未收纳" :value="0" />
+        <el-option v-for="folder in folderOptions" :key="folder.id" :label="folder.path" :value="folder.id" />
+      </el-select>
       <el-select v-model="form.categoryId" placeholder="分类" clearable class="mini-select cat" size="default">
         <el-option v-for="c in categories" :key="c.id" :label="'　'.repeat(c.depth) + c.name" :value="c.id" />
       </el-select>
@@ -3374,9 +3732,17 @@ onBeforeUnmount(() => {
 
       <span class="flex-spacer"></span>
 
-      <span class="save-state" :class="saveState.cls" :title="saveState.text">
+      <span class="save-state" :class="saveState.cls" :title="saveState.title || saveState.text">
         <i class="ss-dot"></i>{{ saveState.text }}
       </span>
+      <!-- 失败必须给出行动：光变红只是"告诉"，重试才是"解决" -->
+      <button
+        v-if="saveState.cls === 'failed' && !saving"
+        class="save-retry"
+        type="button"
+        :title="saveState.title"
+        @click="save"
+      >重试保存</button>
 
       <!-- AI 动作直接放顶栏：原来是「点开 AI 助手 → 再选一项」，两步。
            「打开 AI 对话」已移除 —— 右下角本来就有常驻的智能体悬浮入口，属于重复入口。
@@ -3559,13 +3925,16 @@ onBeforeUnmount(() => {
         <button class="tb" type="button" title="代码块（可选择语言）" @click="onCodeBlockClick">
           <svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2" /><path d="m9 10-1.8 2L9 14M15 10l1.8 2L15 14" /></svg>
         </button>
+        <button class="tb" type="button" title="插入流程图（Mermaid，源码可编辑）" aria-label="插入流程图" @click="onFlowchartClick">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="3" width="8" height="5" rx="1.4" /><rect x="2" y="16" width="8" height="5" rx="1.4" /><rect x="14" y="16" width="8" height="5" rx="1.4" /><path d="M12 8v4M6 16v-4h12v4" /></svg>
+        </button>
         <button class="tb" type="button" title="引用" @click="mdTool('quote')">
           <svg viewBox="0 0 24 24"><path d="M9.5 7.5c-2.6.6-4 2.3-4 5v4h5v-5h-3c0-1.6.7-2.7 2-3.2Zm9 0c-2.6.6-4 2.3-4 5v4h5v-5h-3c0-1.6.7-2.7 2-3.2Z" /></svg>
         </button>
         <button class="tb" type="button" title="分割线" @click="mdTool('hr')">
           <svg viewBox="0 0 24 24"><path d="M4 12h16" stroke-width="1.8" /></svg>
         </button>
-        <button class="tb" type="button" title="链接" @click="mdTool('link')">
+        <button class="tb" type="button" title="超链接：网址、笔记或指定章节" aria-label="插入超链接" @click="openNoteLinkDialog">
           <svg viewBox="0 0 24 24"><path d="M10.5 13.5a3.5 3.5 0 0 0 5 0l3-3a3.5 3.5 0 1 0-5-5l-1.2 1.2M13.5 10.5a3.5 3.5 0 0 0-5 0l-3 3a3.5 3.5 0 1 0 5 5l1.2-1.2" /></svg>
         </button>
         <button class="tb" type="button" title="图片" @click="mdTool('image')">
@@ -3652,8 +4021,10 @@ onBeforeUnmount(() => {
         @keydown.capture="onScrollIntent('editor')"
       >
         <MdEditor
+          v-if="sourceEditorMounted"
           ref="editorRef"
           v-model="form.content"
+          :editor-id="`${editorDomId}-source`"
           :placeholder="'支持 Markdown：代码块、表格、链接…\n# 一级标题\n```java\n// 代码示例\n```'"
           :preview="false"
           :toolbars="[]"
@@ -3676,15 +4047,17 @@ onBeforeUnmount(() => {
         v-show="showPreviewPane"
         class="pane pane-preview"
         @wheel.capture.passive="onScrollIntent('preview')"
-        @pointerdown.capture="onScrollIntent('preview')"
+        @pointerdown.capture="onScrollIntent('preview'); onNoteLinkPointerDown($event)"
+        @pointermove.capture="onNoteLinkPointerMove"
         @touchstart.capture.passive="onScrollIntent('preview')"
         @keydown.capture="onScrollIntent('preview')"
         @mouseenter="attachPreviewEditable"
         @focusin="onPreviewFocusIn"
         @focusout="onPreviewFocusOut"
         @click="onPreviewClick"
+        @click.capture="onNoteLinkClick"
       >
-        <div ref="pvScrollRef" class="pv-scroll" @scroll="onPreviewScroll">
+        <div ref="pvScrollRef" class="pv-scroll" @scroll.passive="onPreviewScroll" @load.capture="onPreviewLayoutChange" @toggle.capture="onPreviewLayoutChange">
           <div class="pv-inner">
             <!-- 空正文时的引导占位（点右侧任意处即可开始编辑，占位随即让位） -->
             <div v-if="!previewEditing && !(form.content || '').trim()" class="pv-empty">
@@ -3702,15 +4075,20 @@ onBeforeUnmount(() => {
               ref="blockPreviewRef"
               key="block-preview"
               :content="form.content"
+              :active="active"
+              :visible="showPreviewPane"
               :source-lines-active="showEditorPane && showPreviewPane"
               :link-base="blockLinkBase"
               @change="onBlockPreviewChange"
               @update="onBlockPreviewUpdate"
               @outline="onBlockOutline"
+              @layout="onPreviewLayoutChange"
             />
             <MdPreview
               v-else
               :modelValue="form.content"
+              :sanitize-mermaid="mermaidFrameHtml"
+              :editor-id="`${editorDomId}-preview`"
               :theme="isDark ? 'dark' : 'light'"
               previewTheme="github"
               class="pv-md"
@@ -3890,6 +4268,7 @@ onBeforeUnmount(() => {
         </details>
         <MdPreview
           :modelValue="fixHtmlQuotes(mergePatch ? mergePatch.after : aiResult) || '*空内容*'"
+          :sanitize-mermaid="mermaidFrameHtml"
           :theme="isDark ? 'dark' : 'light'"
           previewTheme="github"
         />
@@ -4003,6 +4382,7 @@ onBeforeUnmount(() => {
 .mini-select.tag {
   width: 150px;
 }
+.mini-select.folder { width: 148px; }
 
 .flex-spacer {
   flex: 1;
@@ -4042,6 +4422,31 @@ onBeforeUnmount(() => {
 }
 .save-state.saved {
   color: var(--app-brand-deep);
+}
+/* 保存失败：用 Element Plus 的 danger 色，和「未保存」的琥珀色明确区分开 */
+.save-state.failed {
+  color: var(--el-color-danger);
+}
+.save-state.failed .ss-dot {
+  background: var(--el-color-danger);
+  animation: none;
+}
+.save-retry {
+  padding: 2px 8px;
+  border: 1px solid var(--el-color-danger-light-5);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--el-color-danger);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.save-retry:hover {
+  border-color: var(--el-color-danger);
+}
+.save-retry:focus-visible {
+  outline: 2px solid var(--el-color-danger);
+  outline-offset: 2px;
 }
 @keyframes ss-pulse {
   50% { opacity: 0.35; }

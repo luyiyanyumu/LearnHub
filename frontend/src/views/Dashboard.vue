@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { statsApi } from '../api'
 import ActivityHeatmap from '../components/ActivityHeatmap.vue'
+import StateView from '../components/StateView.vue'
 
 const router = useRouter()
 // 初始即置为 loading，避免首帧先闪一下「空状态」再被数据顶掉
@@ -21,6 +22,11 @@ const activityLoading = ref(false)
 const activityError = ref(false)
 const activity = ref({ year: activityYear.value, total: 0, activeDays: 0, max: 0, days: [] })
 let activityRequestId = 0
+
+/** 总览数据加载失败原因。以前失败没有分支，卡片会显示 0 —— 那是假话，不是"暂无数据" */
+const statsError = ref('')
+/** 统计卡、最近笔记、分类分布共用同一个请求，失败时要一起收敛 */
+const statsFailed = computed(() => Boolean(statsError.value) && !loading.value)
 
 const cards = [
   {
@@ -47,8 +53,11 @@ const cards = [
 
 async function load() {
   loading.value = true
+  statsError.value = ''
   try {
     stats.value = await statsApi.dashboard()
+  } catch (e) {
+    statsError.value = e?.message || '请求失败'
   } finally {
     loading.value = false
   }
@@ -116,7 +125,18 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div class="stat-grid">
+    <StateView
+      v-if="statsFailed"
+      state="error"
+      title="总览数据加载失败"
+      :detail="statsError"
+      action-label="重试"
+      @action="load"
+    />
+    <!-- 统计卡、最近笔记、分类分布来自同一个总览请求：要么一起有数据，要么一起失败。
+         失败时不能显示 0 或「还没有笔记」——那是把故障说成没有数据。
+         下方热力图是另一个请求，保留可见，属于局部降级。 -->
+    <div v-if="!statsFailed" class="stat-grid">
       <el-card
         v-for="c in cards"
         :key="c.key"
@@ -152,7 +172,7 @@ onBeforeUnmount(() => {
       @retry="loadActivity()"
     />
 
-    <div class="lower">
+    <div v-if="!statsFailed" class="lower">
       <el-card shadow="never" class="lower-card">
         <template #header>
           <div class="card-head">

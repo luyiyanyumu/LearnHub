@@ -1,9 +1,13 @@
 <script setup>
-import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { ArrowLeft, ArrowRight, ChatDotRound, Collection, Cpu, Document, FolderOpened, House, Moon, Notebook, Setting, Sunny } from '@element-plus/icons-vue'
 import { isDark, toggleTheme } from '../composables/useTheme'
 import { focusMode } from '../composables/useViewMode'
 import AgentPanel from '../components/AgentPanel.vue'
+import { noteTabs, isNoteEditorRoute, openNoteRoute } from '../composables/useNoteTabs.js'
+import { backendDown, backendDownReason } from '../utils/connectionState.js'
+import { categoryApi } from '../api'
 
 /**
  * 设置面板改成异步组件。
@@ -12,10 +16,42 @@ import AgentPanel from '../components/AgentPanel.vue'
  * 挂载后不再卸载（settingsOpen 关闭只是隐藏），避免重复下载与丢状态。
  */
 const SettingsDialog = defineAsyncComponent(() => import('../components/SettingsDialog.vue'))
+const NoteWorkspace = defineAsyncComponent(() => import('../components/NoteWorkspace.vue'))
 
 const route = useRoute()
+const isNoteEditor = computed(() => isNoteEditorRoute(route))
+const showNoteWorkspace = computed(() => route.path === '/notes' || isNoteEditor.value)
+watch(() => route.fullPath, () => openNoteRoute(route), { immediate: true })
 const settingsOpen = ref(false)
 const settingsMounted = ref(false)
+
+/** 全局降级横幅的重试按钮状态 */
+const probing = ref(false)
+/**
+ * 用户手动关掉了横幅。
+ * <p>关闭只在「本次故障内」有效：backendDown 一变化（恢复、或又一次新的失败）就重置，
+ * 否则用户会永远看不到后续的降级提示，那比不显示更危险。
+ */
+const bannerDismissed = ref(false)
+watch(backendDown, () => {
+  bannerDismissed.value = false
+})
+
+/**
+ * 重试探测：用一个最轻的既有接口探活（分类树）。
+ * <p>成功时不需要在这里手动撤横幅 —— api 拦截器拿到任何成功响应都会调 markBackendUp()，
+ * 横幅自动消失，避免"探测成功了但横幅还在"这种两处状态各说各话的情况。
+ */
+async function retryBackend() {
+  probing.value = true
+  try {
+    await categoryApi.tree()
+  } catch {
+    // 失败原因已由拦截器写进 backendDownReason，这里不再重复弹提示
+  } finally {
+    probing.value = false
+  }
+}
 
 /** 首次点「设置」时才把面板拉进来 */
 function openSettings() {
@@ -47,17 +83,17 @@ const activeMenu = computed(() => {
   return best
 })
 
-/** 侧栏导航项：统一线性图标（stroke 风格，16px 视觉） */
+/** 侧栏导航项：与 Element Plus 控件共用图标风格。 */
 const navItems = [
-  { index: '/', name: '总览', icon: 'M3.5 12l8.5-7.5L20.5 12M5.5 10.5V20h13v-9.5M10 20v-5h4v5' },
-  { index: '/notes', name: '笔记', icon: 'M7 3.5h7a3 3 0 0 1 3 3V20.5H7a3 3 0 0 1-3-3v-11a3 3 0 0 1 3-3ZM10 8h4M10 11.5h4M10 15h2' },
-  { index: '/refs', name: '速查卡', icon: 'M13 2.5 5 10.5V21.5h14V2.5h-6Zm0 0v7h6M8.5 14h7M8.5 17h5' },
-  { index: '/files', name: '资料库', icon: 'M3.5 6.5a2 2 0 0 1 2-2h4l2 2.5h7a2 2 0 0 1 2 2v9.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2Z' },
-  { index: '/knowledge', name: '知识库', icon: 'M12 6.5c-1.8-1.6-4.3-2-7-2v13c2.7 0 5.2.4 7 2 1.8-1.6 4.3-2 7-2v-13c-2.7 0-5.2.4-7 2Zm0 0v13' },
+  { index: '/', name: '总览', icon: House },
+  { index: '/notes', name: '笔记', icon: Notebook },
+  { index: '/refs', name: '速查卡', icon: Document },
+  { index: '/files', name: '资料库', icon: FolderOpened },
+  { index: '/knowledge', name: '知识库', icon: Collection },
   // 智能体：会话管理（新开/切换/删除/各自选模型）与对话，和笔记/知识库同级
-  { index: '/agent', name: '智能体', icon: 'M4 5.5h16v11H9l-4 3.5v-14.5ZM8 9h8M8 12.5h5' },
+  { index: '/agent', name: '智能体', icon: ChatDotRound },
   // 代码库：代码片段单独存放（不进知识库的向量索引，避免把笔记挤下去）
-  { index: '/code', name: '代码库', icon: 'M9 7.5 5.5 12 9 16.5M15 7.5 18.5 12 15 16.5M13 5.5l-2 13' },
+  { index: '/code', name: '代码库', icon: Cpu },
 ]
 
 /** 侧栏折叠：收起后只剩图标（64px 图标栏），状态持久化到 localStorage */
@@ -91,9 +127,10 @@ function toggleCollapse() {
         <img v-else class="logo-mark" src="/brand-icon.png" alt="学习工作台" draggable="false" />
       </div>
 
-      <nav class="time-nav" aria-label="主导航">
+      <div v-show="!sidebarCollapsed" class="nav-caption">WORKSPACE</div>
+      <nav class="workspace-nav" aria-label="主导航">
         <router-link
-          v-for="(n, i) in navItems"
+          v-for="n in navItems"
           :key="n.index"
           :to="n.index"
           class="tn-item"
@@ -102,40 +139,24 @@ function toggleCollapse() {
           :aria-label="n.name"
           :aria-current="activeMenu === n.index ? 'page' : undefined"
         >
-          <span class="tn-node" aria-hidden="true"></span>
-          <span class="tn-seq" aria-hidden="true">{{ String(i + 1).padStart(2, '0') }}</span>
-          <svg class="tn-ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path :d="n.icon" />
-          </svg>
+          <span class="tn-ico" aria-hidden="true"><component :is="n.icon" /></span>
           <span class="tn-name">{{ n.name }}</span>
         </router-link>
       </nav>
 
       <div class="side-foot">
         <button v-if="!narrowScreen" class="theme-btn collapse-btn" type="button" :title="sidebarCollapsed ? '展开侧栏' : '收起侧栏'" :aria-label="sidebarCollapsed ? '展开侧栏' : '收起侧栏'" @click="toggleCollapse">
-          <svg v-if="!sidebarCollapsed" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M14 6l-6 6 6 6" />
-          </svg>
-          <svg v-else viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M10 6l6 6-6 6" />
-          </svg>
+          <ArrowRight v-if="sidebarCollapsed" class="foot-icon" aria-hidden="true" />
+          <ArrowLeft v-else class="foot-icon" aria-hidden="true" />
           <span v-show="!sidebarCollapsed">收起侧栏</span>
         </button>
         <button class="theme-btn" type="button" title="设置" aria-label="设置" @click="openSettings">
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="3.2"></circle>
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"></path>
-          </svg>
+          <Setting class="foot-icon" aria-hidden="true" />
           <span v-show="!sidebarCollapsed">设置</span>
         </button>
         <button class="theme-btn" type="button" :title="isDark ? '切换到浅色模式' : '切换到深色模式'" :aria-label="isDark ? '浅色模式' : '深色模式'" @click="toggleTheme">
-          <svg v-if="isDark" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-            <circle cx="12" cy="12" r="4.2"></circle>
-            <path d="M12 2.5v2.4M12 19.1v2.4M2.5 12h2.4M19.1 12h2.4M5 5l1.7 1.7M17.3 17.3L19 19M19 5l-1.7 1.7M6.7 17.3L5 19"></path>
-          </svg>
-          <svg v-else viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M20.5 14.2A8.5 8.5 0 0 1 9.8 3.5a8.5 8.5 0 1 0 10.7 10.7Z"></path>
-          </svg>
+          <Sunny v-if="isDark" class="foot-icon" aria-hidden="true" />
+          <Moon v-else class="foot-icon" aria-hidden="true" />
           <span v-show="!sidebarCollapsed">{{ isDark ? '浅色模式' : '深色模式' }}</span>
         </button>
         <div class="foot-note" v-show="!sidebarCollapsed">Keep learning, keep growing</div>
@@ -143,7 +164,21 @@ function toggleCollapse() {
     </aside>
 
     <main class="content">
-      <router-view />
+      <!-- 全局降级横幅：整条链路不可达时统一说明，避免各页面的空态被误读成"我的数据没了"。
+           页面级失败态说"这一块没加载出来"，这条说"后端没连上"，两者分工不同。 -->
+      <div v-if="backendDown && !bannerDismissed" class="offline-bar" role="alert">
+        <span class="ob-dot" aria-hidden="true" />
+        <span class="ob-text">
+          <b>后端服务未连接</b>
+          <span class="ob-why">{{ backendDownReason }}；页面上的内容可能不是最新的</span>
+        </span>
+        <button class="ob-btn" type="button" :disabled="probing" @click="retryBackend">
+          {{ probing ? '正在重试…' : '重试连接' }}
+        </button>
+        <button class="ob-close" type="button" aria-label="关闭提示" @click="bannerDismissed = true">×</button>
+      </div>
+      <NoteWorkspace v-if="noteTabs.length" v-show="showNoteWorkspace" />
+      <router-view v-if="!isNoteEditor" />
     </main>
 
     <!-- 全局智能体（右下角悬浮 + 抽屉）。
@@ -162,8 +197,9 @@ function toggleCollapse() {
 }
 
 .side {
-  width: 200px;
+  width: 224px;
   flex-shrink: 0;
+  min-height: 0;
   background: var(--app-side);
   border-right: 1px solid var(--app-border);
   display: flex;
@@ -174,95 +210,76 @@ function toggleCollapse() {
 .logo {
   display: flex;
   align-items: center;
-  gap: 11px;
-  padding: 22px 18px 18px;
+  min-height: 92px;
+  padding: 24px 24px 20px;
 }
 
-/* 商标是位图（public/brand-*.png，已抠成透明底）：
-   高度固定、宽度按比例；关掉拖拽与选中，免得用起来像"一张图片" */
 .logo-lockup {
   height: 38px;
+  max-width: 100%;
   width: auto;
+  object-fit: contain;
   display: block;
   user-select: none;
   -webkit-user-drag: none;
 }
 
 .logo-mark {
-  width: 38px;
-  height: 38px;
+  width: 36px;
+  height: 36px;
   display: block;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   user-select: none;
   -webkit-user-drag: none;
-  transition: transform var(--dur) var(--ease);
 }
 
-.logo-mark:hover {
-  transform: rotate(-6deg) scale(1.04);
+.nav-caption {
+  padding: 12px 26px 10px;
+  color: var(--app-text-2);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.15em;
 }
 
-/* 侧栏导航：竖排时间轴（签名视觉）
-   一根 1px 竖线贯穿全部导航项，节点标记当前位置 ——
-   同一根线也用在学习路径上，导航即品牌符号 */
-.time-nav {
-  position: relative;
+.workspace-nav {
   flex: 1;
-  padding: 4px 10px;
+  min-height: 0;
+  padding: 0 12px 24px;
   display: flex;
   flex-direction: column;
-}
-
-/* 竖线：仅覆盖首项与末项节点之间，不外溢到 logo 与底部操作区 */
-.time-nav::before {
-  content: '';
-  position: absolute;
-  left: 25px;
-  top: 24px;
-  bottom: 24px;
-  width: 1px;
-  background: var(--app-border);
+  gap: 5px;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .tn-item {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 9px;
-  height: 44px;
-  padding: 0 10px;
-  border-radius: var(--radius);
+  gap: 12px;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-lg);
   color: var(--app-text-2);
   font-size: 13.5px;
   font-weight: 500;
   text-decoration: none;
-  /* 悬停只动文字与节点，不动背景：品牌色要留给当前态，稀有才有分量 */
-  transition: color var(--dur-fast) ease;
-}
-
-.tn-node {
-  width: 8px;
-  height: 8px;
-  flex-shrink: 0;
-  margin-left: 2px;
-  border-radius: 50%;
-  background: var(--app-border);
-  /* 用侧栏底色断开竖线，节点不悬空 */
-  box-shadow: 0 0 0 4px var(--app-side);
-  transition: background-color var(--dur-instant) linear;
-}
-
-.tn-seq {
-  font-size: var(--font-caption);
-  color: var(--app-text-3);
-  letter-spacing: 0.06em;
-  font-variant-numeric: tabular-nums;
+  transition: color var(--dur-fast) ease, background-color var(--dur-fast) ease, border-color var(--dur-fast) ease;
 }
 
 .tn-ico {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
   flex-shrink: 0;
-  opacity: 0.78;
-  transition: opacity var(--dur-fast) ease;
+}
+
+.tn-ico :deep(svg) {
+  width: 19px;
+  height: 19px;
 }
 
 .tn-name {
@@ -271,73 +288,75 @@ function toggleCollapse() {
 
 .tn-item:hover {
   color: var(--app-text-1);
+  background: var(--app-bg);
 }
 
-/* 当前态：指示条 + 节点实心，取消整块填充 */
 .tn-item.on {
   color: var(--app-brand-deep);
   font-weight: 600;
+  background: var(--app-brand-soft);
+  border-color: color-mix(in srgb, var(--app-brand) 12%, transparent);
 }
 
-.tn-item.on .tn-ico {
-  opacity: 1;
-}
-
-.tn-item.on .tn-node {
-  background: var(--app-brand);
-}
-
-.tn-item.on::before {
+.tn-item.on::after {
   content: '';
-  position: absolute;
-  left: -10px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 3px;
-  height: 20px;
-  border-radius: 2px;
+  width: 5px;
+  height: 5px;
+  margin-left: auto;
+  border-radius: 50%;
   background: var(--app-brand);
+}
+
+.tn-item:focus-visible,
+.theme-btn:focus-visible {
+  outline: 2px solid var(--app-brand);
+  outline-offset: -2px;
 }
 
 .side-foot {
-  padding: 12px 16px 14px;
+  flex-shrink: 0;
+  margin: 0 16px;
+  padding: 14px 0 18px;
   border-top: 1px solid var(--app-border-weak);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 2px;
 }
 
 .theme-btn {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 7px;
-  height: 32px;
-  border: 1px solid var(--app-border);
-  border-radius: var(--radius-sm);
+  justify-content: flex-start;
+  gap: 12px;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
   background: transparent;
   color: var(--app-text-2);
-  font-size: 12.5px;
+  font-size: 12px;
   font-family: inherit;
   cursor: pointer;
-  transition: all var(--dur-fast) ease;
+  transition: color var(--dur-fast) ease, background-color var(--dur-fast) ease;
+}
+
+.foot-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
 }
 
 .theme-btn:hover {
-  border-color: var(--app-brand);
   color: var(--app-brand-deep);
   background: var(--app-brand-soft);
 }
 
-.theme-btn:active {
-  transform: scale(0.98);
-}
-
 .foot-note {
+  margin-top: 14px;
+  padding-left: 10px;
   font-size: 10px;
-  color: var(--app-text-3);
-  text-align: center;
-  letter-spacing: 0.05em;
+  color: var(--app-text-2);
+  letter-spacing: 0.015em;
 }
 
 .content {
@@ -348,49 +367,147 @@ function toggleCollapse() {
   transition: background-color var(--dur) ease;
 }
 
-/* ---- 折叠态：侧栏收成 64px 图标栏，图标带 title 提示 ---- */
+/* 全局降级横幅：整宽状态条，贴在内容区顶部（滚动时保持可见）。
+   用 Element Plus 的 warning 系列，深浅色主题下都由 EP 自己换色。 */
+.offline-bar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--el-color-warning-light-5);
+  background: var(--el-color-warning-light-9);
+  color: var(--app-text-1);
+  font-size: var(--font-caption);
+}
+
+.ob-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--el-color-warning);
+}
+
+.ob-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.ob-why {
+  color: var(--app-text-2);
+  overflow-wrap: anywhere;
+}
+
+.ob-btn {
+  flex-shrink: 0;
+  padding: 4px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius);
+  background: var(--app-card);
+  color: var(--app-text-1);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.ob-btn:hover:not(:disabled) {
+  border-color: var(--app-brand);
+  color: var(--app-brand);
+}
+
+.ob-btn:focus-visible {
+  outline: 2px solid var(--app-brand);
+  outline-offset: 2px;
+}
+
+.ob-btn:disabled {
+  cursor: progress;
+  opacity: .6;
+}
+
+.ob-close {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--app-text-2);
+  font-family: inherit;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.ob-close:hover {
+  background: var(--el-color-warning-light-7);
+  color: var(--app-text-1);
+}
+
+.ob-close:focus-visible {
+  outline: 2px solid var(--app-brand);
+  outline-offset: 2px;
+}
+
+/* 窄屏：横幅内容换行，重试按钮独占一行，避免挤成一条看不清的细条 */
+@media (max-width: 680px) {
+  .offline-bar {
+    flex-wrap: wrap;
+    padding: 8px 12px;
+  }
+
+  .ob-btn {
+    width: 100%;
+  }
+}
+
+/* 窄屏继续使用 64px 图标栏，导航和底部操作均保持可点击。 */
 .side.collapsed {
   width: 64px;
 }
 
 .side.collapsed .logo {
-  padding: 22px 12px 18px;
+  min-height: 84px;
+  padding: 24px 12px;
   justify-content: center;
 }
 
-.side.collapsed .time-nav {
-  padding: 4px 8px;
+.side.collapsed .workspace-nav {
+  padding: 0 8px 16px;
+  gap: 6px;
 }
 
-/* 折叠态：竖线与序号隐藏，节点居中。
-   原实现靠「指示条 left:-8px」的位移补丁避免悬空，这里随 el-menu 一并删除。 */
-.side.collapsed .time-nav::before,
-.side.collapsed .tn-seq,
 .side.collapsed .tn-name {
   display: none;
 }
 
 .side.collapsed .tn-item {
   justify-content: center;
+  min-height: 44px;
   padding: 0;
   gap: 0;
 }
 
-.side.collapsed .tn-node {
-  margin-left: 0;
-  box-shadow: none;
-}
-
-.side.collapsed .tn-item.on::before {
-  left: -8px;
+.side.collapsed .tn-item.on::after {
+  display: none;
 }
 
 .side.collapsed .side-foot {
-  padding: 12px 10px 14px;
+  margin: 0 8px;
+  padding: 12px 0 16px;
+  gap: 4px;
 }
 
 .side.collapsed .theme-btn {
   justify-content: center;
+  min-height: 40px;
   padding: 0;
 }
 </style>

@@ -1,7 +1,8 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import AgentPanel from '../components/AgentPanel.vue'
+import StateView from '../components/StateView.vue'
 import { modelApi } from '../api'
 import { MODEL_CONFIGURATION_CHANGED_EVENT, chatProfiles, chatProfileSelection } from '../utils/modelProfileView'
 
@@ -22,55 +23,74 @@ const sessions = ref([])
 const profiles = ref([])
 const activeId = ref('')
 const loading = ref(false)
+/** 会话列表读取失败原因。失败要看得见，别退化成"还没有会话" */
+const loadError = ref('')
 /** 当前会话用的模型档案 id（空 = 用默认：当前生效档案） */
 const activeProfile = ref('')
 const creating = ref(false)
+let listRequest = 0
+let selectionRevision = 0
+let selectionEstablished = false
+let disposed = false
 
 const providerOf = (id) => profiles.value.find((p) => p.id === id)
 
 const emptyText = computed(() => (loading.value ? '正在读取会话…' : '选择或新建一个会话开始对话'))
 
 async function loadAll() {
+  const request = ++listRequest
+  const revision = selectionRevision
   loading.value = true
+  loadError.value = ''
   try {
     const [s, m] = await Promise.all([modelApi.sessions(100), modelApi.profiles()])
+    if (disposed || request !== listRequest) return
     sessions.value = s || []
     profiles.value = chatProfiles(m?.profiles)
-    // 默认选中最近一次会话（与面板里的 localStorage 一致时高亮才对得上）
-    const saved = localStorage.getItem('lh-agent-session')
-    if (saved && sessions.value.some((x) => x.id === saved)) {
-      activeId.value = saved
-    } else if (sessions.value.length && !activeId.value) {
-      activeId.value = sessions.value[0].id
+    // Only initial loading chooses a default. A delayed refresh cannot undo a user selection or clear.
+    if (revision !== selectionRevision) return
+    if (!selectionEstablished) {
+      const saved = localStorage.getItem('lh-agent-session')
+      select(sessions.value.some(x => x.id === saved) ? saved : sessions.value[0]?.id || '')
     }
     const cur = sessions.value.find((x) => x.id === activeId.value)
     activeProfile.value = chatProfileSelection(profiles.value, cur?.modelProfileId)
   } catch (e) {
-    sessions.value = []
+    // 保留当前会话与列表：刷新失败不该让用户以为会话没了（原来这里直接清空，等于把故障说成"没有会话"）。
+    // 但只有拦截器的一条 toast 不够 —— 用户滑走就没痕迹，所以再落一个可重试的持久状态位。
+    if (disposed || request !== listRequest) return
+    loadError.value = e?.message || '请求失败'
   } finally {
-    loading.value = false
+    if (!disposed && request === listRequest) loading.value = false
   }
 }
 
 /** 选中一个会话：通知面板切过去 */
 function select(id) {
-  if (id === activeId.value) {
-    return
-  }
+  const revision = ++selectionRevision
+  selectionEstablished = true
   activeId.value = id
   const cur = sessions.value.find((x) => x.id === id)
   activeProfile.value = chatProfileSelection(profiles.value, cur?.modelProfileId)
-  localStorage.setItem('lh-agent-session', id)
-  window.dispatchEvent(new CustomEvent('lh-agent-switch', { detail: { id } }))
+  if (id) localStorage.setItem('lh-agent-session', id)
+  else localStorage.removeItem('lh-agent-session')
+  // On the first selection the v-if panel mounts this tick and reads the same stored id.
+  nextTick(() => {
+    if (!disposed && revision === selectionRevision) window.dispatchEvent(new CustomEvent('lh-agent-switch', { detail: { id } }))
+  })
 }
 
 /** 新建会话：建完立刻选中（空会话也要能进去问第一句） */
 async function createSession() {
+  if (creating.value) return
+  const revision = selectionRevision
   creating.value = true
   try {
     const s = await modelApi.newSession({ title: '新对话', modelProfileId: chatProfileSelection(profiles.value, activeProfile.value) || undefined })
+    if (disposed) return
+    sessions.value = [s, ...sessions.value.filter(item => item.id !== s.id)]
+    if (revision === selectionRevision) select(s.id)
     await loadAll()
-    select(s.id)
     ElMessage.success('已新建会话')
   } catch (e) {
     /* 拦截器已提示 */
@@ -83,22 +103,20 @@ async function removeSession(s, e) {
   e?.stopPropagation()
   try {
     await ElMessageBox.confirm(
-      `删除会话「${s.title || '新对话'}」及其全部消息？<br><br><span style="color:#6b7280">· 只删这次对话的记录，笔记/资料不受影响</span>`,
+      `删除会话「${s.title || '新对话'}」及其全部消息？\n笔记和资料不受影响。`,
       '删除会话',
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消', dangerouslyUseHTMLString: true }
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
     )
   } catch {
     return
   }
   try {
     await modelApi.removeSession(s.id)
+    if (disposed) return
     ElMessage.success('已删除')
+    sessions.value = sessions.value.filter(item => item.id !== s.id)
     if (s.id === activeId.value) {
-      activeId.value = ''
-      activeProfile.value = ''
-      localStorage.removeItem('lh-agent-session')
-      // 面板还停在已删除的会话上：清掉它，避免继续往里发消息
-      window.dispatchEvent(new CustomEvent('lh-agent-switch', { detail: { id: '' } }))
+      select('')
     }
     await loadAll()
   } catch (err) {
@@ -112,13 +130,16 @@ async function setModel(profileId) {
   if (!activeId.value) {
     return
   }
+  const id = activeId.value
   try {
-    await modelApi.setSessionModel(activeId.value, profileId || '')
-    activeProfile.value = profileId || ''
-    const cur = sessions.value.find((x) => x.id === activeId.value)
+    await modelApi.setSessionModel(id, profileId || '')
+    if (disposed) return
+    if (activeId.value === id) activeProfile.value = profileId || ''
+    const cur = sessions.value.find((x) => x.id === id)
     if (cur) {
       cur.modelProfileId = profileId || null
     }
+    window.dispatchEvent(new CustomEvent('lh-agent-session-model', { detail: { id, profileId: profileId || '' } }))
     ElMessage.success(profileId ? '本会话已固定使用该模型' : '本会话已改为默认（当前生效档案）')
   } catch (e) {
     /* 拦截器已提示 */
@@ -128,10 +149,15 @@ async function setModel(profileId) {
 /** 面板回报"当前是哪条会话"，用于同步高亮（例如你在抽屉里换了会话） */
 function onCurrent(e) {
   const id = e?.detail?.id
-  if (id && id !== activeId.value) {
+  if (typeof id !== 'string') return
+  if (id !== activeId.value) {
+    selectionRevision++
+    selectionEstablished = true
     activeId.value = id
-    activeProfile.value = chatProfileSelection(profiles.value, e.detail.modelProfileId)
   }
+  if (id) localStorage.setItem('lh-agent-session', id)
+  else localStorage.removeItem('lh-agent-session')
+  activeProfile.value = chatProfileSelection(profiles.value, e.detail.modelProfileId)
 }
 
 onMounted(() => {
@@ -143,6 +169,9 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  disposed = true
+  listRequest++
+  selectionRevision++
   window.removeEventListener('lh-agent-current', onCurrent)
   window.removeEventListener(MODEL_CONFIGURATION_CHANGED_EVENT, loadAll)
   window.removeEventListener('lh-agent-sessions-changed', loadAll)
@@ -167,23 +196,32 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="side-list" v-loading="loading">
+          <!-- 失败态：给原因和重试。下面保留已加载的行，不清空 -->
+          <StateView
+            v-if="loadError && !loading"
+            state="error"
+            size="inline"
+            title="会话列表读取失败"
+            :detail="loadError"
+            action-label="重试"
+            @action="loadAll"
+          />
           <div
             v-for="s in sessions"
             :key="s.id"
             class="side-row"
             :class="{ on: s.id === activeId }"
-            @click="select(s.id)"
           >
-            <div class="row-main">
+            <button type="button" class="row-main" :aria-current="s.id === activeId ? 'true' : undefined" @click="select(s.id)">
               <span class="row-title" :title="s.title">{{ s.title || '新对话' }}</span>
               <span class="row-meta">
                 <span class="row-tag">{{ providerOf(s.modelProfileId)?.name || '默认（当前生效档案）' }}</span>
                 {{ s.events }} 条 · {{ s.updatedAt ? s.updatedAt.slice(5, 16) : '' }}
               </span>
-            </div>
-            <button type="button" class="row-del" title="删除这个会话及其全部消息" @click="removeSession(s, $event)">✕</button>
+            </button>
+            <button type="button" class="row-del" :aria-label="`删除会话 ${s.title || '新对话'}`" title="删除这个会话及其全部消息" @click="removeSession(s, $event)">✕</button>
           </div>
-          <p v-if="!sessions.length && !loading" class="hint side-empty">
+          <p v-if="!sessions.length && !loading && !loadError" class="hint side-empty">
             还没有会话 —— 点「新建」，或在右边直接问一句
           </p>
         </div>
@@ -296,7 +334,15 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
 }
+.row-main:focus-visible, .row-del:focus-visible { outline: 2px solid var(--app-brand); outline-offset: 3px; }
 .row-title {
   font-size: 12.5px;
   color: var(--app-text-1);
@@ -346,7 +392,8 @@ onBeforeUnmount(() => {
   visibility: hidden;
 }
 .side-row:hover .row-del,
-.side-row.on .row-del {
+.side-row.on .row-del,
+.side-row:focus-within .row-del {
   visibility: visible;
 }
 .row-del:hover {
@@ -406,5 +453,20 @@ onBeforeUnmount(() => {
 .chat-area :deep(.panel) {
   width: 100%;
   height: 100%;
+}
+
+@media (max-width: 760px) {
+  .agent-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: 8px; }
+  .sess-side { display: grid; grid-template-columns: 76px minmax(0, 1fr); max-height: 144px; }
+  .side-head { flex-direction: column; justify-content: center; padding: 6px; gap: 4px; border-bottom: 0; }
+  .side-list { display: flex; align-items: stretch; overflow-x: auto; overflow-y: hidden; max-height: 100px; gap: 4px; }
+  .side-row { flex: 0 0 182px; min-width: 0; box-sizing: border-box; }
+  .side-row + .side-row { margin-top: 0; }
+  .side-foot { grid-column: 1 / -1; padding: 4px 8px; }
+  .side-foot > .hint { display: none; }
+  .side-foot :deep(.el-select) { margin-top: 0 !important; }
+  .row-del { visibility: visible; }
+  .head { flex-shrink: 0; }
+  .head-sub { margin: 4px 0 10px; font-size: 12px; }
 }
 </style>

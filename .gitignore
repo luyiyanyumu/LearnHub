@@ -9,6 +9,9 @@
 backend/target/
 *.class
 *.jar
+# ===== Python 字节码（tools/ 下有 .py 辅助脚本）=====
+__pycache__/
+*.pyc
 # 注意：不能写 !backend/target/*.jar 反选构建产物 —— Git 规定「父目录被排除后，
 # 其中的文件无法再被反选」，所以这条死规则曾经误导过人。29M 的 jar 不进仓库，
 # clone 后用 mvn -DskipTests package 现场构建（见 README 快速开始）。

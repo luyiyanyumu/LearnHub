@@ -1,19 +1,24 @@
 <script setup>
-import { nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute } from 'vue-router'
 // 正文渲染不再走 md-editor（老版预览），改用笔记页那套块编辑器（tiptap）的只读模式：
 // 代码块、提示块、折叠块、表格、任务列表…与笔记里看到的是同一套渲染与同一套样式。
 import BlockPreview from '../components/BlockPreview.vue'
+import StateView from '../components/StateView.vue'
 import { categoryApi, quickRefApi } from '../api'
 import { fixHtmlQuotes } from '../utils/htmlQuotes'
 import { createSourceRouteReader } from '../utils/sourceRouteReader'
 
 const loading = ref(false)
+/** 主数据加载失败原因。失败必须与「还没有速查卡」分开表达，别把故障说成没有数据 */
+const loadError = ref('')
 const route = useRoute()
 const list = ref([])
 const categories = ref([])
 const query = ref({ categoryId: undefined, kw: '' })
+/** 空态要区分「库为空」和「筛选后没有」：两者的下一步动作不一样 */
+const hasFilter = computed(() => Boolean(query.value.categoryId || query.value.kw))
 
 const dialogVisible = ref(false)
 const saving = ref(false)
@@ -85,7 +90,15 @@ async function measureClipped() {
 }
 
 async function loadCats() {
-  const tree = await categoryApi.tree()
+  // 分类只服务于筛选下拉框，是旁路请求 —— 它失败不能拖死主数据：
+  // onMounted 里先 `await loadCats()` 再 `await load()`，这里一抛 load() 就永远不会执行，
+  // 页面会停在空态，正好又变成「故障被显示成没有数据」。
+  let tree = []
+  try {
+    tree = await categoryApi.tree()
+  } catch {
+    // 拦截器已提示过一次，这里静默降级：筛选下拉为空，但列表照常加载
+  }
   const flat = []
   ;(function walk(nodes, depth = 0) {
     for (const n of nodes || []) {
@@ -96,16 +109,27 @@ async function loadCats() {
   categories.value = flat
 }
 
+/** 请求序号：避免慢响应的旧结果/旧错误覆盖新一次加载 */
+let loadSeq = 0
+
 async function load() {
+  const seq = ++loadSeq
   loading.value = true
+  loadError.value = ''
   try {
     const params = { ...query.value }
     if (!params.categoryId) delete params.categoryId
     if (!params.kw) delete params.kw
-    list.value = await quickRefApi.list(params)
+    const data = await quickRefApi.list(params)
+    // 与 NoteList 同一套序号保护：慢响应的失败不能覆盖新一次加载的结果
+    if (seq !== loadSeq) return
+    list.value = data
     measureClipped()
+  } catch (e) {
+    if (seq !== loadSeq) return
+    loadError.value = e?.message || '请求失败'
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
 
@@ -213,7 +237,23 @@ onBeforeUnmount(() => {
     </div>
 
     <div v-loading="loading">
-      <el-empty v-if="!list.length" description="还没有速查卡，点右上角添加一张" />
+      <!-- 失败态：给原因和重试，不再和「还没有速查卡」共用一句话 -->
+      <StateView
+        v-if="loadError && !loading"
+        state="error"
+        title="速查卡加载失败"
+        :detail="loadError"
+        action-label="重试"
+        @action="load"
+      />
+      <StateView
+        v-else-if="!loading && !list.length"
+        state="empty"
+        :title="hasFilter ? '没有匹配的速查卡' : '还没有速查卡'"
+        :detail="hasFilter ? '换个关键词再试，或清空筛选条件' : '速查卡用来存常用命令和配置片段，方便随时复制'"
+        :action-label="hasFilter ? '重置筛选' : '新建第一张'"
+        @action="hasFilter ? resetFilter() : openAdd()"
+      />
       <div v-else ref="gridRef" class="ref-grid">
         <el-card
           v-for="r in list"

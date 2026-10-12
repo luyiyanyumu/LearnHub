@@ -1,11 +1,15 @@
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
+import { postChatStream } from '../utils/chatStream.js'
+import { isLinkError, markBackendDown, markBackendUp } from '../utils/connectionState.js'
 
 // 统一请求实例：/api 在开发环境由 Vite 代理到后端 8080
 const request = axios.create({ baseURL: '/api', timeout: 15000 })
 
 request.interceptors.response.use(
   (resp) => {
+    // 拿到任何 HTTP 响应就说明链路通了 —— 先解除全局降级横幅，再判断业务码
+    markBackendUp()
     // 二进制响应（文件下载）直接透传
     if (resp.data instanceof Blob) {
       return resp
@@ -20,6 +24,9 @@ request.interceptors.response.use(
   (err) => {
     const data = err.response?.data
     const msg = (data && data.msg) || err.message || '网络错误'
+    // 链路层失败（连不上/5xx）登记成全局状态：页面级失败态说"这一块没加载出来"，
+    // 横幅说"后端没连上"，两者分工不同。业务失败（4xx）不拉横幅。
+    if (isLinkError(err)) markBackendDown(err)
     if (!err.config?.silentError) ElMessage.error(msg)
     // 把后端的可读信息回填到 .message：阅读器翻译、公式识别等直接显示 err.message
     // 的面板会因此看到「翻译调用失败（档案：xxx）」而不是 axios 的英文默认文案
@@ -51,6 +58,15 @@ export const noteApi = {
   add: (data) => request.post('/notes', data),
   update: (id, data) => request.put(`/notes/${id}`, data),
   remove: (id) => request.delete(`/notes/${id}`),
+}
+
+/** Note and file folders share storage operations; each kind has its own tree. */
+export const folderApi = {
+  list: (kind) => request.get('/folders', { params: { kind } }),
+  create: (data) => request.post('/folders', data),
+  update: (id, data) => request.put(`/folders/${id}`, data),
+  remove: (id) => request.delete(`/folders/${id}`),
+  moveItems: (data) => request.post('/folders/move-items', data),
 }
 
 export const quickRefApi = {
@@ -222,7 +238,8 @@ export const aiApi = {
   /** 分节融入第二步：只改写那一节（SSE；返回 {content, heading, mode}） */
   mergeSectionStream: (data, onEvent, signal) => mergeSectionStream(data, onEvent, signal),
   /** 智能体对话：{ message, sessionId, history?, noteId?, noteTitle?, noteContext? } → AiChatVO（最多 8 轮工具调用，耗时叠加） */
-  chat: (data) => request.post('/ai/chat', data, { timeout: AI_TIMEOUT }),
+  chat: (data, signal) => request.post('/ai/chat', data, { timeout: AI_TIMEOUT, signal, silentError: true }),
+  chatStream: (data, onEvent, signal) => postChatStream('/api/ai/chat-stream', data, onEvent, signal),
   /** 会话回看：把事件日志投影成气泡列表（刷新页面后靠它恢复对话） */
   session: (id) => request.get(`/ai/sessions/${id}`),
   /** 清空一个会话（含其事件） */
@@ -292,6 +309,8 @@ export const modelApi = {
  * 三种检索模式对应三类问题：symbol=在哪定义（精确）、keyword=我写过什么（模糊）、all=默认合并。
  */
 export const codeApi = {
+  /** 多轮自然语言检索；页面持有取消信号与错误状态，避免过期请求弹出提示。 */
+  agenticSearch: (data, signal) => request.post('/code/agentic-search', data, { timeout: AI_TIMEOUT, signal, silentError: true }),
   stats: () => request.get('/code/stats'),
   repos: () => request.get('/code/repos'),
   saveRepo: (id, data) => (id ? request.put(`/code/repos/${id}`, data) : request.post('/code/repos', data)),
@@ -382,10 +401,12 @@ export const fileApi = {
    * 上千份资料就是几千个单元格 DOM。
    */
   page: (params) => request.get('/files/page', { params }),
-  upload: (file, categoryId) => {
+  upload: (file, categoryId, folderId) => {
     const fd = new FormData()
     fd.append('file', file)
     if (categoryId) fd.append('categoryId', categoryId)
+    const target = typeof folderId === 'number' || typeof folderId === 'string' && /^\d+$/.test(folderId.trim()) ? Number(folderId) : null
+    if (Number.isSafeInteger(target) && target > 0) fd.append('folderId', String(target))
     return request.post('/files/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
   },
   /** 抽取出来的正文（阅读器用；**不含在 detail 里**，因为正文动辄十几万字） */
