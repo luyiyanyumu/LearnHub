@@ -5,6 +5,7 @@ import { EditorState, Compartment, Transaction } from '@codemirror/state'
 import { EditorView, keymap, lineNumbers } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { bracketMatching, syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language'
+import { ArrowDown, ArrowUp, Check, DocumentCopy, Edit, FullScreen, Share, View } from '@element-plus/icons-vue'
 import MermaidPreview from './MermaidPreview.vue'
 import { codeBlockChange, codeBlockDocument } from '../utils/codeBlockViewState.js'
 import { createCodeBlockViewport } from '../utils/codeBlockViewport.js'
@@ -13,6 +14,7 @@ const props = defineProps(nodeViewProps)
 const host = ref(null)
 const view = shallowRef(null)
 const languageSelect = ref(null)
+const diagramPreview = ref(null)
 const controlsMounted = ref(false)
 const languageOptionsMounted = ref(false)
 const previewActive = ref(true)
@@ -71,10 +73,12 @@ function changeLang(language) {
   props.updateAttributes({ language })
 }
 
-async function toggleMermaidMode() {
-  mermaidMode.value = mermaidMode.value === 'preview' ? 'source' : 'preview'
+async function setMermaidMode(mode) {
+  mermaidMode.value = mode
+  collapsed.value = false
   if (showSource.value && !collapsed.value) {
     await nextTick()
+    if (disposed || !previewActive.value || props.editor.isDestroyed) return
     viewport?.request()
     view.value?.requestMeasure()
     if (!readonly) view.value?.focus()
@@ -188,8 +192,22 @@ onBeforeUnmount(() => { disposed = true; viewport?.dispose(); languageVersion++;
 </script>
 
 <template>
-  <NodeViewWrapper class="code-block-cm" :class="{ 'is-selected': selected }" :data-line="node.attrs.dataLine || null">
+  <NodeViewWrapper class="code-block-cm" :class="{ 'is-selected': selected, 'is-diagram': isMermaid }" :data-line="node.attrs.dataLine || null">
     <div class="cm-head" contenteditable="false" @mousedown.stop @click.stop @keydown.stop>
+      <template v-if="isMermaid">
+        <div class="diagram-heading"><el-icon class="diagram-heading-icon"><Share /></el-icon><span>流程图</span><span class="diagram-format">Mermaid</span></div>
+        <div class="diagram-modes" role="group" aria-label="流程图显示模式">
+          <el-button class="diagram-mode" :class="{ 'is-active': mermaidMode === 'preview' }" :icon="View" :aria-pressed="mermaidMode === 'preview'" @click="setMermaidMode('preview')">预览</el-button>
+          <el-button class="diagram-mode" :class="{ 'is-active': mermaidMode === 'source' }" :icon="Edit" :aria-pressed="mermaidMode === 'source'" @click="setMermaidMode('source')">源码</el-button>
+        </div>
+        <div class="diagram-actions">
+          <el-button class="diagram-action diagram-enlarge" text :icon="FullScreen" title="查看大图" aria-label="查看流程图大图" :disabled="collapsed || showSource" @click="diagramPreview?.openViewer()"><span>查看大图</span></el-button>
+          <el-button class="diagram-action" text :icon="copied ? Check : DocumentCopy" :title="copied ? '已复制' : '复制源码'" :aria-label="copied ? '已复制流程图源码' : '复制流程图源码'" @click="copyCode" />
+          <el-button class="diagram-action" text :icon="collapsed ? ArrowDown : ArrowUp" :title="collapsed ? '展开' : '折叠'" :aria-label="collapsed ? '展开流程图' : '折叠流程图'" :aria-expanded="!collapsed" @click="collapsed = !collapsed" />
+          <span class="sr-only" role="status">{{ copied ? '流程图源码已复制' : '' }}</span>
+        </div>
+      </template>
+      <template v-else>
       <el-select v-if="!readonly && controlsMounted" ref="languageSelect" class="cm-lang" size="small" :model-value="node.attrs.language || 'plaintext'"
         aria-label="代码语言" filterable @change="changeLang" @visible-change="open => { if (open) languageOptionsMounted = true }">
         <template v-if="languageOptionsMounted"><el-option v-for="language in languageOptions" :key="language" :label="language" :value="language" /></template>
@@ -201,13 +219,17 @@ onBeforeUnmount(() => { disposed = true; viewport?.dispose(); languageVersion++;
       <!-- 只读时语言是静态标签：没有语言就不显示（跟下拉没选中时的空白一致） -->
       <span v-else-if="node.attrs.language" class="cm-lang-text">{{ node.attrs.language }}</span>
       <span class="cm-head-spacer" />
-      <el-button v-if="isMermaid" class="cm-btn" text size="small" :aria-pressed="mermaidMode === 'source'" @click="toggleMermaidMode">
-        {{ mermaidMode === 'preview' ? (readonly ? '查看源码' : '编辑源码') : '预览图' }}
-      </el-button>
       <el-button class="cm-btn" text size="small" @click="copyCode">{{ copied ? '已复制' : '复制代码' }}</el-button>
       <el-button class="cm-btn" text size="small" :aria-expanded="!collapsed" @click="collapsed = !collapsed">{{ collapsed ? '展开' : '折叠' }}</el-button>
+      </template>
     </div>
-    <MermaidPreview v-if="isMermaid" v-show="!collapsed && !showSource" :source="node.attrs.code || ''" :active="previewActive && !collapsed && !showSource" />
+    <MermaidPreview v-if="isMermaid" ref="diagramPreview" v-show="!collapsed && !showSource" :source="node.attrs.code || ''" :active="previewActive && !collapsed && !showSource" />
+    <div v-if="isMermaid" v-show="!collapsed && showSource" class="diagram-source-meta" contenteditable="false">
+      <span>{{ readonly ? '查看源码' : '编辑源码后，切换预览查看效果' }}</span>
+      <el-select v-if="!readonly && controlsMounted" ref="languageSelect" class="cm-lang" size="small" :model-value="node.attrs.language" aria-label="代码语言" filterable @change="changeLang" @visible-change="open => { if (open) languageOptionsMounted = true }">
+        <template v-if="languageOptionsMounted"><el-option v-for="language in languageOptions" :key="language" :label="language" :value="language" /></template>
+      </el-select>
+    </div>
     <div v-show="!collapsed && showSource" ref="host" class="code-block-cm-host">
       <pre v-if="!view" class="cm-source-placeholder" contenteditable="false" :tabindex="readonly ? undefined : 0" :aria-label="readonly ? '代码' : '编辑代码'"
         @mousedown.stop="activateSource" @focus="activateSource"><template v-for="(line, index) in sourceLines" :key="index"><span class="cm-placeholder-number" aria-hidden="true" :data-line-number="index + 1" /><code class="cm-placeholder-line">{{ line + (index < sourceLines.length - 1 ? '\n' : '') }}</code></template></pre>
@@ -218,6 +240,33 @@ onBeforeUnmount(() => { disposed = true; viewport?.dispose(); languageVersion++;
 <style scoped>
 .code-block-cm { border: 1px solid var(--app-border-weak); border-radius: 10px; background: var(--app-card); margin: 1em 0; overflow: hidden; }
 .code-block-cm.is-selected { border-color: var(--app-brand); }
+.code-block-cm.is-diagram { border-radius: var(--radius-lg, 12px); border-color: var(--app-border); box-shadow: var(--shadow-sm); }
+.code-block-cm.is-diagram.is-selected { border-color: var(--app-brand); }
+.is-diagram .cm-head { gap: 12px; min-height: 56px; box-sizing: border-box; padding: 10px 16px; background: color-mix(in srgb, var(--app-bg) 50%, var(--app-card)); }
+.diagram-heading { display: flex; align-items: center; gap: 8px; color: var(--app-text-1); font: 600 14px/1.5 var(--font-sans, system-ui, sans-serif); white-space: nowrap; }
+.diagram-heading-icon { box-sizing: content-box; width: 16px; height: 16px; padding: 8px; border-radius: var(--radius, 8px); background: var(--app-brand-soft); color: var(--app-brand-deep); }
+.diagram-format { padding: 2px 6px; border: 1px solid var(--app-border); border-radius: 4px; font: 11px/1.4 ui-monospace, monospace; color: var(--app-text-2); }
+.diagram-modes { display: flex; margin-left: auto; gap: 2px; padding: 3px; border: 1px solid var(--app-border); border-radius: var(--radius, 8px); background: var(--app-card); }
+.diagram-mode.el-button { margin: 0; height: 28px; padding: 0 10px; border: 0; border-radius: 5px; background: transparent; color: var(--app-text-2); font-size: 12px; }
+.diagram-mode.el-button.is-active { background: var(--app-brand-soft); color: var(--app-brand-deep); font-weight: 600; }
+.diagram-actions { display: flex; align-items: center; gap: 4px; }
+.diagram-action.el-button { height: 32px; min-width: 32px; padding: 8px; margin: 0; color: var(--app-text-2); font-size: 14px; }
+.diagram-enlarge.el-button { font-size: 12px; }
+.diagram-action.el-button:not(:disabled):hover { background: var(--app-brand-soft); color: var(--app-brand-deep); }
+.diagram-mode.el-button:focus-visible, .diagram-action.el-button:focus-visible { outline: 2px solid var(--app-brand); outline-offset: 2px; }
+.diagram-source-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 16px; border-bottom: 1px solid var(--app-border-weak); background: var(--app-code-bg); color: var(--app-text-2); font: 12px/1.5 var(--font-sans, system-ui, sans-serif); }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+@media (max-width: 600px) {
+  .is-diagram .cm-head { gap: 8px; padding: 10px; }
+  .diagram-format { display: none; }
+  .diagram-modes { margin-left: auto; }
+  .diagram-actions { margin-left: auto; }
+  .diagram-source-meta { padding: 8px 10px; }
+}
+@media (max-width: 360px) {
+  .diagram-heading-icon { display: none; }
+  .diagram-mode.el-button { padding: 0 8px; }
+}
 .cm-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; padding: 4px 10px; border-bottom: 1px solid var(--app-border-weak); }
 .cm-lang { width: 126px; min-width: 0; font: 12px/1 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .cm-lang :deep(.el-select__wrapper) { min-height: 28px; background: transparent; }

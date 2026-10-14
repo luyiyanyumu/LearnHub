@@ -53,6 +53,15 @@ public interface Reranker {
      */
     List<String> rerank(String question, List<Item> items);
 
+    /** Request-local execution result; no mutable singleton "last outcome" is used. */
+    record Result(List<String> order, String status, String reason) {
+        public Result { order = List.copyOf(order); }
+    }
+    default Result rerankDetailed(String question, List<Item> items,
+                                  org.dyh.learnhub.service.KnowledgeBaseSettings.Config config) {
+        return new Result(rerank(question, items), "completed", "");
+    }
+
     /** 状态（进 /api/kb/rerank，界面要看"当前用哪个后端"） */
     Map<String, Object> status();
 

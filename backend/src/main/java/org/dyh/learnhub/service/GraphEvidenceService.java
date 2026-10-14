@@ -15,6 +15,7 @@ import org.dyh.learnhub.entity.KgNode;
 import org.dyh.learnhub.mapper.GraphEvidenceSourceMapper;
 import org.dyh.learnhub.mapper.KgCommunityMapper;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -52,8 +53,20 @@ public class GraphEvidenceService {
     private final KgGraphService graphService;
     private final KgCommunityMapper communityMapper;
     private final GraphEvidenceSourceMapper sourceMapper;
+    private KnowledgeBaseSettings knowledgeSettings;
+
+    @Autowired(required = false)
+    public void setKnowledgeSettings(KnowledgeBaseSettings settings) { this.knowledgeSettings = settings; }
+
+    private KnowledgeBaseSettings.Config config() {
+        return knowledgeSettings == null ? KnowledgeBaseSettings.defaults() : knowledgeSettings.snapshot();
+    }
 
     public List<RetrievalHit> search(String question, int limit) {
+        return search(question, limit, config());
+    }
+
+    public List<RetrievalHit> search(String question, int limit, KnowledgeBaseSettings.Config cfg) {
         if (question == null || question.isBlank() || limit <= 0) return List.of();
         int take = Math.min(limit, MAX_HITS);
         Set<String> seeds = new LinkedHashSet<>();
@@ -78,7 +91,7 @@ public class GraphEvidenceService {
                 if (doc == null) continue;
                 int evidenceAt = doc.normalized().text().indexOf(relation.evidence());
                 if (evidenceAt < 0) continue;
-                List<CurrentChunk> indexed = chunks.computeIfAbsent(ref, key -> currentChunks(doc));
+                List<CurrentChunk> indexed = chunks.computeIfAbsent(ref, key -> currentChunks(doc, cfg.chunkOptions()));
                 boolean found = false;
                 for (CurrentChunk chunk : indexed) {
                     if (!chunk.normalized().contains(relation.evidence())) continue;
@@ -96,8 +109,8 @@ public class GraphEvidenceService {
     }
 
     /** 与关键词及向量索引使用同一正文分块器；无需向量索引也能生成相同块序号。 */
-    private static List<CurrentChunk> currentChunks(Document document) {
-        List<TextChunker.Chunk> pieces = TextChunker.splitWithHeadings(document.content());
+    private static List<CurrentChunk> currentChunks(Document document, TextChunker.Options options) {
+        List<TextChunker.Chunk> pieces = TextChunker.splitWithHeadings(document.content(), options);
         Normalized literal = literal(document.content());
         Map<String, String> located = new LinkedHashMap<>();
         List<CurrentChunk> out = new ArrayList<>();

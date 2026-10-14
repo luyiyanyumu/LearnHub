@@ -163,6 +163,14 @@ test('MdPreview frame scales to actual narrow and wide containers instead of a f
   }
 })
 
+test('zoomable viewports fit the full SVG without intrinsic width limits or inner scrolling', () => {
+  const svg = '<svg style="max-width:200px" viewBox="0 0 200 1200"></svg>'
+  const document = mermaidFrameDocument(svg, { padding: 0, fit: true })
+  assert.match(document, /html,body\{height:100%;overflow:hidden\}/)
+  assert.match(document, /svg\{width:100%;height:100%;max-width:none!important\}/)
+  assert.match(document, /default-src 'none'/)
+})
+
 test('sandbox document defines an opaque theme canvas and only accepts safe hex colors', () => {
   const svg = '<svg viewBox="0 0 120 90"></svg>'
   const dark = mermaidFrameDocument(svg, { dark: true, background: '#182221', padding: 0 })

@@ -322,6 +322,19 @@ class WikiRetrievalServiceTest {
     }
 
     @Test
+    void configuredSplitterKeepsWikiSourceKeysAlignedWithCurrentRetrieval() {
+        String content = "合成前言只描述其他主题。".repeat(150) + "\n\n# 核心\nReAct loops with tools and observations.";
+        when(sources.currentSources("note", List.of(1L))).thenReturn(List.of(raw(1, "Source", content)));
+        KnowledgeBaseSettings.Config cfg = KnowledgeBaseSettings.validatePatch(KnowledgeBaseSettings.defaults(),
+                Map.of("chunkTarget", 160, "chunkOverlap", 20, "chunkMax", 220));
+        RetrievalHit hit = service.sourcePassages("ReAct", List.of(section("ReAct", List.of("note:1"))), 10, cfg).getFirst();
+        List<TextChunker.Chunk> current = TextChunker.splitWithHeadings(content, cfg.chunkOptions());
+        assertEquals(current.get(hit.seq()).text(), hit.text());
+        assertEquals(current.size() - 1, hit.seq());
+        assertNotEquals(TextChunker.splitWithHeadings(content).size() - 1, hit.seq());
+    }
+
+    @Test
     void wikiAliasQueryCanLocateCanonicalPageTitleInCurrentSourceWithoutAHeadingMatch() {
         WikiRetrievalService.Section section = new WikiRetrievalService.Section(1L, "entity-react", "ReAct", "section-1",
                 "定义", "Reasoning and Acting 的模型生成导览", List.of("note:1"), List.of(), 1);

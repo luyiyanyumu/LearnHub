@@ -133,6 +133,7 @@ public class SettingsController {
         m.put("autoRecompile", SettingsService.KEY_AUTO_RECOMPILE);
         // 当前激活的模型档案（模型配置已改为"档案列表"，各任务指向档案 id）
         m.put("activeProfile", "ai.active_profile");
+        m.putAll(org.dyh.learnhub.service.KnowledgeBaseSettings.fieldMapping());
 
         // ---- 模型分工字段：从任务清单派生（见类注释）----
         for (String task : ModelRouting.allTasks()) {
@@ -172,7 +173,8 @@ public class SettingsController {
             }
             translated.put(key, e.getValue());
         }
-        settingsService.updateAll(translated);
+        try { settingsService.updateAll(translated); }
+        catch (IllegalArgumentException invalid) { return Result.error(400, invalid.getMessage()); }
         return Result.ok(settingsService.snapshot());
     }
 }

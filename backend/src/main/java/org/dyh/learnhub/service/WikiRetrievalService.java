@@ -11,6 +11,7 @@ import org.dyh.learnhub.entity.WikiPage;
 import org.dyh.learnhub.mapper.GraphEvidenceSourceMapper;
 import org.dyh.learnhub.mapper.WikiPageMapper;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import java.util.*;
 import java.util.regex.Matcher;
@@ -21,6 +22,14 @@ import java.util.regex.Pattern;
 @Slf4j
 @RequiredArgsConstructor
 public class WikiRetrievalService {
+    private KnowledgeBaseSettings knowledgeSettings;
+
+    @Autowired(required = false)
+    public void setKnowledgeSettings(KnowledgeBaseSettings settings) { this.knowledgeSettings = settings; }
+
+    private KnowledgeBaseSettings.Config config() {
+        return knowledgeSettings == null ? KnowledgeBaseSettings.defaults() : knowledgeSettings.snapshot();
+    }
     private static final Set<String> TYPES = Set.of("category", "tag", "entity");
     private static final int MAX_HITS = 24;
     private static final int MAX_SOURCES = 24;
@@ -189,6 +198,11 @@ public class WikiRetrievalService {
 
     /** Resolve page citations to current raw passages; wiki text never becomes raw evidence. */
     public List<RetrievalHit> sourcePassages(String question, List<Section> sections, int limit) {
+        return sourcePassages(question, sections, limit, config());
+    }
+
+    public List<RetrievalHit> sourcePassages(String question, List<Section> sections, int limit,
+                                             KnowledgeBaseSettings.Config cfg) {
         if (question == null || question.isBlank() || sections == null || sections.isEmpty() || limit <= 0) return List.of();
         Map<String, Set<String>> headings = new LinkedHashMap<>();
         Map<String, Set<String>> titles = new LinkedHashMap<>();
@@ -223,7 +237,7 @@ public class WikiRetrievalService {
                 List<String> headingTerms = queryTerms(String.join(" ", headings.get(ref)));
                 Set<String> sourceSubjects = new LinkedHashSet<>(subjectTerms(queryTerms));
                 for (String title : titles.get(ref)) sourceSubjects.addAll(subjectTerms(queryTerms(title)));
-                List<TextChunker.Chunk> chunks = TextChunker.splitWithHeadings(value(row.get("content")));
+                List<TextChunker.Chunk> chunks = TextChunker.splitWithHeadings(value(row.get("content")), cfg.chunkOptions());
                 List<RetrievalHit> ranked = new ArrayList<>();
                 for (int seq = 0; seq < chunks.size(); seq++) {
                     TextChunker.Chunk chunk = chunks.get(seq);

@@ -48,6 +48,12 @@ public class RerankService {
     private final LlmListwiseReranker llm;
     private final CrossEncoderReranker cross;
     private final SettingsService settingsService;
+    private KnowledgeBaseSettings knowledgeSettings;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setKnowledgeSettings(KnowledgeBaseSettings settings) { this.knowledgeSettings = settings; }
+    private KnowledgeBaseSettings.Config config() {
+        return knowledgeSettings == null ? new KnowledgeBaseSettings(settingsService).snapshot() : knowledgeSettings.snapshot();
+    }
 
     public RerankService(LlmListwiseReranker llm, CrossEncoderReranker cross, SettingsService settingsService) {
         this.llm = llm;
@@ -57,6 +63,10 @@ public class RerankService {
 
     /** 一条待重排候选（保持原有类型名，调用方无需改动） */
     public record Item(String key, String title, String snippet) {
+    }
+
+    public record Outcome(List<String> order, String backend, String status, String reason) {
+        public Outcome { order = List.copyOf(order); }
     }
 
     public boolean enabled() {
@@ -87,30 +97,48 @@ public class RerankService {
      * @return 重排后的 key 顺序；未启用 / 候选太少 / 全部失败时返回**原顺序**（调用方无需分支）
      */
     public List<String> rerank(String question, List<Item> items) {
+        return rerankWithOutcome(question, items).order();
+    }
+
+    public Outcome rerankWithOutcome(String question, List<Item> items) {
+        return rerankWithOutcome(question, items, config());
+    }
+
+    public Outcome rerankWithOutcome(String question, List<Item> items, KnowledgeBaseSettings.Config cfg) {
         if (items == null) {
-            return List.of();
+            return new Outcome(List.of(), "", "skipped", "没有待重排候选");
         }
         List<String> original = items.stream().map(Item::key).toList();
-        if (!enabled() || items.size() <= 2) {
-            return original;
+        if (!cfg.rerankEnabled() || items.size() <= 2) {
+            return new Outcome(original, cfg.rerankBackend(), "skipped",
+                    !cfg.rerankEnabled() ? "重排已关闭" : "候选不超过两项，保留原序");
         }
         List<Reranker.Item> converted = items.stream()
                 .map(i -> new Reranker.Item(i.key(), i.title(), i.snippet()))
                 .toList();
-        Reranker first = active();
+        Reranker first = "cross".equals(cfg.rerankBackend()) && cross.available() ? cross : llm;
         Reranker second = first == cross ? llm : cross;
         try {
-            return first.rerank(question, converted);
+            Reranker.Result result = first.rerankDetailed(question, converted, cfg);
+            // Constructor-based mocks and legacy external implementations may not provide a detailed result.
+            if (result == null) result = new Reranker.Result(first.rerank(question, converted), "completed", "");
+            boolean backendFallback = "cross".equals(cfg.rerankBackend()) && first == llm;
+            return new Outcome(result.order(), first.name(), backendFallback && "completed".equals(result.status())
+                    ? "degraded" : result.status(), backendFallback
+                    ? "Cross-Encoder 不可用，已改用对话模型；" + result.reason() : result.reason());
         } catch (Exception e) {
             log.warn("重排后端 {} 失败，改用 {}：{}", first.name(), second.name(), e.toString());
             if (!second.available()) {
-                return original;
+                return new Outcome(original, first.name(), "fallback", "重排后端不可用，保留召回原序");
             }
             try {
-                return second.rerank(question, converted);
+                Reranker.Result result = second.rerankDetailed(question, converted, cfg);
+                if (result == null) result = new Reranker.Result(second.rerank(question, converted), "completed", "");
+                return new Outcome(result.order(), second.name(), "fallback".equals(result.status()) ? "fallback" : "degraded",
+                        "首选重排后端失败，已尝试备用后端；" + result.reason());
             } catch (Exception e2) {
                 log.warn("重排后端 {} 也失败，本轮保持原顺序：{}", second.name(), e2.toString());
-                return original;
+                return new Outcome(original, second.name(), "fallback", "两个重排后端均不可用，保留召回原序");
             }
         }
     }

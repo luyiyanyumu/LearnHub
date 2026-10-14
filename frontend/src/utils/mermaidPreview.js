@@ -27,6 +27,7 @@ export function mermaidConfig(theme = {}) {
     secure: ['secure', 'securityLevel', 'startOnLoad', 'suppressErrorRendering', 'maxTextSize', 'maxEdges',
       'htmlLabels', 'theme', 'themeVariables', 'themeCSS', 'dompurifyConfig', 'fontFamily'],
     themeVariables: {
+      fontSize: '14px',
       darkMode: Boolean(theme.dark),
       background: theme.background || '#ffffff',
       primaryColor: theme.primary || '#e2f5f1',
@@ -40,7 +41,7 @@ export function mermaidConfig(theme = {}) {
       edgeLabelBackground: theme.background || '#ffffff',
       textColor: theme.text || '#1f2d2a',
     },
-    flowchart: { useMaxWidth: true },
+    flowchart: { useMaxWidth: true, nodeSpacing: 32, rankSpacing: 36, padding: 14, curve: 'basis' },
     sequence: { useMaxWidth: true },
   }
 }
@@ -172,13 +173,15 @@ export function mermaidSvgSize(svg) {
 }
 
 /** SVG styles and diagram labels stay inside an opaque, script-free document. */
-export function mermaidFrameDocument(svg, { padding = 8, dark = false, background } = {}) {
+export function mermaidFrameDocument(svg, { padding = 8, dark = false, background, fit = false } = {}) {
   const safePadding = Number.isFinite(padding) ? Math.max(0, Math.min(24, padding)) : 8
   // An opaque document background avoids the sandbox's default white canvas.
   // Keep only opaque hex colors; never interpolate arbitrary CSS tokens here.
   const color = typeof background === 'string' ? background.trim() : ''
   const safeBackground = /^#(?:[\da-f]{3}|[\da-f]{6})$/i.test(color) ? color : dark ? '#182221' : '#ffffff'
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; font-src 'none'; base-uri 'none'; form-action 'none'"><style>html,body{margin:0;color-scheme:${dark ? 'dark' : 'light'};background:${safeBackground}}body{padding:${safePadding}px;box-sizing:border-box}svg{display:block;max-width:100%;height:auto;margin:0 auto}</style></head><body>${svg}</body></html>`
+  // The surrounding viewport owns scrolling; its SVG must fit both dimensions.
+  const viewportCss = fit ? 'html,body{height:100%;overflow:hidden}svg{width:100%;height:100%;max-width:none!important}' : ''
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; font-src 'none'; base-uri 'none'; form-action 'none'"><style>html,body{margin:0;color-scheme:${dark ? 'dark' : 'light'};background:${safeBackground}}body{padding:${safePadding}px;box-sizing:border-box}svg{display:block;max-width:100%;height:auto;margin:0 auto}${viewportCss}</style></head><body>${svg}</body></html>`
 }
 
 export function mermaidFrameHtml(svg) {

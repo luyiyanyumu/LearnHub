@@ -583,22 +583,28 @@ html.dark .md-editor-preview.md-editor-preview mark {
   border-radius: 10px;
 }
 
-/* 行内代码：品牌深色当签名，块内不换行溢出 */
+/* 代码字体；块级代码的字号与表面样式由各自渲染器处理。 */
 .md-editor-preview.md-editor-preview code {
   font-family: ui-monospace, 'Cascadia Code', Consolas, 'Courier New', monospace;
   font-size: 0.875em;
   font-variant-ligatures: none;
 }
 
-.md-editor-preview.md-editor-preview code:not(.md-editor-code-block) {
+/* 笔记编辑与 Markdown 预览共用行内代码样式，长标识符随正文换行。 */
+.block-preview .tiptap code:not(pre code),
+.md-editor-preview.md-editor-preview code:not(pre code):not(.md-editor-code-block) {
+  font-family: ui-monospace, 'Cascadia Code', Consolas, 'Courier New', monospace;
+  font-size: 0.9em;
+  font-weight: 500;
+  font-variant-ligatures: none;
   padding: 0.14em 0.45em;
-  border-radius: 5px;
+  border-radius: var(--radius);
   background: var(--app-code-bg);
   color: var(--app-brand-deep);
-}
-
-html.dark .md-editor-preview.md-editor-preview code:not(.md-editor-code-block) {
-  color: var(--app-brand-deep);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
 }
 
 .md-editor-preview.md-editor-preview kbd {

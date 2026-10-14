@@ -5,6 +5,7 @@ import { parse, compileScript } from '@vue/compiler-sfc'
 import * as vue from 'vue'
 import { isDark, setThemeMode } from '../composables/useTheme.js'
 import { createMermaidAdapter, createMermaidPreviewState, mermaidFrameDocument, mermaidFrameHtml, mermaidSvgSize, readMermaidTheme } from './mermaidPreview.js'
+import { mermaidReadableSize, mermaidViewportSize } from './mermaidViewport.js'
 
 // Compile the actual component setup, replacing only DOM lifecycle and renderer.
 // Its watchers/generation state and the actual useTheme ordering run unchanged.
@@ -17,7 +18,7 @@ function previewHarness(render) {
   const bindings = { computed: vue.computed, nextTick: vue.nextTick, reactive: vue.reactive, ref: vue.ref, watch: vue.watch,
     isDark, onMounted: callback => mounted.push(callback), onBeforeUnmount: callback => unmounted.push(callback),
     createMermaidPreviewState: options => createMermaidPreviewState({ ...options, render }),
-    mermaidFrameDocument, mermaidSvgSize, readMermaidTheme }
+    mermaidFrameDocument, mermaidSvgSize, readMermaidTheme, mermaidViewportSize, mermaidReadableSize }
   const component = new Function(...Object.keys(bindings), script)(...Object.values(bindings))
   const scope = vue.effectScope()
   const props = vue.reactive({ source: 'flowchart TD\nA-->B', active: true })
@@ -101,16 +102,88 @@ test('rapid theme switches render only final tokens and inactive previews stay i
   } finally { harness.dispose() }
 }))
 
-test('actual block preview computes enough iframe height for wide and narrow diagram widths', () => withThemeDom(async () => {
+test('actual block preview fits the whole diagram within both width and height without cropping', () => withThemeDom(async () => {
   const harness = previewHarness(async () => '<svg viewBox="0 0 1200 900"></svg>')
   try {
     await vue.nextTick()
+    harness.setup.fit()
     for (const availableWidth of [280, 390, 800, 1440]) {
       harness.setup.width.value = availableWidth
-      const diagramHeight = Math.min(availableWidth - 16, 1200) / 1200 * 900
-      assert.ok(harness.setup.frameHeight.value >= diagramHeight + 16)
-      assert.ok(harness.setup.frameHeight.value < diagramHeight + 26)
+      const expected = mermaidViewportSize({ width: 1200, height: 900 }, availableWidth - 48)
+      assert.equal(harness.setup.frameHeight.value, expected.height)
+      assert.equal(harness.setup.frameSize.value.width, expected.width)
+      assert.ok(harness.setup.frameHeight.value <= 440)
+      assert.match(harness.setup.frameDocument.value, /body\{padding:0px/)
     }
+  } finally { harness.dispose() }
+}))
+
+test('long diagrams remain readable and scroll until the user explicitly requests an overview', () => withThemeDom(async () => {
+  const harness = previewHarness(async () => '<svg viewBox="0 0 160 2400"></svg>')
+  try {
+    await vue.nextTick()
+    assert.equal(harness.setup.inlineOverview.value, false)
+    assert.ok(harness.setup.frameHeight.value >= 1800)
+    assert.equal(harness.setup.needsScroll.value, true)
+    harness.setup.fit()
+    assert.ok(Math.abs(harness.setup.frameHeight.value - 440) < 0.001)
+    assert.equal(harness.setup.needsScroll.value, false)
+  } finally { harness.dispose() }
+}))
+
+test('zoom and viewer controls never change the source, and an inactive note closes its viewer', () => withThemeDom(async () => {
+  const harness = previewHarness(async () => '<svg viewBox="0 0 300 600"></svg>')
+  try {
+    await vue.nextTick()
+    const source = harness.props.source
+    for (let i = 0; i < 10; i++) harness.setup.zoomBy(0.25)
+    assert.equal(harness.setup.zoom.value, 2)
+    for (let i = 0; i < 10; i++) harness.setup.zoomBy(-0.25)
+    assert.equal(harness.setup.zoom.value, 0.5)
+    harness.setup.fit()
+    assert.equal(harness.setup.zoom.value, 1)
+    harness.setup.openViewer()
+    assert.equal(harness.setup.viewerOpen.value, true)
+    assert.equal(harness.setup.viewerNatural.value, true)
+    harness.setup.viewerWidth.value = 200
+    assert.equal(harness.setup.viewerSize.value.width, 300)
+    harness.setup.zoomBy(0.25, true)
+    assert.equal(harness.setup.viewerZoom.value, 1.25)
+    assert.equal(harness.setup.zoom.value, 1)
+    harness.setup.fit(true)
+    assert.equal(harness.setup.viewerNatural.value, false)
+    assert.ok(harness.setup.viewerSize.value.width <= 152)
+    harness.setup.naturalSize()
+    assert.equal(harness.setup.viewerNatural.value, true)
+    assert.equal(harness.props.source, source)
+    harness.props.active = false
+    await vue.nextTick()
+    assert.equal(harness.setup.viewerOpen.value, false)
+    harness.setup.openViewer()
+    assert.equal(harness.setup.viewerOpen.value, false)
+  } finally { harness.dispose() }
+}))
+
+test('canvas keyboard zoom handles local view keys while leaving editor shortcuts alone', () => withThemeDom(async () => {
+  const harness = previewHarness(async () => '<svg viewBox="0 0 300 600"></svg>')
+  try {
+    await vue.nextTick()
+    let prevented = 0
+    const key = (name, options = {}) => harness.setup.onCanvasKeydown({ key: name, preventDefault() { prevented++ }, stopPropagation() {}, ...options })
+    key('+')
+    assert.equal(harness.setup.zoom.value, 1.25)
+    key('-', { ctrlKey: true })
+    assert.equal(harness.setup.zoom.value, 1.25)
+    key('0')
+    assert.equal(harness.setup.zoom.value, 1)
+    key('Enter')
+    assert.equal(harness.setup.viewerOpen.value, true)
+    assert.equal(prevented, 3)
+    const scrolls = []
+    key('PageDown', { currentTarget: { clientHeight: 440, scrollBy(...args) { scrolls.push(args) } } })
+    key('End', { currentTarget: { scrollWidth: 900, scrollHeight: 2400, scrollTo(...args) { scrolls.push(args) } } })
+    assert.deepEqual(scrolls, [[0, 440], [900, 2400]])
+    assert.equal(prevented, 5)
   } finally { harness.dispose() }
 }))
 

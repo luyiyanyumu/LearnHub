@@ -62,6 +62,9 @@ public class CrossEncoderReranker implements Reranker {
 
     private final SettingsService settingsService;
     private final ObjectMapper json;
+    private org.dyh.learnhub.service.KnowledgeBaseSettings knowledgeSettings;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setKnowledgeSettings(org.dyh.learnhub.service.KnowledgeBaseSettings settings) { this.knowledgeSettings = settings; }
 
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(2))
@@ -105,8 +108,16 @@ public class CrossEncoderReranker implements Reranker {
 
     @Override
     public List<String> rerank(String question, List<Item> items) {
+        var cfg = knowledgeSettings == null ? new org.dyh.learnhub.service.KnowledgeBaseSettings(settingsService).snapshot()
+                : knowledgeSettings.snapshot();
+        return rerankDetailed(question, items, cfg).order();
+    }
+
+    @Override
+    public Result rerankDetailed(String question, List<Item> items,
+                                 org.dyh.learnhub.service.KnowledgeBaseSettings.Config cfg) {
         if (items == null || items.isEmpty()) {
-            return List.of();
+            return new Result(List.of(), "skipped", "没有待重排候选");
         }
         ObjectNode body = JsonNodeFactory.instance.objectNode();
         body.put("query", question == null ? "" : question);
@@ -114,14 +125,12 @@ public class CrossEncoderReranker implements Reranker {
         for (Item it : items) {
             // Both backends preserve the section label and a question-centered source
             // excerpt within the same configured character budget.
-            String snip = QueryAwareExcerpt.rerankExcerpt(question, it.snippet(), snippetLimit());
+            String snip = QueryAwareExcerpt.rerankExcerpt(question, it.snippet(), cfg.rerankSnippet());
             docs.add((it.title() == null ? "" : it.title()) + (snip.isEmpty() ? "" : "｜" + snip));
         }
         JsonNode data;
         try {
-            HttpRequest req = HttpRequest.newBuilder(URI.create(settingsService.effective(KEY_URL) == null
-                            || settingsService.effective(KEY_URL).isBlank()
-                            ? "http://127.0.0.1:8091/rerank" : settingsService.effective(KEY_URL).trim()))
+            HttpRequest req = HttpRequest.newBuilder(URI.create(cfg.rerankUrl()))
                     .timeout(Duration.ofSeconds(20))
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(body), StandardCharsets.UTF_8))
@@ -158,12 +167,13 @@ public class CrossEncoderReranker implements Reranker {
             throw new IllegalStateException("精排服务没有返回任何可用 index：" + clip(data.toString()));
         }
         // 服务只回了一部分（被 top_n 截过）：剩下的按原顺序补在后面，绝不丢候选
+        boolean repaired = out.size() != items.size();
         for (Item it : items) {
             if (!out.contains(it.key())) {
                 out.add(it.key());
             }
         }
-        return out;
+        return new Result(out, repaired ? "degraded" : "completed", repaired ? "服务只返回部分候选，遗漏项按原序补入" : "");
     }
 
     @Override
@@ -185,6 +195,7 @@ public class CrossEncoderReranker implements Reranker {
 
     /** 当前生效的候选文本长度（设置里没配就用默认 120，上限 {@link #MAX_SNIPPET}） */
     private int snippetLimit() {
+        if (knowledgeSettings != null) return knowledgeSettings.snapshot().rerankSnippet();
         String v = settingsService.effective(Reranker.KEY_SNIPPET);
         if (v == null || v.isBlank()) {
             return DEFAULT_SNIPPET;

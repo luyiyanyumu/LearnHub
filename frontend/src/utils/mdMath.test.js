@@ -35,6 +35,24 @@ test('LaTeX delimiters \\(…\\) and \\[…\\] are supported', () => {
   assert.match(block, /class="math-block"/)
 })
 
+test('parentheses delimiters allow surrounding TeX whitespace and preserve it in rendered source', () => {
+  for (const tex of [' x + y ', '\tx + y\t', '\n x + y \n']) {
+    const out = html(`前文 \\(${tex}\\) 后文`)
+    assert.match(out, /class="math-inline"/)
+    assert.match(out, /class="katex"/)
+    assert.ok(out.includes(`data-tex="${tex}"`))
+    assert.ok(!out.includes('\\('))
+  }
+})
+
+test('blank parentheses remain literal while dollar whitespace and currency protections stay active', () => {
+  for (const source of ['\\(\\)', '\\(   \\)', '\\(\t\n \\)', '$ x + y$', '$x + y $', '$ x + y $', '价格 $5 与 $6']) {
+    const out = html(source)
+    assert.ok(!out.includes('math-inline'), source)
+    assert.ok(!out.includes('class="katex"'), source)
+  }
+})
+
 test('escaped \\$ stays a literal dollar', () => {
   const out = html('价格是 \\$5 不是公式')
   assert.match(out, /\$5/)

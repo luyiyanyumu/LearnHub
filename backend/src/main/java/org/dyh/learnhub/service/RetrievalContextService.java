@@ -35,6 +35,12 @@ public class RetrievalContextService {
 
     private final KnowledgeRetrievalService retrievalService;
     private final GraphRagService graphRagService;
+    private KnowledgeBaseSettings knowledgeSettings;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setKnowledgeSettings(KnowledgeBaseSettings settings) { this.knowledgeSettings = settings; }
+    private KnowledgeBaseSettings.Config config() {
+        return knowledgeSettings == null ? KnowledgeBaseSettings.defaults() : knowledgeSettings.snapshot();
+    }
 
     public record Context(List<String> blocks, List<RetrievalHit> injectedHits,
                           List<Map<String, Object>> retrieved) {
@@ -67,11 +73,35 @@ public class RetrievalContextService {
      * All choices belong to this invocation and never change singleton service state.
      */
     public Context build(String question, int limit, String mode, boolean wiki, boolean kg) {
+        return buildInternal(question, limit, mode, wiki, kg, null, true, config(), knowledgeSettings != null);
+    }
+
+    /** Automatic answers share one captured parameter snapshot through retrieval and context assembly. */
+    public Context buildWithConfig(String question, int limit, String mode, boolean wiki, boolean kg,
+                                   KnowledgeBaseSettings.Config cfg) {
+        return buildInternal(question, limit, mode, wiki, kg, null, true, cfg, true);
+    }
+
+    /** Reuse one retrieval result for diagnostics; synthetic runs never read neighboring or global sources. */
+    public Context buildFromSearch(String question, int limit, KnowledgeRetrievalService.SearchResult result,
+                                   boolean wiki, boolean kg, boolean expandNeighbors) {
+        return buildFromSearch(question, limit, result, wiki, kg, expandNeighbors, config());
+    }
+
+    public Context buildFromSearch(String question, int limit, KnowledgeRetrievalService.SearchResult result,
+                                   boolean wiki, boolean kg, boolean expandNeighbors, KnowledgeBaseSettings.Config cfg) {
+        return buildInternal(question, limit, "fused", wiki, kg,
+                result == null ? KnowledgeRetrievalService.SearchResult.empty() : result, expandNeighbors, cfg, true);
+    }
+
+    private Context buildInternal(String question, int limit, String mode, boolean wiki, boolean kg,
+                                  KnowledgeRetrievalService.SearchResult supplied, boolean expandNeighbors,
+                                  KnowledgeBaseSettings.Config cfg, boolean useCapturedConfig) {
         if (question == null || question.isBlank() || limit <= 0) return Context.empty();
         if (mode != null && !List.of("fused", "keyword", "vector").contains(mode)) {
             throw new IllegalArgumentException("检索模式必须是 fused、keyword 或 vector");
         }
-        int cap = Math.min(MAX_PASSAGES, limit);
+        int cap = Math.min(cfg.maxPassages(), limit);
 
         // Reserve only material that was actually found. A missing graph/wiki block gives its
         // entire allowance back to source passages rather than starving them with an empty quota.
@@ -80,30 +110,39 @@ public class RetrievalContextService {
         // Local graph paths arrive only with passages whose quotes were checked against the
         // current source text. The older local display block does not perform that validation.
         // Global summaries have their own source-freshness checks and keep the shared router.
-        if (kg && GraphRagService.isGlobal(question, 0)) {
+        if (kg && expandNeighbors && cfg.globalGraphChars() > 0 && GraphRagService.isGlobal(question, 0)) {
             try {
-                graphContext = graphRagService.contextResult(question, GLOBAL_GRAPH_CHARS);
+                graphContext = graphRagService.contextResult(question, cfg.globalGraphChars());
                 graphBlock = value(graphContext.get("block"));
                 // Do not silently truncate graph citations while retaining refs to omitted evidence.
-                if (graphBlock.length() > GLOBAL_GRAPH_CHARS) graphBlock = "";
+                if (graphBlock.length() > cfg.globalGraphChars()) graphBlock = "";
             } catch (Exception e) {
                 log.warn("图谱上下文不可用，额度返还原文：{}", e.toString());
             }
         }
         List<RetrievalHit> candidates;
         List<WikiRetrievalService.Section> sections = List.of();
-        try {
-            if (wiki) {
-                var result = retrievalService.searchWithWiki(question, CANDIDATE_LIMIT, mode, kg, true);
+        if (supplied != null) {
+            candidates = supplied.passages();
+            sections = wiki ? supplied.wikiSections() : List.of();
+        } else try {
+            if (useCapturedConfig) {
+                var result = retrievalService.searchWithTrace(question, cfg.candidates(), mode, kg, wiki, cfg, null);
                 candidates = result.passages();
                 sections = result.wikiSections();
-            } else candidates = retrievalService.search(question, CANDIDATE_LIMIT, mode, kg);
+            } else if (wiki) {
+                var result = retrievalService.searchWithWiki(question, cfg.candidates(), mode, kg, true);
+                candidates = result.passages();
+                sections = result.wikiSections();
+            } else candidates = retrievalService.search(question, cfg.candidates(), mode, kg);
         } catch (Exception e) {
             log.warn("Wiki 检索不可用，回退原文检索：{}", e.toString());
-            try { candidates = retrievalService.search(question, CANDIDATE_LIMIT, mode, kg); }
+            try { candidates = useCapturedConfig
+                    ? retrievalService.searchWithTrace(question, cfg.candidates(), mode, kg, false, cfg, null).passages()
+                    : retrievalService.search(question, cfg.candidates(), mode, kg); }
             catch (Exception unavailable) { candidates = List.of(); }
         }
-        WikiBlock wikiResult = renderWiki(sections);
+        WikiBlock wikiResult = renderWiki(sections, cfg);
         String wikiBlock = wikiResult.text();
         if (graphBlock.isBlank()) graphBlock = "";
         if (wikiBlock.isBlank()) wikiBlock = "";
@@ -113,7 +152,7 @@ public class RetrievalContextService {
         if (!graphBlock.isEmpty()) auxiliary.add(graphBlock);
         int reserved = DATA_NOTICE.length();
         for (String block : auxiliary) reserved += SEPARATOR.length() + block.length();
-        int passageBudget = TOTAL_CHARS - reserved - SEPARATOR.length();
+        int passageBudget = cfg.totalChars() - reserved - SEPARATOR.length();
 
         // First reserve space for the ranked seeds. Neighbors then enrich those entries;
         // they never displace another topic or quietly raise the caller's topK limit.
@@ -126,8 +165,8 @@ public class RetrievalContextService {
             String body = value(hit.text()).strip();
             if (body.isBlank()) continue;
             // Graph windows retain every supporting quote or are omitted whole.
-            if (body.length() > PASSAGE_CHARS && hit.graphRelations().isEmpty()) {
-                body = QueryAwareExcerpt.excerpt(question, body, PASSAGE_CHARS);
+            if (body.length() > cfg.passageChars() && hit.graphRelations().isEmpty()) {
+                body = QueryAwareExcerpt.excerpt(question, body, cfg.passageChars());
             }
             var passage = new PreparedPassage(hit, "", List.of(new PassageMember(hit, body)));
             String entry = renderPassage(passage, prepared.size() + 1);
@@ -135,7 +174,7 @@ public class RetrievalContextService {
             prepared.add(passage);
             renderedChars += entry.length();
         }
-        expandSections(question, prepared, passageBudget, renderedChars);
+        if (expandNeighbors) expandSections(question, prepared, passageBudget, renderedChars, cfg);
 
         StringBuilder passages = new StringBuilder(PASSAGE_HEADER);
         List<RetrievalHit> injected = new ArrayList<>();
@@ -189,12 +228,13 @@ public class RetrievalContextService {
     }
 
     /** Round-robin expansion gives each seed a chance before any receives a second neighbor. */
-    private void expandSections(String question, List<PreparedPassage> prepared, int budget, int renderedChars) {
-        if (prepared.isEmpty()) return;
+    private void expandSections(String question, List<PreparedPassage> prepared, int budget, int renderedChars,
+                                KnowledgeBaseSettings.Config cfg) {
+        if (prepared.isEmpty() || cfg.neighborCount() == 0) return;
         List<RetrievalHit> seeds = prepared.stream().map(PreparedPassage::seed).toList();
         Map<String, KnowledgeRetrievalService.SectionNeighbors> related;
         try {
-            related = retrievalService.relatedSections(seeds, 2);
+            related = retrievalService.relatedSections(seeds, cfg.neighborCount());
         } catch (Exception error) {
             log.warn("同小节原文扩展不可用，保留已命中片段：{}", error.toString());
             return;
@@ -202,7 +242,7 @@ public class RetrievalContextService {
         if (related == null || related.isEmpty()) return;
         var usedKeys = new LinkedHashSet<String>();
         seeds.forEach(hit -> usedKeys.add(hit.key()));
-        for (int round = 0; round < 2; round++) {
+        for (int round = 0; round < cfg.neighborCount(); round++) {
             for (int i = 0; i < prepared.size(); i++) {
                 PreparedPassage original = prepared.get(i);
                 if (!original.seed().graphRelations().isEmpty() || original.seed().seq() == null
@@ -214,7 +254,7 @@ public class RetrievalContextService {
                 String body = value(neighbor.text()).strip();
                 if (body.isBlank() || neighbor.seq() == null || neighbor.seq() < 0
                         || !neighbor.graphRelations().isEmpty()) continue;
-                if (body.length() > PASSAGE_CHARS) body = QueryAwareExcerpt.excerpt(question, body, PASSAGE_CHARS);
+                if (body.length() > cfg.passageChars()) body = QueryAwareExcerpt.excerpt(question, body, cfg.passageChars());
                 int oldChars = renderPassage(original, i + 1).length();
                 PreparedPassage expanded = original.withNeighbor(section.heading(), neighbor, body);
                 int newChars = renderPassage(expanded, i + 1).length();
@@ -223,7 +263,7 @@ public class RetrievalContextService {
                     // chunk. Labels and every separator are included in this exact allowance.
                     int allowance = budget - (renderedChars - oldChars) - (newChars - body.length());
                     if (allowance < Math.min(body.length(), MIN_NEIGHBOR_EXCERPT_CHARS)) continue;
-                    body = QueryAwareExcerpt.excerpt(question, body, Math.min(PASSAGE_CHARS, allowance));
+                    body = QueryAwareExcerpt.excerpt(question, body, Math.min(cfg.passageChars(), allowance));
                     expanded = original.withNeighbor(section.heading(), neighbor, body);
                     newChars = renderPassage(expanded, i + 1).length();
                     if (renderedChars - oldChars + newChars > budget) continue;
@@ -288,11 +328,11 @@ public class RetrievalContextService {
 
     private record WikiBlock(String text, List<Map<String, Object>> metadata) {}
 
-    private static WikiBlock renderWiki(List<WikiRetrievalService.Section> sections) {
+    private static WikiBlock renderWiki(List<WikiRetrievalService.Section> sections, KnowledgeBaseSettings.Config cfg) {
         StringBuilder block = new StringBuilder(WIKI_HEADER);
         List<Map<String, Object>> metadata = new ArrayList<>();
         for (var section : sections) {
-            if (metadata.size() >= 2) break;
+            if (metadata.size() >= cfg.wikiSections()) break;
             String entry = "页面：" + section.pageTitle() + "（topic_key=" + section.topicKey()
                     + "；section_key=" + section.sectionKey() + "）\n小节：" + section.heading()
                     + "\n导览正文：\n" + section.text()
@@ -300,7 +340,7 @@ public class RetrievalContextService {
                     + "\n关联页：" + String.join("、", section.links()) + "\n\n";
             // Include a complete section or return its budget to originals; never truncate a
             // citation while reporting its source as if the omitted material were supplied.
-            if (section.text().isBlank() || block.length() + entry.length() > WIKI_CHARS) continue;
+            if (section.text().isBlank() || block.length() + entry.length() > cfg.wikiChars()) continue;
             block.append(entry);
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("type", "wiki");

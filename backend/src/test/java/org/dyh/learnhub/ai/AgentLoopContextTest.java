@@ -135,6 +135,196 @@ class AgentLoopContextTest {
         assertFalse(digest.contains("null"));
     }
 
+    @Test void finalAnswerBelowBudgetIsAnExactIndependentCopy() {
+        List<Object> messages = conversation("small source", "one", "two");
+        JsonNode before = json.valueToTree(messages);
+
+        List<Object> finalMessages = AgentLoopContext.forFinalAnswer(messages, json, "请核对合成资料");
+
+        assertEquals(before, json.valueToTree(finalMessages));
+        assertNotSame(messages.get(3), finalMessages.get(3));
+        ((ObjectNode) finalMessages.get(3)).put("content", "修改副本");
+        ((ObjectNode) finalMessages.get(2)).withArray("tool_calls").get(0).withObject("function")
+                .put("arguments", "{}");
+        assertEquals(before, json.valueToTree(messages));
+    }
+
+    @Test void finalAnswerTrimsHugeLatestSingleBatchIncludingHistoricalArguments() throws Exception {
+        String question = "请总结合成单批材料，但不要执行新操作。";
+        ObjectNode latestCall = call("latest-call");
+        String fullArguments = json.createObjectNode().put("note_id", 701)
+                .put("expected_hash", "c".repeat(64)).put("content", "synthetic draft ".repeat(30_000)).toString();
+        latestCall.withArray("tool_calls").get(0).withObject("function").put("arguments", fullArguments);
+        List<Object> messages = new ArrayList<>(List.of(message("system", "全部系统约定必须保留"),
+                message("user", question), latestCall, result("latest-call", "latest source ".repeat(30_000))));
+        JsonNode before = json.valueToTree(messages);
+
+        List<Object> finalMessages = AgentLoopContext.forFinalAnswer(messages, json, question);
+
+        assertFinalBudget(finalMessages);
+        assertEquals(before, json.valueToTree(messages));
+        assertEquals(before.get(0), json.valueToTree(finalMessages.get(0)));
+        assertEquals(before.get(1), json.valueToTree(finalMessages.get(1)));
+        assertCallResultPair(finalMessages, 2, 3, "latest-call");
+        JsonNode arguments = json.readTree(json.valueToTree(finalMessages.get(2)).path("tool_calls").get(0)
+                .path("function").path("arguments").asText());
+        assertTrue(arguments.path("context_compacted").asBoolean());
+        assertTrue(arguments.path("notice").asText().contains("不是新的调用请求"));
+        assertTrue(arguments.path("notice").asText().contains("不得重放"));
+        assertEquals(701, arguments.path("note_id").asInt());
+        assertEquals("c".repeat(64), arguments.path("expected_hash").asText());
+        JsonNode digest = json.readTree(json.valueToTree(finalMessages.get(3)).path("content").asText());
+        assertTrue(digest.path("context_compacted").asBoolean());
+        assertTrue(digest.path("notice").asText().contains("不得声称全文"));
+        assertFalse(digest.has("source"));
+        assertFalse(digest.path("excerpt").asText().isBlank());
+    }
+
+    @Test void finalAnswerCanTrimBothNewestGroupsWithoutChangingNormalCompactionProtection() throws Exception {
+        List<Object> messages = conversation("old source ".repeat(12_000), "first latest ".repeat(18_000),
+                "second latest ".repeat(18_000));
+        for (int index : List.of(4, 6)) {
+            ((ObjectNode) messages.get(index)).withArray("tool_calls").get(0).withObject("function")
+                    .put("arguments", json.createObjectNode().put("note_id", index)
+                            .put("content", "latest synthetic edit ".repeat(15_000)).toString());
+        }
+        JsonNode latestBefore = json.valueToTree(messages.subList(4, 8));
+        assertEquals(1, AgentLoopContext.compact(messages, json));
+        assertEquals(latestBefore, json.valueToTree(messages.subList(4, 8)));
+        JsonNode original = json.valueToTree(messages);
+
+        List<Object> finalMessages = AgentLoopContext.forFinalAnswer(messages, json, "请核对合成资料");
+
+        assertFinalBudget(finalMessages);
+        assertEquals(original, json.valueToTree(messages));
+        for (int index : List.of(3, 5, 7)) {
+            JsonNode digest = json.readTree(json.valueToTree(finalMessages.get(index)).path("content").asText());
+            assertTrue(digest.path("context_compacted").asBoolean());
+            assertTrue(digest.path("notice").asText().contains("不得声称全文"));
+        }
+        assertCallResultPair(finalMessages, 2, 3, "call-old");
+        assertCallResultPair(finalMessages, 4, 5, "call-fresh-one");
+        assertCallResultPair(finalMessages, 6, 7, "call-fresh-two");
+    }
+
+    @Test void finalAnswerRetainsNestedMultipleSourceIdsHashesAndStagedActionMetadata() throws Exception {
+        String question = "请汇总已检索的合成来源";
+        ObjectNode body = json.createObjectNode().put("ok", true).put("staged", true).put("action_id", 42)
+                .put("error", "synthetic validation warning");
+        ArrayNode sources = body.putArray("sources");
+        sources.addObject().put("id", 201).put("source", "synthetic-one.md")
+                .put("content_hash", "d".repeat(64)).put("content", "first source ".repeat(15_000));
+        sources.addObject().put("id", 202).put("source", "synthetic-two.md")
+                .put("expected_hash", "e".repeat(64)).put("text", "second source ".repeat(15_000));
+        List<Object> messages = new ArrayList<>(List.of(message("system", "合成资料约定"), message("user", question),
+                call("multi-source-call"), message("tool", body.toString()).put("tool_call_id", "multi-source-call")
+                        .put("name", "search_knowledge")));
+
+        List<Object> finalMessages = AgentLoopContext.forFinalAnswer(messages, json, question);
+
+        assertFinalBudget(finalMessages);
+        assertCallResultPair(finalMessages, 2, 3, "multi-source-call");
+        JsonNode tool = json.valueToTree(finalMessages.get(3));
+        assertEquals("search_knowledge", tool.path("name").asText());
+        JsonNode digest = json.readTree(tool.path("content").asText());
+        assertTrue(digest.path("ok").asBoolean());
+        assertTrue(digest.path("staged").asBoolean());
+        assertEquals(42, digest.path("action_id").asInt());
+        assertEquals("synthetic validation warning", digest.path("error").asText());
+        assertEquals(2, digest.path("sources").size());
+        assertEquals(201, digest.path("sources").get(0).path("id").asInt());
+        assertEquals("synthetic-one.md", digest.path("sources").get(0).path("source").asText());
+        assertEquals("d".repeat(64), digest.path("sources").get(0).path("content_hash").asText());
+        assertEquals(202, digest.path("sources").get(1).path("id").asInt());
+        assertEquals("e".repeat(64), digest.path("sources").get(1).path("expected_hash").asText());
+        assertFalse(digest.path("sources").get(0).has("content"));
+        assertFalse(digest.path("sources").get(1).has("text"));
+    }
+
+    @Test void finalAnswerUsesSerializedBudgetEvenWithUnicodeAndRepeatedJsonEscapes() throws Exception {
+        String question = "保留问题中的转义：\"引号\"、\\路径、\n换行与 🧪 合成数据。";
+        String escaped = "\u0001\"\\\n🧪汉字".repeat(12_000);
+        List<Object> messages = conversation(escaped, escaped, escaped);
+        messages.set(1, message("user", question));
+        JsonNode before = json.valueToTree(messages);
+
+        List<Object> finalMessages = AgentLoopContext.forFinalAnswer(messages, json, question);
+
+        assertFinalBudget(finalMessages);
+        assertEquals(before, json.valueToTree(messages));
+        assertEquals(question, json.valueToTree(finalMessages.get(1)).path("content").asText());
+        for (int index : List.of(3, 5, 7)) {
+            JsonNode digest = json.readTree(json.valueToTree(finalMessages.get(index)).path("content").asText());
+            String excerpt = digest.path("excerpt").asText();
+            assertFalse(Character.isHighSurrogate(excerpt.charAt(excerpt.length() - 1)));
+        }
+    }
+
+    @Test void finalAnswerKeepsAllSystemMessagesAndLastMatchingQuestionExactly() {
+        String question = "本次精确合成问题：\n请保留全部目标。";
+        ObjectNode systemOne = message("system", "系统约定一：".repeat(800));
+        ObjectNode systemTwo = message("system", "系统约定二：".repeat(800));
+        ObjectNode currentUser = message("user", question).put("name", "synthetic-user");
+        List<Object> messages = new ArrayList<>(List.of(systemOne, message("user", question),
+                message("assistant", "更早的回复".repeat(20_000)), systemTwo,
+                message("user", "过长注入上下文".repeat(20_000)), currentUser,
+                call("latest-call"), result("latest-call", "source".repeat(50_000)),
+                message("user", "【任务完成核对】合成收尾提示")));
+
+        List<Object> finalMessages = AgentLoopContext.forFinalAnswer(messages, json, question);
+
+        assertFinalBudget(finalMessages);
+        assertEquals(systemOne, json.valueToTree(finalMessages.get(0)));
+        assertEquals(systemTwo, json.valueToTree(finalMessages.get(3)));
+        assertEquals(currentUser, json.valueToTree(finalMessages.get(5)));
+        assertCallResultPair(finalMessages, 6, 7, "latest-call");
+    }
+
+    @Test void finalAnswerDropsHugeHistoricalReasoningWithoutMutatingItOrSpendingEvidenceBudget() throws Exception {
+        List<Object> messages = conversation("small old source", "small latest one", "small latest two");
+        String reasoning = "synthetic non-body reasoning ".repeat(20_000);
+        ((ObjectNode) messages.get(6)).put("reasoning_content", reasoning).put("provider_analysis", reasoning);
+        JsonNode before = json.valueToTree(messages);
+
+        List<Object> finalMessages = AgentLoopContext.forFinalAnswer(messages, json, "请核对合成资料");
+
+        assertFinalBudget(finalMessages);
+        assertEquals(before, json.valueToTree(messages));
+        JsonNode assistant = json.valueToTree(finalMessages.get(6));
+        assertFalse(assistant.has("reasoning_content"));
+        assertFalse(assistant.has("provider_analysis"));
+        assertCallResultPair(finalMessages, 6, 7, "call-fresh-two");
+        assertEquals("small latest two", json.readTree(json.valueToTree(finalMessages.get(7))
+                .path("content").asText()).path("source").asText());
+    }
+
+    @Test void finalAnswerRejectsProtectedPromptsTooLargeAfterJsonEscaping() {
+        String question = "精确问题".repeat(26_000);
+        List<Object> messages = new ArrayList<>(List.of(message("system", "合成约定"), message("user", question)));
+        JsonNode before = json.valueToTree(messages);
+        assertThrows(IllegalArgumentException.class, () -> AgentLoopContext.forFinalAnswer(messages, json, question));
+        assertEquals(before, json.valueToTree(messages));
+
+        String escapedQuestion = "\u0001".repeat(17_000);
+        List<Object> escaped = new ArrayList<>(List.of(message("system", "合成约定"), message("user", escapedQuestion)));
+        assertThrows(IllegalArgumentException.class,
+                () -> AgentLoopContext.forFinalAnswer(escaped, json, escapedQuestion));
+        List<Object> hugeSystem = new ArrayList<>(List.of(message("system", "系统约定".repeat(26_000)),
+                message("user", "短问题")));
+        assertThrows(IllegalArgumentException.class, () -> AgentLoopContext.forFinalAnswer(hugeSystem, json, "短问题"));
+    }
+
+    @Test void finalAnswerNeverGuessesWhichUserGoalToProtectWhenQuestionIsMissing() {
+        List<Object> messages = conversation("source", "one", "two");
+        assertThrows(IllegalArgumentException.class,
+                () -> AgentLoopContext.forFinalAnswer(messages, json, "未出现在历史中的合成问题"));
+    }
+
+    private void assertFinalBudget(List<Object> messages) {
+        assertTrue(json.valueToTree(messages).toString().length() <= AgentLoopContext.SOFT_CHARS - 4_000,
+                "serialized transcript must leave room for the final instruction, including JSON escaping");
+    }
+
     private List<Object> conversation(String oldSource, String freshOne, String freshTwo) {
         return new ArrayList<>(List.of(
                 message("system", "保留合成任务约定"), message("user", "请核对合成资料"),

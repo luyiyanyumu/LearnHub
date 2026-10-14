@@ -58,6 +58,12 @@ public class VectorIndexService {
     /** ANN 后端：按 kb.vector_backend 切换，连不上时**自动降级**回上面的全扫 */
     private final org.dyh.learnhub.service.vector.MilvusVectorStore milvusStore;
     private final PlatformTransactionManager transactionManager;
+    private KnowledgeBaseSettings knowledgeSettings;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setKnowledgeSettings(KnowledgeBaseSettings settings) { this.knowledgeSettings = settings; }
+    private KnowledgeBaseSettings.Config config() {
+        return knowledgeSettings == null ? new KnowledgeBaseSettings(settingsService).snapshot() : knowledgeSettings.snapshot();
+    }
     /** 重启或同步失败后先读 MySQL；完整同步成功才信任指定空间和服务的 ANN。 */
     private record AnnReadiness(String space, String uri) { }
     private volatile AnnReadiness annReadiness;
@@ -292,29 +298,30 @@ public class VectorIndexService {
     /** 先准备全部向量，再在一个事务内替换，失败时旧索引完整保留。 */
     private synchronized void rebuild(Job job) {
         try {
+            KnowledgeBaseSettings.Config cfg = config();
             EmbeddingClient.Snapshot target = requireTarget();
-            boolean contextual = contextual();
+            boolean contextual = cfg.contextualEmbed();
             List<Source> sources = collectSources();
             job.total = sources.size();
             List<PreparedSource> prepared = new ArrayList<>();
             job.stage = "分块并嵌入（旧索引保留）";
             for (Source source : sources) {
-                prepared.add(prepareSource(source, target, contextual));
+                prepared.add(prepareSource(source, target, contextual, cfg));
                 job.chunks += prepared.get(prepared.size() - 1).rows().size();
                 job.chars += source.text().length();
                 job.done++;
             }
             validatePrepared(prepared);
-            assertCurrent(target, contextual);
+            assertCurrent(target, contextual, cfg);
             job.stage = "替换索引";
             annReadiness = null;
             try {
                 new TransactionTemplate(transactionManager).executeWithoutResult(tx -> {
-                    assertCurrent(target, contextual);
+                    assertCurrent(target, contextual, cfg);
                     mapper.delete(Wrappers.<KbChunk>lambdaQuery());
                     stateMapper.delete(Wrappers.<KbIndexState>lambdaQuery());
-                    for (PreparedSource source : prepared) persistSource(source, target, contextual);
-                    assertCurrent(target, contextual);
+                    for (PreparedSource source : prepared) persistSource(source, target, contextual, cfg);
+                    assertCurrent(target, contextual, cfg);
                 });
             } finally {
                 invalidateCache();
@@ -334,12 +341,13 @@ public class VectorIndexService {
 
     private record PreparedSource(Source source, List<KbChunk> rows) { }
 
-    private PreparedSource prepareSource(Source source, EmbeddingClient.Snapshot target, boolean contextual) {
-        List<TextChunker.Chunk> chunks = TextChunker.splitWithHeadings(source.text());
+    private PreparedSource prepareSource(Source source, EmbeddingClient.Snapshot target, boolean contextual,
+                                         KnowledgeBaseSettings.Config cfg) {
+        List<TextChunker.Chunk> chunks = TextChunker.splitWithHeadings(source.text(), cfg.chunkOptions());
         if (chunks.isEmpty()) return new PreparedSource(source, List.of());
         List<String> inputs = chunks.stream().map(c -> contextual
                 ? TextChunker.embedText(source.title(), c.heading(), c.text()) : c.text()).toList();
-        List<float[]> vectors = embedder.embedAll(target, inputs);
+        List<float[]> vectors = embedInputs(target, inputs, cfg);
         if (vectors == null || vectors.size() != chunks.size())
             throw new IllegalStateException("嵌入服务返回的向量数量不匹配");
         List<KbChunk> rows = new ArrayList<>(chunks.size());
@@ -411,12 +419,19 @@ public class VectorIndexService {
             throw new IllegalStateException("上下文嵌入设置已变更，请重新构建索引");
     }
 
+    private void assertCurrent(EmbeddingClient.Snapshot target, boolean contextual, KnowledgeBaseSettings.Config cfg) {
+        assertCurrent(target, contextual);
+        if (!cfg.indexingFingerprint().equals(config().indexingFingerprint()))
+            throw new IllegalStateException("分片或嵌入输入参数已变更，旧任务已停止，请重新构建索引");
+    }
+
     /** 仅在调用方的数据库事务内执行。 */
-    private void persistSource(PreparedSource prepared, EmbeddingClient.Snapshot target, boolean contextual) {
+    private void persistSource(PreparedSource prepared, EmbeddingClient.Snapshot target, boolean contextual,
+                               KnowledgeBaseSettings.Config cfg) {
         Source source = prepared.source();
         mapper.deleteBySource(source.type(), source.id());
         for (KbChunk row : prepared.rows()) mapper.insert(row);
-        upsertState(source, prepared.rows().size(), target, contextual);
+        upsertState(source, prepared.rows().size(), target, contextual, cfg);
     }
 
     private void assertAnnUri(String expected) {
@@ -464,12 +479,20 @@ public class VectorIndexService {
 
     /** 记录/更新该来源已索引内容的指纹（增量索引靠它判断"变了没有"） */
     private static String sourceHash(Source source, String space, boolean contextual) {
-        return KgService.sha256(space + "\u0000" + contextual + "\u0000"
-                + (source.title() == null ? "" : source.title()) + "\u0000"
-                + (source.text() == null ? "" : source.text()));
+        return sourceHash(source, space, contextual, KnowledgeBaseSettings.defaults());
     }
 
-    private void upsertState(Source source, int chunks, EmbeddingClient.Snapshot target, boolean contextual) {
+    private static String sourceHash(Source source, String space, boolean contextual, KnowledgeBaseSettings.Config cfg) {
+        // Version every fingerprint: enforcing max after overlap changes even the default splitter.
+        String parameters = "\u0000split:v2:" + cfg.chunkTarget() + ":" + cfg.chunkOverlap() + ":" + cfg.chunkMax()
+                + ":input:" + cfg.embeddingInputChars();
+        return KgService.sha256(space + "\u0000" + contextual + "\u0000"
+                + (source.title() == null ? "" : source.title()) + "\u0000"
+                + (source.text() == null ? "" : source.text()) + parameters);
+    }
+
+    private void upsertState(Source source, int chunks, EmbeddingClient.Snapshot target, boolean contextual,
+                             KnowledgeBaseSettings.Config cfg) {
         String key = KbIndexState.key(source.type(), source.id());
         KbIndexState state = stateMapper.selectById(key);
         boolean insert = state == null;
@@ -479,7 +502,7 @@ public class VectorIndexService {
             state.setSourceType(source.type());
             state.setSourceId(source.id());
         }
-        state.setContentHash(sourceHash(source, target.spaceFingerprint(), contextual));
+        state.setContentHash(sourceHash(source, target.spaceFingerprint(), contextual, cfg));
         state.setEmbeddingSpace(target.spaceFingerprint());
         state.setChunks(chunks);
         state.setIndexedAt(LocalDateTime.now());
@@ -506,6 +529,7 @@ public class VectorIndexService {
     }
 
     private Map<String, Object> reindexChanged(boolean automatic) {
+        KnowledgeBaseSettings.Config cfg = config();
         EmbeddingClient.Snapshot target = embedder.snapshot();
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("configured", target != null && target.configured());
@@ -516,9 +540,8 @@ public class VectorIndexService {
             result.put("reason", target == null ? "未配置嵌入模型，关键词检索仍可用" : target.reason());
             return result;
         }
-        if (automatic && (!settingsService.vectorEnabled()
-                || "0".equals(settingsService.effective(SETTING_AUTO_INDEX)))) return result;
-        boolean contextual = contextual();
+        if (automatic && (!settingsService.vectorEnabled() || !cfg.vectorEnabled() || !cfg.autoIndex())) return result;
+        boolean contextual = cfg.contextualEmbed();
         List<KbIndexState> known = stateMapper.selectList(null);
         if (automatic && (known.stream().anyMatch(state -> !target.spaceFingerprint().equals(state.getEmbeddingSpace()))
                 || mapper.loadAll().stream().anyMatch(row -> !target.spaceFingerprint().equals(row.getEmbeddingSpace())))) {
@@ -536,8 +559,8 @@ public class VectorIndexService {
             alive.add(key);
             KbIndexState state = bySource.get(key);
             if (state != null && target.spaceFingerprint().equals(state.getEmbeddingSpace())
-                    && sourceHash(source, target.spaceFingerprint(), contextual).equals(state.getContentHash())) continue;
-            prepared.add(prepareSource(source, target, contextual));
+                    && sourceHash(source, target.spaceFingerprint(), contextual, cfg).equals(state.getContentHash())) continue;
+            prepared.add(prepareSource(source, target, contextual, cfg));
         }
         List<KbIndexState> removed = known.stream().filter(state -> !alive.contains(state.getId())).toList();
         validatePrepared(prepared);
@@ -553,19 +576,19 @@ public class VectorIndexService {
                     throw new IllegalStateException("嵌入维度已变化，请全量重建索引");
             }
         }
-        assertCurrent(target, contextual);
+        assertCurrent(target, contextual, cfg);
         if (!prepared.isEmpty() || !removed.isEmpty()) {
             AnnReadiness previouslyReady = annReadiness;
             annReadiness = null;
             try {
                 new TransactionTemplate(transactionManager).executeWithoutResult(tx -> {
-                    assertCurrent(target, contextual);
-                    for (PreparedSource source : prepared) persistSource(source, target, contextual);
+                    assertCurrent(target, contextual, cfg);
+                    for (PreparedSource source : prepared) persistSource(source, target, contextual, cfg);
                     for (KbIndexState state : removed) {
                         mapper.deleteBySource(state.getSourceType(), state.getSourceId());
                         stateMapper.deleteById(state.getId());
                     }
-                    assertCurrent(target, contextual);
+                    assertCurrent(target, contextual, cfg);
                 });
             } finally {
                 invalidateCache();
@@ -706,7 +729,11 @@ public class VectorIndexService {
      * @return 按相似度降序；低于 {@link #MIN_SCORE} 的丢掉
      */
     public List<Hit> search(String query, int topK) {
-        if (query == null || query.isBlank() || !settingsService.vectorEnabled()) {
+        return search(query, topK, config());
+    }
+
+    public List<Hit> search(String query, int topK, KnowledgeBaseSettings.Config cfg) {
+        if (query == null || query.isBlank() || topK <= 0 || !settingsService.vectorEnabled() || !cfg.vectorEnabled()) {
             return List.of();
         }
         EmbeddingClient.Snapshot target = embedder.snapshot();
@@ -729,7 +756,8 @@ public class VectorIndexService {
         }
         float[] qv;
         try {
-            qv = embedder.embed(target, query);
+            qv = cfg.embeddingInputChars() == 6000 ? embedder.embed(target, query)
+                    : embedInputs(target, List.of(query), cfg).getFirst();
             validateVector(qv);
         } catch (Exception e) {
             // 嵌入失败不能影响对话：退化成"这轮没有语义命中"
@@ -744,7 +772,7 @@ public class VectorIndexService {
         // 是最难定位的那类 bug）。ANN 需要比 topK 更大的池子，因为相对带还会筛掉一批。
         List<org.dyh.learnhub.service.vector.VectorStore.VecHit> candidates;
         try {
-            candidates = active.search(target.spaceFingerprint(), qv, Math.max(topK * 4, 64));
+            candidates = active.search(target.spaceFingerprint(), qv, Math.max(topK * cfg.vectorPoolMultiplier(), cfg.vectorPoolMin()));
             if (active == milvusStore && candidates.isEmpty())
                 candidates = mysqlStore.search(target.spaceFingerprint(), qv, Integer.MAX_VALUE);
         } catch (Exception e) {
@@ -762,12 +790,17 @@ public class VectorIndexService {
         }
         List<Hit> hits = new ArrayList<>();
         for (org.dyh.learnhub.service.vector.VectorStore.VecHit c : candidates) {
-            if (Double.isFinite(c.score()) && c.score() >= MIN_SCORE) {
+            if (Double.isFinite(c.score()) && c.score() >= cfg.vectorMinScore()) {
                 hits.add(new Hit(c.sourceType(), c.sourceId(), c.title(), c.category(),
                         c.text(), c.score(), c.seq()));
             }
         }
-        hits.sort(Comparator.comparingDouble(Hit::score).reversed());
+        return filterHits(hits, topK, cfg);
+    }
+
+    private static List<Hit> filterHits(List<Hit> raw, int topK, KnowledgeBaseSettings.Config cfg) {
+        List<Hit> hits = raw.stream().filter(h -> Double.isFinite(h.score()) && h.score() >= cfg.vectorMinScore())
+                .sorted(Comparator.comparingDouble(Hit::score).reversed()).toList();
         if (hits.isEmpty()) {
             return List.of();
         }
@@ -775,7 +808,7 @@ public class VectorIndexService {
         double best = hits.get(0).score();
         List<Hit> band = new ArrayList<>();
         for (Hit h : hits) {
-            if (h.score() >= best - RELATIVE_BAND) {
+            if (h.score() >= best - cfg.vectorScoreGap()) {
                 band.add(h);
             }
         }
@@ -786,9 +819,9 @@ public class VectorIndexService {
         // 所以"来源少、块多"时行为与以前一致。
         List<Hit> distinct = new ArrayList<>();
         List<Hit> extra = new ArrayList<>();
-        java.util.Set<String> seenSrc = new java.util.LinkedHashSet<>();
+        Map<String, Integer> seenSrc = new LinkedHashMap<>();
         for (Hit h : band) {
-            if (seenSrc.add(key(h.sourceType(), h.sourceId()))) {
+            if (seenSrc.merge(key(h.sourceType(), h.sourceId()), 1, Integer::sum) <= cfg.vectorSourcePriority()) {
                 distinct.add(h);
             } else {
                 extra.add(h);
@@ -798,12 +831,60 @@ public class VectorIndexService {
         return distinct.size() > topK ? distinct.subList(0, topK) : distinct;
     }
 
+    private List<float[]> embedInputs(EmbeddingClient.Snapshot target, List<String> inputs, KnowledgeBaseSettings.Config cfg) {
+        return cfg.embedBatchSize() == 16 && cfg.embeddingInputChars() == 6000
+                ? embedder.embedAll(target, inputs)
+                : embedder.embedAll(target, inputs, cfg.embedBatchSize(), cfg.embeddingInputChars());
+    }
+
+    /** Synthetic diagnostics use the actual model and filtering, without reading or writing any knowledge/index table. */
+    public List<Hit> searchEphemeral(String question, List<Map<String, Object>> docs) {
+        return searchEphemeral(question, docs, config());
+    }
+
+    public List<Hit> searchEphemeral(String question, List<Map<String, Object>> docs, KnowledgeBaseSettings.Config cfg) {
+        if (question == null || question.isBlank() || docs == null || docs.isEmpty() || !cfg.vectorEnabled()) return List.of();
+        EmbeddingClient.Snapshot target = embedder.snapshot();
+        if (target == null || !target.configured()) return List.of();
+        List<Hit> passages = new ArrayList<>();
+        List<String> inputs = new ArrayList<>();
+        inputs.add(question);
+        for (Map<String, Object> doc : docs) {
+            if (!(doc.get("source_id") instanceof Number id)) continue;
+            String type = text(doc.get("source_type")), title = text(doc.get("title")), category = text(doc.get("category"));
+            List<TextChunker.Chunk> chunks = TextChunker.splitWithHeadings(text(doc.get("content")), cfg.chunkOptions());
+            for (int seq = 0; seq < chunks.size(); seq++) {
+                TextChunker.Chunk chunk = chunks.get(seq);
+                passages.add(new Hit(type, id.longValue(), title, category, chunk.text(), 0, seq));
+                inputs.add(cfg.contextualEmbed() ? TextChunker.embedText(title, chunk.heading(), chunk.text()) : chunk.text());
+            }
+        }
+        if (passages.isEmpty()) return List.of();
+        List<float[]> embeddings = embedInputs(target, inputs, cfg);
+        if (embeddings == null || embeddings.size() != inputs.size()) throw new IllegalStateException("嵌入服务返回的向量数量不匹配");
+        float[] query = embeddings.getFirst();
+        validateVector(query);
+        List<Hit> hits = new ArrayList<>();
+        for (int index = 0; index < passages.size(); index++) {
+            Hit h = passages.get(index);
+            float[] vector = embeddings.get(index + 1);
+            validateVector(vector);
+            if (vector.length != query.length) throw new IllegalStateException("嵌入服务返回的向量维数不一致");
+            hits.add(new Hit(h.sourceType(), h.sourceId(), h.title(), h.category(), h.text(),
+                    EmbeddingClient.cosine(query, vector), h.seq()));
+        }
+        return filterHits(hits, cfg.candidates(), cfg);
+    }
+
+    private static String text(Object value) { return value == null ? "" : String.valueOf(value); }
+
     // ------------------------------------------------------------------
     // 状态 / 体检
     // ------------------------------------------------------------------
 
     /** 索引状态：块数、字数、模型、来源数、是否与当前内容一致 */
     public Map<String, Object> status() {
+        KnowledgeBaseSettings.Config cfg = config();
         EmbeddingClient.Snapshot target = embedder.snapshot();
         List<KbChunk> rows = mapper.loadAll();
         List<Source> sources = collectSources();
@@ -828,11 +909,11 @@ public class VectorIndexService {
         }
         boolean changed = !rows.isEmpty() && (!configured || compatible != rows.size());
         boolean stale = rows.isEmpty() || changed || sources.size() != states.size();
-        boolean contextual = contextual();
+        boolean contextual = cfg.contextualEmbed();
         for (Source source : sources) {
             KbIndexState state = bySource.get(KbIndexState.key(source.type(), source.id()));
             if (state == null || !configured || !target.spaceFingerprint().equals(state.getEmbeddingSpace())
-                    || !sourceHash(source, target.spaceFingerprint(), contextual).equals(state.getContentHash())) stale = true;
+                    || !sourceHash(source, target.spaceFingerprint(), contextual, cfg).equals(state.getContentHash())) stale = true;
         }
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("chunks", rows.size());

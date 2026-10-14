@@ -284,7 +284,7 @@ public class AiController {
     public SseEmitter chatStream(@Valid @RequestBody AiChatRequest req, HttpServletResponse response) {
         response.setHeader("Cache-Control", "no-cache, no-transform");
         response.setHeader("X-Accel-Buffering", "no");
-        SseEmitter emitter = new SseEmitter(360_000L);
+        SseEmitter emitter = new SseEmitter(AgentService.CHAT_ROUND_BUDGET_MS + 60_000L);
         AtomicBoolean connected = new AtomicBoolean(true);
         ScheduledFuture<?> heartbeat = chatHeartbeats.scheduleAtFixedRate(() -> {
             if (!connected.get()) return;
@@ -338,7 +338,7 @@ public class AiController {
         String message = failure.getMessage() == null ? "" : failure.getMessage();
         if (message.contains("未配置") || message.contains("没有配置")) return "请先在设置中配置可用的对话模型，再重新发送。";
         if (message.contains("超时") || message.toLowerCase(java.util.Locale.ROOT).contains("timeout"))
-            return "本轮处理超时，已完成的过程和待确认改动会保留在会话中。可以缩小问题范围后继续。";
+            return "本轮处理超时，已整理的工作记忆、处理过程和待确认改动会保留在会话中。可以继续同一任务。";
         return "本轮未能完成，请稍后继续。已完成的过程和待确认改动会保留在会话中。";
     }
 
@@ -406,6 +406,12 @@ public class AiController {
         if (v != null && StringUtils.hasText(String.valueOf(v))) {
             target.put(key, String.valueOf(v));
         }
+    }
+
+    /** Query an action without repeating approval or exposing its stored tool arguments. */
+    @GetMapping("/actions/{id}")
+    public Result<Map<String, Object>> actionStatus(@PathVariable Long id) {
+        return Result.ok(agentService.pendingActionStatus(id));
     }
 
     /** 确认执行一个待确认的写操作（在此之前数据库零改动） */

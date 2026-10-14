@@ -16,6 +16,8 @@ import { Underline } from '@tiptap/extension-underline'
 import markdownItSup from 'markdown-it-sup'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { sanitizePastedHtml } from '../utils/pasteHtml'
+import { handleMarkdownPaste } from '../utils/markdownPaste.js'
+import { MarkdownBold } from '../utils/markdownBold.js'
 import markdownItSub from 'markdown-it-sub'
 import markdownItMark from 'markdown-it-mark'
 import mdDataLine from '../utils/mdDataLine'
@@ -570,7 +572,7 @@ onMounted(() => {
   const initial = props.active && props.visible ? props.content || '' : ''
   editor.value = new Editor({
     editable: !props.readonly,
-    extensions: [StarterKit.configure({ codeBlock: false, underline: false, link: { openOnClick: false } }), CodeBlockCm, Callout, Details, Summary, Underline, Superscript, Subscript, Highlight, FontStyle, TableKit, ExcelTableNavigation, DataLineAttr, BlockMeta, HeadingAnchorAttr, ToolbarAttrs, InlineImage, TaskList, EditableTaskItem, MathInline, MathBlock, BlockPaste],
+    extensions: [StarterKit.configure({ bold: false, codeBlock: false, underline: false, link: { openOnClick: false } }), MarkdownBold, CodeBlockCm, Callout, Details, Summary, Underline, Superscript, Subscript, Highlight, FontStyle, TableKit, ExcelTableNavigation, DataLineAttr, BlockMeta, HeadingAnchorAttr, ToolbarAttrs, InlineImage, TaskList, EditableTaskItem, MathInline, MathBlock, BlockPaste],
     content: renderContent(initial),
     editorProps: {
       // 关掉浏览器拼写检查：笔记里全是 StringBuffer / spring_factories / AutoConfiguration 这类
@@ -624,11 +626,12 @@ watch([() => props.active, () => props.visible], () => {
   if (!previewAvailable() && layoutFrame) { cancelAnimationFrame(layoutFrame); layoutFrame = 0 }
 })
 
-/** Clean rich clipboard HTML without changing the editor's actual selection. */
+/** Recognize Markdown formatting at the paste caret and clean ordinary rich HTML. */
 const BlockPaste = Extension.create({
   name: 'blockPaste',
   addProseMirrorPlugins() {
     return [new Plugin({ props: {
+      handlePaste: handleMarkdownPaste,
       transformPastedHTML(html) {
         const { html: cleaned, droppedImages } = sanitizePastedHtml(html)
         if (droppedImages) {

@@ -28,13 +28,18 @@ function harness(options = {}) {
   const values = new Map(options.saved ? [['lh-agent-session', options.saved]] : [])
   globalThis.window = new EventTarget()
   globalThis.localStorage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key) }
-  const calls = [], legacyCalls = [], approvals = [], updates = [], warnings = []
+  const calls = [], legacyCalls = [], approvals = [], rejections = [], checks = [], updates = [], warnings = [], notices = []
   const history = new Map()
   const reads = []
   window.addEventListener(noteEdit.AGENT_NOTE_UPDATED_EVENT, event => updates.push(event.detail))
   const component = factory({
     vue, 'vue-router': { useRouter: () => ({ push() {} }) },
-    'element-plus': { ElMessage: { success() {}, info() {}, error() {}, warning: text => warnings.push(text) }, ElMessageBox: { async confirm() {} } },
+    'element-plus': { ElMessage: {
+      success: text => notices.push({ type: 'success', text }),
+      info: text => notices.push({ type: 'info', text }),
+      error: text => notices.push({ type: 'error', text }),
+      warning: text => { warnings.push(text); notices.push({ type: 'warning', text }) },
+    }, ElMessageBox: { async confirm() {} } },
     '../api': {
       aiApi: {
         async status() { return { configured: true } },
@@ -42,7 +47,8 @@ function harness(options = {}) {
         chatStream(request, onEvent, signal) { const done = deferred(); calls.push({ request, onEvent, signal, ...done }); return done.promise },
         async chat(request, signal) { legacyCalls.push({ request, signal }); return result(request.sessionId || 'legacy', '旧版合成回答') },
         async approveAction(id) { approvals.push(id); return options.approve ? options.approve(id) : { ok: true, hint: '合成修改完成' } },
-        async rejectAction() {},
+        async rejectAction(id) { rejections.push(id) },
+        async actionState(id) { checks.push(id); return options.actionState ? options.actionState(id) : { id, status: 'pending' } },
       },
       modelApi: { async sessions() { return [{ id: 'a' }, { id: 'b' }] }, async profiles() { return { profiles: [{ id: 'profile-a', purpose: 'chat' }] } }, async setSessionModel() {} },
       settingsApi: { async get() { return { webEnabled: false } } }, categoryApi: { async tree() { return [] } }, noteApi: {},
@@ -61,7 +67,7 @@ function harness(options = {}) {
   })
   const app = renderer.createApp(component)
   app.mount({ children: [] })
-  return { state: app._instance.setupState, calls, legacyCalls, approvals, updates, warnings, history, reads, values,
+  return { state: app._instance.setupState, calls, legacyCalls, approvals, rejections, checks, updates, warnings, notices, history, reads, values,
     dispose() { app.unmount(); globalThis.window = previousWindow; globalThis.localStorage = previousStorage },
   }
 }
@@ -243,4 +249,214 @@ test('failed approval while another turn streams must not replace that live turn
     h.calls[0].resolve(result('a', '本轮最终结果')); await sending
     assert.equal(h.state.messages.at(-1).content, '本轮最终结果')
   } finally { h.dispose() }
+})
+
+test('an approval remains locked until its response arrives and double clicks never repeat the write', async () => {
+  const approval = deferred(), h = harness({ saved: 'a', approve: () => approval.promise })
+  try {
+    await flush()
+    h.state.messages = [{ role: 'assistant', content: '合成操作预览', progress: [] }]
+    h.state.pending = [action]
+    const approving = h.state.resolveAction(action, true)
+    assert.equal(h.state.actionLocked(action), true)
+    await h.state.resolveAction(action, true)
+    await h.state.resolveAction(action, false)
+    assert.deepEqual(h.approvals, [91])
+    assert.deepEqual(h.rejections, [])
+    approval.resolve({ ok: true, hint: '合成执行完成' }); await approving
+    assert.deepEqual(h.checks, [])
+    assert.equal(h.state.pending.length, 0)
+  } finally { h.dispose() }
+})
+
+test('approval timeout queries status once, keeps an executing card locked and later recovers completion without replay', async () => {
+  let status = 'executing'
+  const h = harness({ saved: 'a', approve: async () => { throw Object.assign(new Error('合成超时'), { code: 'ECONNABORTED' }) },
+    actionState: id => ({ id, status, summary: '下载合成资料' }) })
+  try {
+    await flush()
+    h.state.messages = [{ role: 'assistant', content: '合成预览', progress: [{ id: 'write', actionId: 91, status: 'waiting' }] }]
+    h.state.pending = [action]
+    const originalReads = h.reads.length
+    await h.state.resolveAction(action, true)
+    assert.deepEqual(h.approvals, [91])
+    assert.deepEqual(h.checks, [91])
+    assert.equal(h.reads.length, originalReads)
+    assert.equal(h.state.pending[0].status, 'executing')
+    assert.equal(h.state.messages[0].progress[0].status, 'running')
+    assert.equal(h.state.actionLocked(h.state.pending[0]), true)
+    assert.equal(h.state.messages[0].content, '合成预览')
+    assert.equal(h.notices.some(notice => notice.type === 'error' || notice.type === 'success'), false)
+    await h.state.resolveAction(h.state.pending[0], true)
+    await h.state.resolveAction(h.state.pending[0], false)
+    assert.deepEqual(h.approvals, [91])
+    assert.deepEqual(h.rejections, [])
+    status = 'approved'
+    await h.state.checkActionState(h.state.pending[0])
+    assert.deepEqual(h.checks, [91, 91])
+    assert.deepEqual(h.approvals, [91])
+    assert.equal(h.state.pending.length, 0)
+    assert.ok(h.state.messages[0].progress.every(step => step.status === 'completed'))
+    assert.match(h.state.messages[0].content, /已执行：下载合成资料/)
+    assert.equal(h.notices.filter(notice => notice.type === 'success').length, 1)
+    assert.deepEqual(h.updates, [], 'status recovery must not invent a note-edit payload')
+  } finally { h.dispose() }
+})
+
+test('unreachable status stays uncertain, prevents a repeated write and unlocks only after a read confirms pending', async () => {
+  let readable = false
+  const h = harness({ saved: 'a', approve: async () => { throw new Error('合成网络断开') },
+    actionState: id => { if (!readable) throw new Error('合成状态连接断开'); return { id, status: 'pending' } } })
+  try {
+    await flush()
+    h.state.messages = [{ role: 'assistant', content: '合成预览', progress: [{ id: 'write', actionId: 91, status: 'waiting' }] }]
+    h.state.pending = [action]
+    await h.state.resolveAction(action, true)
+    assert.equal(h.state.uncertainActions.has(91), true)
+    assert.equal(h.state.actionLocked(h.state.pending[0]), true)
+    assert.equal(h.state.messages[0].content, '合成预览')
+    assert.equal(h.notices.some(notice => notice.type === 'success' || notice.type === 'error'), false)
+    await h.state.resolveAction(action, true)
+    assert.deepEqual(h.approvals, [91])
+    readable = true
+    await h.state.checkActionState(h.state.pending[0])
+    assert.equal(h.state.uncertainActions.has(91), false)
+    assert.equal(h.state.actionLocked(h.state.pending[0]), false)
+    assert.equal(h.state.pending[0].status, 'pending')
+    assert.equal(h.state.messages[0].progress[0].status, 'waiting')
+    assert.deepEqual(h.approvals, [91], 'confirming pending only unlocks the button; it never resubmits')
+    assert.deepEqual(h.checks, [91, 91])
+  } finally { h.dispose() }
+})
+
+test('status after timeout can confirm success or failure but unknown statuses never claim a terminal result', async () => {
+  for (const status of ['approved', 'failed', 'rejected', 'unexpected']) {
+    const h = harness({ saved: 'a', approve: async () => { throw new Error('合成超时') }, actionState: id => ({ id, status }) })
+    try {
+      await flush()
+      h.state.messages = [{ role: 'assistant', content: '合成预览', progress: [{ id: 'write', actionId: 91, status: 'waiting' }] }]
+      h.state.pending = [action]
+      await h.state.resolveAction(action, true)
+      assert.deepEqual(h.approvals, [91])
+      assert.deepEqual(h.checks, [91])
+      if (status === 'unexpected') {
+        assert.equal(h.state.pending.length, 1)
+        assert.equal(h.state.uncertainActions.has(91), true)
+        assert.equal(h.state.messages[0].content, '合成预览')
+        assert.equal(h.notices.some(notice => notice.type === 'success' || notice.type === 'error'), false)
+      } else {
+        assert.equal(h.state.pending.length, 0)
+        assert.equal(h.state.messages[0].progress[0].status, status === 'failed' ? 'error' : 'completed')
+        assert.match(h.state.messages[0].content, status === 'approved' ? /已确认执行/ : status === 'failed' ? /执行失败/ : /已取消/)
+      }
+    } finally { h.dispose() }
+  }
+})
+
+test('a restored executing action is locked immediately and concurrent status clicks use one GET', async () => {
+  const check = deferred(), running = { ...action, status: 'executing' }
+  const h = harness({ saved: 'a', session: () => ({ messages: [{ role: 'assistant', content: '合成任务处理中' }], pendingActions: [running] }), actionState: () => check.promise })
+  try {
+    await flush()
+    assert.equal(h.state.pending[0].status, 'executing')
+    assert.equal(h.state.actionLocked(h.state.pending[0]), true)
+    await h.state.resolveAction(h.state.pending[0], true)
+    await h.state.resolveAction(h.state.pending[0], false)
+    const checking = h.state.checkActionState(h.state.pending[0])
+    await h.state.checkActionState(h.state.pending[0])
+    assert.deepEqual(h.approvals, [])
+    assert.deepEqual(h.rejections, [])
+    assert.deepEqual(h.checks, [91])
+    check.resolve({ id: 91, status: 'executing' }); await checking
+    assert.equal(h.state.pending[0].status, 'executing')
+  } finally { h.dispose() }
+})
+
+test('a late recovery GET never changes the newly selected session', async () => {
+  const check = deferred(), h = harness({ saved: 'a', approve: async () => { throw new Error('合成超时') }, actionState: () => check.promise })
+  try {
+    await flush()
+    h.state.messages = [{ role: 'assistant', content: '甲预览', progress: [{ id: 'write', actionId: 91, status: 'waiting' }] }]
+    h.state.pending = [action]
+    h.history.set('b', { messages: [{ role: 'assistant', content: '乙回答' }], pendingActions: [{ ...action, id: 92 }] })
+    const approving = h.state.resolveAction(action, true)
+    await flush()
+    assert.deepEqual(h.checks, [91])
+    await h.state.switchSession('b')
+    check.resolve({ id: 91, status: 'approved' }); await approving
+    assert.equal(h.state.messages[0].content, '乙回答')
+    assert.deepEqual(h.state.pending.map(item => item.id), [92])
+    assert.deepEqual(h.updates, [])
+    assert.equal(h.notices.some(notice => notice.type === 'success'), false)
+  } finally { h.dispose() }
+})
+
+test('recovering an older action while a new turn streams only updates the owning reply', async () => {
+  const check = deferred(), h = harness({ saved: 'a', approve: async () => { throw new Error('合成超时') }, actionState: () => check.promise })
+  try {
+    await flush()
+    h.state.messages = [{ role: 'assistant', content: '先前预览', progress: [{ id: 'write', actionId: 91, status: 'waiting' }] }]
+    h.state.pending = [action]
+    const originalReads = h.reads.length
+    const approving = h.state.resolveAction(action, true)
+    await flush()
+    const sending = h.state.send('合成新任务')
+    h.calls[0].onEvent('progress', { id: 'read', status: 'running', title: '读取合成来源' })
+    check.resolve({ id: 91, status: 'approved' }); await approving
+    assert.match(h.state.messages[0].content, /已确认执行/)
+    assert.equal(h.state.messages.at(-1).content, '')
+    assert.equal(h.state.messages.at(-1).progress[0].status, 'running')
+    assert.equal(h.state.busy, true)
+    assert.equal(h.reads.length, originalReads)
+    h.calls[0].resolve(result('a', '合成新结论')); await sending
+    assert.equal(h.state.messages.at(-1).content, '合成新结论')
+    assert.match(h.state.messages[0].content, /已确认执行/)
+    assert.deepEqual(h.approvals, [91])
+  } finally { h.dispose() }
+})
+
+test('an older history response cannot resurrect an approved card or roll back a recovered executing state', async () => {
+  for (const recovering of [false, true]) {
+    const oldHistory = deferred()
+    const h = harness({ session: () => oldHistory.promise, actionState: id => ({ id, status: 'executing' }) })
+    try {
+      await flush()
+      h.state.sessionId = 'a'
+      h.state.messages = [{ role: 'assistant', content: '合成预览', progress: [{ id: 'write', actionId: 91, status: 'waiting' }] }]
+      h.state.pending = [action]
+      const reading = h.state.loadSession()
+      if (recovering) await h.state.checkActionState(action)
+      else await h.state.resolveAction(action, true)
+      oldHistory.resolve({ messages: [{ role: 'assistant', content: '过期预览' }], pendingActions: [action] }); await reading
+      assert.notEqual(h.state.messages[0].content, '过期预览')
+      if (recovering) {
+        assert.equal(h.state.pending[0].status, 'executing')
+        assert.equal(h.state.actionLocked(h.state.pending[0]), true)
+      } else {
+        assert.equal(h.state.pending.length, 0)
+        assert.match(h.state.messages[0].content, /已确认执行/)
+      }
+    } finally { h.dispose() }
+  }
+})
+
+test('a history read started during approval cannot replace its owning reply before or after completion', async () => {
+  for (const historyFirst of [false, true]) {
+    const oldHistory = deferred(), approval = deferred()
+    const h = harness({ session: () => oldHistory.promise, approve: () => approval.promise })
+    try {
+      await flush()
+      h.state.sessionId = 'a'
+      h.state.messages = [{ role: 'assistant', content: '合成预览', progress: [] }]
+      h.state.pending = [action]
+      const approving = h.state.resolveAction(action, true)
+      const reading = h.state.loadSession()
+      if (!historyFirst) { approval.resolve({ ok: true, hint: '合成已完成' }); await approving }
+      oldHistory.resolve({ messages: [{ role: 'assistant', content: '过期快照' }], pendingActions: [action] }); await reading
+      if (historyFirst) { approval.resolve({ ok: true, hint: '合成已完成' }); await approving }
+      assert.match(h.state.messages[0].content, /合成已完成/)
+      assert.equal(h.state.pending.length, 0)
+      assert.deepEqual(h.approvals, [91])
+    } finally { h.dispose() }
+  }
 })

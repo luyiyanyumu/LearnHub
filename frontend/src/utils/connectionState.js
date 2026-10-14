@@ -22,6 +22,8 @@ export const backendDownReason = ref('')
  */
 export function isLinkError(err) {
   if (!err) return false
+  // A long write may outlive its HTTP wait; that alone does not establish an outage.
+  if (err.config?.serverMayContinueOnTimeout && ['ECONNABORTED', 'ETIMEDOUT'].includes(err.code)) return false
   // 没有 response = 请求根本没到后端：连接被拒、超时、代理挂了
   if (!err.response) return true
   // 5xx = 到了后端但后端自己起不来（如数据库连不上）

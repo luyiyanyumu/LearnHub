@@ -140,7 +140,8 @@ public class SettingsService {
         for (String task : org.dyh.learnhub.ai.ModelRouting.allTasks()) {
             keys.add(modelForTaskKey(task));
         }
-        return List.copyOf(keys);
+        keys.addAll(KnowledgeBaseSettings.settingKeys());
+        return keys.stream().distinct().toList();
     }
 
     /** 默认模型：deepseek-flash（DeepSeek 官方当前主推的快速版，性价比高） */
@@ -359,8 +360,22 @@ public class SettingsService {
             // 模型分工的默认值放在 ModelRouting 里（那边连"为什么是这个默认"一起写着）。
             // 这里按**前缀**判断，而不是逐个列举任务名 —— 列举就会漏（漏了 triple/rerank/grounding）。
             // 空值 = 该任务用 ModelRouting 决定的默认档案。
-            default -> key != null && key.startsWith("ai.model_for_") ? "" : null; // API Key 无内置默认，走 .env 兜底
+            default -> key != null && key.startsWith("ai.model_for_") ? "" : KnowledgeBaseSettings.defaultSetting(key);
         };
+    }
+
+    /** The typed knowledge snapshot reads all persisted fields in one statement, not dozens of per-field queries. */
+    public Map<String, String> effectiveAll(List<String> keys) {
+        Map<String, String> stored = new LinkedHashMap<>();
+        for (AppSetting entry : mapper.selectBatchIds(keys)) stored.put(entry.getSettingKey(), entry.getSettingValue());
+        Map<String, String> out = new LinkedHashMap<>();
+        for (String key : keys) {
+            String value = stored.get(key);
+            if (!StringUtils.hasText(value)) value = externalValue(key);
+            if (!StringUtils.hasText(value)) value = KnowledgeBaseSettings.defaultSetting(key);
+            out.put(key, value);
+        }
+        return out;
     }
 
     /** 给前端/调用方的完整快照：当前生效值 + 内置默认值 */
@@ -440,6 +455,14 @@ public class SettingsService {
         if (kv == null) {
             return;
         }
+        // Validate all names and the complete knowledge parameter combination before the first write.
+        for (String key : kv.keySet()) if (!KNOWN_KEYS.contains(key))
+            throw new IllegalArgumentException("不支持的设置项: " + key);
+        Map<String, Object> knowledgePatch = new LinkedHashMap<>();
+        KnowledgeBaseSettings.fieldMapping().forEach((field, key) -> {
+            if (kv.containsKey(key)) knowledgePatch.put(field, kv.get(key));
+        });
+        if (!knowledgePatch.isEmpty()) new KnowledgeBaseSettings(this).validatePatch(knowledgePatch);
         kv.forEach(this::update);
     }
 

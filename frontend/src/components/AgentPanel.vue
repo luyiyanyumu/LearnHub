@@ -245,7 +245,7 @@ async function loadSession() {
   const isCurrent = () => revision === viewRevision && loadVersion === sessionLoadVersion && requestedId === sessionId.value
   try {
     const s = await aiApi.session(requestedId)
-    if (!isCurrent()) return
+    if (!isCurrent() || pending.value.some(a => resolvingActions.value.has(a.id) || checkingActions.value.has(a.id))) return
     messages.value = (s?.messages || []).map((m, i) => ({
       id: Date.now() + i,
       role: m.role,
@@ -285,23 +285,102 @@ function newChat() {
  */
 const pending = ref([])
 const resolvingActions = ref(new Set())
+const checkingActions = ref(new Set())
+const uncertainActions = ref(new Set())
 
 function notifyLearningActivity() {
   window.dispatchEvent(new CustomEvent('lh-learning-activity-changed'))
 }
 
+function actionContext(a) {
+  const ownerSession = sessionId.value
+  const ownerRevision = viewRevision
+  return {
+    isCurrent: () => ownerSession === sessionId.value && ownerRevision === viewRevision,
+    message: [...messages.value].reverse().find(m => m.role === 'assistant' && m.progress?.some(step => String(step.actionId) === String(a.id)))
+      || [...messages.value].reverse().find(m => m.role === 'assistant'),
+  }
+}
+
+function actionLocked(a) {
+  return resolvingActions.value.has(a.id) || checkingActions.value.has(a.id) || uncertainActions.value.has(a.id) || a.status === 'executing'
+}
+
+function showActionOutcome(a, approve, succeeded, hint, context) {
+  if (!context.isCurrent()) return
+  sessionLoadVersion++
+  const last = context.message
+  if (last && messages.value.includes(last)) {
+    last.events = [...(last.events || []), hint]
+    last.progress = (last.progress || []).map(step => String(step.actionId) === String(a.id)
+      ? { ...step, status: approve && !succeeded ? 'error' : 'completed', detail: hint }
+      : step)
+    last.progress = upsertProgress(last.progress, {
+      id: `approval-${a.id}`, kind: 'update', status: approve && !succeeded ? 'error' : 'completed',
+      title: hint, toolName: a.toolName,
+    })
+    const tail = approve
+      ? `\n\n（${succeeded ? '已确认执行' : '执行失败'}：${hint}）`
+      : `\n\n（已取消，未做任何改动：${a.summary || ''}）`
+    last.content = (last.content || '') + tail
+    scrollBottom()
+  }
+  uncertainActions.value.delete(a.id)
+  pending.value = pending.value.filter(x => x.id !== a.id)
+}
+
+/** Reconcile an interrupted approval with a GET; never replay its stored write. */
+async function checkActionState(a, context = actionContext(a)) {
+  if (checkingActions.value.has(a.id)) return
+  sessionLoadVersion++
+  checkingActions.value.add(a.id)
+  try {
+    const state = await aiApi.actionState(a.id)
+    if (!context.isCurrent()) return
+    const status = state?.status
+    if (['approved', 'executed', 'failed', 'rejected'].includes(status)) {
+      const approved = status === 'approved' || status === 'executed'
+      const rejected = status === 'rejected'
+      const hint = `${approved ? '已执行' : rejected ? '已取消' : '执行失败'}：${state.summary || a.summary || '本次操作'}`
+      if (approved) { notifyLearningActivity(); ElMessage.success(hint) }
+      else if (rejected) ElMessage.info(hint)
+      else ElMessage.error(hint)
+      showActionOutcome(a, !rejected, approved, hint, context)
+      return
+    }
+    if (status !== 'pending' && status !== 'executing') throw new Error('Unknown action state')
+    sessionLoadVersion++
+    uncertainActions.value.delete(a.id)
+    pending.value = pending.value.map(item => item.id === a.id ? { ...item, status } : item)
+    const detail = status === 'executing' ? '操作仍在后台执行，可稍后查看状态' : '操作尚未执行，可以重新确认'
+    const last = context.message
+    if (last && messages.value.includes(last)) {
+      last.progress = (last.progress || []).map(step => String(step.actionId) === String(a.id)
+        ? { ...step, status: status === 'executing' ? 'running' : 'waiting', detail }
+        : step)
+      last.progress = upsertProgress(last.progress, {
+        id: `approval-${a.id}`, actionId: a.id, kind: 'update', toolName: a.toolName,
+        status: status === 'executing' ? 'running' : 'waiting', title: detail,
+      })
+    }
+    ElMessage.info(detail)
+  } catch {
+    if (!context.isCurrent()) return
+    sessionLoadVersion++
+    uncertainActions.value.add(a.id)
+    ElMessage.warning('暂未确认执行结果，请稍后查看状态；无需重复确认')
+  } finally { checkingActions.value.delete(a.id) }
+}
+
 async function resolveAction(a, approve) {
-  if (resolvingActions.value.has(a.id)) return
+  if (actionLocked(a)) return
   if (approve && a.toolName === 'edit_note' && activeNote.value?.dirty
       && matchesOpenNote(activeNote.value.noteId, a.preview?.noteId)) {
     ElMessage.warning('当前笔记有未保存改动，请先保存，再重新生成定向编辑预览')
     return
   }
-  const ownerSession = sessionId.value
-  const ownerRevision = viewRevision
-  const ownerMessage = [...messages.value].reverse().find(m => m.role === 'assistant' && m.progress?.some(step => String(step.actionId) === String(a.id)))
-    || [...messages.value].reverse().find(m => m.role === 'assistant')
-  const isCurrent = () => ownerSession === sessionId.value && ownerRevision === viewRevision
+  const context = actionContext(a)
+  sessionLoadVersion++
   resolvingActions.value.add(a.id)
   try {
     let hint
@@ -325,31 +404,13 @@ async function resolveAction(a, approve) {
       hint = '已取消：' + (a.summary || '')
       ElMessage.info('已取消，未做任何改动')
     }
-    // 立刻把执行痕迹挂到最近一条回答的事件角标上：后端也会追加同样的事件，
-    // 刷新后由 loadSession 恢复 —— 两处表现保持一致，不必等刷新才看到结果。
-    if (!isCurrent()) return
-    const last = ownerMessage
-    if (last && messages.value.includes(last)) {
-      last.events = [...(last.events || []), hint]
-      last.progress = (last.progress || []).map(step => String(step.actionId) === String(a.id)
-        ? { ...step, status: approve && !succeeded ? 'error' : 'completed', detail: hint }
-        : step)
-      last.progress = upsertProgress(last.progress, {
-        id: `approval-${a.id}`, kind: 'update', status: approve && !succeeded ? 'error' : 'completed',
-        title: hint, toolName: a.toolName,
-      })
-      // 同时改正文：那条回答里通常写着"请在下方卡片上点确认"，而卡片点完就消失了 ——
-      // 只剩这句话会让人以为还没确认。补一行结果，读起来才自洽。
-      const tail = approve
-        ? `\n\n（${succeeded ? '已确认执行' : '执行失败'}：${hint}）`
-        : `\n\n（已取消，未做任何改动：${a.summary || ''}）`
-      last.content = (last.content || '') + tail
-      scrollBottom()
-    }
-    if (isCurrent()) pending.value = pending.value.filter((x) => x.id !== a.id)
+    showActionOutcome(a, approve, succeeded, hint, context)
   } catch (e) {
-    // Network failures may leave the action pending; reload its authoritative state.
-    if (isCurrent()) void loadSession()
+    if (!context.isCurrent()) return
+    if (approve) {
+      uncertainActions.value.add(a.id)
+      await checkActionState(a, context)
+    } else void loadSession()
   } finally {
     resolvingActions.value.delete(a.id)
   }
@@ -996,9 +1057,9 @@ function askFromEvent(e) {
           </button>
         </div>
 
-        <!-- 待确认的写操作：在点「确认执行」之前，后端不会动数据库 -->
+        <!-- 待确认与执行中的操作；连接中断后只查询状态，不重复批准。 -->
         <div v-if="pending.length" class="pending-box">
-          <div class="pending-head">待确认 · {{ pending.length }} 项（确认前不会写入）</div>
+          <div class="pending-head">操作确认与执行 · {{ pending.length }} 项</div>
           <div v-for="a in pending" :key="a.id" class="pending-item">
             <div class="pending-body">
               <span class="pending-sum">{{ a.summary }}</span>
@@ -1016,10 +1077,12 @@ function askFromEvent(e) {
                   </div>
                 </div>
               </details>
+              <p v-if="uncertainActions.has(a.id) || a.status === 'executing'" class="pending-state" role="status">{{ uncertainActions.has(a.id) ? '结果暂未确认，请先查看执行状态。' : '操作正在后台执行，可稍后查看状态。' }}</p>
             </div>
             <span class="pending-btns">
-              <button type="button" class="act-btn primary" :disabled="resolvingActions.has(a.id)" @click="resolveAction(a, true)">{{ resolvingActions.has(a.id) ? '处理中…' : '确认执行' }}</button>
-              <button type="button" class="act-btn" :disabled="resolvingActions.has(a.id)" @click="resolveAction(a, false)">取消</button>
+              <button v-if="uncertainActions.has(a.id) || a.status === 'executing'" type="button" class="act-btn" :disabled="checkingActions.has(a.id) || resolvingActions.has(a.id)" @click="checkActionState(a)">{{ checkingActions.has(a.id) ? '查询中…' : '查看状态' }}</button>
+              <button type="button" class="act-btn primary" :disabled="actionLocked(a)" @click="resolveAction(a, true)">{{ resolvingActions.has(a.id) ? '处理中…' : uncertainActions.has(a.id) ? '结果待确认' : a.status === 'executing' ? '执行中…' : '确认执行' }}</button>
+              <button type="button" class="act-btn" :disabled="actionLocked(a)" @click="resolveAction(a, false)">取消</button>
             </span>
           </div>
         </div>
@@ -1778,13 +1841,15 @@ function askFromEvent(e) {
 
 .pending-item {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
   padding: 6px 0;
 }
 
-.pending-body { flex: 1; min-width: 0; }
+.pending-body { flex: 1 1 220px; min-width: 0; }
+.pending-state { margin: 6px 0 0; color: var(--app-text-2); font-size: var(--font-caption); line-height: 1.6; }
 .edit-preview { margin-top: 6px; font-size: 12px; color: var(--app-text-2); }
 .edit-preview summary { cursor: pointer; color: var(--app-brand-deep); }
 .edit-preview-list { margin-top: 6px; }
@@ -1814,6 +1879,9 @@ function askFromEvent(e) {
 
 .pending-btns {
   display: inline-flex;
+  flex-wrap: wrap;
+  max-width: 100%;
+  margin-left: auto;
   gap: 6px;
   flex: none;
 }

@@ -61,7 +61,8 @@ class VectorIndexSpaceTest {
     private KbIndexState state(String space) {
         KbIndexState state = new KbIndexState(); state.setId("note:1"); state.setSourceType("note"); state.setSourceId(1L);
         state.setEmbeddingSpace(space); state.setChunks(1);
-        state.setContentHash(KgService.sha256(space + "\u0000" + true + "\u0000标题\u0000正文说明，保留来源内容。"));
+        state.setContentHash(KgService.sha256(space + "\u0000" + true + "\u0000标题\u0000正文说明，保留来源内容。"
+                + "\u0000split:v2:800:120:1200:input:6000"));
         return state;
     }
 

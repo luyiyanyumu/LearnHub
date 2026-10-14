@@ -45,6 +45,20 @@ class GraphEvidenceServiceTest {
     }
 
     @Test
+    void configuredSplitterKeepsGraphPassageKeysAlignedWithCurrentRetrieval() {
+        String content = "合成前言用于验证不同的切块长度。".repeat(120) + "\n\n## 实现\nA 依赖 B 才能启动。";
+        rows(relation("a", "prerequisite", "b", "A 依赖 B 才能启动。", "笔记#7"));
+        docs("note", source(7, "合成参数验证", content));
+        KnowledgeBaseSettings.Config cfg = KnowledgeBaseSettings.validatePatch(KnowledgeBaseSettings.defaults(),
+                Map.of("chunkTarget", 160, "chunkOverlap", 20, "chunkMax", 220));
+        RetrievalHit hit = service.search("A 怎么启动", 6, cfg).getFirst();
+        List<TextChunker.Chunk> current = TextChunker.splitWithHeadings(content, cfg.chunkOptions());
+        assertEquals(current.get(hit.seq()).text(), hit.text());
+        assertEquals(current.size() - 1, hit.seq());
+        assertNotEquals(TextChunker.splitWithHeadings(content).size() - 1, hit.seq());
+    }
+
+    @Test
     void noRecognizedConceptDoesNotReadRelationsOrSources() {
         when(graph.recognize(anyString(), anyInt())).thenReturn(List.of());
         assertTrue(service.search("没见过的问题", 6).isEmpty());

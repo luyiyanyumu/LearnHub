@@ -8,6 +8,7 @@ import org.dyh.learnhub.entity.AgentPendingAction;
 import org.dyh.learnhub.service.AgentSessionService;
 import org.dyh.learnhub.service.GroundingService;
 import org.dyh.learnhub.service.NoteService;
+import org.dyh.learnhub.service.NoteContentEditor;
 import org.dyh.learnhub.service.RetrievalContextService;
 import org.dyh.learnhub.service.SettingsService;
 import org.dyh.learnhub.vo.AiChatVO;
@@ -39,6 +40,8 @@ class AgentLoopServiceTest {
     private final ObjectMapper json = new ObjectMapper();
     private final List<JsonNode> requestSnapshots = new ArrayList<>();
     private final List<Boolean> requestHasTools = new ArrayList<>();
+    private final List<JsonNode> memoryRequests = new ArrayList<>();
+    private Exception memoryFailure;
     @Mock DeepSeekClient client;
     @Mock ModelRouting routing;
     @Mock SettingsService settings;
@@ -55,8 +58,6 @@ class AgentLoopServiceTest {
         when(sessions.ensure(isNull(), isNull(), eq(QUESTION))).thenReturn(SESSION);
         when(settings.effective(SettingsService.KEY_CHAT_PROMPT)).thenReturn("合成系统提示");
         when(contexts.build(QUESTION, 8, "fused", false, false)).thenReturn(RetrievalContextService.Context.empty());
-        when(routing.forTask(ModelRouting.TASK_CHAT)).thenReturn(new ModelRouting.ModelTarget(
-                "synthetic", "synthetic", "http://unused.invalid", "dummy", "mock", true));
         when(evolution.definitions(anyList(), anySet())).thenReturn(List.of());
     }
 
@@ -196,6 +197,139 @@ class AgentLoopServiceTest {
         verify(evolution, never()).execute(anyString(), any(), anyList(), anySet(), any(), any());
     }
 
+    @Test void oversizedFreshSourceIsProcessedInFullBatchesThenAnswersWithoutRepeatingItsReadOrClaimingFullVerification() throws Exception {
+        String original = "合成来源事实：方案甲使用两级索引。\n" + "合成原文材料".repeat(50_000) + "synthetic-unread-tail";
+        source(21, original);
+        when(grounding.enabled()).thenReturn(true);
+        script(tools(call("huge-read", "get_note", Map.of("note_id", 21))), answer("根据已读节选，合成方案甲使用两级索引；其余内容尚未核对。"));
+
+        AiChatVO result = chat();
+
+        assertEquals("answer", result.getRunSummary().get("stopReason"));
+        assertEquals(2, requestSnapshots.size());
+        assertTrue(requestHasTools.get(1), "the original task can still use tools after preparing working memory");
+        assertFalse(memoryRequests.isEmpty());
+        assertTrue(memoryRequests.stream().anyMatch(part -> part.toString().contains("synthetic-unread-tail")), "even the final source characters must reach a summary batch");
+        assertTrue(memoryRequests.stream().allMatch(part -> part.toString().length() <= 90_000));
+        assertTrue(AgentLoopContext.size(json.convertValue(requestSnapshots.get(1), List.class), json) <= AgentLoopContext.HARD_CHARS);
+        assertFalse(requestSnapshots.get(1).toString().contains("synthetic-unread-tail"));
+        String memory = taskMemory(requestSnapshots.get(1));
+        assertTrue(memory.contains(NoteContentEditor.hash(original)));
+        assertTrue(memoryRequests.stream().anyMatch(part -> part.toString().contains("合成来源事实")));
+        assertTrue(requestSnapshots.get(1).toString().contains(QUESTION));
+        assertTrue(result.getReply().startsWith("根据已读节选"));
+        assertFalse(result.getReply().contains("模型没有给出文字答复"));
+        assertEquals(1, result.getRetrieved().size());
+        assertEquals(false, result.getGrounding().get("checked"));
+        verify(grounding, never()).check(anyString(), anyString(), anyString());
+        verify(notes, times(1)).detail(21L);
+        verify(sessions).appendTaskMemory(eq(SESSION), eq(memory));
+        verify(sessions).append(eq(SESSION), eq("assistant"), startsWith("根据已读节选"), isNull(), isNull(), anyInt(), eq("stop"));
+        assertPaired(requestSnapshots.get(1));
+    }
+
+    @Test void twelveSourcesInTheNewestTwoBatchesStillProduceABoundedPartialAnswer() throws Exception {
+        List<JsonNode> first = new ArrayList<>(), second = new ArrayList<>();
+        for (int i = 0; i < 12; i++) {
+            long id = 21L + i;
+            source(id, "合成来源 " + id + "：独立证据前缀。" + "原文".repeat(11_000));
+            (i < 6 ? first : second).add(call("source-" + id, "get_note", Map.of("note_id", id)));
+        }
+        script(tools(first.toArray(JsonNode[]::new)), tools(second.toArray(JsonNode[]::new)), answer("十二份合成来源的已读节选存在共同前缀，尚需继续核对正文。"));
+
+        AiChatVO result = chat();
+
+        assertEquals(3, requestSnapshots.size());
+        assertEquals(List.of(true, true, true), requestHasTools);
+        assertEquals("answer", result.getRunSummary().get("stopReason"));
+        assertEquals(12, result.getRunSummary().get("executedCalls"));
+        assertTrue(result.getReply().startsWith("十二份合成来源"));
+        assertTrue(AgentLoopContext.size(json.convertValue(requestSnapshots.get(2), List.class), json) <= AgentLoopContext.HARD_CHARS);
+        assertFalse(memoryRequests.isEmpty());
+        for (int i = 0; i < 12; i++) {
+            long id = 21L + i;
+            assertTrue(requestSnapshots.get(2).toString().contains("source-" + id), "all source identities must survive into the final task context");
+            verify(notes, times(1)).detail(id);
+        }
+        assertEquals(12, result.getRetrieved().size());
+        assertPaired(requestSnapshots.get(2));
+    }
+
+    @Test void hugeStagedWriteKeepsItsOriginalApprovalPayloadWhileOnlyTheFinalTranscriptIsExcerpted() throws Exception {
+        String original = "合成待确认正文".repeat(50_000) + "synthetic-staged-tail";
+        stubPending();
+        script(tools(call("huge-staged-write", "create_note", Map.of("title", "合成待确认标题", "content", original))),
+                answer("合成长文预览已准备，请在下方确认后写入。"));
+
+        AiChatVO result = chat();
+
+        assertEquals("awaiting_confirmation", result.getRunSummary().get("stopReason"));
+        assertEquals(2, requestSnapshots.size());
+        assertFalse(requestHasTools.get(1));
+        assertTrue(AgentLoopContext.size(json.convertValue(requestSnapshots.get(1), List.class), json) <= AgentLoopContext.SOFT_CHARS);
+        assertFalse(requestSnapshots.get(1).toString().contains("synthetic-staged-tail"));
+        assertTrue(toolResults(requestSnapshots.get(1)).get("huge-staged-write").path("staged").asBoolean());
+        assertEquals(1, result.getPendingActions().size());
+        verify(sessions).stageAction(eq(SESSION), eq("create_note"), argThat(args -> {
+            try { return original.equals(json.readTree(args).path("content").asText()); }
+            catch (Exception malformed) { return false; }
+        }), anyString());
+        verifyNoInteractions(notes);
+        assertPaired(requestSnapshots.get(1));
+    }
+
+    @Test void failedEmptyOrToolCallingFinalReplyNeverRestartsTheStoppedToolLoop() throws Exception {
+        memoryFailure = new IOException("synthetic summary unavailable");
+        Object[] endings = { new IOException("synthetic final model failure"), answer(""), tools(call("unrequested-write", "create_note", Map.of("title", "合成标题", "content", "不能执行"))) };
+        for (Object ending : endings) {
+            requestSnapshots.clear(); requestHasTools.clear(); memoryRequests.clear(); clearInvocations(notes, sessions);
+            source(21, "合成超长原文".repeat(50_000));
+            script(tools(call("only-read", "get_note", Map.of("note_id", 21))), ending);
+
+            AiChatVO result = chat();
+
+            assertEquals(2, requestSnapshots.size());
+            assertFalse(requestHasTools.get(1));
+            assertEquals("context_limit", result.getRunSummary().get("stopReason"));
+            assertTrue(result.getReply().contains("暂未生成可用的文字结论"));
+            assertFalse(result.getReply().contains("模型没有给出文字答复"));
+            assertEquals(1, result.getRetrieved().size());
+            assertTrue(result.getPendingActions().isEmpty());
+            verify(notes, times(1)).detail(21L);
+            verify(sessions, never()).stageAction(anyString(), anyString(), anyString(), anyString());
+            assertPaired(requestSnapshots.get(1));
+        }
+    }
+
+    @Test void oversizedProtectedSystemDoesNotSendAnyOversizedModelRequest() throws Exception {
+        when(settings.effective(SettingsService.KEY_CHAT_PROMPT)).thenReturn("合成不可丢弃系统约定".repeat(40_000));
+
+        AiChatVO result = chat();
+
+        assertEquals("context_limit", result.getRunSummary().get("stopReason"));
+        assertTrue(result.getReply().contains("暂未生成可用的文字结论"));
+        verify(client, never()).chatFull(anyList(), nullable(List.class), anyString(), anyString(), anyString(), anyInt(), anyDouble(), nullable(String.class), nullable(String.class), any(Duration.class));
+        verifyNoInteractions(notes);
+    }
+
+    @Test void successfulWorkingMemoryIsSavedAndAvailableWhenTheSameSessionContinues() throws Exception {
+        source(21, "合成完整材料".repeat(50_000));
+        script(tools(call("remembered-source", "get_note", Map.of("note_id", 21))), answer("合成第一阶段结论。"));
+        chat();
+        String saved = taskMemory(requestSnapshots.get(1));
+        assertTrue(saved.startsWith(AgentContextMemory.PREFIX));
+        verify(sessions).appendTaskMemory(SESSION, saved);
+        when(sessions.latestTaskMemory(SESSION)).thenReturn(saved);
+        requestSnapshots.clear(); requestHasTools.clear(); memoryRequests.clear();
+        script(answer("接着已处理的合成来源继续回答。"));
+
+        AiChatVO continued = chat();
+
+        assertTrue(requestSnapshots.getFirst().toString().contains("remembered-source"));
+        assertTrue(continued.getReply().startsWith("接着已处理的合成来源"));
+        verify(notes, times(1)).detail(21L);
+    }
+
     private void source(long id, String content) {
         NoteVO note = new NoteVO(); note.setId(id); note.setTitle("合成笔记 " + id); note.setContent(content);
         when(notes.detail(id)).thenReturn(note);
@@ -210,9 +344,21 @@ class AgentLoopServiceTest {
     }
 
     private void script(Object... results) throws Exception {
+        when(routing.forTask(ModelRouting.TASK_CHAT)).thenReturn(new ModelRouting.ModelTarget(
+                "synthetic", "synthetic", "http://unused.invalid", "dummy", "mock", true));
         doAnswer(invocation -> {
+            JsonNode snapshot = json.valueToTree(invocation.getArgument(0)).deepCopy();
+            for (JsonNode message : snapshot) {
+                if ("system".equals(message.path("role").asText())
+                        && message.path("content").asText().startsWith(AgentContextMemory.SUMMARY_PREFIX)) {
+                    memoryRequests.add(snapshot);
+                    assertNull(invocation.getArgument(1), "source summarization must never have executable tools");
+                    if (memoryFailure != null) throw memoryFailure;
+                    return answer("合成工作记忆：保留已处理的来源说明、关键结论与未覆盖事项；摘要不代替原文核验。");
+                }
+            }
             int index = requestSnapshots.size();
-            requestSnapshots.add(json.valueToTree(invocation.getArgument(0)).deepCopy());
+            requestSnapshots.add(snapshot);
             List<?> tools = invocation.getArgument(1); requestHasTools.add(tools != null && !tools.isEmpty());
             if (index >= results.length) throw new AssertionError("unexpected extra synthetic model request: " + index);
             Object result = results[index]; if (result instanceof Exception error) throw error;
@@ -247,6 +393,14 @@ class AgentLoopServiceTest {
         for (JsonNode message : transcript) if ("tool".equals(message.path("role").asText()))
             assertNull(results.put(message.path("tool_call_id").asText(), json.readTree(message.path("content").asText())), "tool response ids must remain unique");
         return results;
+    }
+
+    private String taskMemory(JsonNode transcript) {
+        for (JsonNode message : transcript) {
+            String content = message.path("content").asText();
+            if (content.startsWith(AgentContextMemory.PREFIX)) return content;
+        }
+        throw new AssertionError("the task must retain its successfully processed source memory");
     }
 
     private void assertPaired(JsonNode transcript) throws Exception {

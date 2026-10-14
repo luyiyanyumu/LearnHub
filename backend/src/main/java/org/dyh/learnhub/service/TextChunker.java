@@ -31,6 +31,15 @@ public final class TextChunker {
     /** 单块上限，硬性兜底 */
     public static final int MAX = 1200;
 
+    /** Immutable splitter settings shared by indexing, retrieval and synthetic diagnostics. */
+    public record Options(int target, int overlap, int max) {
+        public Options {
+            if (target < 1 || overlap < 0 || overlap >= target || target > max)
+                throw new IllegalArgumentException("分片须满足 0 ≤ overlap < target ≤ max");
+        }
+        public static Options defaults() { return new Options(TARGET, OVERLAP, MAX); }
+    }
+
     /** Markdown 标题行（# ~ ######）；PDF/纯文本没有标题时这一层自然为空 */
     private static final Pattern HEADING = Pattern.compile("^(#{1,6})\\s*(.+?)\\s*#*$");
 
@@ -71,6 +80,11 @@ public final class TextChunker {
      * @return 块列表；短于目标的整篇作为一块
      */
     public static List<Chunk> splitWithHeadings(String text) {
+        return splitWithHeadings(text, Options.defaults());
+    }
+
+    public static List<Chunk> splitWithHeadings(String text, Options options) {
+        if (options == null) options = Options.defaults();
         List<Chunk> out = new ArrayList<>();
         if (text == null || text.isBlank()) {
             return out;
@@ -121,7 +135,7 @@ public final class TextChunker {
 
         // ② 节内再按长度切（复用段落聚合逻辑），每块继承所属小节
         for (Chunk sec : sections) {
-            for (String piece : splitPlain(sec.text())) {
+            for (String piece : splitPlain(sec.text(), options)) {
                 out.add(new Chunk(sec.heading(), piece));
             }
         }
@@ -135,7 +149,7 @@ public final class TextChunker {
      */
     @Deprecated
     public static List<String> split(String text) {
-        return splitPlain(text);
+        return splitPlain(text, Options.defaults());
     }
 
     /**
@@ -160,13 +174,13 @@ public final class TextChunker {
         return sb.append('\n').append(body == null ? "" : body).toString();
     }
 
-    private static List<String> splitPlain(String text) {
+    private static List<String> splitPlain(String text, Options options) {
         List<String> out = new ArrayList<>();
         if (text == null || text.isBlank()) {
             return out;
         }
         String s = text.replace("\r\n", "\n").replace('\r', '\n').trim();
-        if (s.length() <= TARGET) {
+        if (s.length() <= options.target()) {
             out.add(s);
             return out;
         }
@@ -180,19 +194,19 @@ public final class TextChunker {
         }
         StringBuilder cur = new StringBuilder();
         for (String p : paras) {
-            if (p.length() > MAX) {
+            if (p.length() > options.max()) {
                 // ② 超长段落（如整篇没有空行的代码/论文）：先把不完整的收尾，再按句子滑窗切
                 if (cur.length() > 0) {
                     out.add(cur.toString().trim());
                     cur.setLength(0);
                 }
-                out.addAll(splitLong(p));
+                out.addAll(splitLong(p, options));
                 continue;
             }
-            if (cur.length() > 0 && cur.length() + p.length() + 1 > TARGET) {
+            if (cur.length() > 0 && cur.length() + p.length() + 1 > options.target()) {
                 out.add(cur.toString().trim());
                 // 重叠：把上一块尾部几个字符带进下一块（保持句子连续感）
-                String tail = tailOf(cur.toString(), OVERLAP);
+                String tail = tailOf(cur.toString(), options.overlap());
                 cur.setLength(0);
                 if (!tail.isEmpty()) {
                     cur.append(tail).append('\n');
@@ -206,19 +220,25 @@ public final class TextChunker {
         if (cur.length() > 0) {
             out.add(cur.toString().trim());
         }
-        return out.stream().filter(x -> !x.isBlank()).toList();
+        // Paragraph overlap can itself push a block past max; enforce the promised bound.
+        List<String> bounded = new ArrayList<>();
+        for (String piece : out) {
+            if (piece.length() <= options.max()) bounded.add(piece);
+            else bounded.addAll(splitLong(piece, options));
+        }
+        return bounded.stream().filter(x -> !x.isBlank()).toList();
     }
 
     /** 超长段落按句子边界滑窗 */
-    private static List<String> splitLong(String p) {
+    private static List<String> splitLong(String p, Options options) {
         List<String> out = new ArrayList<>();
         // 句子边界：中英文句号/问号/感叹号/分号/换行
         String[] sentences = p.split("(?<=[。！？；!?;\\n])");
         StringBuilder cur = new StringBuilder();
         for (String sen : sentences) {
-            if (cur.length() > 0 && cur.length() + sen.length() > TARGET) {
+            if (cur.length() > 0 && cur.length() + sen.length() > options.target()) {
                 out.add(cur.toString().trim());
-                String tail = tailOf(cur.toString(), OVERLAP);
+                String tail = tailOf(cur.toString(), options.overlap());
                 cur.setLength(0);
                 if (!tail.isEmpty()) {
                     cur.append(tail);
@@ -226,9 +246,9 @@ public final class TextChunker {
             }
             cur.append(sen);
             // 单句仍然超长（极端情况）：硬切
-            while (cur.length() > MAX) {
-                out.add(cur.substring(0, MAX).trim());
-                String rest = cur.substring(MAX - OVERLAP);
+            while (cur.length() > options.max()) {
+                out.add(cur.substring(0, options.max()).trim());
+                String rest = cur.substring(options.max() - options.overlap());
                 cur.setLength(0);
                 cur.append(rest);
             }
@@ -240,7 +260,7 @@ public final class TextChunker {
     }
 
     private static String tailOf(String s, int n) {
-        if (s == null || s.isEmpty()) {
+        if (s == null || s.isEmpty() || n <= 0) {
             return "";
         }
         String t = s.trim();

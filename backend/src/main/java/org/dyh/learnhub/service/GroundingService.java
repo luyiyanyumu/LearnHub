@@ -57,6 +57,12 @@ public class GroundingService {
     private final ModelRouting routing;
     private final ObjectMapper objectMapper;
     private final SettingsService settingsService;
+    private KnowledgeBaseSettings knowledgeSettings;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setKnowledgeSettings(KnowledgeBaseSettings settings) { this.knowledgeSettings = settings; }
+    private KnowledgeBaseSettings.Config config() {
+        return knowledgeSettings == null ? new KnowledgeBaseSettings(settingsService).snapshot() : knowledgeSettings.snapshot();
+    }
 
     public GroundingService(DeepSeekClient client, ModelRouting routing, ObjectMapper objectMapper,
                             SettingsService settingsService) {
@@ -94,7 +100,8 @@ public class GroundingService {
      * @param answer   模型最终答案
      */
     public Result check(String question, String evidence, String answer) {
-        if (!enabled()) {
+        KnowledgeBaseSettings.Config cfg = config();
+        if (!cfg.groundingEnabled()) {
             return Result.skipped("未开启校验");
         }
         if (!StringUtils.hasText(evidence)) {
@@ -105,10 +112,10 @@ public class GroundingService {
         }
         // A prefix cannot establish whether the answer is supported by all material the
         // assistant read. Keep this budget explicit instead of producing a partial verdict.
-        if (evidence.length() > EVIDENCE_CHARS) {
+        if (evidence.length() > cfg.totalChars()) {
             return Result.skipped("本轮证据超过校验预算，未进行完整核对");
         }
-        if (answer.length() > ANSWER_CHARS) {
+        if (answer.length() > cfg.groundingAnswerChars()) {
             return Result.skipped("本轮答案超过校验预算，未进行完整核对");
         }
         int evLen = evidence.length();
@@ -165,9 +172,11 @@ public class GroundingService {
 
     /** 给界面/日志用的状态 */
     public Map<String, Object> status() {
+        KnowledgeBaseSettings.Config cfg = config();
         Map<String, Object> o = new LinkedHashMap<>();
-        o.put("enabled", enabled());
-        o.put("evidenceChars", EVIDENCE_CHARS);
+        o.put("enabled", cfg.groundingEnabled());
+        o.put("evidenceChars", cfg.totalChars());
+        o.put("answerChars", cfg.groundingAnswerChars());
         return o;
     }
 

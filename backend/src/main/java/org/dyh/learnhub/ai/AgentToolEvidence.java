@@ -19,6 +19,7 @@ final class AgentToolEvidence {
             "graph_neighbors", "graph_query", "web_search", "web_fetch", "search_code", "get_code",
             "search_wiki", "read_wiki");
     private final ObjectMapper json;
+    private final int totalChars;
     private final List<String> blocks = new ArrayList<>();
     private final Set<String> seenBodies = new LinkedHashSet<>();
     private final Map<String, Map<String, Object>> refs = new LinkedHashMap<>();
@@ -26,7 +27,13 @@ final class AgentToolEvidence {
     private String skipReason;
 
     AgentToolEvidence(RetrievalContextService.Context initial, ObjectMapper json) {
+        this(initial, json, RetrievalContextService.TOTAL_CHARS);
+    }
+
+    AgentToolEvidence(RetrievalContextService.Context initial, ObjectMapper json, int totalChars) {
+        if (totalChars <= 0) throw new IllegalArgumentException("证据预算须为正数");
         this.json = json;
+        this.totalChars = totalChars;
         // Context also removes a bare data notice when the only material is generated Wiki navigation.
         append(initial.groundingText());
         for (RetrievalHit hit : initial.injectedHits()) seenBodies.add(bodyKey(hit.sourceType(), hit.sourceId(), hit.text()));
@@ -161,7 +168,7 @@ final class AgentToolEvidence {
     private void append(String block) {
         if (block == null || block.isBlank()) return;
         int needed = block.length() + (blocks.isEmpty() ? 0 : 2);
-        if (needed > RetrievalContextService.TOTAL_CHARS - chars) {
+        if (needed > totalChars - chars) {
             skipReason = "本轮实际读取材料超过校验预算，未进行完整核对";
             return;
         }

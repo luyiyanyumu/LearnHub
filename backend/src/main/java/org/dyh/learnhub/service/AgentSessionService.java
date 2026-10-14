@@ -57,6 +57,9 @@ public class AgentSessionService {
     public static final String ROLE_ASSISTANT = "assistant";
     public static final String ROLE_TOOL = "tool";
     public static final String ROLE_SUMMARY = "summary";
+    /** Hidden semantic working memory; it is neither a conversation turn nor a tool result. */
+    public static final String ROLE_TASK_MEMORY = "task_memory";
+    public static final int MAX_TASK_MEMORY_CHARS = 40_000;
     /** Factual UI process snapshots, kept out of the user/assistant model projection. */
     public static final String ROLE_PROGRESS = "progress";
     private static final com.fasterxml.jackson.databind.ObjectMapper DISPLAY_JSON = new com.fasterxml.jackson.databind.ObjectMapper();
@@ -239,6 +242,26 @@ public class AgentSessionService {
         return rows.isEmpty() ? null : rows.get(0).getContent();
     }
 
+    /** Latest durable working memory for this session; reading never changes conversation coverage. */
+    public String latestTaskMemory(String sessionId) {
+        if (!StringUtils.hasText(sessionId)) return null;
+        List<AgentEvent> rows = eventMapper.selectList(Wrappers.<AgentEvent>lambdaQuery()
+                .eq(AgentEvent::getSessionId, sessionId)
+                .eq(AgentEvent::getRole, ROLE_TASK_MEMORY)
+                .orderByDesc(AgentEvent::getId)
+                .last("LIMIT 1"));
+        return rows.isEmpty() ? null : rows.getFirst().getContent();
+    }
+
+    /** Save only a complete bounded memory; do not silently truncate semantic facts. */
+    public void appendTaskMemory(String sessionId, String text) {
+        if (text != null && text.length() > MAX_TASK_MEMORY_CHARS)
+            throw new IllegalArgumentException("工作记忆不能超过 " + MAX_TASK_MEMORY_CHARS + " 字符");
+        if (!StringUtils.hasText(text)) return;
+        if (!StringUtils.hasText(sessionId)) throw new IllegalArgumentException("工作记忆的会话编号不能为空");
+        append(sessionId, ROLE_TASK_MEMORY, text, null, null);
+    }
+
     private static final String SUMMARY_WATERMARK_PREFIX = "summary-through:";
 
     /** Keep summary prose display-compatible while recording exactly which conversation event it covers. */
@@ -406,7 +429,8 @@ public class AgentSessionService {
         Map<Long, List<Map<String, Object>>> waiting = new LinkedHashMap<>();
         for (Map<String, Object> message : messages) {
             for (Map<String, Object> row : (List<Map<String, Object>>) message.getOrDefault("progress", List.of())) {
-                if ("waiting".equals(row.get("status")) && row.get("actionId") instanceof Number number)
+                if (("waiting".equals(row.get("status")) || "running".equals(row.get("status")))
+                        && row.get("actionId") instanceof Number number)
                     waiting.computeIfAbsent(number.longValue(), ignored -> new ArrayList<>()).add(row);
             }
         }
@@ -416,10 +440,24 @@ public class AgentSessionService {
         for (AgentPendingAction action : actions) {
             if (!sessionId.equals(action.getSessionId()) || !waiting.containsKey(action.getId())) continue;
             String status = action.getStatus();
-            if (!"approved".equals(status) && !"rejected".equals(status) && !"failed".equals(status)) continue;
+            String progressStatus = switch (status == null ? "" : status) {
+                case "pending" -> "waiting";
+                case "executing" -> "running";
+                case "approved", "rejected" -> "completed";
+                case "failed" -> "error";
+                default -> null;
+            };
+            if (progressStatus == null) continue;
+            String detail = switch (status) {
+                case "pending" -> "等待确认执行";
+                case "executing" -> "正在执行，请勿重复确认";
+                case "approved" -> "已确认执行";
+                case "rejected" -> "已取消，本项未执行";
+                default -> "执行失败，请根据会话中的说明重试";
+            };
             for (Map<String, Object> row : waiting.get(action.getId())) {
-                row.put("status", "failed".equals(status) ? "error" : "completed");
-                row.put("detail", "approved".equals(status) ? "已确认执行" : "rejected".equals(status) ? "已取消，本项未执行" : "执行失败，请根据会话中的说明重试");
+                row.put("status", progressStatus);
+                row.put("detail", detail);
             }
         }
     }
@@ -503,11 +541,11 @@ public class AgentSessionService {
         return a;
     }
 
-    /** 某会话里尚未处理的操作，按先后顺序 */
+    /** Unfinished actions, including an approval still executing after a disconnected response. */
     public List<AgentPendingAction> pendingActions(String sessionId) {
         return actionMapper.selectList(Wrappers.<AgentPendingAction>lambdaQuery()
                 .eq(AgentPendingAction::getSessionId, sessionId)
-                .eq(AgentPendingAction::getStatus, "pending")
+                .in(AgentPendingAction::getStatus, List.of("pending", "executing"))
                 .orderByAsc(AgentPendingAction::getId));
     }
 
@@ -588,6 +626,7 @@ public class AgentSessionService {
     public static Map<String, Object> actionBrief(AgentPendingAction a) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("id", a.getId());
+        m.put("status", a.getStatus());
         m.put("toolName", a.getToolName());
         m.put("summary", a.getSummary());
         if ("edit_note".equals(a.getToolName())) {

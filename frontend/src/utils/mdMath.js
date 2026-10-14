@@ -81,11 +81,12 @@ function mathInline(state, silent) {
   }
   if (end < 0) return false
   if (end === bodyStart) return false
-  if (isSpace(src.charCodeAt(end - 1))) return false // "$ … $" 不是公式
+  if (closer === CODE_DOLLAR && isSpace(src.charCodeAt(end - 1))) return false // "$ … $" 不是公式
   if (closer === CODE_DOLLAR && isDigit(src.charCodeAt(end + 1))) return false // "$5 … $6" 不是公式
 
   // `\(…\)` 的正文不包含收尾的 `\)`
-  const content = src.slice(bodyStart, closer === CODE_OPEN_PAREN ? end : end)
+  const content = src.slice(bodyStart, end)
+  if (!content.trim()) return false // 明确的括号定界符允许空白，但空公式保留为文本
 
   if (!silent) {
     const token = state.push('math_inline', 'math', 0)

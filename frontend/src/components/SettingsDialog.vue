@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { categoryApi, tagApi, settingsApi, aiApi, wikiApi, modelApi } from '../api'
 import { extractPromptFromMd } from '../utils/promptFromMd'
@@ -33,8 +33,14 @@ const emptyForm = () => ({
  * 现在拆成左侧分组菜单 + 右侧只显示当前分组，一屏就能看完一组。
  */
 const pane = ref('model')
+const KnowledgeSettingsPanel = defineAsyncComponent(() => import('./KnowledgeSettingsPanel.vue'))
+const knowledgeMounted = ref(false)
+const knowledgePanel = ref(null)
+const knowledgeState = ref({ dirty: false, saving: false, loaded: false, view: 'parameters', count: 0 })
+watch(pane, value => { if (value === 'knowledge') knowledgeMounted.value = true })
 const PANES = [
   { id: 'model', name: '模型档案与分工' },
+  { id: 'knowledge', name: '知识库' },
   { id: 'legacy', name: '模型参数' },
   { id: 'prompt', name: '对话提示词' },
   { id: 'skill', name: '技能' },
@@ -1064,7 +1070,7 @@ function notifyMetaChanged() {
 }
 </script>
 <template>
-  <el-dialog v-model="visible" title="⚙ 设置" width="880px" top="8vh" destroy-on-close>
+  <el-dialog v-model="visible" title="设置" :width="pane === 'knowledge' ? '1040px' : '880px'" :top="pane === 'knowledge' ? '5vh' : '8vh'" destroy-on-close class="settings-dialog" :class="{ 'has-knowledge': pane === 'knowledge' }">
     <div class="settings-body">
       <nav class="settings-nav">
         <button
@@ -1078,6 +1084,18 @@ function notifyMetaChanged() {
       </nav>
 
       <div class="settings-pane">
+        <KnowledgeSettingsPanel
+          v-if="knowledgeMounted"
+          v-show="pane === 'knowledge'"
+          ref="knowledgePanel"
+          :active="visible && pane === 'knowledge'"
+          :profiles="profiles"
+          :routing="routing.table"
+          :routing-busy="routingBusy"
+          @state="knowledgeState = $event"
+          @set-target="setTaskTarget"
+          @open-models="pane = 'model'"
+        />
         <div v-show="pane === 'legacy'">
           <section class="sec">
             <h4 class="sec-title">选择模型档案</h4>
@@ -1523,14 +1541,29 @@ function notifyMetaChanged() {
     </div>
 
     <template #footer>
-      <el-button @click="resetAll" :disabled="saving">全部恢复默认</el-button>
-      <el-button @click="visible = false">关闭</el-button>
-      <el-button type="primary" :loading="saving" @click="save">保存</el-button>
+      <template v-if="pane === 'knowledge'">
+        <span v-if="knowledgeState.dirty" class="knowledge-footer-hint">{{ knowledgeState.count }} 项待保存</span>
+        <el-button v-if="knowledgeState.view === 'parameters'" text class="knowledge-reset" :disabled="knowledgeState.saving || knowledgeState.rebuilding || !knowledgeState.loaded" @click="knowledgePanel?.resetDefaults()">恢复知识库默认</el-button>
+        <el-button @click="visible = false">关闭</el-button>
+        <el-button v-if="knowledgeState.view === 'parameters' || knowledgeState.dirty" type="primary" :loading="knowledgeState.saving" :disabled="knowledgeState.rebuilding || !knowledgeState.loaded || !knowledgeState.dirty" @click="knowledgePanel?.save()">保存知识库设置</el-button>
+      </template>
+      <template v-else>
+        <el-button @click="resetAll" :disabled="saving">全部恢复默认</el-button>
+        <el-button @click="visible = false">关闭</el-button>
+        <el-button type="primary" :loading="saving" @click="save">保存</el-button>
+      </template>
     </template>
   </el-dialog>
 </template>
 
 <style scoped>
+:global(.settings-dialog.el-dialog) { max-width: calc(100vw - 24px); }
+:global(.settings-dialog .el-dialog__footer) { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+:global(.settings-dialog .el-dialog__footer .el-button + .el-button) { margin-left: 0; }
+:global(.settings-dialog.has-knowledge .el-dialog__footer) { border-top: 1px solid var(--app-border-weak); padding-top: 16px; align-items: center; }
+.knowledge-footer-hint { margin-right: auto; font-size: var(--font-caption); color: var(--app-text-3); }
+.knowledge-reset { margin-right: auto; color: var(--app-text-3); }
+.knowledge-footer-hint + .knowledge-reset { margin-right: 0; }
 .settings {
   display: flex;
   flex-direction: column;
@@ -1629,6 +1662,18 @@ function notifyMetaChanged() {
 .settings-pane {
   overflow-y: auto;
   padding-right: 4px;
+  min-width: 0;
+  overscroll-behavior: contain;
+}
+:global(.settings-dialog.has-knowledge .settings-body) { height: 68vh; }
+.nav-item:focus-visible { outline: 2px solid var(--app-brand); outline-offset: -2px; }
+@media (max-width: 760px) {
+  .settings-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: 12px; height: 60vh; }
+  .settings-nav { flex-direction: row; padding: 0 0 8px; border-right: 0; border-bottom: 1px solid var(--app-border-weak); overflow-x: auto; }
+  .nav-item { white-space: nowrap; flex: 0 0 auto; }
+  .settings-pane { padding-right: 0; min-width: 0; }
+  :global(.settings-dialog.has-knowledge .settings-body) { height: 64vh; }
+  .knowledge-footer-hint { flex-basis: 100%; text-align: left; }
 }
 /* 分组内的 section 不再各占一大块：收紧间距与留白 */
 .settings-pane .sec + .sec {

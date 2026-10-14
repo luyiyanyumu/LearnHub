@@ -64,6 +64,25 @@ test('isLinkError：没有 response 的错误算链路层（连接被拒/超时/
   assert.equal(isLinkError({ request: {} }), true)
 })
 
+test('isLinkError：明确标记的长写入等待超时不证明后端离线', () => {
+  for (const code of ['ECONNABORTED', 'ETIMEDOUT']) {
+    const error = { code, message: '合成操作可能仍在后台执行', config: { serverMayContinueOnTimeout: true } }
+    assert.equal(isLinkError(error), false, code)
+    assert.equal(isLinkError({ ...error, config: {} }), true, `${code} without the explicit marker`)
+    assert.equal(isLinkError({ ...error, config: { serverMayContinueOnTimeout: false } }), true, `${code} with marker disabled`)
+  }
+})
+
+test('isLinkError：长任务标记不能隐藏真实网络故障或服务器错误', () => {
+  const config = { serverMayContinueOnTimeout: true }
+  for (const code of ['ERR_NETWORK', 'ECONNREFUSED', 'ENOTFOUND']) {
+    assert.equal(isLinkError({ code, message: '合成连接失败', config }), true, code)
+  }
+  for (const status of [500, 502, 503, 504]) {
+    assert.equal(isLinkError({ code: 'ERR_BAD_RESPONSE', response: { status }, config }), true, `status=${status}`)
+  }
+})
+
 test('isLinkError：4xx 是业务失败，不拉全局横幅', () => {
   for (const status of [400, 401, 403, 404, 422]) {
     assert.equal(isLinkError({ response: { status } }), false, `status=${status} 不应判为链路错误`)

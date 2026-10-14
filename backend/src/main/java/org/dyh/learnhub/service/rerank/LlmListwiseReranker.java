@@ -45,6 +45,9 @@ public class LlmListwiseReranker implements Reranker {
     private final ModelRouting routing;
     private final ObjectMapper objectMapper;
     private final SettingsService settingsService;
+    private org.dyh.learnhub.service.KnowledgeBaseSettings knowledgeSettings;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setKnowledgeSettings(org.dyh.learnhub.service.KnowledgeBaseSettings settings) { this.knowledgeSettings = settings; }
 
     public LlmListwiseReranker(DeepSeekClient client, ModelRouting routing, ObjectMapper objectMapper,
                                SettingsService settingsService) {
@@ -66,16 +69,29 @@ public class LlmListwiseReranker implements Reranker {
 
     @Override
     public List<String> rerank(String question, List<Item> items) {
+        var cfg = knowledgeSettings == null ? new org.dyh.learnhub.service.KnowledgeBaseSettings(settingsService).snapshot()
+                : knowledgeSettings.snapshot();
+        return rerankDetailed(question, items, cfg).order();
+    }
+
+    @Override
+    public Result rerankDetailed(String question, List<Item> items,
+                                 org.dyh.learnhub.service.KnowledgeBaseSettings.Config cfg) {
         if (items == null || items.isEmpty()) {
-            return List.of();
+            return new Result(List.of(), "skipped", "没有待重排候选");
         }
         List<Item> window = items.size() > MAX_WINDOW ? items.subList(0, MAX_WINDOW) : items;
+        int snippetBudget = cfg.rerankSnippet();
         List<List<String>> batches = new ArrayList<>();
+        int failures = 0, repairs = 0, calls = 0;
         for (int from = 0; from < window.size(); from += BATCH) {
             List<Item> part = window.subList(from, Math.min(window.size(), from + BATCH));
-            List<String> ordered = rerankBatch(question, part);
+            if (part.size() > 2) calls++;
+            Result ordered = rerankBatch(question, part, snippetBudget);
             // 这一批失败：按原顺序保留，绝不丢候选
-            batches.add(ordered != null ? ordered : part.stream().map(Item::key).toList());
+            batches.add(ordered.order());
+            if ("fallback".equals(ordered.status())) failures++;
+            if ("degraded".equals(ordered.status())) repairs++;
         }
         List<String> out = interleave(batches);
         // 窗口之外的候选按原顺序接在后面
@@ -84,7 +100,12 @@ public class LlmListwiseReranker implements Reranker {
                 out.add(it.key());
             }
         }
-        return out;
+        String status = calls == 0 ? "skipped" : failures == calls ? "fallback"
+                : failures > 0 || repairs > 0 ? "degraded" : "completed";
+        String reason = failures > 0 ? "重排模型调用或响应格式不可用，失败批次按召回原序保留"
+                : repairs > 0 ? "模型返回部分有效编号，遗漏候选按原序补入"
+                : calls == 0 ? "候选不超过两项，保留原序" : "";
+        return new Result(out, status, reason);
     }
 
     /** 批间轮转交错：各批的第 i 名依次排下去 */
@@ -109,12 +130,11 @@ public class LlmListwiseReranker implements Reranker {
      *
      * @return 排好序的 key；失败返回 {@code null}（调用方按原顺序保留这一批）
      */
-    private List<String> rerankBatch(String question, List<Item> part) {
+    private Result rerankBatch(String question, List<Item> part, int snippetLimit) {
         if (part.size() <= 2) {
-            return part.stream().map(Item::key).toList();
+            return new Result(part.stream().map(Item::key).toList(), "skipped", "");
         }
         StringBuilder list = new StringBuilder();
-        int snippetLimit = snippetLimit();
         for (int i = 0; i < part.size(); i++) {
             Item it = part.get(i);
             String snip = QueryAwareExcerpt.rerankExcerpt(question, it.snippet(), snippetLimit);
@@ -138,7 +158,7 @@ public class LlmListwiseReranker implements Reranker {
                     "disabled", null, Duration.ofSeconds(20));
             String content = node.path("content").asText("");
             if (!StringUtils.hasText(content)) {
-                return null;
+                return fallback(part);
             }
             JsonNode arr = objectMapper.readTree(stripFence(content)).path("order");
             List<String> out = new ArrayList<>();
@@ -152,19 +172,24 @@ public class LlmListwiseReranker implements Reranker {
                 }
             }
             if (out.isEmpty()) {
-                return null;
+                return fallback(part);
             }
+            boolean repaired = out.size() != part.size();
             // 模型漏写的编号按原顺序补在后面
             for (Item it : part) {
                 if (!out.contains(it.key())) {
                     out.add(it.key());
                 }
             }
-            return out;
+            return new Result(out, repaired ? "degraded" : "completed", repaired ? "遗漏编号已按原序补入" : "");
         } catch (Exception e) {
             log.warn("重排失败（这一批保持原顺序）：{}", e.toString());
-            return null;
+            return fallback(part);
         }
+    }
+
+    private static Result fallback(List<Item> part) {
+        return new Result(part.stream().map(Item::key).toList(), "fallback", "模型调用或响应格式不可用");
     }
 
     @Override
@@ -180,6 +205,7 @@ public class LlmListwiseReranker implements Reranker {
 
     /** 候选文本长度（设置里没配就用 120） */
     private int snippetLimit() {
+        if (knowledgeSettings != null) return knowledgeSettings.snapshot().rerankSnippet();
         String v = settingsService.effective(Reranker.KEY_SNIPPET);
         if (v == null || v.isBlank()) {
             return DEFAULT_SNIPPET;

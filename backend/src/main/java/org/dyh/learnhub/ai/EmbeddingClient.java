@@ -138,14 +138,25 @@ public class EmbeddingClient {
         return embedAll(snapshot, texts, Duration.ofMinutes(5));
     }
 
+    /** Explicit per-operation bounds; callers keep one immutable configuration across all batches. */
+    public List<float[]> embedAll(Snapshot snapshot, List<String> texts, int batchSize, int maxChars) {
+        return embedAll(snapshot, texts, Duration.ofMinutes(5), batchSize, maxChars);
+    }
+
     private List<float[]> embedAll(Snapshot snapshot, List<String> texts, Duration timeout) {
+        return embedAll(snapshot, texts, timeout, BATCH, MAX_CHARS);
+    }
+
+    private List<float[]> embedAll(Snapshot snapshot, List<String> texts, Duration timeout, int batchSize, int maxChars) {
         if (snapshot == null || !snapshot.configured())
             throw new IllegalStateException(snapshot == null ? "未配置向量嵌入模型" : snapshot.reason());
         if (texts == null) throw new IllegalArgumentException("嵌入文本不能为空");
+        if (batchSize < 1 || batchSize > 128 || maxChars < 1 || maxChars > 32000)
+            throw new IllegalArgumentException("嵌入批量或输入长度超出范围");
         List<float[]> out = new ArrayList<>();
         int dimensions = 0;
-        for (int i = 0; i < texts.size(); i += BATCH) {
-            List<float[]> vectors = embedBatch(snapshot, texts.subList(i, Math.min(texts.size(), i + BATCH)), timeout);
+        for (int i = 0; i < texts.size(); i += batchSize) {
+            List<float[]> vectors = embedBatch(snapshot, texts.subList(i, Math.min(texts.size(), i + batchSize)), timeout, maxChars);
             for (float[] vector : vectors) {
                 if (dimensions != 0 && vector.length != dimensions)
                     throw new IllegalStateException("嵌入服务返回的向量维数不一致");
@@ -156,13 +167,13 @@ public class EmbeddingClient {
         return out;
     }
 
-    private List<float[]> embedBatch(Snapshot snapshot, List<String> batch, Duration timeout) {
+    private List<float[]> embedBatch(Snapshot snapshot, List<String> batch, Duration timeout, int maxChars) {
         var body = objectMapper.createObjectNode();
         body.put("model", snapshot.model());
         var input = body.putArray("input");
         for (String text : batch) {
             if (text == null || text.isBlank()) throw new IllegalArgumentException("嵌入文本不能为空");
-            int end = Math.min(text.length(), MAX_CHARS);
+            int end = Math.min(text.length(), maxChars);
             if (end < text.length() && Character.isHighSurrogate(text.charAt(end - 1))) end--;
             input.add(text.substring(0, end));
         }

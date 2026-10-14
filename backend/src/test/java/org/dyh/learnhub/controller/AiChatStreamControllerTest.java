@@ -8,6 +8,7 @@ import org.dyh.learnhub.vo.AiChatVO;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
+import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
@@ -29,6 +30,14 @@ class AiChatStreamControllerTest {
     private final MockMvc mvc = MockMvcBuilders.standaloneSetup(controller).build();
 
     @AfterEach void shutdown() { controller.shutdownStreamPool(); }
+
+    @Test void researchChatHasTimeForSeveralSourceBatchesWithoutWaitingInTheTest() {
+        when(agent.chat(any(AiChatRequest.class), any(AgentService.ChatListener.class))).thenReturn(new AiChatVO());
+        AiChatRequest question = new AiChatRequest(); question.setMessage("合成大资料问题");
+        var emitter = controller.chatStream(question, new MockHttpServletResponse());
+        assertEquals(900_000L, AgentService.CHAT_ROUND_BUDGET_MS);
+        assertEquals(960_000L, emitter.getTimeout());
+    }
 
     @Test void sendsProgressBeforeTheFinalAnswerAndDisablesProxyBuffering() throws Exception {
         CountDownLatch progressSent = new CountDownLatch(1);

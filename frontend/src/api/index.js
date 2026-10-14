@@ -91,6 +91,7 @@ export const knowledgeApi = {
 // AI 相关请求的统一超时：思考模式（DeepSeek V4 / Kimi K3 / GLM-5.3 等）会让长文处理
 // 比 90 秒慢得多（实测 4863 字润色 81.6s，更长文档直接破 90s），而对齐后端 HttpClient 的 300s。
 const AI_TIMEOUT = 300000
+const CHAT_TIMEOUT = 960000
 
 /**
  * 流式润色 / 整理格式：边处理边回报分段进度。
@@ -237,15 +238,22 @@ export const aiApi = {
   mergeLocate: (data) => mergeLocate(data),
   /** 分节融入第二步：只改写那一节（SSE；返回 {content, heading, mode}） */
   mergeSectionStream: (data, onEvent, signal) => mergeSectionStream(data, onEvent, signal),
-  /** 智能体对话：{ message, sessionId, history?, noteId?, noteTitle?, noteContext? } → AiChatVO（最多 8 轮工具调用，耗时叠加） */
-  chat: (data, signal) => request.post('/ai/chat', data, { timeout: AI_TIMEOUT, signal, silentError: true }),
+  /** 智能体对话：多轮工具调用与大资料分批处理，共用独立的聊天等待时间。 */
+  chat: (data, signal) => request.post('/ai/chat', data, { timeout: CHAT_TIMEOUT, signal, silentError: true }),
   chatStream: (data, onEvent, signal) => postChatStream('/api/ai/chat-stream', data, onEvent, signal),
   /** 会话回看：把事件日志投影成气泡列表（刷新页面后靠它恢复对话） */
   session: (id) => request.get(`/ai/sessions/${id}`),
   /** 清空一个会话（含其事件） */
   deleteSession: (id) => request.delete(`/ai/sessions/${id}`),
   /** 确认执行一个待确认的写操作（在此之前数据库零改动） */
-  approveAction: (id) => request.post(`/ai/actions/${id}/approve`),
+  approveAction: (id) => request.post(`/ai/actions/${id}/approve`, {}, {
+    timeout: AI_TIMEOUT,
+    silentError: true,
+    serverMayContinueOnTimeout: true,
+    timeoutErrorMessage: '等待执行结果超时，操作可能仍在后台执行，请查看执行状态',
+  }),
+  /** 只查询已确认操作的状态；网络中断后不重发写操作。 */
+  actionState: (id) => request.get(`/ai/actions/${id}`, { silentError: true }),
   /** 取消一个待确认的写操作 */
   rejectAction: (id) => request.post(`/ai/actions/${id}/reject`),
   /** 技能清单：润色/整理格式的提示词来自 skills/<id>/SKILL.md，这里只做只读展示 */
@@ -449,6 +457,11 @@ export const fileApi = {
 
 /** 语义检索（向量索引）：状态 / 重建（带进度）/ 检索体检 */
 export const kbApi = {
+  settings: () => request.get('/kb/settings', { silentError: true }),
+  saveSettings: (values) => request.put('/kb/settings', { values }, { silentError: true }),
+  diagnosticCases: () => request.get('/kb/diagnostics/cases', { silentError: true }),
+  diagnose: (data, { signal } = {}) => request.post('/kb/diagnostics', data, { signal, timeout: 180000, silentError: true }),
+  syncVector: () => request.post('/kb/vector/sync', {}, { timeout: 180000, silentError: true }),
   /** 只读；含 configured/embeddingChanged/compatibleChunks/embeddingSpace，不会调用模型或自动重建。 */
   status: () => request.get('/kb/status'),
   rebuild: () => request.post('/kb/rebuild', {}, { timeout: 30000 }),
