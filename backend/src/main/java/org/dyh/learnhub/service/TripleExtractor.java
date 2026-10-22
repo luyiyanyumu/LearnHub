@@ -2,6 +2,7 @@ package org.dyh.learnhub.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import org.dyh.learnhub.ai.DeepSeekClient;
 import org.dyh.learnhub.ai.ModelRouting;
 import org.slf4j.Logger;
@@ -49,6 +50,8 @@ public class TripleExtractor {
 
     /** 一次送进去的素材字符数（分批，避免超长导致截断） */
     private static final int BATCH_CHARS = 4000;
+    /** A formula/code block stays atomic; this hard ceiling bounds a single model request. */
+    private static final int MAX_ATOMIC_CHARS = 32_000;
     /** 每批最多接受多少条三元组 */
     private static final int MAX_PER_BATCH = 12;
     /** 抽取时的输出预算：思考关了，这个额度对 JSON 足够 */
@@ -85,9 +88,28 @@ public class TripleExtractor {
      * @param known    已知实体名（给模型对齐用；也能显著减少"换个写法又建一个点"）
      */
     public Result extract(String material, List<String> known) {
+        return extractInternal(material, known, null, null);
+    }
+
+    /** Atomic maintenance extraction: every source batch must succeed before its old support is replaced. */
+    public Result extractSourceStrict(String cite, String title, String body, List<String> known) {
+        if (cite == null || !cite.matches("(?:笔记|速查卡|资料)#[0-9]+")) {
+            throw new IllegalArgumentException("无效图谱来源标识");
+        }
+        return extractInternal(body, known, cite, title == null ? "" : title);
+    }
+
+    /** No credentials are persisted; changing task target, endpoint or model invalidates the checkpoint. */
+    public String modelFingerprint() {
+        ModelRouting.ModelTarget target = routing.forTask(ModelRouting.TASK_TRIPLE);
+        return target.id() + "\n" + target.baseUrl() + "\n" + target.model();
+    }
+
+    private Result extractInternal(String material, List<String> known, String sourceCite, String title) {
+        boolean strict = sourceCite != null;
         ModelRouting.ModelTarget t = routing.forTask(ModelRouting.TASK_TRIPLE);
         boolean cloud = !t.separate();
-        List<String> parts = split(material, BATCH_CHARS);
+        List<String> parts = strict ? splitSource(material, BATCH_CHARS) : split(material, BATCH_CHARS);
         List<Triple> accepted = new ArrayList<>();
         Set<String> seen = new LinkedHashSet<>();
         int rejectedOntology = 0;
@@ -97,32 +119,45 @@ public class TripleExtractor {
         for (int i = 0; i < parts.size(); i++) {
             batches++;
             String system = systemPrompt(known);
-            String user = "素材（第 " + (i + 1) + "/" + parts.size() + " 段）：\n" + parts.get(i);
+            String user = "素材（第 " + (i + 1) + "/" + parts.size() + " 段）：\n"
+                    + (strict ? "[" + sourceCite + "] 《" + title + "》\n" : "") + parts.get(i);
             String reply;
             try {
-                reply = chat(system, user, t);
+                reply = strict ? chatStrict(system, user, t) : chat(system, user, t);
             } catch (Exception e) {
+                if (strict) throw new IllegalStateException("图谱来源抽取失败，保留已有关系；原因："
+                        + KnowledgeMaintenanceService.failureReason(e), e);
                 log.warn("三元组抽取失败（跳过这批）：{}", e.toString());
                 continue;
             }
             if (!StringUtils.hasText(reply)) {
+                if (strict) throw new IllegalStateException("图谱来源抽取返回空内容，保留已有关系");
                 log.warn("三元组抽取返回空内容，跳过这批");
                 continue;
             }
             JsonNode arr;
             try {
-                JsonNode root = objectMapper.readTree(stripFence(reply));
+                JsonNode root = strict ? objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                        .readTree(stripFence(reply)) : objectMapper.readTree(stripFence(reply));
                 arr = root.path("triples");
                 if (!arr.isArray()) {
+                    if (strict && !root.isArray()) throw new IllegalArgumentException("缺少 triples 数组");
                     arr = root.isArray() ? root : objectMapper.createArrayNode();
                 }
             } catch (Exception e) {
+                if (strict) throw new IllegalStateException("图谱来源抽取返回无效 JSON，保留已有关系", e);
                 log.warn("三元组抽取返回的 JSON 解析失败：{}｜原文前 200 字：{}", e.toString(),
                         reply.length() > 200 ? reply.substring(0, 200) : reply);
                 continue;
             }
             int taken = 0;
             for (JsonNode n : arr) {
+                if (strict && (!n.isObject() || text(n, "head", "a", "subject", "头实体").isBlank()
+                        || text(n, "relation", "rel", "predicate", "relation_type", "关系").isBlank()
+                        || text(n, "tail", "b", "object", "尾实体").isBlank()
+                        || text(n, "evidence", "quote", "证据", "原文").isBlank())) {
+                    throw new IllegalStateException("图谱来源抽取返回无效三元组，保留已有关系");
+                }
                 if (taken >= MAX_PER_BATCH) {
                     break;
                 }
@@ -130,7 +165,7 @@ public class TripleExtractor {
                 String rel = text(n, "relation", "rel", "predicate", "relation_type", "关系");
                 String tail = text(n, "tail", "b", "object", "尾实体");
                 String evidence = text(n, "evidence", "quote", "证据", "原文");
-                String cite = text(n, "cite", "source", "来源");
+                String cite = strict ? sourceCite : text(n, "cite", "source", "来源");
                 String canon = KgOntology.canonical(rel);
                 if (canon == null) {
                     rejectedOntology++;
@@ -154,8 +189,13 @@ public class TripleExtractor {
                 // 证据句必须真的在素材里出现过（防编造）：只做宽松包含判断，标点差异不算。
                 // 未核对的三元组**不丢**（模型常改写证据而非原样抄，实测 #97 的原话在素材里但引用被改写），
                 // 但必须降权：以前一律给 0.9，"有没有原文支持"在数据上完全不可区分（评估报告 P0-D）。
-                boolean verified = StringUtils.hasText(evidence) && containsLoose(parts.get(i), evidence);
+                boolean verified = StringUtils.hasText(evidence) && (strict
+                        ? evidenceSupported(parts.get(i), evidence) : containsLoose(parts.get(i), evidence));
                 if (!verified) {
+                    if (strict) {
+                        rejectedShape++;
+                        continue;
+                    }
                     evidence = null;
                 }
                 String key = EntityLinker.normalize(head) + "|" + canon + "|" + EntityLinker.normalize(tail);
@@ -171,6 +211,90 @@ public class TripleExtractor {
         log.info("三元组抽取：{} 批 → 接受 {} 条（关系不在本体 {} / 形状不合法 {} / 重复 {}），模型={}",
                 batches, accepted.size(), rejectedOntology, rejectedShape, rejectedDedup, t.model());
         return new Result(accepted, batches, rejectedOntology, rejectedShape, rejectedDedup, t.model(), cloud);
+    }
+
+    private String chatStrict(String system, String user, ModelRouting.ModelTarget target) throws Exception {
+        DeepSeekClient.ChatResult result = client.chatFull(List.of(
+                        Map.of("role", "system", "content", system), Map.of("role", "user", "content", user)),
+                null, target.baseUrl(), target.apiKey(), target.model(), MAX_TOKENS, 0.2,
+                "disabled", null, Duration.ofMinutes(3));
+        if (result == null) {
+            throw new IllegalStateException("图谱来源抽取未取得模型结果");
+        }
+        if (result.truncated()) {
+            throw new IllegalStateException("图谱来源抽取输出被截断");
+        }
+        return result.message().path("content").asText("");
+    }
+
+    /** Full normalized evidence must occur in the body, rather than only its first half. */
+    static boolean evidenceSupported(String body, String evidence) {
+        String normalized = squash(evidence);
+        return !normalized.isEmpty() && squash(body).contains(normalized);
+    }
+
+    /** Lossless splitting: max is a soft target; a protected block gets its own bounded batch. */
+    static List<String> splitSource(String text, int max) {
+        if (text == null || text.isBlank()) return List.of();
+        List<String> units = new ArrayList<>();
+        StringBuilder atomic = new StringBuilder();
+        String fence = null;
+        boolean dollars = false;
+        int brackets = 0;
+        int environments = 0;
+        for (String line : text.split("(?<=\n)", -1)) {
+            String trimmed = line.stripLeading().replaceFirst("^(?:>\\s*)+", "");
+            boolean wasProtected = fence != null || dollars || brackets > 0 || environments > 0;
+            boolean containsMath = false;
+            if (fence != null) {
+                if (trimmed.startsWith(fence)) fence = null;
+            } else if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
+                fence = trimmed.substring(0, 3);
+            } else {
+                // Inline code cannot open a display formula.
+                String math = line.replaceAll("`[^`]*`", "");
+                containsMath = math.contains("$$") || math.contains("\\[") || math.contains("\\begin{");
+                int count = math.split("(?<!\\\\)\\$\\$", -1).length - 1;
+                if (count % 2 == 1) dollars = !dollars;
+                brackets += occurrences(math, "\\[") - occurrences(math, "\\]");
+                environments += occurrences(math, "\\begin{") - occurrences(math, "\\end{");
+                brackets = Math.max(0, brackets);
+                environments = Math.max(0, environments);
+            }
+            boolean protectedNow = fence != null || dollars || brackets > 0 || environments > 0;
+            if (wasProtected || protectedNow || containsMath) {
+                atomic.append(line);
+                if (atomic.length() > MAX_ATOMIC_CHARS) {
+                    throw new IllegalStateException("单个公式或代码块超过图谱抽取安全上限 " + MAX_ATOMIC_CHARS
+                            + " 字符（当前至少 " + atomic.length() + " 字符），保持完整并等待调整来源");
+                }
+                if (!protectedNow) { units.add(atomic.toString()); atomic.setLength(0); }
+            } else {
+                for (int from = 0; from < line.length();) {
+                    int end = Math.min(line.length(), from + max);
+                    if (end < line.length() && end > from + 1 && Character.isHighSurrogate(line.charAt(end - 1))) end--;
+                    units.add(line.substring(from, end));
+                    from = end;
+                }
+            }
+        }
+        if (!atomic.isEmpty()) units.add(atomic.toString());
+        List<String> parts = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        for (String unit : units) {
+            if (!current.isEmpty() && current.length() + unit.length() > max) {
+                parts.add(current.toString()); current.setLength(0);
+            }
+            current.append(unit);
+        }
+        if (!current.isEmpty()) parts.add(current.toString());
+        return parts;
+    }
+
+    private static int occurrences(String text, String literal) {
+        int count = 0;
+        for (int at = 0; (at = text.indexOf(literal, at)) >= 0; at += literal.length()) count++;
+        return count;
     }
 
     /** 只抽一条特定素材（给"增量更新"用） */
@@ -223,7 +347,7 @@ public class TripleExtractor {
                     Duration.ofMinutes(3));
             return node.path("content").asText("");
         } catch (Exception e) {
-            throw new IllegalStateException("三元组抽取调用失败：" + e.getMessage());
+            throw new IllegalStateException("三元组抽取调用失败：" + KnowledgeMaintenanceService.failureReason(e), e);
         }
     }
 

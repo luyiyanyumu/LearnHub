@@ -90,6 +90,7 @@ const navItems = [
   { index: '/refs', name: '速查卡', icon: Document },
   { index: '/files', name: '资料库', icon: FolderOpened },
   { index: '/knowledge', name: '知识库', icon: Collection },
+  { index: '/knowledge-model', name: '本地知识模型', icon: Cpu },
   // 智能体：会话管理（新开/切换/删除/各自选模型）与对话，和笔记/知识库同级
   { index: '/agent', name: '智能体', icon: ChatDotRound },
   // 代码库：代码片段单独存放（不进知识库的向量索引，避免把笔记挤下去）

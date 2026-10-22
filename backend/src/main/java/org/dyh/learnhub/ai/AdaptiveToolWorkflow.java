@@ -23,13 +23,29 @@ import java.util.function.BiConsumer;
  * optional isolated Python steps. Generated code is sent to a separately configured
  * runner; it is never executed in this JVM. The caller remains responsible for each
  * built-in tool's authorization and write confirmation.
+ *
+ * <p>中文说明：一个「有界」的 JSON 工作流执行器。模型只负责产出流程定义（JSON），
+ * 本类负责按定义顺序执行：调用已授权的内置工具（{@code call}）、做确定性数据变换
+ * （pick/filter/sort/unique/join/replace/template/split/length），以及可选的隔离 Python 步骤。
+ *
+ * <p>两条关键安全边界：
+ * <ol>
+ *   <li>生成的代码<b>绝不在本 JVM 内执行</b>，而是交给独立配置的 runner 进程；</li>
+ *   <li>本类不做权限判定，<b>调用方</b>仍需为每个内置工具的授权与写操作确认负责。</li>
+ * </ol>
  */
 public final class AdaptiveToolWorkflow {
+    /** 单个工作流最多允许的步骤数，防止定义被写成超长流水线。 */
     public static final int MAX_STEPS = 8;
+    /** 工作流定义 JSON 的字符上限，先于解析做体量校验。 */
     public static final int MAX_DEFINITION_CHARS = 64_000;
+    /** 单个值（含工具返回）的字符上限，避免单步把内存撑爆。 */
     public static final int MAX_VALUE_CHARS = 1_000_000;
+    /** 所有步骤累计结果的字符上限，防止「每步都不大、加起来巨大」。 */
     public static final int MAX_TOTAL_RESULT_CHARS = 2_000_000;
+    /** JSON 递归深度上限，配合已有的「病理递归」防护，阻断深嵌套攻击。 */
     public static final int MAX_DEPTH = 32;
+    /** 单次数组处理的元素上限，避免对超大数组做 O(n) 变换时长时间占用。 */
     public static final int MAX_ARRAY_ITEMS = 10_000;
     private static final Set<String> KINDS = Set.of("pick", "filter", "sort", "unique", "join",
             "replace", "template", "split", "length");

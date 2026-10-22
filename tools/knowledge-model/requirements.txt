@@ -1,0 +1,9 @@
+# Install the CUDA PyTorch wheel separately for the local NVIDIA driver first.
+torch>=2.5,<2.11
+transformers>=4.51,<5
+peft>=0.17,<0.19
+accelerate>=1.7,<2
+bitsandbytes>=0.48,<0.50
+fastapi>=0.115,<1
+uvicorn>=0.34,<1
+pydantic>=2.10,<3

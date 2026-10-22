@@ -22,6 +22,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.LongSupplier;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -90,21 +91,21 @@ class AgentMathGenerationTest {
         assertEquals(question, messages.getLast().path("content").asText());
     }
 
-    @Test void longNoteSectionGenerationAlsoReceivesMathPolicyOutsideChat() throws Exception {
+    @Test void wholeNoteGenerationAlsoReceivesMathPolicyAndPreservesRealCodeOutsideChat() throws Exception {
         answer(BODY);
-        String points = "用公式说明向量内积；真实 Python 实现：\n" + BODY;
+        ReflectionTestUtils.setField(agent, "longNoteClock", (LongSupplier) () -> 0L);
+        String outline = "## 相似度\n## 概率\n用公式说明向量内积；真实 Python 实现：\n" + BODY;
 
-        DeepSeekClient.ChatResult result = ReflectionTestUtils.invokeMethod(agent, "writeSection",
-                "合成长文", "## 相似度\n## 概率", List.of("基础"), "相似度", points, TARGET);
+        DeepSeekClient.ChatResult result = ReflectionTestUtils.invokeMethod(agent, "writeWholeNote",
+                "合成长文", outline, TARGET, 60_000L);
 
         assertNotNull(result);
         assertEquals(BODY, result.message().path("content").asText());
         List<JsonNode> messages = modelMessages();
         assertMathPolicy(roleText(messages, "system"));
         String user = roleText(messages, "user");
-        assertTrue(user.contains(points));
-        assertTrue(user.contains("数学公式"));
-        assertTrue(user.contains("具体编程实现才用代码"));
+        assertTrue(user.contains(outline), "完整大纲及其中的公式、真实代码必须进入同一个请求");
+        assertTrue(user.contains(BODY));
         verifyNoInteractions(settings, sessions, contexts, routing);
     }
 

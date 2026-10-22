@@ -404,6 +404,94 @@ function previewScroller(headings = []) {
   }
 }
 
+test('reading scroll measures only visible outline headings and catches up immediately when reopened', async () => {
+  const h = await harness()
+  try {
+    const a = await h.mount({ noteId: 1, noteQuery: {}, tabKey: 'note:1', active: true })
+    const queries = [], scroller = previewScroller()
+    let measured = 0
+    scroller.clientWidth = 800
+    const headings = [0, 600, 1200].map(top => ({ getBoundingClientRect() {
+      measured++
+      return { top: 100 + top - scroller.scrollTop, height: 28 }
+    } }))
+    scroller.querySelectorAll = selector => { queries.push(selector); return selector.includes('[data-line]') ? [] : headings }
+    a.state.pvScrollRef = scroller
+    a.state.outlineOpen = false
+    await flush()
+    const before = h.frameCount()
+    for (let frame = 0; frame < 60; frame++) { scroller.scrollTop = frame * 10; a.state.onPreviewScroll(); await flush() }
+    a.state.onPreviewLayoutChange()
+    await flush()
+    assert.equal(h.frameCount(), before, 'hidden outline schedules no reading-scroll frame')
+    assert.deepEqual(queries, [])
+    assert.equal(measured, 0)
+
+    a.state.outlineOpen = true
+    await flush()
+    assert.equal(a.state.activeIdx, 1)
+    assert.equal(queries.length, 1)
+    assert.ok(queries.every(selector => !selector.includes('[data-line]')), 'reading never builds source-sync anchors')
+    assert.equal(measured, 3)
+    scroller.scrollTop = 1210
+    a.state.onPreviewScroll()
+    await flush()
+    assert.equal(a.state.activeIdx, 2)
+    assert.equal(measured, 3, 'scrolling reuses content coordinates')
+
+    a.state.onPreviewLayoutChange()
+    a.state.outlineOpen = false
+    await flush()
+    assert.equal(measured, 3, 'a queued frame cannot measure an outline hidden before it runs')
+    a.state.layoutMode = 'tab'
+    await flush()
+    a.state.openOutlineDrawer()
+    await flush()
+    assert.equal(a.state.activeIdx, 2)
+    assert.equal(measured, 6, 'opening the narrow-screen drawer rebuilds invalidated headings')
+    a.state.layoutMode = 'wide'
+    scroller.scrollTop = 610
+    a.state.onPreviewScroll()
+    await flush()
+    assert.equal(a.state.outlineOpen, false)
+    assert.equal(a.state.activeIdx, 1, 'a drawer kept open across a breakpoint still tracks scrolling')
+    a.props.active = false
+    await flush()
+    a.state.onPreviewScroll()
+    a.state.onPreviewLayoutChange()
+    await flush()
+    assert.equal(measured, 6, 'background drafts do no scroll geometry work')
+  } finally { await h.cleanup() }
+})
+
+test('hiding the outline keeps preview-to-source scrolling synchronized in two-pane editing', async () => {
+  const h = await harness()
+  try {
+    const a = await h.mount({ noteId: 1, noteQuery: {}, tabKey: 'note:1', active: true })
+    const pv = previewScroller(), ed = previewScroller()
+    pv.clientWidth = ed.clientWidth = 600
+    pv.scrollHeight = 2500
+    ed.scrollHeight = 2000
+    const view = vue.markRaw({
+      scrollDOM: ed, contentDOM: { querySelectorAll: () => [] }, documentTop: 100,
+      state: EditorState.create({ doc: a.state.form.content }),
+      lineBlockAt: () => ({ top: 0 }),
+    })
+    a.state.editorRef = vue.markRaw({ getEditorView: () => view })
+    a.state.pvScrollRef = pv
+    a.state.readingMode = false
+    a.state.outlineOpen = false
+    await flush()
+    pv.scrollTop = 500
+    a.state.onScrollIntent('preview')
+    a.state.onPreviewScroll()
+    await flush()
+    assert.equal(ed.scrollTop, 375)
+    assert.equal(a.state.outlineShown, false)
+    assert.equal(a.state.activeIdx, -1)
+  } finally { await h.cleanup() }
+})
+
 test('a normal internal-link click navigates even when an inserted link label remains selected', async () => {
   const h = await harness()
   try {

@@ -15,6 +15,8 @@ import org.dyh.learnhub.vo.QuickRefVO;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.stubbing.Answer;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -198,6 +200,32 @@ class WikiGenerationDependencyTest {
         verify(dependencies).saveGenerated(page.capture(), snapshot.capture());
         assertEquals(List.of(new WikiDependencyService.SourceRef("quick_ref", 7L)), snapshot.getValue().sourceRefs());
         assertEquals("ok", page.getValue().getQuality()); assertTrue(page.getValue().getContentMd().contains("[速查卡#7]"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void modelTransportWrappingRetainsCauseAndNeverCopiesProviderResponse(boolean tls) throws Exception {
+        noteScope(note(1, "Synthetic source preview"));
+        put("note", 1, "# State mechanism\nThe source explains how a recoverable checkpoint preserves execution state.");
+        Object topic = ReflectionTestUtils.invokeMethod(service, "resolve", "cat-3");
+        Object material = generationMaterial();
+        String providerBody = "provider diagnostic https://provider.example.invalid/private api_key=synthetic-private-value";
+        Exception original = tls ? new javax.net.ssl.SSLHandshakeException(providerBody) : new java.io.IOException(providerBody);
+        model(call -> { throw original; });
+
+        IllegalStateException wrapped = assertThrows(IllegalStateException.class, () ->
+                ReflectionTestUtils.invokeMethod(service, "callModel", topic, material, service.target(null), null,
+                        (IntConsumer) chars -> {}));
+
+        assertSame(original, wrapped.getCause());
+        assertEquals("AI 调用失败：" + KnowledgeMaintenanceService.failureReason(original), wrapped.getMessage());
+        if (tls) assertTrue(wrapped.getMessage().contains("TLS 握手失败"));
+        assertFalse(wrapped.getMessage().contains("provider diagnostic"));
+        assertFalse(wrapped.getMessage().contains("provider.example.invalid"));
+        assertFalse(wrapped.getMessage().contains("synthetic-private-value"));
+        verify(dependencies, never()).saveGenerated(any(), any());
+        verify(pages, never()).insert(any(WikiPage.class));
+        verify(pages, never()).updateById(any(WikiPage.class));
     }
 
     private Object generationMaterial() {

@@ -38,7 +38,7 @@ public class KnowledgeBaseSettings {
             new Field("embeddingInputChars", "kb.embedding_input_chars", "嵌入文本上限", "index", "number", 6000, 128, 32000, 100, true, "含标题和小节，超出上限的输入截断。", List.of()),
             new Field("vectorEnabled", "ai.vector_enabled", "启用向量检索", "retrieval", "boolean", true, null, null, null, false, "关闭后继续使用词面检索。", List.of()),
             new Field("contextualEmbed", "kb.contextual_embed", "嵌入包含标题与小节", "index", "boolean", true, null, null, null, true, "为片段前置来源标题和所属小节。", List.of()),
-            new Field("autoIndex", "kb.auto_index", "自动增量索引", "index", "boolean", true, null, null, null, false, "内容变化后更新索引；改变嵌入空间仍须手动重建。", List.of()),
+            new Field("autoIndex", "kb.auto_index", "自动维护索引", "index", "boolean", true, null, null, null, false, "内容变化后增量更新；自动维护开启时，嵌入空间改变也会排队重建。", List.of()),
             new Field("vectorBackend", "kb.vector_backend", "向量检索后端", "index", "select", "mysql", null, null, null, false, "Milvus 不可用时回退 MySQL；切换后需完整同步。", List.of(Map.of("label", "MySQL 扫描", "value", "mysql"), Map.of("label", "Milvus ANN", "value", "milvus"))),
             new Field("milvusUri", "kb.milvus_uri", "Milvus 服务地址", "index", "text", "http://127.0.0.1:19530", null, null, null, false, "使用已保存的认证配置；修改地址后需完整同步。", List.of()),
             new Field("rerankEnabled", "kb.rerank", "启用候选重排", "rerank", "boolean", false, null, null, null, false, "按照候选对回答问题的用处重新排序。", List.of()),

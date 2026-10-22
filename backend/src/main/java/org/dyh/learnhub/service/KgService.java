@@ -40,8 +40,7 @@ import java.util.Set;
  * </ul>
  *
  * <h3>成本</h3>
- * 结构边零 token、秒级实时；语义边要花 token，所以只在用户点「重建关联」时调用，
- * 或由界面上提示"关联可能已过期"（见 {@link #version()} 与前端）。
+ * 结构边零 token、秒级实时；语义边按原文变化由后台维护，也支持手动重建。
  */
 @Service
 @RequiredArgsConstructor
@@ -71,6 +70,12 @@ public class KgService {
     private final ObjectMapper objectMapper;
     /** 模型分工：语义关联重建走哪套模型由 ModelRouting 决定（默认云端） */
     private final ModelRouting routing;
+    private org.springframework.transaction.PlatformTransactionManager transactionManager;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setTransactionManager(org.springframework.transaction.PlatformTransactionManager manager) {
+        transactionManager = manager;
+    }
 
     /** 图数据上限：个人知识库规模下够用；真到几千条要改成按需展开子图 */
     private static final int MAX_NOTES = 500;
@@ -251,14 +256,25 @@ public class KgService {
      *
      * @return 统计信息：参与条目数、接受边数、被丢弃的边数（模型偶尔会编出清单外的 id）
      */
-    public Map<String, Object> rebuildSemantic() {
-        ModelRouting.ModelTarget graphTarget = routing.forTask(ModelRouting.TASK_GRAPH);
-        if (!client.isConfigured()) {
-            throw new IllegalStateException("AI 未配置：请先在「设置 → 外观与 AI」里填 API Key，再重建关联。");
-        }
+    public synchronized Map<String, Object> rebuildSemantic() {
+        return rebuildSemantic(false);
+    }
+
+    /** Automatic jobs must distinguish a trustworthy empty result from a failed model response. */
+    public synchronized Map<String, Object> maintainSemantic() {
+        return rebuildSemantic(true);
+    }
+
+    private Map<String, Object> rebuildSemantic(boolean strict) {
         List<Item> items = catalogue();
         if (items.size() < 2) {
-            throw new IllegalStateException("知识库条目太少（至少 2 条）才能推断关联。");
+            if (!strict) throw new IllegalStateException("知识库条目太少（至少 2 条）才能推断关联。");
+            replaceSemanticEdges(List.of(), true);
+            return Map.of("items", items.size(), "edges", 0, "rejected", 0);
+        }
+        ModelRouting.ModelTarget graphTarget = routing.forTask(ModelRouting.TASK_GRAPH);
+        if (strict ? (!graphTarget.separate() && !StringUtils.hasText(graphTarget.apiKey())) : !client.isConfigured()) {
+            throw new IllegalStateException("AI 未配置：请先在「设置 → 外观与 AI」里填 API Key，再重建关联。");
         }
 
         StringBuilder sb = new StringBuilder("条目清单（共 " + items.size() + " 条）：\n");
@@ -279,7 +295,13 @@ public class KgService {
 
         String content;
         try {
-            JsonNode reply = client.chat(messages, null, graphTarget.baseUrl(), graphTarget.apiKey(), graphTarget.model(),
+            JsonNode reply;
+            if (strict) {
+                var result = client.chatFull(messages, null, graphTarget.baseUrl(), graphTarget.apiKey(), graphTarget.model(),
+                        client.maxTokensOf(graphTarget.id()), 0.2, "disabled", null, DeepSeekClient.DEFAULT_TIMEOUT);
+                if (result == null || result.truncated()) throw new IllegalStateException("文档关联未完整返回");
+                reply = result.message();
+            } else reply = client.chat(messages, null, graphTarget.baseUrl(), graphTarget.apiKey(), graphTarget.model(),
                     client.maxTokensOf(graphTarget.id()), 0.2, "disabled", null, DeepSeekClient.DEFAULT_TIMEOUT);
             content = reply.path("content").asText("");
         } catch (Exception e) {
@@ -298,7 +320,8 @@ public class KgService {
         Map<String, Integer> nodeEdgeCount = new LinkedHashMap<>();
         int rejected = 0;
 
-        for (JsonNode e : parseEdges(content)) {
+        List<JsonNode> proposed = strict ? parseMaintenanceEdges(content) : parseEdges(content);
+        for (JsonNode e : proposed) {
             String a = e.path("a").asText("").trim();
             String b = e.path("b").asText("").trim();
             String rel = normalizeRelation(e.path("relation").asText(""));
@@ -341,14 +364,9 @@ public class KgService {
         }
 
         // 整批替换：先把旧的 LLM 边清掉再写新的（见类注释）
-        edgeMapper.deleteByOrigin(ORIGIN_LLM);
-        for (KgEdge e : accepted) {
-            try {
-                edgeMapper.insert(e);
-            } catch (Exception ex) {
-                log.warn("语义边写入失败（跳过）：{}", ex.getMessage());
-            }
-        }
+        if (strict && !proposed.isEmpty() && accepted.isEmpty())
+            throw new IllegalStateException("未取得可核对的文档关联，保留原有关联");
+        replaceSemanticEdges(accepted, strict);
         log.info("语义关联重建完成：条目 {}，接受 {} 条边，丢弃 {} 条", items.size(), accepted.size(), rejected);
 
         Map<String, Object> out = new LinkedHashMap<>();
@@ -360,7 +378,38 @@ public class KgService {
         return out;
     }
 
+    private void replaceSemanticEdges(List<KgEdge> accepted, boolean strict) {
+        Runnable replace = () -> {
+            edgeMapper.deleteByOrigin(ORIGIN_LLM);
+            for (KgEdge edge : accepted) edgeMapper.insert(edge);
+        };
+        if (transactionManager != null) new org.springframework.transaction.support.TransactionTemplate(transactionManager)
+                .executeWithoutResult(tx -> replace.run());
+        else if (strict) throw new IllegalStateException("文档关联事务尚未就绪");
+        else replace.run();
+    }
+
     /** 兼容模型可能返回 {"edges":[...]} 或直接 [...]，以及被 ```json 包起来的输出 */
+    private List<JsonNode> parseMaintenanceEdges(String content) {
+        String body = content == null ? "" : content.strip();
+        if (body.startsWith("```")) body = body.replaceFirst("^```(?:json)?\\s*", "").replaceFirst("\\s*```$", "");
+        try {
+            JsonNode root = objectMapper.reader()
+                    .with(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(body);
+            JsonNode rows = root == null ? null : root.isArray() ? root : root.get("edges");
+            if (rows == null || !rows.isArray()) throw new IllegalArgumentException();
+            List<JsonNode> out = new ArrayList<>();
+            for (JsonNode row : rows) {
+                if (!row.isObject() || !row.path("a").isTextual() || !row.path("b").isTextual())
+                    throw new IllegalArgumentException();
+                out.add(row);
+            }
+            return out;
+        } catch (Exception malformed) {
+            throw new IllegalStateException("文档关联返回格式无效，保留原有关联", malformed);
+        }
+    }
+
     private List<JsonNode> parseEdges(String content) {
         String text = content == null ? "" : content.trim();
         int fence = text.indexOf("```");
@@ -410,7 +459,7 @@ public class KgService {
             return false;
         }
         String type = ref.substring(0, i);
-        if (!"note".equals(type) && !"ref".equals(type)) {
+        if (!"note".equals(type) && !"ref".equals(type) && !"file".equals(type)) {
             return false;
         }
         try {
@@ -428,6 +477,13 @@ public class KgService {
         }
         for (QuickRefVO r : quickRefService.list(null, null)) {
             all.add(new Item("ref", r.getId(), r.getTitle(), r.getCategoryName(), clip(r.getContent(), 90), r.getUpdatedAt()));
+        }
+        for (Map<String, Object> file : fileStorageService.retrievalScan(REBUILD_ITEMS)) {
+            if (!(file.get("id") instanceof Number id)) continue;
+            String summary = String.valueOf(file.getOrDefault("summary", ""));
+            String body = String.valueOf(file.getOrDefault("text", ""));
+            all.add(new Item("file", id.longValue(), String.valueOf(file.getOrDefault("originName", "")),
+                    String.valueOf(file.getOrDefault("categoryName", "")), clip(summary + " " + body, 90), null));
         }
         all.sort(Comparator.comparing(Item::updatedAt, Comparator.nullsLast(Comparator.reverseOrder())));
 

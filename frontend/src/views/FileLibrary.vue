@@ -18,6 +18,7 @@ const loading = ref(false)
 const route = useRoute()
 const router = useRouter()
 const uploading = ref(false)
+const reextractingIds = ref(new Set())
 const list = ref([])
 /** 分页状态。列表一次只渲染一页（而不是全量）——原因见 fileApi.page 的注释。 */
 const pager = ref({ page: 1, size: 20, total: 0 })
@@ -422,12 +423,15 @@ async function copyReaderText() {
   }
 }
 
+const skippedTextHint = '此前因文件大小限制跳过，请在「⋯」菜单中点击「重抽正文」。'
+
 /** 抽不出正文时的人话解释（不同状态的应对方式不同） */
 function statusHint() {
   const s = readerStatus.value
   if (s === 'ok') return ''
   if (s === 'empty') return '这份文件抽取出来是空的 —— 扫描版 PDF / 纯图片类常见这种，需要 OCR 或手工补「说明」。'
   if (s === 'unsupported') return '这个格式不支持抽正文 —— 仍可点「原文」阅读，检索靠手填「说明」。'
+  if (s === 'skipped') return skippedTextHint
   if (s === 'failed') return '抽取失败：' + (readerError.value || '未知原因')
   if (s === 'pending') return '还在抽取中，稍后重新打开即可。'
   return '未抽取正文。'
@@ -447,6 +451,10 @@ async function onDelete(row) {
   await refreshCollection()
 }
 
+function textHint(row) {
+  return row.textStatus === 'skipped' ? skippedTextHint : row.textError
+}
+
 /** 正文抽取状态 → 徽标文案（这几档含义不同，不能只显示"成功/失败"） */
 function textLabel(row) {
   if (!row) return ''
@@ -459,7 +467,7 @@ function textLabel(row) {
     case 'unsupported':
       return '不支持'
     case 'skipped':
-      return '太大未抽'
+      return '待重抽'
     case 'failed':
       return '抽取失败'
     default:
@@ -516,11 +524,21 @@ async function onRename(row) {
   load()
 }
 
+function isReextracting(row) {
+  return !isExplorerFolder(row) && reextractingIds.value.has(String(row.id))
+}
+
 async function onReextract(row) {
-  if (isExplorerFolder(row)) return
-  const r = await fileApi.reextract(row.id)
-  ElMessage.success(`已重新抽取：${textLabel(r)}`)
-  load()
+  if (isExplorerFolder(row) || isReextracting(row)) return
+  const id = String(row.id)
+  reextractingIds.value.add(id)
+  try {
+    const r = await fileApi.reextract(row.id)
+    ElMessage.success(`已重新抽取：${textLabel(r)}`)
+    await load()
+  } finally {
+    reextractingIds.value.delete(id)
+  }
 }
 
 /** 改分类：资料按分类进知识图谱，所以"归类"就是把资料接进图的那一步 */
@@ -554,18 +572,21 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="page">
-    <div class="toolbar">
-      <h2 class="page-h2">资料库</h2>
-      <span class="tip">按文件夹收纳原文，抽取正文参与知识库检索</span>
-      <div class="spacer"></div>
-      <el-select v-model="uploadCategoryId" placeholder="上传分类（可选）" clearable style="width: 160px">
+  <div class="page file-library">
+    <div class="toolbar library-header">
+      <div class="library-heading">
+        <h2 class="page-h2">资料库</h2>
+        <span class="tip">按文件夹收纳原文，抽取正文参与知识库检索</span>
+      </div>
+      <div class="library-header-actions">
+      <el-select v-model="uploadCategoryId" class="upload-category" aria-label="上传分类" placeholder="上传分类（可选）" clearable>
         <el-option v-for="c in categories" :key="c.id" :label="catLabel(c)" :value="c.id" />
       </el-select>
       <el-button type="primary" :loading="uploading" :title="`上传到：${selectedFolder > 0 ? currentFolderTitle : '未收纳'}`" @click="pickUpload">
         <span class="btn-ico"><svg viewBox="0 0 24 24"><path d="M12 16V4.5M6.5 10 12 4.5 17.5 10M4.5 19.5h15" /></svg></span>上传资料
       </el-button>
       <input ref="uploadInput" type="file" multiple hidden @change="onFileChosen" />
+      </div>
     </div>
 
     <el-card class="library-content" shadow="never">
@@ -587,12 +608,13 @@ onBeforeUnmount(() => {
             <el-button size="small" @click="openMove()">移动到</el-button>
             <el-button size="small" text @click="table?.clearSelection()">取消选择</el-button>
           </div>
-          <div class="spacer"></div>
+          <div class="collection-filters">
       <el-input
         v-model="query.kw"
+        class="file-search"
+        aria-label="搜索资料"
         placeholder="搜索文件名 / 说明 / 正文"
         clearable
-        style="width: 200px"
         @keyup.enter="search"
         @clear="search"
       >
@@ -600,13 +622,16 @@ onBeforeUnmount(() => {
           <el-button @click="search">搜索</el-button>
         </template>
       </el-input>
-      <el-select v-model="query.categoryId" placeholder="全部分类" clearable style="width: 140px" @change="search">
+      <el-select v-model="query.categoryId" class="file-category-filter" aria-label="筛选资料分类" placeholder="全部分类" clearable @change="search">
         <el-option v-for="c in categories" :key="c.id" :label="catLabel(c)" :value="c.id" />
       </el-select>
           <el-button v-if="hasFilter" @click="resetFilter">重置</el-button>
+          </div>
         </div>
       <el-table
         ref="table"
+        class="file-table"
+        :class="{ 'with-locations': selectedFolder == null }"
         :data="explorerRows"
         row-key="__explorerKey"
         :row-class-name="({ row }) => isExplorerFolder(row) ? 'explorer-folder-row' : ''"
@@ -614,8 +639,8 @@ onBeforeUnmount(() => {
         @selection-change="onSelectionChange"
         @row-dblclick="openExplorerRow"
       >
-        <el-table-column type="selection" width="46" :selectable="selectableFile" />
-        <el-table-column label="名称" min-width="240">
+        <el-table-column type="selection" width="44" :selectable="selectableFile" />
+        <el-table-column label="名称" min-width="280">
           <template #default="{ row }">
             <button
               v-if="isExplorerFolder(row)"
@@ -633,29 +658,30 @@ onBeforeUnmount(() => {
             </template>
           </template>
         </el-table-column>
-        <el-table-column label="类型" width="90">
+        <el-table-column label="类型" width="80">
           <template #default="{ row }">
             <span v-if="isExplorerFolder(row)" class="folder-kind">文件夹</span>
             <el-tag v-else size="small" type="info" effect="plain">{{ row.ext || '其他' }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="正文" min-width="180">
+        <el-table-column label="正文" width="196">
           <template #default="{ row }">
             <span v-if="isExplorerFolder(row)" class="folder-detail">{{ NUM.format(row.itemCount || 0) }} 份资料<span v-if="row.childrenCount"> · {{ row.childrenCount }} 个子文件夹</span></span>
             <template v-else>
-              <el-tooltip v-if="row.textError" :content="row.textError" placement="top">
+              <el-tooltip v-if="textHint(row)" :content="textHint(row)" placement="top">
                 <el-tag size="small" :type="textTagType(row.textStatus)" effect="plain">{{ textLabel(row) }}</el-tag>
               </el-tooltip>
               <el-tag v-else size="small" :type="textTagType(row.textStatus)" effect="plain">{{ textLabel(row) }}</el-tag>
-              <div v-if="row.summary" class="fsummary">{{ row.summary }}</div>
+              <div v-if="row.summary" class="fsummary" :title="row.summary">{{ row.summary }}</div>
             </template>
           </template>
         </el-table-column>
-        <el-table-column label="分类" width="150">
+        <el-table-column label="分类" width="132">
           <template #default="{ row }">
             <el-select
               v-if="!isExplorerFolder(row)"
               :model-value="row.categoryId || undefined"
+              :aria-label="`${row.originName}的分类`"
               placeholder="未分类"
               clearable
               size="small"
@@ -666,10 +692,10 @@ onBeforeUnmount(() => {
             </el-select>
           </template>
         </el-table-column>
-        <el-table-column label="大小" width="100">
+        <el-table-column label="大小" width="88">
           <template #default="{ row }"><span class="num">{{ isExplorerFolder(row) ? '—' : fmtSize(row.size) }}</span></template>
         </el-table-column>
-        <el-table-column label="修改 / 上传时间" width="165">
+        <el-table-column label="修改 / 上传时间" width="152">
           <template #default="{ row }"><span class="num">{{ time(isExplorerFolder(row) ? row.updatedAt || row.createdAt : row.createdAt) }}</span></template>
         </el-table-column>
         <!--
@@ -678,15 +704,16 @@ onBeforeUnmount(() => {
           五个按钮要 270px，320px 屏上文件名（min-width 240）直接被挤出视野，
           而这一列永远可见。收进 ⋯ 后主操作只剩三个（阅读/下载/删除）。
         -->
-        <el-table-column label="操作" width="196" fixed="right">
+        <el-table-column label="操作" width="176" fixed="right">
           <template #default="{ row }">
+            <div class="row-actions">
             <el-button v-if="isExplorerFolder(row)" link type="primary" @click="openExplorerRow(row)">打开</el-button>
             <template v-else>
               <el-button link type="primary" @click="openReader(row)">阅读</el-button>
               <el-button link type="primary" @click="onDownload(row)">下载</el-button>
             </template>
-            <el-dropdown trigger="click" @click.stop @dblclick.stop>
-              <el-button link type="primary" :aria-label="isExplorerFolder(row) ? '文件夹操作' : '资料更多操作'">⋯</el-button>
+            <el-dropdown trigger="click" :disabled="isReextracting(row)" @click.stop @dblclick.stop>
+              <el-button link type="primary" :loading="isReextracting(row)" :disabled="isReextracting(row)" :aria-busy="isReextracting(row)" :aria-label="isExplorerFolder(row) ? '文件夹操作' : '资料更多操作'">⋯</el-button>
               <template #dropdown>
                 <el-dropdown-menu>
                   <template v-if="isExplorerFolder(row)">
@@ -698,12 +725,13 @@ onBeforeUnmount(() => {
                     <el-dropdown-item @click="openMove([row])">移动到文件夹</el-dropdown-item>
                     <el-dropdown-item @click="onEditSummary(row)">说明</el-dropdown-item>
                     <el-dropdown-item @click="onRename(row)">重命名</el-dropdown-item>
-                    <el-dropdown-item v-if="row.textStatus !== 'ok'" @click="onReextract(row)">重抽正文</el-dropdown-item>
+                    <el-dropdown-item v-if="row.textStatus !== 'ok'" :disabled="isReextracting(row)" @click="onReextract(row)">{{ isReextracting(row) ? '正在抽取正文…' : '重抽正文' }}</el-dropdown-item>
                   </template>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
             <el-button v-if="!isExplorerFolder(row)" link type="danger" @click="onDelete(row)">删除</el-button>
+            </div>
           </template>
         </el-table-column>
         <template #empty>
@@ -931,20 +959,53 @@ onBeforeUnmount(() => {
   color: #18181b;
   box-shadow: 0 1px 3px rgb(0 0 0 / 14%);
 }
-.tip { font-size: 12px; color: var(--app-text-3); }
+.file-library { min-width: 0; }
+.library-header { justify-content: space-between; gap: var(--space-md); margin-bottom: var(--space-lg); }
+.library-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--space-sm) var(--space-md); min-width: 0; }
+.library-heading .page-h2 { font-size: var(--font-title); line-height: var(--lh-title); }
+.library-heading .tip { font-size: var(--font-caption); line-height: var(--lh-caption); color: var(--app-text-3); }
+.library-header-actions { display: flex; align-items: center; gap: var(--space-sm); flex-shrink: 0; }
+.upload-category { width: 176px; }
+.library-header-actions :deep(.el-button), .collection-filters :deep(.el-button) { height: var(--control-h); margin-left: 0; font-size: var(--font-body); }
+.library-header-actions :deep(.el-select__wrapper), .collection-filters :deep(.el-select__wrapper) { min-height: var(--control-h); font-size: var(--font-body); }
+.collection-filters :deep(.el-input) { --el-component-size: var(--control-h); font-size: var(--font-body); }
 .library-content { min-width: 0; }
-.library-content :deep(.el-card__body) { padding: 14px 16px; }
-.collection-head { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 10px 0; }
-.collection-title { display: flex; align-items: center; gap: 10px; min-width: 0; max-width: 100%; }
-.collection-title > span { flex-shrink: 0; font-size: 12px; color: var(--app-text-3); }
-.selection-actions { display: flex; align-items: center; gap: 8px; color: var(--app-brand); font-size: 12px; }
+.library-content :deep(.el-card__body) { padding: var(--space-md); }
+.library-content :deep(.folder-explorer) { margin-bottom: var(--space-md); }
+.library-content :deep(.explorer-toolbar) { gap: var(--space-sm); padding: var(--space-sm); border-radius: var(--radius); }
+.library-content :deep(.explorer-history .el-button) { width: var(--control-h-inline); height: var(--control-h-inline); }
+.library-content :deep(.explorer-actions) { gap: var(--space-sm); }
+.library-content :deep(.explorer-actions .el-button) { height: var(--control-h-inline); font-size: var(--font-caption); }
+.library-content :deep(.explorer-path) { height: var(--control-h-inline); min-height: var(--control-h-inline); padding: 0 var(--space-xs); border-radius: var(--radius); }
+.library-content :deep(.path-segment) { padding: var(--space-xs) var(--space-sm); font-size: var(--font-body); }
+.collection-head { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-sm) var(--space-md); margin: 0 0 var(--space-md); min-height: var(--control-h); }
+.collection-title { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-sm); min-width: 0; max-width: 100%; }
+.collection-title > span { font-size: var(--font-caption); line-height: var(--lh-caption); color: var(--app-text-3); }
+.collection-filters { display: flex; align-items: center; gap: var(--space-sm); margin-left: auto; min-width: 0; }
+.file-search { width: 320px; }
+.file-category-filter { width: 160px; }
+.selection-actions { display: flex; align-items: center; gap: var(--space-sm); color: var(--app-brand); font-size: var(--font-caption); }
+.selection-actions :deep(.el-button) { height: var(--control-h-inline); }
 .selection-actions .el-button + .el-button { margin-left: 0; }
-.folder-location { display: block; margin-top: 4px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--app-text-3); font-size: 12px; }
-.folder-name { display: inline-flex; align-items: center; gap: 9px; max-width: 100%; padding: 3px 0; border: 0; border-radius: 5px; background: transparent; color: var(--app-text-1); font: inherit; font-weight: 500; text-align: left; cursor: pointer; }
-.folder-name svg { width: 22px; height: 22px; flex-shrink: 0; fill: var(--app-brand-soft); stroke: var(--app-brand); stroke-width: 1.6; }
+.file-table { font-size: var(--font-body); }
+.file-table :deep(.el-table__body tr) { height: 72px; }
+.file-table.with-locations :deep(.el-table__body tr) { height: 88px; }
+.file-table :deep(td.el-table__cell) { padding: 12px 0; }
+.file-table :deep(th.el-table__cell) { height: 44px; padding: var(--space-sm) 0; }
+.file-table :deep(.cell) { padding: 0 12px; line-height: 20px; }
+.file-table :deep(.el-table__header .cell) { font-size: var(--font-caption); font-weight: 600; letter-spacing: 0; }
+.file-table :deep(.el-select__wrapper) { min-height: var(--control-h-inline); font-size: var(--font-caption); }
+.file-table :deep(.el-tag) { height: 24px; padding: 0 var(--space-sm); font-size: var(--font-caption); line-height: 22px; }
+.row-actions { display: flex; align-items: center; gap: var(--space-sm); white-space: nowrap; }
+.row-actions :deep(.el-button) { min-height: var(--control-h-inline); margin: 0; padding: 0; font-size: var(--font-body); }
+.row-actions :deep(.el-dropdown) { display: inline-flex; align-items: center; }
+.row-actions :deep(.el-dropdown .el-button) { min-width: 24px; }
+.folder-location { display: block; margin-top: var(--space-xs); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--app-text-3); font-size: var(--font-caption); line-height: 16px; }
+.folder-name { display: inline-flex; align-items: center; gap: var(--space-sm); max-width: 100%; padding: var(--space-xs) 0; border: 0; border-radius: var(--radius); background: transparent; color: var(--app-text-1); font: inherit; font-weight: 500; text-align: left; cursor: pointer; }
+.folder-name svg { width: 20px; height: 20px; flex-shrink: 0; fill: var(--app-brand-soft); stroke: var(--app-brand); stroke-width: 1.6; }
 .folder-name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .folder-name:focus-visible { outline: 2px solid var(--app-brand); outline-offset: 3px; }
-.folder-kind, .folder-detail { color: var(--app-text-3); font-size: 12px; }
+.folder-kind, .folder-detail { color: var(--app-text-3); font-size: var(--font-caption); }
 .library-content :deep(.explorer-folder-row) { cursor: pointer; }
 .library-content :deep(.explorer-folder-row .el-table-column--selection .el-checkbox) { visibility: hidden; }
 /* 文件名：裁 2 行 + 只在必要时断行。
@@ -953,6 +1014,9 @@ onBeforeUnmount(() => {
    裁切是必须的：origin_name 上限 255 字符，不裁的话一行能长到十几行（见 title 属性给全文）。 */
 .fname {
   color: var(--app-text-1);
+  font-size: var(--font-body);
+  font-weight: 500;
+  line-height: 20px;
   overflow-wrap: anywhere;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -960,10 +1024,10 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 /* 参与"一眼比大小"的数字用等宽数字，值变化时列不会左右跳 */
-.num { font-variant-numeric: tabular-nums; }
+.num { font-size: var(--font-caption); color: var(--app-text-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
 /* 分页条：右对齐、给表格一点呼吸 */
-.fpage { display: flex; justify-content: flex-end; max-width: 100%; margin-top: 12px; overflow-x: auto; scrollbar-width: thin; }
-.fsummary { margin-top: 4px; font-size: 12px; line-height: 1.5; color: var(--app-text-3); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.fpage { display: flex; justify-content: flex-end; max-width: 100%; margin-top: var(--space-md); overflow-x: auto; scrollbar-width: thin; }
+.fsummary { margin-top: var(--space-xs); font-size: var(--font-caption); line-height: 16px; color: var(--app-text-3); white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
 .spacer { flex: 1 1 auto; }
 :global(.reader-dialog.el-dialog) { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }
 :global(.reader-dialog .el-dialog__header) { flex: 0 0 auto; }
@@ -987,17 +1051,33 @@ onBeforeUnmount(() => {
 .para-text { margin: 6px 0 0; font-size: 15px; line-height: 1.95; color: var(--app-text-1); white-space: pre-wrap; overflow-wrap: anywhere; }
 .warn-line { margin: 0 8px 8px; font-size: 12.5px; color: #b45309; }
 @media (max-width: 800px) {
+  .file-library { padding: var(--space-md); }
+  .library-heading { flex-direction: column; align-items: flex-start; gap: var(--space-xs); }
+  .library-header-actions { margin-left: auto; }
   .collection-title { flex-basis: 100%; }
-  .collection-head :deep(.el-input) { flex: 1 1 200px; }
-  .library-content :deep(.el-card__body) { padding: 12px; }
+  .collection-filters { flex: 1 1 100%; flex-wrap: wrap; }
+  .file-search { flex: 1 1 240px; width: auto; min-width: 0; }
+  .file-category-filter { flex: 0 1 160px; }
+  .library-content :deep(.el-card__body) { padding: var(--space-sm); }
   .fpage { justify-content: flex-start; }
   :global(.reader-dialog.el-dialog) { padding: 10px; }
   .reader-meta { gap: 5px; }
   .para { padding: 0 16px; }
 }
-@media (max-width: 760px) {
+@media (max-width: 1280px) {
   .library-content :deep(.el-table-fixed-column--right) { position: static !important; right: auto !important; box-shadow: none !important; }
   .library-content :deep(.el-table-fixed-column--right::before),
   .library-content :deep(.el-table-fixed-column--right::after) { display: none !important; }
+}
+@media (max-width: 480px) {
+  .library-header { gap: var(--space-md); }
+  .library-header-actions { width: 100%; }
+  .upload-category { flex: 1; width: auto; min-width: 0; }
+  .file-search { flex-basis: 100%; }
+  .file-category-filter { flex: 1; width: auto; }
+  .selection-actions { flex-wrap: wrap; }
+  .library-content :deep(.explorer-history) { gap: 0; }
+  .library-content :deep(.explorer-path) { order: 1; flex: 1; flex-basis: 0; }
+  .library-content :deep(.explorer-actions) { order: 2; flex-basis: 100%; justify-content: flex-end; margin-left: 0; gap: var(--space-xs); }
 }
 </style>

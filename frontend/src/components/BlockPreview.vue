@@ -27,7 +27,7 @@ import { TableKit } from '@tiptap/extension-table'
 import MarkdownIt from 'markdown-it'
 import mdCallout from '../utils/mdCallout'
 import mdAnchor from '../utils/mdAnchor'
-import mdMath from '../utils/mdMath'
+import mdMath, { renderMathInHtml } from '../utils/mdMath'
 import { MathInline, MathBlock } from '../utils/mathNodes'
 import { previewHtmlToMd } from '../utils/htmlToMd'
 import { BlockMeta, isBlockId } from '../utils/blockMeta'
@@ -637,7 +637,7 @@ const BlockPaste = Extension.create({
         if (droppedImages) {
           ElMessage.info(`已忽略粘贴内容里的 ${droppedImages} 张内嵌大图（base64 太大，会把笔记撑到几百 KB）`)
         }
-        return cleaned
+        return renderMathInHtml(cleaned, { renderKatex: false })
       },
     } })]
   },

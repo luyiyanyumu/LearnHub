@@ -31,6 +31,32 @@ class AgentContextMemoryTest {
         assertEquals(before, json.valueToTree(messages));
     }
 
+    @Test void webpageMemoryKeepsTheSnapshotCursorAndDistinctSourceCoverageFlags() throws Exception {
+        List<Object> messages = conversation("synthetic", "latest one", "latest two");
+        ObjectNode result = json.createObjectNode().put("ok", true)
+                .put("page_id", "synthetic-snapshot-id").put("url", "https://example.invalid/article")
+                .put("fetch_mode", "dynamic").put("offset", 8000).put("next_offset", 16000)
+                .put("total_chars", 32000).put("has_more", true).put("source_truncated", false)
+                .put("http_success", true).put("cached", true).put("truncated", true)
+                .put("content", "完整提交给工作记忆的合成网页片段。".repeat(8_000));
+        ((ObjectNode) messages.get(3)).put("name", "web_fetch").put("content", result.toString());
+        Recorder recorder = new Recorder();
+
+        AgentContextMemory.Update update = AgentContextMemory.compact(messages, json, goal, recorder);
+
+        JsonNode metadata = descriptor(memory(update.memory()).path("sources"), "old:result").path("metadata");
+        assertEquals("synthetic-snapshot-id", metadata.path("page_id").asText());
+        assertEquals(16000, metadata.path("next_offset").asInt());
+        assertEquals(32000, metadata.path("total_chars").asInt());
+        assertTrue(metadata.path("has_more").asBoolean());
+        assertTrue(metadata.path("truncated").asBoolean());
+        assertFalse(metadata.path("source_truncated").asBoolean());
+        assertEquals("dynamic", metadata.path("fetch_mode").asText());
+        assertTrue(metadata.path("cached").asBoolean());
+        assertTrue(metadata.path("http_success").asBoolean());
+        assertEquals(result.path("content").asText(), recorder.field("old:result", "$/content"));
+    }
+
     @Test void oldWholeExchangeIsReplacedOnlyAfterEverySourceCharacterIncludingTailWasSubmitted() throws Exception {
         String source = "synthetic complete old source\n\n".repeat(5_000) + "OLD-FULL-TAIL-SENTINEL";
         List<Object> messages = conversation(source, "latest one", "latest two");

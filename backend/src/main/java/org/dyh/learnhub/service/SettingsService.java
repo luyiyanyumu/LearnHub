@@ -91,6 +91,10 @@ public class SettingsService {
     /** 语义检索总开关（默认开；关掉后只剩词面检索） */
     public static final String KEY_VECTOR_ENABLED = "ai.vector_enabled";
 
+    /** 本地专用模型：默认关闭；只训练启用后的上传或显式入队的资料。 */
+    public static final String KEY_KNOWLEDGE_MODEL_ENABLED = "knowledge_model.enabled";
+    public static final String KEY_KNOWLEDGE_MODEL_BASE_URL = "knowledge_model.base_url";
+
     private static final List<String> KNOWN_KEYS = buildKnownKeys();
 
     /**
@@ -120,6 +124,7 @@ public class SettingsService {
                 KEY_WEB_ENABLED, KEY_SEARCH_BASE_URL, KEY_SEARCH_MODEL,
                 KEY_WIKI_BASE_URL, KEY_WIKI_MODEL, KEY_WIKI_API_KEY, KEY_QUERY_REWRITE,
                 KEY_EMBED_BASE_URL, KEY_EMBED_MODEL, KEY_VECTOR_ENABLED, KEY_AUTO_RECOMPILE,
+                KEY_KNOWLEDGE_MODEL_ENABLED, KEY_KNOWLEDGE_MODEL_BASE_URL,
                 // 检索侧开关（2026-09）：上下文嵌入 与 重排。
                 // 必须登记在这里 —— update() 有白名单校验，漏登记会抛异常，
                 // 而开关按钮只看到 500、值其实没变（这个坑踩过一次：A/B 两轮跑出完全一样的数字，
@@ -356,6 +361,8 @@ public class SettingsService {
             case KEY_EMBED_MODEL -> "bge-m3";
             case KEY_VECTOR_ENABLED -> "1";
             case KEY_AUTO_RECOMPILE -> "0";
+            case KEY_KNOWLEDGE_MODEL_ENABLED -> "0";
+            case KEY_KNOWLEDGE_MODEL_BASE_URL -> "http://127.0.0.1:8766";
             case "ai.model_for_embed" -> org.dyh.learnhub.ai.ModelRouting.EMBED_DISABLED;
             // 模型分工的默认值放在 ModelRouting 里（那边连"为什么是这个默认"一起写着）。
             // 这里按**前缀**判断，而不是逐个列举任务名 —— 列举就会漏（漏了 triple/rerank/grounding）。

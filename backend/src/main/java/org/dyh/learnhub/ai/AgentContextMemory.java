@@ -27,7 +27,8 @@ final class AgentContextMemory {
     private static final Pattern BEGIN = Pattern.compile("\\\\begin\\{([^}]+)}");
     private static final Set<String> META = Set.of("ok", "staged", "action_id", "id", "source", "source_id", "source_type",
             "url", "title", "name", "file_id", "note_id", "content_hash", "expected_hash", "hash", "error", "code",
-            "status", "type", "kind", "version", "count", "total", "total_chars", "offset", "next_offset", "truncated");
+            "status", "type", "kind", "version", "count", "total", "total_chars", "offset", "next_offset", "truncated",
+            "page_id", "fetch_mode", "has_more", "source_truncated", "http_success", "cached");
     private static final Set<String> REFERENCE_LISTS = Set.of("ids", "hashes", "sourceIds", "sourceRefs", "source_refs");
     private static final String SYSTEM = SUMMARY_PREFIX + "你在整理已完成工具交换的工作记忆，不能调用或执行工具。"
             + "用户的完整目标不能缩小。输入 parts 的字段按 source_ref、JSON path 与 offset 连续提供；每个片段均需处理，"

@@ -25,7 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * 建表脚本与实体是否一致 —— 防的是这一类事故：
  *
- * <p>{@code spring.sql.init.mode=always} 每次启动都会执行 {@code schema.sql}，但里面用的是
+ * <p>数据库由 Flyway 的版本化迁移管理；历史基线里的
  * {@code CREATE TABLE IF NOT EXISTS}：**表一旦建过，加列再也不会生效**。于是"实体加了字段、
  * 建表脚本也加了列"，只有**已经存在的老库**拿不到这一列，运行时直接
  * {@code Unknown column 'xxx' in 'field list'}。
@@ -35,9 +35,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 而**开发机上一直没暴露**，因为那台机器的库是这列还在的早期版本建的。
  * 也就是说：**跑现有测试永远抓不到它**，只有对着"按当前 schema 新建的库"才看得见。
  *
- * <p>所以这个用例不连数据库：直接从 {@code schema.sql} 解析出"建表时会创建哪些列"
- * （包括末尾那些自愈式 {@code ALTER TABLE ... ADD COLUMN}），再与实体的持久化字段对账。
- * 纯文本解析，任何时候都能跑。
+ * <p>所以这个用例不连数据库：从 {@code db/migration} 的全部 Flyway SQL 迁移解析出
+ * "部署时会创建哪些列"（包括自愈式 {@code ALTER TABLE ... ADD COLUMN}），再与实体的
+ * 持久化字段对账。自动发现增量迁移，不依赖已停止执行的 {@code schema.sql} 或版本白名单。
  */
 class SchemaEntityAlignmentTest {
 
@@ -46,7 +46,25 @@ class SchemaEntityAlignmentTest {
         return camel.replaceAll("(?<=[a-z0-9])([A-Z])", "_$1").toLowerCase(Locale.ROOT);
     }
 
-    /** 从 schema.sql 里解析：表名 → 该表最终会有的列集合 */
+    /** 自动发现完整迁移链；新迁移不需要额外加入测试白名单。 */
+    private static String migrationSql(Path root) throws IOException {
+        Path migrations = root.resolve("src/main/resources/db/migration");
+        assertTrue(Files.isDirectory(migrations), "找不到 Flyway 迁移目录: " + migrations);
+        List<Path> scripts;
+        try (Stream<Path> paths = Files.walk(migrations)) {
+            scripts = paths.filter(Files::isRegularFile)
+                    .filter(path -> path.getFileName().toString().matches("(?:V.+|R)__.+\\.sql"))
+                    .sorted().toList();
+        }
+        assertTrue(!scripts.isEmpty(), "没有发现 Flyway SQL 迁移: " + migrations);
+        StringBuilder sql = new StringBuilder();
+        for (Path script : scripts) {
+            sql.append('\n').append(Files.readString(script, StandardCharsets.UTF_8)).append('\n');
+        }
+        return sql.toString();
+    }
+
+    /** 从迁移链解析：表名 → 建表及增量补列的列集合。 */
     private static Map<String, Set<String>> schemaColumns(String sql) {
         Map<String, Set<String>> out = new LinkedHashMap<>();
         // ① CREATE TABLE [IF NOT EXISTS] t (...)
@@ -120,15 +138,13 @@ class SchemaEntityAlignmentTest {
     }
 
     @Test
-    @DisplayName("表结构漂移：schema.sql 建不出的列，实体里不能有（只在全新库上会炸）")
+    @DisplayName("表结构漂移：完整 Flyway 迁移链建不出的列，实体里不能有")
     void entityFieldsExistInSchema() throws Exception {
         Path root = Path.of(System.getProperty("user.dir"));
-        Path schema = root.resolve("src/main/resources/schema.sql");
         Path entities = root.resolve("src/main/java/org/dyh/learnhub/entity");
-        assertTrue(Files.exists(schema), "找不到 schema.sql: " + schema);
         assertTrue(Files.isDirectory(entities), "找不到 entity 目录: " + entities);
 
-        Map<String, Set<String>> schemaCols = schemaColumns(Files.readString(schema, StandardCharsets.UTF_8));
+        Map<String, Set<String>> schemaCols = schemaColumns(migrationSql(root));
         List<String> problems = new ArrayList<>();
         List<Entity> checked = new ArrayList<>();
         try (Stream<Path> s = Files.list(entities)) {
@@ -136,14 +152,14 @@ class SchemaEntityAlignmentTest {
                 Entity e = parseEntity(f);
                 Set<String> cols = schemaCols.get(e.table().toLowerCase(Locale.ROOT));
                 if (cols == null) {
-                    problems.add(String.format("%s：表 %s 在 schema.sql 里没有建表语句", e.file(), e.table()));
+                    problems.add(String.format("%s：表 %s 在 Flyway 迁移链里没有建表语句", e.file(), e.table()));
                     continue;
                 }
                 checked.add(e);
                 for (String c : e.columns()) {
                     if (!cols.contains(c)) {
                         problems.add(String.format(
-                                "%s：表 %s 缺列 `%s`（实体字段写它，但 schema.sql 建不出来 → "
+                                "%s：表 %s 缺列 `%s`（实体字段写它，但 Flyway 迁移链建不出来 → "
                                         + "全新部署的库会在运行时报 Unknown column）",
                                 e.file(), e.table(), c));
                     }
@@ -155,10 +171,9 @@ class SchemaEntityAlignmentTest {
     }
 
     @Test
-    @DisplayName("自愈式补列：schema.sql 必须能在已存在的库上补齐它自己建不出的老列")
+    @DisplayName("自愈式补列：Flyway 迁移必须能在已存在的库上补齐老列")
     void knownDriftIsPatchedForExistingDatabases() throws Exception {
-        Path schema = Path.of(System.getProperty("user.dir"), "src/main/resources/schema.sql");
-        String sql = Files.readString(schema, StandardCharsets.UTF_8);
+        String sql = migrationSql(Path.of(System.getProperty("user.dir")));
         // kb_chunk.heading 是实测踩过的那一处：老库没有它，必须靠幂等 ALTER 补上
         assertTrue(sql.matches("(?s).*ALTER\\s+TABLE\\s+kb_chunk\\s+ADD\\s+COLUMN\\s+heading.*"),
                 "kb_chunk.heading 缺少自愈式补列语句 —— 已存在的库不会拿到这一列");

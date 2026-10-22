@@ -5,22 +5,25 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { MdPreview } from 'md-editor-v3'
 import '../utils/mdEditorSetup'
 import { fileApi, kbApi, knowledgeApi, kgApi, saveBlob, wikiApi } from '../api'
+import { knowledgeMaintenanceApi } from '../api/knowledgeMaintenance.js'
 import { fixHtmlQuotes } from '../utils/htmlQuotes'
 import { isDark } from '../composables/useTheme'
 import { mermaidFrameHtml } from '../utils/mermaidPreview.js'
 import KnowledgeGraph from '../components/KnowledgeGraph.vue'
+import CommunityGalaxy from '../components/CommunityGalaxy.vue'
 import KnowledgeSearchPanel from '../components/KnowledgeSearchPanel.vue'
 import WikiTopicNavigator from '../components/WikiTopicNavigator.vue'
 import { Search, Share, Reading, Setting, ArrowRight } from '@element-plus/icons-vue'
 import { knowledgeWorkspaceQuery, knowledgeWorkspaceTab } from '../utils/knowledgeWorkspace'
 
-import { expandGraphIds, filterConceptGraph, findGraphNodes, graphSource } from '../utils/knowledgeGraphView'
+import { expandGraphIds, filterConceptGraph, findGraphNodes, graphCommunityOptions, graphSource } from '../utils/knowledgeGraphView'
+import { buildCommunityGalaxyMap, expandCommunityGraph } from '../utils/knowledgeGraphCommunities.js'
 import { retrievalSourcePath } from '../utils/retrievalDisplay'
 import { createKnowledgeSearchLoader } from '../utils/knowledgeSearch'
 import { findWikiHeading, wikiHeadingId, wikiRouteTarget } from '../utils/wikiNavigation'
 import { createWikiDependencyLoader, wikiDependencyView } from '../utils/wikiDependencyDisplay'
 import { MODEL_CONFIGURATION_CHANGED_EVENT } from '../utils/modelProfileView'
-import { createKnowledgeStatusLoader, knowledgeIndexView } from '../utils/knowledgeIndexView'
+import { createKnowledgeMaintenanceLoader, createKnowledgeStatusLoader, knowledgeIndexView, maintenanceTime } from '../utils/knowledgeIndexView'
 
 /**
  * 知识库：三个视图
@@ -145,7 +148,25 @@ const probeQ = ref('')
 const probeResult = ref(null)
 const probeBusy = ref(false)
 let probeGeneration = 0
-const kbView = computed(() => knowledgeIndexView(kb.value, kbLoading.value))
+const maintenanceState = ref({ status: null, loading: false, submitting: false, error: '' })
+const maintenance = computed(() => maintenanceState.value.status)
+const maintenanceStepLabels = { pending: '待执行', partial: '尚未完成', queued: '已排队', waiting: '等待处理', running: '进行中', fresh: '已维护', completed: '已完成', done: '已完成', failed: '失败', error: '失败', skipped: '已跳过', blocked: '待处理' }
+const maintenanceLoader = createKnowledgeMaintenanceLoader({
+  load: signal => knowledgeMaintenanceApi.status(signal),
+  onState(state) {
+    const completed = maintenanceState.value.status?.lastCompletedAt
+    maintenanceState.value = state
+    if (state.status?.lastCompletedAt && completed && state.status.lastCompletedAt !== completed) loadKb()
+  },
+})
+const kbView = computed(() => knowledgeIndexView(kb.value, kbLoading.value, maintenance.value))
+async function setMaintenanceEnabled(enabled) {
+  await maintenanceLoader.submit(() => knowledgeMaintenanceApi.settings(enabled))
+}
+async function runMaintenance() {
+  await maintenanceLoader.submit(() => knowledgeMaintenanceApi.run())
+}
+watch(maintenanceOpen, open => { if (open) maintenanceLoader.refresh() })
 const kbStatusLoader = createKnowledgeStatusLoader({
   load: () => kbApi.status(),
   onState(state) { kb.value = state.status; kbLoading.value = state.loading },
@@ -155,7 +176,8 @@ function modelConfigurationChanged() {
   probeGeneration++
   probeResult.value = null
   probeBusy.value = false
-  // Refreshing configuration only reads status; index building remains an explicit action.
+  // The backend schedules configuration changes; this page only reads their state.
+  maintenanceLoader.refresh()
   loadKb()
 }
 
@@ -284,6 +306,8 @@ const communityFilter = ref('')
 const showIsolated = ref(false)
 const graphQuery = ref('')
 const graphRef = ref(null)
+const galaxyRef = ref(null)
+const lastCommunityId = ref('')
 const inspectorTab = ref('explore')
 const graphProbeQuestion = ref('')
 const graphProbeMode = ref('auto')
@@ -393,22 +417,49 @@ const canvasEdges = computed(() => (layer.value === 'doc' ? graph.value.edges : 
 /** 详情栏里显示的是哪一层的选中项 */
 const selectedNode = computed(() => (layer.value === 'doc' ? selected.value : conceptSelected.value))
 
-/** 概念层：先按关系过滤，再按"聚焦集合"裁剪（展开邻居后只显示关注的那一片） */
-const visibleConceptGraph = computed(() => filterConceptGraph(concept.value.nodes || [], concept.value.edges || [], {
-  relations: relationFilter.value, origin: originFilter.value, community: communityFilter.value,
-  communities: communityOf.value, focus: focus.value, showIsolated: showIsolated.value,
+/** Membership is optional metadata: retain uncovered concepts in an explicit group. */
+const resolvedCommunityOf = computed(() => {
+  const membership = { ...communityOf.value }
+  for (const group of communityGroups.value) for (const id of group.nodeIds || []) {
+    if (membership[id] == null) membership[id] = group.communityId
+  }
+  for (const node of concept.value.nodes || []) if (membership[node.id] == null) membership[node.id] = '__unassigned__'
+  return membership
+})
+const coloredCommunityOf = computed(() => Object.fromEntries(Object.entries(resolvedCommunityOf.value).filter(([, id]) => Number.isFinite(Number(id)))))
+const overviewConceptGraph = computed(() => filterConceptGraph(concept.value.nodes || [], concept.value.edges || [], {
+  relations: relationFilter.value, origin: originFilter.value, showIsolated: showIsolated.value,
+}))
+const isCommunityOverview = computed(() => layer.value === 'concept' && communityFilter.value === '' && !focus.value)
+const expandedCommunityGraph = computed(() => expandCommunityGraph(overviewConceptGraph.value.nodes, overviewConceptGraph.value.edges,
+  resolvedCommunityOf.value, communityFilter.value))
+/** The overview contains community stars; concrete concepts only mount after expansion. */
+const visibleConceptGraph = computed(() => communityFilter.value !== '' && !focus.value ? expandedCommunityGraph.value : filterConceptGraph(concept.value.nodes || [], concept.value.edges || [], {
+  relations: relationFilter.value, origin: originFilter.value,
+  communities: resolvedCommunityOf.value, focus: focus.value, showIsolated: showIsolated.value,
 }))
 const shownConceptEdges = computed(() => visibleConceptGraph.value.edges)
 const shownConceptNodes = computed(() => visibleConceptGraph.value.nodes)
 const graphMatches = computed(() => findGraphNodes(layer.value === 'concept' ? concept.value.nodes || [] : graph.value.nodes || [], graphQuery.value))
 const visibleDerivedCount = computed(() => shownConceptEdges.value.filter(e => e.origin === 'derived').length)
-const communityOptions = computed(() => communityGroups.value.map(g => ({ ...g,
-  title: (g.nodeIds || []).map(id => concept.value.nodes.find(n => n.id === id)).filter(Boolean)
-    .sort((a, b) => (b.degree || 0) - (a.degree || 0)).slice(0, 2).map(n => n.label).join(' / ') || `社区 #${g.communityId}`,
-})))
+const conceptNodeById = computed(() => new Map(concept.value.nodes.map(node => [node.id, node])))
+const communityOptions = computed(() => graphCommunityOptions(concept.value.nodes, communityGroups.value))
+const communityOverview = computed(() => buildCommunityGalaxyMap(overviewConceptGraph.value.nodes, overviewConceptGraph.value.edges,
+  resolvedCommunityOf.value, communityOptions.value))
+const activeCommunityTitle = computed(() => communityOverview.value.communities.find(group => String(group.communityId) === communityFilter.value)?.title
+  || communityOptions.value.find(group => String(group.communityId) === communityFilter.value)?.title
+  || (communityFilter.value === '__unassigned__' ? '未分组概念' : `社区 #${communityFilter.value}`))
+const communitySelectionOptions = computed(() => {
+  const options = communityOverview.value.communities.map(group => ({ value: String(group.communityId), label: `${group.title} · ${group.size} 个概念` }))
+  if (communityFilter.value !== '' && !options.some(option => option.value === communityFilter.value)) {
+    options.unshift({ value: communityFilter.value, label: `${activeCommunityTitle.value} · 当前筛选无匹配` })
+  }
+  return [{ value: '', label: `全部社区（${communityOverview.value.totalCommunities}）` }, ...options]
+})
 
 function resetGraphFilters() {
   focus.value = null
+  focusRootId.value = ''
   communityFilter.value = ''
   relationFilter.value = (concept.value.ontology || []).map(r => r.id)
   originFilter.value = 'direct'
@@ -416,14 +467,13 @@ function resetGraphFilters() {
   graphQuery.value = ''
   conceptSelected.value = null
   selected.value = null
-  nextTick(() => graphRef.value?.resetView())
+  nextTick(() => { graphRef.value?.resetView(); galaxyRef.value?.resetView() })
 }
 
 function locateNode(node) {
   if (layer.value === 'concept') {
     communityFilter.value = ''
-    relationFilter.value = (concept.value.ontology || []).map(r => r.id)
-    const edges = (concept.value.edges || []).filter(e => originFilter.value === 'all' || (originFilter.value === 'derived' ? e.origin === 'derived' : e.origin !== 'derived'))
+    const edges = filterConceptGraph(concept.value.nodes || [], concept.value.edges || [], { relations: relationFilter.value, origin: originFilter.value }).edges
     focus.value = expandGraphIds(node.id, edges, 1)
     focusRootId.value = node.id
   }
@@ -433,11 +483,28 @@ function locateNode(node) {
 }
 
 function focusCommunity(id) {
+  lastCommunityId.value = String(id)
   communityFilter.value = String(id)
   focus.value = null
+  focusRootId.value = ''
   conceptSelected.value = null
   graphQuery.value = ''
   nextTick(() => graphRef.value?.resetView())
+}
+
+function returnToCommunityOverview() {
+  const previous = communityFilter.value || lastCommunityId.value
+  communityFilter.value = ''
+  focus.value = null
+  focusRootId.value = ''
+  conceptSelected.value = null
+  graphQuery.value = ''
+  nextTick(() => galaxyRef.value?.focusCommunity(previous))
+}
+
+function onCommunityChange(id) {
+  if (id == null || String(id) === '') returnToCommunityOverview()
+  else focusCommunity(id)
 }
 
 function sourceLinks(sources) {
@@ -538,6 +605,7 @@ async function loadCommunities() {
 
 /** 与 KnowledgeGraph 内同一套色相算法（黄金角步进），图例色块才和节点颜色对得上 */
 function communityColor(id) {
+  if (!Number.isFinite(Number(id))) return 'var(--app-brand)'
   return `hsl(${Math.round((Number(id) * 137.508) % 360)} 46% 48%)`
 }
 
@@ -568,8 +636,7 @@ function selectCommunityMember(nodeId) {
  * 只查它就会退化成显示 id（实测踩到：侧栏整列都是 e-7debe…）。完整列表在 `concept.nodes`。
  */
 function shortName(nodeId) {
-  const inCanvas = canvasNodes.value.find((n) => n.id === nodeId)
-  const inAll = inCanvas || (concept.value?.nodes || []).find((n) => n.id === nodeId)
+  const inAll = conceptNodeById.value.get(nodeId)
   return inAll?.name || inAll?.label || String(nodeId).slice(0, 6)
 }
 
@@ -640,7 +707,7 @@ async function removeConceptNode(n) {
     await ElMessageBox.confirm(
       `删除概念「${n.label}」？<br><br>` +
         '<span style="color:#6b7280">· 它的所有三元组会一起删掉<br>' +
-        '· 原始笔记 / 速查卡 / 资料一行不动，但**不会自动重建** —— 除非你重新点「重建 GraphRAG」</span>',
+        '· 原始笔记 / 速查卡 / 资料一行不动；后续更新按后台维护设置执行，可在知识库维护查看</span>',
       '删除概念',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消', dangerouslyUseHTMLString: true }
     )
@@ -848,7 +915,7 @@ function startStaleWatch(key) {
         loadWikiDependencies()
         stopStaleWatch()
         loadTopicsQuiet()
-        ElMessage.success('wiki 已按最新内容自动更新')
+        ElMessage.success('Wiki 已更新为当前版本')
       }
     } catch (e) {
       stopStaleWatch()
@@ -975,7 +1042,7 @@ async function toggleAutoRefresh(v) {
   try {
     const r = await wikiApi.setAutoRefresh(v)
     autoRefresh.value = !!r.enabled
-    ElMessage.success(r.enabled ? '已开启自动更新：改完笔记会自动重生成对应主题' : '已关闭自动更新')
+    ElMessage.success(r.enabled ? '已允许分类与标签 Wiki 自动更新；执行由后台自动维护统一调度' : '已关闭分类与标签 Wiki 自动更新')
   } catch (e) {
     autoRefresh.value = !v
   }
@@ -1127,7 +1194,7 @@ function onWikiClick(e) {
 // 生命周期
 // ------------------------------------------------------------------
 const staleTopicCount = computed(() => topics.value.filter(t => t.stale).length)
-const maintenanceBusy = computed(() => kbBusy.value || kgBuilding.value || rebuilding.value || entBusy.value || reBusy.value || lintBusy.value || summaryBusy.value || kgBusy.value || communityLoading.value)
+const maintenanceBusy = computed(() => maintenance.value?.running || kbBusy.value || kgBuilding.value || rebuilding.value || entBusy.value || reBusy.value || lintBusy.value || summaryBusy.value || kgBusy.value || communityLoading.value)
 const indexState = computed(() => kbView.value.label)
 const formatCount = value => value == null ? '—' : Number(value).toLocaleString('zh-CN')
 
@@ -1158,6 +1225,7 @@ onMounted(() => {
   loadAutoRefresh()
   loadWikiTargets()
   loadKb()
+  maintenanceLoader.start()
   loadConcept()
 })
 
@@ -1172,6 +1240,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('lh-open-wiki', openWikiFromReference)
   window.removeEventListener(MODEL_CONFIGURATION_CHANGED_EVENT, modelConfigurationChanged)
   kbStatusLoader.dispose()
+  maintenanceLoader.dispose()
   probeGeneration++
   wikiLoadGeneration++
   wikiDependencyLoader.dispose()
@@ -1182,7 +1251,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="page knowledge-page" :class="{ 'knowledge-page-graph': tab === 'graph' }">
+  <div class="page knowledge-page" :class="{ 'knowledge-page-graph': tab === 'graph', 'knowledge-page-overview': tab === 'graph' && isCommunityOverview }">
     <header class="knowledge-header">
       <div class="knowledge-heading">
         <h1>知识库</h1>
@@ -1214,7 +1283,7 @@ onBeforeUnmount(() => {
             <button type="button" :class="{ on: layer === 'concept' }" @click="layer = 'concept'">概念层<template v-if="concept.stat">（{{ concept.stat.nodes }}）</template></button>
             <button type="button" :class="{ on: layer === 'doc' }" @click="layer = 'doc'">文档层</button>
           </div>
-          <span class="graph-description">{{ layer === 'concept' ? '从概念出发，沿关系找到原文依据' : '查看笔记、资料与速查卡之间的联系' }}</span>
+          <span class="graph-description">{{ layer === 'concept' ? '先看社区星系，再展开概念与原文关系' : '查看笔记、资料与速查卡之间的联系' }}</span>
           <div class="graph-actions">
             <el-button size="small" @click="resetGraphFilters">重置视图</el-button>
 <el-button size="small" @click="maintenanceOpen = true">管理图谱</el-button>
@@ -1222,23 +1291,16 @@ onBeforeUnmount(() => {
         </div>
         <div v-if="layer === 'concept'" class="graph-filters">
           <label class="graph-select-label">社区
-            <!-- 与检索方式同样的问题：原生 <select> 的弹层由系统绘制，主题色/圆角都进不去 -->
-            <el-select
+            <el-select-v2
               v-model="communityFilter"
               aria-label="筛选社区"
-              :placeholder="'全部社区（' + communityGroups.length + '）'"
+              :placeholder="'全部社区（' + communityOverview.totalCommunities + '）'"
+              :options="communitySelectionOptions"
+              filterable
               size="small"
-              style="width: 190px"
-              @change="focus = null; conceptSelected = null"
-            >
-              <el-option :label="'全部社区（' + communityGroups.length + '）'" :value="''" />
-              <el-option
-                v-for="g in communityOptions"
-                :key="g.communityId"
-                :label="g.title + ' · ' + g.size + ' 个概念'"
-                :value="String(g.communityId)"
-              />
-            </el-select>
+              style="width: 220px"
+              @change="onCommunityChange"
+            />
           </label>
           <el-select v-model="relationFilter" aria-label="筛选关系" multiple collapse-tags collapse-tags-tooltip size="small" placeholder="选择关系" class="graph-relation-filter">
             <el-option v-for="r in concept.ontology || []" :key="r.id" :label="r.label" :value="r.id" />
@@ -1251,25 +1313,31 @@ onBeforeUnmount(() => {
             </el-select>
           </label>
           <label class="graph-checkbox"><input v-model="showIsolated" type="checkbox" />显示孤立概念</label>
-          <button v-if="focus" type="button" class="text-action" @click="focus = null">退出邻域聚焦</button>
         </div>
+        <nav v-if="layer === 'concept' && !isCommunityOverview" class="graph-view-navigation" aria-label="图谱层级导航">
+          <el-button size="small" @click="returnToCommunityOverview">← 社区星系</el-button>
+          <span :title="focus ? '概念邻域' : activeCommunityTitle">{{ focus ? '概念邻域' : activeCommunityTitle }}</span>
+          <small v-if="!focus && expandedCommunityGraph.boundaryIds.size">包含 {{ expandedCommunityGraph.boundaryIds.size }} 个外部关联概念</small>
+        </nav>
         <div v-if="layer === 'concept' && kgBuilding && kgJob" class="kb-progress">
           <el-progress :percentage="kgJob.percent || 0" :stroke-width="6" :show-text="false" />
           <div class="hint">{{ kgJob.stage }} · {{ kgJob.detail }}</div>
         </div>
 
-        <div class="graph-workspace">
-          <section class="graph-stage" aria-label="知识图谱">
+        <div class="graph-workspace" :class="{ 'graph-workspace-overview': isCommunityOverview }">
+          <section class="graph-stage" :class="{ 'graph-stage-overview': isCommunityOverview }" aria-label="知识图谱">
             <div class="graph-stage-head">
-              <div><b>{{ focus ? '概念邻域' : communityFilter !== '' ? '社区视图' : '知识地图' }}</b><span class="hint">{{ canvasNodes.length }} 个{{ layer === 'concept' ? '概念' : '节点' }} · {{ canvasEdges.length }} 条关系</span></div>
+              <div><b>{{ isCommunityOverview ? '社区星系' : focus ? '概念邻域' : communityFilter !== '' ? '社区视图' : '知识地图' }}</b><span class="hint">{{ isCommunityOverview ? `${communityOverview.totalCommunities} 个社区 · ${communityOverview.totalNodes} 个概念` : `${canvasNodes.length} 个${layer === 'concept' ? '概念' : '节点'} · ${canvasEdges.length} 条关系` }}</span></div>
               <span v-if="layer === 'concept'" class="hint">{{ visibleDerivedCount ? `包含 ${visibleDerivedCount} 条推导` : '仅展示原文抽取' }}</span>
             </div>
             <div class="kg-box" v-loading="layer === 'doc' ? graphLoading : conceptLoading">
-              <KnowledgeGraph v-if="canvasNodes.length" ref="graphRef" :key="layer" :nodes="canvasNodes" :edges="canvasEdges" :communities="layer === 'concept' ? communityOf : {}" :active-id="selectedNode?.id || ''" :layout-root-id="layer === 'concept' && focus ? focusRootId : ''" @select="onSelectNode" @open="openNode" />
-              <el-empty v-else :description="layer === 'doc' ? '还没有内容，先写几篇笔记' : concept.nodes.length ? '当前筛选下没有关联，可调整筛选或显示孤立概念' : '还没有概念，重建 GraphRAG 后即可探索'" />
+              <CommunityGalaxy v-if="layer === 'concept' && overviewConceptGraph.nodes.length" v-show="isCommunityOverview" ref="galaxyRef" :active="isCommunityOverview" :overview-data="communityOverview" :nodes="overviewConceptGraph.nodes" :edges="overviewConceptGraph.edges" :communities="resolvedCommunityOf" :groups="communityOptions" @expand="focusCommunity" />
+              <KnowledgeGraph v-if="!isCommunityOverview && canvasNodes.length" ref="graphRef" :key="layer" :nodes="canvasNodes" :edges="canvasEdges" :communities="layer === 'concept' ? coloredCommunityOf : {}" :active-id="selectedNode?.id || ''" :layout-root-id="layer === 'concept' && focus ? focusRootId : ''" @select="onSelectNode" @open="openNode" />
+              <el-empty v-if="isCommunityOverview ? !overviewConceptGraph.nodes.length : !canvasNodes.length" :description="layer === 'doc' ? '还没有内容，先写几篇笔记' : concept.nodes.length ? '当前筛选下没有关联，可调整筛选或显示孤立概念' : '还没有概念，重建 GraphRAG 后即可探索'" />
             </div>
             <div class="graph-stage-foot">
-              <template v-if="layer === 'concept'"><span class="legend"><i class="line line-direct" />原文抽取</span><span class="legend"><i class="line line-derived" />规则推导</span><span class="hint">颜色表示社区 · 点选查看依据</span></template>
+              <template v-if="isCommunityOverview"><span class="hint">每个标记代表一个社区 · 聚焦查看真实关系 · 点击展开</span></template>
+              <template v-else-if="layer === 'concept'"><span class="legend"><i class="line line-direct" />原文抽取</span><span class="legend"><i class="line line-derived" />规则推导</span><span class="hint">颜色表示社区 · 点选查看依据</span></template>
               <template v-else><span v-for="t in ['category', 'note', 'ref', 'file', 'tag']" :key="t" class="legend"><i class="dot" :class="`dot-${t === 'category' ? 'cat' : t}`" />{{ nodeTypeLabel(t) }}</span></template>
             </div>
           </section>
@@ -1282,7 +1350,8 @@ onBeforeUnmount(() => {
             <div class="inspector-scroll">
               <template v-if="inspectorTab === 'explore'">
                 <input v-model="graphQuery" class="graph-search" :placeholder="layer === 'concept' ? '搜索概念或别名…' : '搜索文档或标签…'" aria-label="搜索图谱节点" @keydown.enter="graphMatches[0] && locateNode(graphMatches[0])" />
-                <template v-if="!selectedNode || graphQuery">
+                <p v-if="isCommunityOverview && !graphQuery" class="graph-overview-help">点击星团展开社区，或搜索概念直接定位到它的关系。</p>
+                <template v-if="(!selectedNode || graphQuery) && (!isCommunityOverview || graphQuery)">
                   <div class="inspector-label">{{ graphQuery ? '匹配结果' : '从一个概念开始' }}</div>
                   <p v-if="!graphMatches.length" class="hint">没有匹配的节点，请换一个关键词。</p>
                   <div class="graph-node-list">
@@ -1321,9 +1390,9 @@ onBeforeUnmount(() => {
                 </div>
 
                 <template v-if="layer === 'concept' && !selectedNode && !graphQuery">
-                  <div class="inspector-label">按社区探索 <span>{{ communityGroups.length }}</span></div>
+                  <div class="inspector-label">按社区探索 <span>{{ communityOverview.totalCommunities }}</span></div>
                   <div class="community-list">
-                    <button v-for="g in communityOptions.slice(0, 8)" :key="g.communityId" type="button" :class="{ active: String(g.communityId) === communityFilter }" @click="focusCommunity(g.communityId)"><i :style="{ background: communityColor(g.communityId) }" /><span>{{ g.title }}</span><small>{{ g.size }}</small></button>
+                    <button v-for="g in communityOverview.communities.slice(0, 8)" :key="g.communityId" type="button" :class="{ active: String(g.communityId) === communityFilter }" @click="focusCommunity(g.communityId)"><i :style="{ background: communityColor(g.communityId) }" /><span>{{ g.title }}</span><small>{{ g.size }}</small></button>
                   </div>
                   <p class="hint">顶部筛选可选择全部社区。</p>
                 </template>
@@ -1526,8 +1595,22 @@ onBeforeUnmount(() => {
 
     <el-drawer v-model="maintenanceOpen" title="知识库维护" size="min(580px, 100vw)" append-to-body class="knowledge-maintenance-drawer">
       <div class="maintenance-content">
-        <p class="maintenance-intro">查看索引状态，更新知识结构，验证检索效果。已开始的任务会在关闭面板后继续。</p>
-        <details open class="maintenance-section"><summary><el-icon><Search /></el-icon><span>检索索引与体检</span></summary><div class="maintenance-section-body">
+        <section class="maintenance-auto" aria-labelledby="maintenance-auto-title" :aria-busy="maintenanceState.submitting">
+          <div class="maintenance-auto-heading"><div><h3 id="maintenance-auto-title">后台自动维护</h3><p class="hint">合并内容变更后，在后台更新索引、Wiki、图谱、社区、摘要与自检。关闭页面后继续执行。</p></div><el-switch :model-value="maintenance?.enabled === true" :disabled="!maintenance || maintenanceState.submitting || !!maintenanceState.error" :loading="maintenanceState.submitting" aria-label="后台自动维护知识库" @change="setMaintenanceEnabled" /></div>
+          <div v-if="maintenance" class="maintenance-live" role="status" aria-live="polite">
+            <b>{{ maintenance.phaseLabel || (maintenance.running ? '后台维护中' : maintenance.pending ? '等待后台执行' : maintenance.enabled ? '自动维护已开启' : '自动维护已关闭') }}</b>
+            <p>{{ maintenance.message || '后台尚未提供本次维护说明。' }}</p>
+            <dl class="maintenance-times"><div><dt>上次开始</dt><dd>{{ maintenanceTime(maintenance.lastStartedAt) }}</dd></div><div><dt>上次结束</dt><dd>{{ maintenanceTime(maintenance.lastCompletedAt) }}</dd></div><div><dt>下次计划</dt><dd>{{ maintenanceTime(maintenance.nextRunAt) }}</dd></div></dl>
+            <ol v-if="maintenance.steps?.length" class="maintenance-steps" aria-label="后台实际维护步骤"><li v-for="step in maintenance.steps" :key="step.key"><div><b>{{ step.label }}</b><span>{{ maintenanceStepLabels[step.status] || step.status || '状态待确认' }}</span></div><p v-if="step.message">{{ step.message }}</p></li></ol>
+          </div>
+          <p v-else class="hint" role="status">{{ maintenanceState.loading ? '正在读取后台维护状态…' : '尚未读取后台维护状态' }}</p>
+          <el-alert v-if="maintenance?.lastError" :title="maintenance.lastError" type="error" :closable="false" show-icon />
+          <el-alert v-if="maintenanceState.error" :title="maintenanceState.error" type="warning" :closable="false" show-icon />
+          <div class="maintenance-actions"><el-button type="primary" :loading="maintenanceState.submitting" :disabled="!maintenance || maintenanceState.submitting || maintenance.running" @click="runMaintenance">{{ maintenance?.lastError ? '重试维护' : '立即维护' }}</el-button><el-button :loading="maintenanceState.loading" :disabled="maintenanceState.submitting" @click="maintenanceLoader.refresh">刷新状态</el-button></div>
+          <p class="hint">立即维护只向后台排队；执行结果以阶段与错误记录为准。自动维护会按需调用已配置的模型。</p>
+        </section>
+        <p class="maintenance-intro">高级修复与检索体检用于按需排查，可单独执行维护步骤。</p>
+        <details class="maintenance-section"><summary><el-icon><Search /></el-icon><span>高级修复 · 检索索引与体检</span></summary><div class="maintenance-section-body">
       <!-- 语义索引状态：资料能不能"问什么都知道"取决于索引新不新 -->
       <div class="kb-bar">
         <span class="kb-title">语义索引</span>
@@ -1544,7 +1627,7 @@ onBeforeUnmount(() => {
         <span v-else class="hint">{{ kbView.label }}</span>
       </div>
       <p class="hint">{{ kbView.description }}</p>
-      <p v-if="kbView.canRebuild" class="hint">重建会调用所选嵌入服务，可能产生服务费用；更换配置不会自动重建。</p>
+      <p v-if="kbView.canRebuild" class="hint">高级重建会调用所选嵌入服务。常规变更由后台根据自动维护设置调度。</p>
 
       <!-- 重建进度 -->
       <div v-if="kbBusy && kbJob" class="kb-progress">
@@ -1599,7 +1682,7 @@ onBeforeUnmount(() => {
           <div class="maintenance-actions"><el-button :loading="entBusy" @click="compileEntities">编译知识页</el-button><el-button :loading="reBusy" @click="recompileAffected">重建受影响页</el-button><el-button :loading="lintBusy" @click="runLint">自检</el-button></div>
           <div v-if="entBusy && entJob" class="kb-progress"><el-progress :percentage="entJob.percent || 0" :stroke-width="6" /><p class="hint">{{ entJob.stage }} · {{ entJob.done }}/{{ entJob.total }} · 已写 {{ entJob.pages }} 页</p></div>
           <div v-if="reBusy && reJob" class="kb-progress"><el-progress :percentage="reJob.percent || 0" :stroke-width="6" /><p class="hint">{{ reJob.stage }} · {{ reJob.detail }}</p></div>
-          <div class="maintenance-toggle"><div><b>自动更新知识页</b><p class="hint">原文变化后，自动重新生成受影响的页面。</p></div><el-switch v-model="autoRefresh" aria-label="原文变化后自动更新 Wiki" @change="toggleAutoRefresh" /></div>
+          <div class="maintenance-toggle"><div><b>分类与标签 Wiki 自动更新</b><p class="hint">仅控制分类、标签主题页的自动更新；索引、实体 Wiki 和图谱等由顶部总开关统一调度。</p></div><el-switch v-model="autoRefresh" aria-label="分类与标签 Wiki 自动更新" @change="toggleAutoRefresh" /></div>
           <el-button @click="maintenanceOpen = false; chooseTab('wiki')">前往 Wiki 阅读区<el-icon><ArrowRight /></el-icon></el-button>
         </div></details>
       </div>
@@ -1640,6 +1723,24 @@ onBeforeUnmount(() => {
 .wiki-view-header p { margin: 4px 0 0; font-size: 12px; color: var(--app-text-3); }
 .wiki-view-header > span { color: var(--app-text-3); font-size: 12px; }
 .maintenance-intro { margin: 0 0 24px; color: var(--app-text-2); line-height: 1.8; font-size: 14px; }
+.maintenance-auto { padding: 20px; margin-bottom: 24px; border: 1px solid var(--app-border); border-radius: var(--radius-lg); background: var(--app-card); color: var(--app-text-1); }
+.maintenance-auto-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.maintenance-auto-heading > div:first-child { flex: 1; min-width: 0; }
+.maintenance-auto-heading > .el-switch { flex: none; }
+.maintenance-auto h3 { margin: 0 0 8px; font-size: 16px; }
+.maintenance-auto .hint, .maintenance-live p { font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.maintenance-live { margin: 20px 0 16px; }
+.maintenance-live > p { color: var(--app-text-2); }
+.maintenance-times { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 12px; font-size: 12px; }
+.maintenance-times dt { color: var(--app-text-3); }
+.maintenance-times dd { margin: 4px 0 0; overflow-wrap: anywhere; }
+.maintenance-steps { list-style: none; padding: 0; margin: 16px 0; }
+.maintenance-steps li { padding: 10px 0; border-top: 1px solid var(--app-border-weak); font-size: 13px; }
+.maintenance-steps li > div { display: flex; justify-content: space-between; gap: 12px; }
+.maintenance-steps li > div b { min-width: 0; overflow-wrap: anywhere; }
+.maintenance-steps li span { color: var(--app-text-3); flex: none; }
+.maintenance-steps li p { margin: 5px 0 0; color: var(--app-text-2); }
+.maintenance-section > summary:focus-visible { outline: 2px solid var(--app-brand); outline-offset: -3px; border-radius: var(--radius-lg); }
 .maintenance-section { border: 1px solid var(--app-border); border-radius: var(--radius-lg); margin-bottom: 16px; color: var(--app-text-1); background: var(--app-card); }
 .maintenance-section > summary { display: flex; align-items: center; gap: 10px; padding: 16px; font-weight: 600; cursor: pointer; list-style: none; }
 .maintenance-section > summary::-webkit-details-marker { display: none; }
@@ -2282,6 +2383,9 @@ onBeforeUnmount(() => {
 /* Graph exploration: the canvas stays stable while evidence scrolls independently. */
 
 .graph-fill { min-height: 0; gap: 8px; }
+.graph-view-navigation { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; flex-shrink: 0; }
+.graph-view-navigation > span { min-width: 0; flex: 0 1 auto; max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--app-text-1); }
+.graph-view-navigation small, .graph-overview-help { font-size: 12px; color: var(--app-text-2); line-height: 1.7; }
 .head { flex-shrink: 0; }
 .graph-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex-shrink: 0; }
 .graph-description { font-size: 12px; color: var(--app-text-3); }
@@ -2357,6 +2461,16 @@ onBeforeUnmount(() => {
 .probe-empty button { display: block; margin-top: 8px; }
 .summary-status { padding-top: 16px; margin-top: 16px; border-top: 1px solid var(--app-border-weak); font-size: 12px; }
 .summary-status .hint { line-height: 1.7; }
+.knowledge-page-overview { height: auto; min-height: 100%; }
+.graph-workspace-overview { min-height: 720px; }
+.graph-stage-overview { min-height: 720px; height: auto; background: #fff; border-color: #e6e9ef; }
+.graph-stage-overview > .graph-stage-head, .graph-stage-overview > .graph-stage-foot { background: #fff; border-color: #e6e9ef; }
+.graph-stage-overview > .graph-stage-head b { color: #384a67; font-weight: 500; }
+.graph-stage-overview > .graph-stage-head .hint, .graph-stage-overview > .graph-stage-foot .hint { color: #67758b; }
+.graph-stage-overview :deep(.el-empty__description p) { color: #49566a; }
+.graph-stage-overview :deep(.el-loading-mask) { background: #ffffffcc; }
+.graph-stage-overview .kg-box { min-height: 640px; flex: 1 1 auto; overflow: visible; background: #fff; border-color: #e6e9ef; }
+.graph-workspace-overview .graph-inspector { height: 720px; }
 @media (min-width: 1600px) { .graph-workspace { grid-template-columns: minmax(0, 1fr) 350px; } }
 @media (max-width: 1050px) { .graph-description { display: none; } .graph-workspace { grid-template-columns: minmax(0, 1fr) 280px; gap: 10px; } .graph-select-label select { max-width: 180px; } .graph-stage-head .hint { font-size: 11px; } }
 @media (max-width: 1100px) {
@@ -2374,6 +2488,9 @@ onBeforeUnmount(() => {
   .graph-workspace { grid-template-columns: 1fr; flex: none; }
   .graph-stage { height: 500px; }
   .graph-inspector { height: 460px; }
+  .graph-stage-overview { height: auto; min-height: 680px; }
+  .graph-stage-overview .kg-box { min-height: 580px; }
+  .graph-workspace-overview .graph-inspector { height: 460px; }
   .graph-toolbar, .graph-filters { gap: 8px; }
   .graph-stage-foot { gap: 10px; }
   .wiki { grid-template-columns: 1fr; }
@@ -2393,6 +2510,7 @@ onBeforeUnmount(() => {
   .graph-stage-foot { padding: 6px 10px; }
   .graph-filters .graph-select-label { flex-wrap: wrap; }
   .graph-stage { height: 440px; }
+  .graph-stage-overview { height: auto; }
   .wiki-main { padding: 16px; }
   .page-acts { gap: 8px; }
   .page-acts .el-button + .el-button { margin-left: 0; }

@@ -451,8 +451,8 @@ export const fileApi = {
   rename: (id, name) => request.put(`/files/${id}/name`, { name }),
   /** 换分类（资料按分类进知识图谱） */
   updateCategory: (id, categoryId) => request.put(`/files/${id}/category`, { categoryId }),
-  /** 重新抽取正文 */
-  reextract: (id) => request.post(`/files/${id}/reextract`),
+  /** 大文件抽取可能超过默认超时，等待后端返回最终状态。 */
+  reextract: (id) => request.post(`/files/${id}/reextract`, {}, { timeout: 0 }),
 }
 
 /** 语义检索（向量索引）：状态 / 重建（带进度）/ 检索体检 */

@@ -1,0 +1,3 @@
+scrapling[fetchers]==0.4.15
+playwright==1.62.0
+markdownify==1.2.0

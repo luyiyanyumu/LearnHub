@@ -13,7 +13,10 @@ import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -136,6 +139,49 @@ class EntityRegenerateTest {
     }
 
     @Test
+    void automaticMaterialPreflightUsesRealBodyAndAliasesWithoutModelsOrPageMutation() {
+        WikiPage orphan = page("entity-mqtt", "MQTT", "原有内容");
+        WikiPage alias = page("entity-recover", "可恢复智能体", "<!-- entity-aliases: AgentRewind -->\n历史页面");
+        when(pages.selectList(any())).thenReturn(List.of(orphan, alias));
+        when(chunks.allFiles()).thenReturn(List.of(
+                row(6, "MQTT.pdf", "MQTT\nAuthors: Example Author"),
+                row(7, "恢复机制", "AgentRewind saves checkpoints and restores recorded execution context.")));
+
+        Map<String, String> unavailable = service.unavailableRegenerationMaterials(List.of("entity-mqtt", "entity-recover"));
+
+        assertEquals(List.of("entity-mqtt"), new ArrayList<>(unavailable.keySet()));
+        assertTrue(unavailable.get("entity-mqtt").contains("原页面已保留"));
+        assertEquals("原有内容", orphan.getContentMd());
+        assertNull(orphan.getGeneratedAt(), "预检不能把缺素材旧页标成新鲜");
+        verify(chunks, times(1)).allNotes();
+        verify(chunks, times(1)).allRefs();
+        verify(chunks, times(1)).allFiles();
+        verifyNoInteractions(client, routing, dependencies);
+        verify(pages, never()).updateById(any(WikiPage.class));
+        verify(pages, never()).insert(any(WikiPage.class));
+    }
+
+    @Test
+    void sourceChangesMakeAPreviouslyUnsupportedEntityEligibleAgain() {
+        WikiPage orphan = page("entity-mqtt", "MQTT", "历史协议页");
+        when(pages.selectList(any())).thenReturn(List.of(orphan));
+        when(chunks.allNotes()).thenReturn(List.of(row(1, "协议笔记", "Spring Boot 自动配置。")));
+        assertTrue(service.unavailableRegenerationMaterials(List.of("entity-mqtt")).containsKey("entity-mqtt"));
+
+        when(chunks.allNotes()).thenReturn(List.of(row(1, "协议笔记", "MQTT 使用发布订阅机制，通过主题路由和分发应用消息。")));
+
+        assertTrue(service.unavailableRegenerationMaterials(List.of("entity-mqtt")).isEmpty());
+        assertEquals("历史协议页", orphan.getContentMd());
+        verifyNoInteractions(client, routing, dependencies);
+    }
+
+    @Test
+    void emptyAutomaticPreflightDoesNotLoadAnyLibrarySource() {
+        assertTrue(service.unavailableRegenerationMaterials(List.of()).isEmpty());
+        verifyNoInteractions(pages, chunks, client, routing, dependencies);
+    }
+
+    @Test
     void fakeAliasInCodeDoesNotExpandRegenerationScope() {
         WikiPage old = page("entity-unmatched", "不存在的概念", "## Example\n```html\n<!-- entity-aliases: MQTT -->\n```");
         when(pages.selectOne(any())).thenReturn(old);
@@ -191,6 +237,74 @@ class EntityRegenerateTest {
         assertEquals("failed", awaitJob(service.startRegenerate(old.getTopicKey(), null)).get("status"));
         assertEquals("Original", old.getContentMd());
         verifyNoInteractions(dependencies);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void modelTransportWrappingRetainsCauseAndNeverCopiesProviderResponse(boolean tls) throws Exception {
+        String providerBody = "provider diagnostic https://provider.example.invalid/private api_key=synthetic-private-value";
+        Exception original = tls ? new javax.net.ssl.SSLHandshakeException(providerBody) : new java.io.IOException(providerBody);
+        stubChat(answer -> { throw original; });
+        ReflectionTestUtils.invokeMethod(service, "setTarget", (Object) null);
+
+        IllegalStateException wrapped = assertThrows(IllegalStateException.class, () ->
+                ReflectionTestUtils.invokeMethod(service, "chat", "synthetic system", "synthetic input", 1024, "disabled", true));
+
+        assertSame(original, wrapped.getCause());
+        assertEquals("AI 调用失败：" + KnowledgeMaintenanceService.failureReason(original), wrapped.getMessage());
+        if (tls) assertTrue(wrapped.getMessage().contains("TLS 握手失败"));
+        assertFalse(wrapped.getMessage().contains("provider diagnostic"));
+        assertFalse(wrapped.getMessage().contains("provider.example.invalid"));
+        assertFalse(wrapped.getMessage().contains("synthetic-private-value"));
+        verifyNoInteractions(dependencies, pages);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1024, 6144, 16384})
+    void shortPageUsesSelectedProfileBudgetWithoutInheritingMainModelThinking(int budget) throws Exception {
+        WikiPage old = page("entity-rewind", "AgentRewind", "Original");
+        when(pages.selectOne(any())).thenReturn(old);
+        when(chunks.allFiles()).thenReturn(List.of(row(6, "AgentRewind", "AgentRewind restores an execution checkpoint.")));
+        when(routing.forProfile("selected")).thenReturn(new ModelRouting.ModelTarget(
+                "selected", "synthetic", "https://model.example.invalid/v1", "", "writer-model", false));
+        when(client.maxTokensOf("selected")).thenReturn(budget);
+        when(client.thinkingOf("selected")).thenReturn("enabled");
+        when(client.reasoningEffortOf("selected")).thenReturn("high");
+        stubChat(answer -> response(validWiki("资料#6")));
+
+        assertEquals("done", awaitJob(service.startRegenerate(old.getTopicKey(), null)).get("status"));
+
+        verify(client).chatFull(anyList(), isNull(), eq("https://model.example.invalid/v1"), eq(""), eq("writer-model"),
+                eq(budget), anyDouble(), eq("disabled"), isNull(), any(Duration.class));
+        verify(client, never()).thinkingOf(anyString());
+        verify(client, never()).reasoningEffortOf(anyString());
+        verify(client, never()).chat(anyList(), isNull(), anyString(), nullable(String.class), anyString(),
+                anyInt(), anyDouble(), nullable(String.class), nullable(String.class), any(Duration.class));
+        ArgumentCaptor<WikiPage> generated = ArgumentCaptor.forClass(WikiPage.class);
+        verify(dependencies).saveGenerated(generated.capture(), any(WikiDependencyService.Snapshot.class));
+        assertEquals(old.getTopicKey(), generated.getValue().getTopicKey());
+        assertEquals(old.getId(), generated.getValue().getId());
+    }
+
+    @Test
+    void truncatedNonemptyPageNeverReplacesExistingContentOrDependencies() throws Exception {
+        WikiPage old = page("entity-rewind", "AgentRewind", "Original");
+        when(pages.selectOne(any())).thenReturn(old);
+        when(chunks.allFiles()).thenReturn(List.of(row(6, "AgentRewind", "AgentRewind restores an execution checkpoint.")));
+        when(client.maxTokensOf("selected")).thenReturn(6144);
+        when(client.chatFull(anyList(), isNull(), anyString(), nullable(String.class), anyString(), anyInt(), anyDouble(),
+                nullable(String.class), nullable(String.class), any(Duration.class)))
+                .thenReturn(new DeepSeekClient.ChatResult(response(validWiki("资料#6")), "length", 100, 6144, 0));
+
+        Map<String, Object> done = awaitJob(service.startRegenerate(old.getTopicKey(), null));
+
+        assertEquals("failed", done.get("status"));
+        assertTrue(String.valueOf(done.get("error")).contains("未完整返回"));
+        assertEquals("Original", old.getContentMd());
+        assertEquals(0, done.get("pages"));
+        verifyNoInteractions(dependencies);
+        verify(pages, never()).insert(any(WikiPage.class));
+        verify(pages, never()).updateById(any(WikiPage.class));
     }
 
     @Test
@@ -279,10 +393,13 @@ class EntityRegenerateTest {
     private void stubChat(org.mockito.stubbing.Answer<JsonNode> answer) throws Exception {
         when(client.chat(anyList(), isNull(), anyString(), nullable(String.class), anyString(), anyInt(), anyDouble(),
                 nullable(String.class), nullable(String.class), any(Duration.class))).thenAnswer(answer);
+        when(client.chatFull(anyList(), isNull(), anyString(), nullable(String.class), anyString(), anyInt(), anyDouble(),
+                nullable(String.class), nullable(String.class), any(Duration.class)))
+                .thenAnswer(invocation -> new DeepSeekClient.ChatResult(answer.answer(invocation), "stop", 100, 200, 0));
     }
 
     private void verifyChatCount(int count) throws Exception {
-        verify(client, times(count)).chat(anyList(), isNull(), anyString(), nullable(String.class), anyString(), anyInt(),
+        verify(client, times(count)).chatFull(anyList(), isNull(), anyString(), nullable(String.class), anyString(), anyInt(),
                 anyDouble(), nullable(String.class), nullable(String.class), any(Duration.class));
     }
 

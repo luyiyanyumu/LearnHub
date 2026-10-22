@@ -240,6 +240,85 @@ public class KgGraphService {
         return true;
     }
 
+    /**
+     * Replace one source's automatic support. Caller supplies the surrounding transaction, including
+     * its durable checkpoint. Manual and derived facts, and every existing node, are preserved.
+     * The legacy schema has one shared quote, so unsupported shared evidence is cleared rather than
+     * being attributed to a remaining source that never said it.
+     */
+    public Set<String> replaceSourceSupport(String cite, List<TripleExtractor.Triple> triples,
+                                            Map<String, String> currentBodies, String model) {
+        Set<String> refresh = new LinkedHashSet<>();
+        List<KgRelation> automatic = relMapper.selectList(Wrappers.<KgRelation>lambdaQuery()
+                .eq(KgRelation::getOrigin, "llm").last("FOR UPDATE"));
+        for (KgRelation relation : automatic) {
+            if (!"llm".equals(relation.getOrigin())) continue;
+            Set<String> sources = new LinkedHashSet<>(splitAliases(relation.getSources()));
+            if (!sources.remove(cite)) continue;
+            sources.removeIf(source -> !currentBodies.containsKey(source));
+            if (sources.isEmpty()) {
+                relMapper.delete(Wrappers.<KgRelation>lambdaQuery().eq(KgRelation::getId, relation.getId())
+                        .eq(KgRelation::getOrigin, "llm"));
+                continue;
+            }
+            boolean supported = StringUtils.hasText(relation.getEvidence()) && sources.stream()
+                    .anyMatch(source -> TripleExtractor.evidenceSupported(currentBodies.get(source), relation.getEvidence()));
+            String evidence = supported ? relation.getEvidence() : null;
+            double weight = relation.getWeight() == null ? 0.4 : relation.getWeight();
+            if (!supported) {
+                weight = Math.min(weight, 0.4);
+                refresh.addAll(sources);
+            }
+            // updateById ignores null values; an explicit SET is needed to actually remove a stale quote.
+            relMapper.update(null, Wrappers.<KgRelation>lambdaUpdate().eq(KgRelation::getId, relation.getId())
+                    .eq(KgRelation::getOrigin, "llm").set(KgRelation::getSources, String.join("|", sources))
+                    .set(KgRelation::getEvidence, evidence).set(KgRelation::getWeight, weight));
+        }
+        for (TripleExtractor.Triple triple : triples) {
+            String relation = KgOntology.canonical(triple.relation());
+            if (relation == null || !admissibleConceptName(triple.head()) || !admissibleConceptName(triple.tail())
+                    || !EntityLinker.plausible(triple.head()) || !EntityLinker.plausible(triple.tail())
+                    || EntityLinker.same(triple.head(), triple.tail())
+                    || !TripleExtractor.evidenceSupported(currentBodies.get(cite), triple.evidence())) continue;
+            String headId = EntityLinker.id(triple.head());
+            String tailId = EntityLinker.id(triple.tail());
+            KgRelation existing = relMapper.selectOne(Wrappers.<KgRelation>lambdaQuery()
+                    .eq(KgRelation::getHeadId, headId).eq(KgRelation::getRelation, relation)
+                    .eq(KgRelation::getTailId, tailId).last("FOR UPDATE"));
+            // The unique key has no origin column: a normal upsert would silently mutate manual facts.
+            if (existing != null && !"llm".equals(existing.getOrigin())) continue;
+            Set<String> sources = new LinkedHashSet<>(existing == null ? List.of() : splitAliases(existing.getSources()));
+            sources.add(cite);
+            String joined = String.join("|", sources);
+            if (joined.length() > 255) {
+                // Never cut a token into a false citation. The existing projection remains supported.
+                log.debug("图谱关系来源已达存储上限，省略新增来源投影");
+                continue;
+            }
+            if (existing == null) {
+                upsertEntity(triple.head(), null, null, null);
+                upsertEntity(triple.tail(), null, null, null);
+                KgRelation added = new KgRelation();
+                added.setHeadId(headId); added.setRelation(relation); added.setTailId(tailId);
+                added.setSources(cite); added.setEvidence(clip(triple.evidence(), 480));
+                added.setWeight(Math.min(0.9, Math.max(0.1, triple.weight())));
+                added.setOrigin("llm"); added.setModel(model);
+                relMapper.insert(added);
+            } else {
+                String evidence = existing.getEvidence();
+                boolean supported = StringUtils.hasText(evidence) && sources.stream()
+                        .anyMatch(source -> TripleExtractor.evidenceSupported(currentBodies.get(source), existing.getEvidence()));
+                if (!supported) evidence = clip(triple.evidence(), 480);
+                relMapper.update(null, Wrappers.<KgRelation>lambdaUpdate().eq(KgRelation::getId, existing.getId())
+                        .eq(KgRelation::getOrigin, "llm").set(KgRelation::getSources, joined)
+                        .set(KgRelation::getEvidence, evidence)
+                        .set(KgRelation::getWeight, Math.max(existing.getWeight() == null ? 0.0 : existing.getWeight(), 0.9))
+                        .set(KgRelation::getModel, model));
+            }
+        }
+        return refresh;
+    }
+
     // ==================================================================
     // ② 读取与查询
     // ==================================================================

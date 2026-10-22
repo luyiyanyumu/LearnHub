@@ -10,6 +10,7 @@ import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.rendering.ImageType;
 import org.apache.pdfbox.rendering.PDFRenderer;
 import org.dyh.learnhub.common.KnowledgeChangedEvent;
+import org.dyh.learnhub.common.FileTextExtractedEvent;
 import org.dyh.learnhub.entity.FileInfo;
 import org.dyh.learnhub.mapper.CategoryMapper;
 import org.dyh.learnhub.mapper.FileInfoMapper;
@@ -286,7 +287,7 @@ public class FileStorageService {
             if (!Files.exists(path)) {
                 continue;
             }
-            extractInto(info, path);
+            extractInto(info, path, false);
             done++;
         }
         log.info("启动补抽正文：{} 条", done);
@@ -302,6 +303,10 @@ public class FileStorageService {
      * 这样界面上能解释"为什么正文是空的"，而不是留一片空白让用户以为坏了。
      */
     private String extractInto(FileInfo info, Path path) {
+        return extractInto(info, path, true);
+    }
+
+    private String extractInto(FileInfo info, Path path, boolean trainEligible) {
         DocumentTextService.Extracted r = documentTextService.extract(path, info.getExt(), info.getSize());
         info.setTextStatus(r.status());
         info.setTextContent(r.text());
@@ -309,6 +314,9 @@ public class FileStorageService {
         info.setTextError(r.error());
         info.setExtractedAt(LocalDateTime.now());
         fileInfoMapper.updateById(info);
+        if (trainEligible && "ok".equals(r.status()) && StringUtils.hasText(r.text())) {
+            events.publishEvent(new FileTextExtractedEvent(info.getId(), info.getOriginName(), r.text()));
+        }
         return r.status();
     }
 

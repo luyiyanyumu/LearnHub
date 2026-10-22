@@ -2,6 +2,92 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createPreviewGeometryCache, activeHeadingIndex, mapSparseScroll } from './previewGeometry.js'
 
+function paneFixture() {
+  const queries = [], reads = [0, 0, 0, 0]
+  const host = { clientWidth: 800, clientTop: 3, scrollTop: 120, viewportTop: 80, contentOffset: 0,
+    getBoundingClientRect: () => ({ top: host.viewportTop }),
+    querySelectorAll: selector => {
+      queries.push(selector)
+      return selector.includes('data-line') ? nodes : [nodes[1], nodes[3]]
+    },
+  }
+  const nodes = [0, 120, 360, 720].map((top, index) => ({ dataset: { line: String(index * 4) },
+    getBoundingClientRect: () => {
+      reads[index]++
+      return { top: host.viewportTop + host.clientTop + top + host.contentOffset - host.scrollTop, height: 30 }
+    },
+  }))
+  return { host, queries, reads }
+}
+
+test('heading-only scrolling never queries or measures line anchors', () => {
+  const { host, queries, reads } = paneFixture()
+  const cache = createPreviewGeometryCache()
+  const headings = cache.readHeadings(host)
+  assert.deepEqual(headings, [{ index: 0, top: 120 }, { index: 1, top: 720 }])
+  for (let i = 0; i < 60; i++) {
+    host.scrollTop = i * 20
+    assert.strictEqual(cache.readHeadings(host), headings)
+    assert.equal(activeHeadingIndex(headings, host.scrollTop), host.scrollTop >= 720 ? 1 : host.scrollTop >= 120 ? 0 : -1)
+  }
+  assert.equal(queries.length, 1)
+  assert.ok(!queries[0].includes('data-line'))
+  assert.deepEqual(reads, [0, 1, 0, 1])
+  assert.deepEqual(cache.readHeadings(null), [])
+})
+
+test('adding anchors after scrolling reuses heading content coordinates without measuring them twice', () => {
+  const { host, queries, reads } = paneFixture()
+  const cache = createPreviewGeometryCache()
+  const headings = cache.readHeadings(host)
+  host.scrollTop = 600
+  host.viewportTop = 45
+  const geometry = cache.read(host)
+  assert.strictEqual(geometry.headings, headings)
+  assert.deepEqual(geometry.anchors, [
+    { line: 0, preview: 0 }, { line: 4, preview: 120 },
+    { line: 8, preview: 360 }, { line: 12, preview: 720 },
+  ])
+  assert.deepEqual(reads, [1, 1, 1, 1])
+  assert.equal(queries.length, 2)
+  host.scrollTop = 200
+  assert.strictEqual(cache.read(host), geometry)
+  assert.strictEqual(cache.readHeadings(host), headings)
+  assert.deepEqual(reads, [1, 1, 1, 1])
+})
+
+test('complete reads share headings while width, host, and explicit invalidation clear both caches', () => {
+  const first = paneFixture(), second = paneFixture()
+  const cache = createPreviewGeometryCache()
+  const original = cache.read(first.host)
+  assert.strictEqual(cache.readHeadings(first.host), original.headings)
+  assert.deepEqual(first.reads, [1, 1, 1, 1])
+
+  first.host.clientWidth = 500
+  first.host.contentOffset = 25
+  const resizedHeadings = cache.readHeadings(first.host)
+  assert.notStrictEqual(resizedHeadings, original.headings)
+  assert.deepEqual(resizedHeadings, [{ index: 0, top: 145 }, { index: 1, top: 745 }])
+  assert.deepEqual(first.reads, [1, 2, 1, 2])
+  assert.strictEqual(cache.read(first.host).headings, resizedHeadings)
+  assert.deepEqual(cache.read(first.host).anchors.map(point => point.preview), [25, 145, 385, 745])
+  assert.deepEqual(first.reads, [2, 2, 2, 2])
+
+  second.host.clientWidth = 500
+  second.host.contentOffset = 70
+  assert.deepEqual(cache.readHeadings(second.host), [{ index: 0, top: 190 }, { index: 1, top: 790 }])
+  assert.deepEqual(cache.read(second.host).anchors.map(point => point.preview), [70, 190, 430, 790])
+  assert.deepEqual(second.reads, [1, 1, 1, 1])
+  cache.read(first.host)
+  assert.deepEqual(first.reads, [3, 3, 3, 3])
+
+  first.host.contentOffset = 90
+  cache.invalidate()
+  assert.deepEqual(cache.readHeadings(first.host), [{ index: 0, top: 210 }, { index: 1, top: 810 }])
+  assert.deepEqual(cache.read(first.host).anchors.map(point => point.preview), [90, 210, 450, 810])
+  assert.deepEqual(first.reads, [4, 4, 4, 4])
+})
+
 test('a thousand-block note is measured once across repeated scrolling, then remeasured on layout change', () => {
   let reads = 0
   const host = { clientWidth: 800, clientTop: 0, scrollTop: 0,

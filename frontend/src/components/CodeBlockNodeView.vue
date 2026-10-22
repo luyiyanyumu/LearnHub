@@ -9,6 +9,7 @@ import { ArrowDown, ArrowUp, Check, DocumentCopy, Edit, FullScreen, Share, View 
 import MermaidPreview from './MermaidPreview.vue'
 import { codeBlockChange, codeBlockDocument } from '../utils/codeBlockViewState.js'
 import { createCodeBlockViewport } from '../utils/codeBlockViewport.js'
+import { highlightCodeBlockLines, loadCodeBlockLanguage } from '../utils/codeBlockHighlight.js'
 
 const props = defineProps(nodeViewProps)
 const host = ref(null)
@@ -19,6 +20,7 @@ const controlsMounted = ref(false)
 const languageOptionsMounted = ref(false)
 const previewActive = ref(true)
 const sourceLines = computed(() => codeBlockDocument(props.node.attrs.code).split('\n'))
+const highlightedLines = shallowRef(null)
 const collapsed = ref(false)
 const copied = ref(false)
 const mermaidMode = ref('preview')
@@ -30,6 +32,8 @@ let languageVersion = 0
 let syncingCode = false
 let copyTimer
 let viewport
+let readingActive = false
+let highlightVersion = 0
 
 const LANGS = ['mermaid', 'python', 'java', 'javascript', 'typescript', 'vue', 'html', 'css', 'json', 'yaml', 'xml', 'sql', 'go', 'rust', 'c', 'cpp', 'csharp', 'php', 'ruby', 'kotlin', 'markdown', 'plaintext']
 const languageOptions = computed(() => {
@@ -45,28 +49,14 @@ const languageOptions = computed(() => {
  */
 const readonly = props.editor?.options?.editable === false
 
-const LANG_LOADERS = {
-  python: () => import('@codemirror/lang-python').then((m) => m.python()),
-  java: () => import('@codemirror/lang-java').then((m) => m.java()),
-  javascript: () => import('@codemirror/lang-javascript').then((m) => m.javascript()),
-  typescript: () => import('@codemirror/lang-javascript').then((m) => m.javascript({ typescript: true })),
-  vue: () => import('@codemirror/lang-vue').then((m) => m.vue()),
-  html: () => import('@codemirror/lang-html').then((m) => m.html()),
-  css: () => import('@codemirror/lang-css').then((m) => m.css()),
-  json: () => import('@codemirror/lang-json').then((m) => m.json()),
-  yaml: () => import('@codemirror/lang-yaml').then((m) => m.yaml()),
-  xml: () => import('@codemirror/lang-xml').then((m) => m.xml()),
-  sql: () => import('@codemirror/lang-sql').then((m) => m.sql()),
-  go: () => import('@codemirror/lang-go').then((m) => m.go()),
-  rust: () => import('@codemirror/lang-rust').then((m) => m.rust()),
-  cpp: () => import('@codemirror/lang-cpp').then((m) => m.cpp()),
-  php: () => import('@codemirror/lang-php').then((m) => m.php()),
-  markdown: () => import('@codemirror/lang-markdown').then((m) => m.markdown()),
-}
-async function langExt(lang) {
-  const loader = LANG_LOADERS[String(lang || '').toLowerCase()]
-  if (!loader) return []
-  try { return await loader() } catch { return [] }
+async function prepareReading() {
+  if (view.value || disposed || !previewActive.value || !readingActive || !showSource.value || collapsed.value || highlightedLines.value) return
+  const version = ++highlightVersion
+  const source = codeBlockDocument(props.node.attrs.code)
+  const language = props.node.attrs.language
+  const support = await loadCodeBlockLanguage(language)
+  if (disposed || props.editor.isDestroyed || view.value || !previewActive.value || !readingActive || !showSource.value || collapsed.value || version !== highlightVersion) return
+  highlightedLines.value = highlightCodeBlockLines(source, support)
 }
 
 function changeLang(language) {
@@ -80,6 +70,7 @@ async function setMermaidMode(mode) {
     await nextTick()
     if (disposed || !previewActive.value || props.editor.isDestroyed) return
     viewport?.request()
+    if (!readonly) initializeSource()
     view.value?.requestMeasure()
     if (!readonly) view.value?.focus()
   }
@@ -97,9 +88,9 @@ async function copyCode() {
 async function configureLanguage() {
   if (!view.value) return
   const version = ++languageVersion
-  const language = await langExt(props.node.attrs.language)
+  const language = await loadCodeBlockLanguage(props.node.attrs.language)
   if (disposed || props.editor.isDestroyed || version !== languageVersion) return
-  view.value?.dispatch({ effects: langComp.reconfigure(language) })
+  view.value?.dispatch({ effects: langComp.reconfigure(language || []) })
 }
 
 function initializeSource() {
@@ -123,6 +114,8 @@ function initializeSource() {
     ],
   })
   view.value = new EditorView({ state, parent: host.value })
+  highlightVersion++
+  highlightedLines.value = null
   configureLanguage()
   nextTick(() => { if (!disposed && previewActive.value) view.value?.requestMeasure() })
 }
@@ -132,6 +125,7 @@ async function activateSource(event) {
   if (readonly) return
   event?.preventDefault?.()
   viewport?.request()
+  initializeSource()
   await nextTick()
   if (disposed || !previewActive.value || !view.value) return
   const position = event?.clientX != null ? view.value.posAtCoords({ x: event.clientX, y: event.clientY }) : null
@@ -140,7 +134,7 @@ async function activateSource(event) {
 }
 
 async function activateLanguage(open = false) {
-  viewport?.request()
+  controlsMounted.value = true
   await nextTick()
   if (disposed || !previewActive.value) return
   languageSelect.value?.focus()
@@ -153,14 +147,15 @@ onMounted(() => {
   viewport = createCodeBlockViewport({
     editor: props.editor,
     element,
-    activate() { controlsMounted.value = true; initializeSource() },
-    onActivity(active) { previewActive.value = active },
+    activate() { readingActive = true; prepareReading() },
+    onActivity(active) { previewActive.value = active; if (active) prepareReading() },
   })
   // Only the selected, visible source editor may take focus after insertion.
   let pos = null
   try { pos = props.getPos() } catch { return }
   if (!readonly && showSource.value && props.selected && props.editor.view.hasFocus() && props.editor.state.selection.from === pos) {
     viewport.request()
+    initializeSource()
     nextTick(() => { if (!disposed && previewActive.value) view.value?.focus() })
   }
 })
@@ -169,12 +164,18 @@ watch(
   () => props.node.attrs.language,
   () => {
     mermaidMode.value = 'preview'
+    highlightVersion++
+    highlightedLines.value = null
+    prepareReading()
     configureLanguage()
   },
 )
 
 watch(() => props.node.attrs.code, code => {
-  if (disposed || !view.value) return
+  highlightVersion++
+  highlightedLines.value = null
+  if (disposed) return
+  if (!view.value) { prepareReading(); return }
   const changes = codeBlockChange(view.value.state.doc.toString(), codeBlockDocument(code))
   if (!changes) return
   syncingCode = true
@@ -185,10 +186,10 @@ watch(() => props.node.attrs.code, code => {
 watch([collapsed, showSource], async () => {
   if (collapsed.value || !showSource.value) return
   await nextTick()
-  if (!disposed) { viewport?.refresh(); view.value?.requestMeasure() }
+  if (!disposed) { viewport?.refresh(); prepareReading(); view.value?.requestMeasure() }
 })
 
-onBeforeUnmount(() => { disposed = true; viewport?.dispose(); languageVersion++; clearTimeout(copyTimer); view.value?.destroy(); view.value = null })
+onBeforeUnmount(() => { disposed = true; viewport?.dispose(); languageVersion++; highlightVersion++; clearTimeout(copyTimer); view.value?.destroy(); view.value = null })
 </script>
 
 <template>
@@ -229,10 +230,11 @@ onBeforeUnmount(() => { disposed = true; viewport?.dispose(); languageVersion++;
       <el-select v-if="!readonly && controlsMounted" ref="languageSelect" class="cm-lang" size="small" :model-value="node.attrs.language" aria-label="代码语言" filterable @change="changeLang" @visible-change="open => { if (open) languageOptionsMounted = true }">
         <template v-if="languageOptionsMounted"><el-option v-for="language in languageOptions" :key="language" :label="language" :value="language" /></template>
       </el-select>
+      <button v-else-if="!readonly" type="button" class="cm-lang cm-lang-trigger" aria-label="代码语言" aria-haspopup="listbox" @mousedown.prevent="activateLanguage(true)" @focus="activateLanguage()" @keydown.enter.prevent="activateLanguage(true)" @keydown.space.prevent="activateLanguage(true)"><span>{{ node.attrs.language || 'plaintext' }}</span><span aria-hidden="true">⌄</span></button>
     </div>
     <div v-show="!collapsed && showSource" ref="host" class="code-block-cm-host">
       <pre v-if="!view" class="cm-source-placeholder" contenteditable="false" :tabindex="readonly ? undefined : 0" :aria-label="readonly ? '代码' : '编辑代码'"
-        @mousedown.stop="activateSource" @focus="activateSource"><template v-for="(line, index) in sourceLines" :key="index"><span class="cm-placeholder-number" aria-hidden="true" :data-line-number="index + 1" /><code class="cm-placeholder-line">{{ line + (index < sourceLines.length - 1 ? '\n' : '') }}</code></template></pre>
+        @mousedown.stop="activateSource" @focus="activateSource"><template v-for="(line, index) in sourceLines" :key="index"><span class="cm-placeholder-number" aria-hidden="true" :data-line-number="index + 1" /><code class="cm-placeholder-line"><template v-if="highlightedLines"><span v-for="(token, tokenIndex) in highlightedLines[index]" :key="tokenIndex" :class="token.className">{{ token.text }}</span></template><template v-else>{{ line }}</template>{{ index < sourceLines.length - 1 ? '\n' : '' }}</code></template></pre>
     </div>
   </NodeViewWrapper>
 </template>
@@ -294,5 +296,20 @@ onBeforeUnmount(() => { disposed = true; viewport?.dispose(); languageVersion++;
 .cm-placeholder-number { min-width: 20px; padding: 0 3px 0 5px; box-sizing: border-box; text-align: right; color: var(--app-text-3); user-select: none; }
 .cm-placeholder-number::before { content: attr(data-line-number); }
 .cm-placeholder-line { min-height: 1.4em; padding: 0 2px 0 6px; font: inherit; white-space: break-spaces; word-break: break-word; overflow-wrap: anywhere; }
+.cm-placeholder-line .tok-keyword, .cm-placeholder-line .tok-operator { color: #708; }
+.cm-placeholder-line .tok-atom, .cm-placeholder-line .tok-bool, .cm-placeholder-line .tok-number { color: #164; }
+.cm-placeholder-line .tok-string, .cm-placeholder-line .tok-regexp { color: #a11; }
+.cm-placeholder-line .tok-comment { color: #666; }
+.cm-placeholder-line .tok-typeName, .cm-placeholder-line .tok-className { color: #085; }
+.cm-placeholder-line .tok-variableName.tok-definition, .cm-placeholder-line .tok-propertyName { color: #00f; }
+.cm-placeholder-line .tok-meta { color: #555; }
+.cm-placeholder-line .tok-link { text-decoration: underline; }
+.cm-placeholder-line .tok-invalid { color: #f00; }
+:global(html.dark .code-block-cm .cm-placeholder-line .tok-keyword), :global(html.dark .code-block-cm .cm-placeholder-line .tok-operator) { color: #c792ea; }
+:global(html.dark .code-block-cm .cm-placeholder-line .tok-atom), :global(html.dark .code-block-cm .cm-placeholder-line .tok-bool), :global(html.dark .code-block-cm .cm-placeholder-line .tok-number) { color: #f78c6c; }
+:global(html.dark .code-block-cm .cm-placeholder-line .tok-string), :global(html.dark .code-block-cm .cm-placeholder-line .tok-regexp) { color: #c3e88d; }
+:global(html.dark .code-block-cm .cm-placeholder-line .tok-comment), :global(html.dark .code-block-cm .cm-placeholder-line .tok-meta) { color: #8997a7; }
+:global(html.dark .code-block-cm .cm-placeholder-line .tok-typeName), :global(html.dark .code-block-cm .cm-placeholder-line .tok-className) { color: #ffcb6b; }
+:global(html.dark .code-block-cm .cm-placeholder-line .tok-variableName.tok-definition), :global(html.dark .code-block-cm .cm-placeholder-line .tok-propertyName) { color: #82aaff; }
 .cm-source-placeholder:focus-visible { box-shadow: inset 0 0 0 1px var(--app-brand); }
 </style>

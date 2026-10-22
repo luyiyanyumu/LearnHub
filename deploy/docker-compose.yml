@@ -66,6 +66,8 @@ services:
       SPRING_SQL_INIT_CONTINUE_ON_ERROR: "true"
       # 技能提示词目录：镜像里放在 /app/skills，这里显式给一下（自动探测也能命中）
       LEARNHUB_SKILLS_DIR: /app/skills
+      # Automatic maintenance scans full source text; avoid logging content and credentials as SQL parameters.
+      MYBATIS_PLUS_CONFIGURATION_LOG_IMPL: org.apache.ibatis.logging.nologging.NoLoggingImpl
       # 嵌入（向量）服务：语义检索靠它把文本变成向量。
       # 默认指向本栈里的 ollama 服务（`--profile ollama` 时才有；不启用时该地址不可达，
       # 检索会退化成关键词检索 —— 不报错，但拿不到语义检索）。

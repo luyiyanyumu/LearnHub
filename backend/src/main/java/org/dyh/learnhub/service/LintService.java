@@ -137,6 +137,7 @@ public class LintService {
                 throw new IllegalStateException("模型返回空内容（通常是思考 token 占满预算），本次自检结果不可信");
             }
             JsonNode arr = objectMapper.readTree(stripFence(reply)).path("issues");
+            if (!arr.isArray()) throw new IllegalStateException("语义自检未返回合法的 issues 数组");
             for (JsonNode n : arr) {
                 List<String> involved = new ArrayList<>();
                 for (JsonNode x : n.path("pages")) {
@@ -162,6 +163,7 @@ public class LintService {
         out.put("cloud", cloud);
         out.put("code", codeIssues);
         out.put("modelFindings", modelIssues);
+        out.put("modelCheckSucceeded", modelIssues.stream().noneMatch(issue -> "error".equals(issue.get("kind"))));
         log.info("语义自检完成：代码问题 {} 条，模型发现 {} 条（模型 {}）", codeIssues.size(), modelIssues.size(), modelName);
         return out;
     }

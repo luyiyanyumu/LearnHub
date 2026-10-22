@@ -233,7 +233,7 @@ curl http://localhost:18080/api/files?page=1&size=3
 | 上传大 PDF 失败 | nginx `client_max_body_size` 默认 1MB，调到 60m（后端上限：单文件 50MB、请求 60MB） |
 | 长回答/翻译中途 502 | nginx `proxy_read_timeout` 默认 60s，长请求会断，调到 300s |
 | 想换 18080 端口 | 后端 `--server.port=`，前端改 `vite.config.js` 的 proxy target（或 nginx `proxy_pass`） |
-| **Windows 一键启动脚本只认 Windows** | `start-all.bat` / `stop-all.bat` 依赖 `cmd`；Linux/macOS 用上面的命令，或照它的逻辑写一份 shell 脚本（它做的就是：`docker start` → 起 jar → 起前端 → 开浏览器） |
+| **Windows 一键启动脚本只认 Windows** | `start-all.bat` / `stop-all.bat` 依赖 `cmd`；Linux/macOS 用上面的 Compose 命令。`start-all.bat` 启动服务后会重启复用中的本项目后端，等待健康检查再开页面；源码变更需执行 `start-all.bat build` 重新构建镜像。 |
 
 ---
 

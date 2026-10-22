@@ -149,6 +149,123 @@ function mathBlock(state, startLine, endLine, silent) {
   }
 }
 
+function htmlTableDepth(source) {
+  let depth = 0
+  // Ignore comments and quoted attributes when counting nested table tags.
+  for (const match of source.matchAll(/<!--[\s\S]*?-->|<(\/?)table\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/gi)) {
+    if (match[1] != null) depth += match[1] ? -1 : 1
+  }
+  return depth
+}
+
+/**
+ * Raw HTML tables bypass Markdown inline rules. Convert only their text nodes,
+ * retaining cell structure/formatting and leaving code and existing math atomic.
+ * The same conversion runs before Tiptap's rich-HTML paste parser.
+ */
+export function renderMathInHtml(html, { renderKatex = true } = {}) {
+  const source = String(html ?? '')
+  if (!/\$|\\[([]|data-tex\s*=/.test(source)) return source
+  // A raw-HTML token can be only the opening half of a container. Parsing such
+  // a fragment in isolation would close the table early or discard its cells.
+  const root = /^\s*<([a-z][\w-]*)\b/i.exec(source)?.[1]
+  if (root && !/^(?:area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/i.test(root)
+    && !new RegExp(`</${root}\\s*>`, 'i').test(source)) return source
+  if (/^\s*<\//.test(source) || (/^\s*<(?:tr|td|th|thead|tbody|tfoot|colgroup)\b/i.test(source))) return source
+  if (htmlTableDepth(source) > 0) return source
+  const box = document.createElement('div')
+  box.innerHTML = source
+  let changed = false
+
+  function shell(tex, display) {
+    const element = document.createElement(display ? 'div' : 'span')
+    element.className = display ? 'math-block' : 'math-inline'
+    element.setAttribute('data-tex', tex)
+    if (renderKatex) element.innerHTML = renderMathToHtml(tex, { display })
+    return element
+  }
+
+  function convertText(node) {
+    const text = node.data
+    const fragment = document.createDocumentFragment()
+    let cursor = 0
+    for (let pos = 0; pos < text.length;) {
+      let tex, end, display = false
+      const opening = text.slice(pos, pos + 2)
+      if (opening === '$$' || opening === '\\[') {
+        const closing = opening === '$$' ? '$$' : '\\]'
+        const closeAt = text.indexOf(closing, pos + 2)
+        if (closeAt >= 0 && text.slice(pos + 2, closeAt).trim()) {
+          tex = text.slice(pos + 2, closeAt).trim()
+          end = closeAt + 2
+          display = true
+        } else { pos += 2; continue }
+      } else {
+        const token = {}
+        const state = { src: text, pos, posMax: text.length, push: () => token }
+        if (mathInline(state, false)) { tex = token.content; end = state.pos }
+      }
+      if (end == null) {
+        pos += text[pos] === '\\' ? 2 : 1
+        continue
+      }
+      fragment.appendChild(document.createTextNode(text.slice(cursor, pos)))
+      fragment.appendChild(shell(tex, display))
+      cursor = pos = end
+    }
+    if (!cursor) return
+    fragment.appendChild(document.createTextNode(text.slice(cursor)))
+    node.replaceWith(fragment)
+    changed = true
+  }
+
+  function visit(node) {
+    if (node.nodeType === 3) { convertText(node); return }
+    if (node.nodeType !== 1) return // Comments and attributes are never math.
+    if (/^(PRE|CODE|SCRIPT|STYLE|TEXTAREA|MATH|SVG|KBD|SAMP)$/.test(node.nodeName)) return
+    const classes = node.getAttribute('class') || ''
+    if (/(?:^|\s)(?:math-inline|math-block|katex(?:-display)?|md-editor-katex-(?:inline|block))(?:\s|$)/.test(classes)) {
+      // Saved table formulas are source shells. Export/preview must fill empty
+      // shells, while the editor lets its node views render them once instead.
+      if (renderKatex && node.hasAttribute('data-tex') && !node.innerHTML.trim()) {
+        node.innerHTML = renderMathToHtml(node.getAttribute('data-tex'), {
+          display: node.classList.contains('math-block'),
+        })
+        changed = true
+      }
+      return
+    }
+    for (const child of Array.from(node.childNodes)) visit(child)
+  }
+  visit(box)
+  // A display formula cannot be serialized as a div inside a paragraph: HTML
+  // reparsing would insert empty paragraphs and move the remaining text. Split
+  // its textblock explicitly, retaining inline formatting on either side.
+  for (const block of Array.from(box.querySelectorAll('div.math-block'))) {
+    const paragraph = block.closest('p,h1,h2,h3,h4,h5,h6')
+    if (!paragraph) continue
+    let branch = block, before = null, after = null
+    while (branch !== paragraph) {
+      const parent = branch.parentNode
+      const prefix = parent.cloneNode(false), suffix = parent.cloneNode(false)
+      let past = false
+      for (const child of Array.from(parent.childNodes)) {
+        if (child === branch) {
+          if (before?.hasChildNodes()) prefix.appendChild(before)
+          if (after?.hasChildNodes()) suffix.appendChild(after)
+          past = true
+        } else (past ? suffix : prefix).appendChild(child)
+      }
+      if (prefix.hasChildNodes() && suffix.hasChildNodes()) suffix.removeAttribute('id')
+      before = prefix; after = suffix; branch = parent
+    }
+    const hasContent = (node) => node.textContent.trim() || node.querySelector('br,img,.math-inline,.math-block')
+    paragraph.replaceWith(...[before, block, after].filter(node => node === block || hasContent(node)))
+    changed = true
+  }
+  return changed ? box.innerHTML : source
+}
+
 /**
  * 把数学公式接进一个 markdown-it 实例。
  * 用法：`md.use(mdMath)` —— 与 `mdCallout` / `mdAnchor` 是同一类插件。
@@ -160,6 +277,29 @@ export function mdMath(md, { renderKatex = true } = {}) {
   md.block.ruler.before('fence', 'math_block', mathBlock, {
     alt: ['paragraph', 'reference', 'blockquote', 'list'],
   })
+  // Markdown ends raw HTML tokens at blank lines. Rejoin adjacent parts of a
+  // table before the DOM conversion so every row retains its table context.
+  md.core.ruler.after('block', 'math_html_tables', (state) => {
+    const tokens = state.tokens
+    for (let index = 0; index < tokens.length; index++) {
+      const token = tokens[index]
+      if (token.type !== 'html_block' || !token.map) continue
+      let depth = htmlTableDepth(token.content)
+      if (depth <= 0) continue
+      let content = token.content, end = index
+      while (tokens[end + 1]?.type === 'html_block' && tokens[end + 1].map) {
+        const next = tokens[++end]
+        const previous = tokens[end - 1]
+        content += '\n'.repeat(Math.max(0, next.map[0] - previous.map[1])) + next.content
+        depth += htmlTableDepth(next.content)
+        if (depth > 0) continue
+        token.content = content
+        token.map = [token.map[0], next.map[1]]
+        tokens.splice(index + 1, end - index)
+        break
+      }
+    }
+  })
   md.renderer.rules.math_inline = (tokens, idx) => {
     const tex = tokens[idx].content
     return `<span class="math-inline" data-tex="${escapeAttr(tex)}">${renderKatex ? renderMathToHtml(tex) : ''}</span>`
@@ -168,6 +308,11 @@ export function mdMath(md, { renderKatex = true } = {}) {
     const tex = tokens[idx].content
     return `<div class="math-block" data-tex="${escapeAttr(tex)}">${renderKatex ? renderMathToHtml(tex, { display: true }) : ''}</div>\n`
   }
+  const renderHtml = md.renderer.rules.html_block
+  md.renderer.rules.html_block = (tokens, idx, options, env, self) => renderMathInHtml(
+    renderHtml ? renderHtml(tokens, idx, options, env, self) : tokens[idx].content,
+    { renderKatex },
+  )
 }
 
 function escapeAttr(s) {

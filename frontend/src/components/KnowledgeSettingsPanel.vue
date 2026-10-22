@@ -2,6 +2,8 @@
 import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { kbApi } from '../api'
+import { knowledgeMaintenanceApi } from '../api/knowledgeMaintenance.js'
+import { createKnowledgeMaintenanceLoader, knowledgeIndexView, maintenanceUpdateHint } from '../utils/knowledgeIndexView'
 import { MODEL_CONFIGURATION_CHANGED_EVENT, profileTargetsForTask, routingTargetLabel } from '../utils/modelProfileView'
 import { KNOWLEDGE_GROUP_LABELS, knowledgeChanges, knowledgeValues, validateKnowledgeValues } from '../utils/knowledgeSettings'
 
@@ -19,6 +21,10 @@ const defaults = ref({})
 const values = ref({})
 const baseline = ref({})
 const status = ref(null)
+const maintenanceState = ref({ status: null, loading: false, submitting: false, error: '' })
+const maintenance = computed(() => maintenanceState.value.status)
+const maintenanceHint = computed(() => maintenanceState.value.error || maintenanceUpdateHint(maintenance.value))
+const maintenanceLoader = createKnowledgeMaintenanceLoader({ load: signal => knowledgeMaintenanceApi.status(signal), onState: state => { maintenanceState.value = state } })
 const statusRefreshing = ref(false)
 const needsRebuild = ref(false)
 const view = ref('parameters')
@@ -65,13 +71,16 @@ const categoryHints = {
   context: '控制最终注入回答的原文数量和长度。',
   grounding: '控制回答生成后的依据核对。',
 }
-const summaryText = computed(() => !status.value ? '索引状态加载中' : !status.value.configured ? '嵌入模型未配置' : !status.value.enabled ? '向量检索已关闭' : showRebuild.value ? '索引待重建' : needsSync.value ? '向量待同步' : '索引已就绪')
+const summaryText = computed(() => needsSync.value ? '向量待同步' : knowledgeIndexView(status.value, statusRefreshing.value, maintenance.value).label)
 const showRebuild = computed(() => needsRebuild.value || status.value?.stale || rebuildChanges.value.length > 0)
 const canRebuild = computed(() => !!status.value?.configured && !!status.value?.enabled && !dirty.value && !saving.value && !rebuilding.value && !syncing.value && !props.routingBusy && !statusRefreshing.value)
 
 watch([changes, saving, loaded, rebuilding, syncing, view], () => emit('state', { dirty: dirty.value, count: Object.keys(changes.value).length, saving: saving.value, loaded: loaded.value, rebuilding: rebuilding.value || syncing.value, view: view.value }), { immediate: true })
 watch(view, value => { if (value === 'diagnostics') diagnosticMounted.value = true })
-watch(() => props.active, active => { if (active && !loaded.value && !loading.value) load() }, { immediate: true })
+watch(() => props.active, active => {
+  if (active) { if (!loaded.value && !loading.value) load(); maintenanceLoader.start() }
+  else maintenanceLoader.stop()
+}, { immediate: true })
 
 function applySnapshot(snapshot) {
   fields.value = snapshot.fields || []
@@ -128,8 +137,9 @@ async function save() {
     const snapshot = await kbApi.saveSettings(changes.value)
     if (disposed) return false
     applySnapshot(snapshot)
-    await refreshStatus()
-    ElMessage.success(snapshot.needsRebuild ? '知识库参数已保存，重建索引后应用切块与嵌入修改' : '知识库参数已保存，下一次检索生效')
+    await Promise.all([refreshStatus(), maintenanceLoader.refresh()])
+    if (disposed) return false
+    ElMessage.success('知识库参数已保存；' + (maintenanceState.value.error ? '暂时无法确认后台维护状态，可到知识库维护查看。' : maintenanceUpdateHint(maintenance.value)))
     return true
   } catch (error) {
     if (!disposed) saveError.value = error?.message || '知识库参数保存失败，修改仍保留'
@@ -193,10 +203,11 @@ async function syncVector() {
   finally { if (!disposed) syncing.value = false }
 }
 
-function modelsChanged() { if (loaded.value) refreshStatus() }
+function modelsChanged() { if (loaded.value) { refreshStatus(); maintenanceLoader.refresh() } }
 window.addEventListener(MODEL_CONFIGURATION_CHANGED_EVENT, modelsChanged)
 onBeforeUnmount(() => {
   disposed = true; loadSequence++; statusSequence++
+  maintenanceLoader.dispose()
   clearTimeout(jobTimer); cancelJobWait?.()
   window.removeEventListener(MODEL_CONFIGURATION_CHANGED_EVENT, modelsChanged)
 })
@@ -209,6 +220,7 @@ defineExpose({ save, resetDefaults, dirty, saving })
       <div><h3>知识库</h3><p>调整检索参数，查看检索效果。</p></div>
       <el-tag v-if="dirty" type="warning" effect="plain" size="small">{{ Object.keys(changes).length }} 项未保存</el-tag>
     </header>
+    <p class="kb-maintenance-note" role="status">{{ maintenanceHint }}<span v-if="maintenance?.pending"> · 后台有待处理变更</span></p>
     <el-alert v-if="loadError" :title="loadError" type="error" :closable="false" show-icon class="kb-alert"><el-button text @click="load">重新加载</el-button></el-alert>
     <div v-else-if="loading && !loaded" role="status" class="kb-loading">正在加载知识库设置…</div>
     <template v-if="loaded">
@@ -253,11 +265,11 @@ defineExpose({ save, resetDefaults, dirty, saving })
               <el-select v-else-if="field.type === 'select'" :id="'kb-' + field.key" v-model="values[field.key]" :aria-label="field.label" :disabled="saving || rebuilding || syncing"><el-option v-for="option in field.options || []" :key="option.value" :label="option.label" :value="option.value" /></el-select>
               <el-input v-else :id="'kb-' + field.key" v-model="values[field.key]" :aria-label="field.label" :disabled="saving || rebuilding || syncing" :placeholder="String(defaults[field.key] ?? field.default ?? '')" />
             </div>
-            <div class="kb-field-meta"><span>默认 {{ defaultLabel(field) }}</span><el-button v-if="field.key in changes" text size="small" :aria-label="field.label + '恢复默认'" :disabled="saving || rebuilding || syncing" @click="resetField(field)">恢复</el-button></div>
+            <div class="kb-field-meta"><span>默认 {{ defaultLabel(field) }}</span><span v-if="field.key === 'autoIndex'">控制向量自动索引；执行由后台自动维护总开关统一调度。</span><el-button v-if="field.key in changes" text size="small" :aria-label="field.label + '恢复默认'" :disabled="saving || rebuilding || syncing" @click="resetField(field)">恢复</el-button></div>
           </div>
         </div>
         <p v-if="!visibleFields.length" class="kb-empty" role="status">没有匹配的参数。</p>
-        <p v-if="rebuildChanges.length" class="kb-change-note" role="status">切块或嵌入参数已修改。保存后，在“模型与索引”中重建索引。</p>
+        <p v-if="rebuildChanges.length" class="kb-change-note" role="status">切块或嵌入参数已修改。保存后由后台根据自动维护设置更新；可在知识库维护查看进度。</p>
       </section>
 
       <DiagnosticPanel v-if="diagnosticMounted" v-show="view === 'diagnostics'" :active="active && view === 'diagnostics'" :dirty="dirty" :config="baseline" :index-status="status" />
@@ -284,12 +296,12 @@ defineExpose({ save, resetDefaults, dirty, saving })
           </dl>
           <div class="kb-index-action">
             <div>
-              <b>{{ status && !status.configured ? '先选择嵌入模型' : showRebuild ? '索引需要重建' : '索引已与当前配置对齐' }}</b>
-              <p class="kb-hint">{{ status && !status.configured ? '关键词检索仍可用。选择嵌入模型后，可重建并检验向量召回。' : dirty ? '先保存参数，再重建已有资料的向量索引。' : '切块或嵌入配置改变时，重建索引以应用到已有资料。' }}</p>
+              <b>{{ showRebuild ? '索引待更新' : summaryText }}</b>
+              <p class="kb-hint">{{ status && !status.configured ? '关键词检索仍可用。先选择嵌入模型，再查看后台维护状态。' : dirty ? '先保存参数，后台再根据自动维护设置处理变更。' : maintenanceHint }}</p>
             </div>
-            <el-button type="primary" :loading="rebuilding" :disabled="!canRebuild || syncing" @click="rebuild">重建向量索引</el-button>
+            <el-button :loading="rebuilding" :disabled="!canRebuild || syncing || maintenance?.running" @click="rebuild">高级修复：重建索引</el-button>
           </div>
-          <div v-if="needsSync" class="kb-index-action"><div><b>Milvus 待同步</b><p class="kb-hint">同步已有向量。未就绪时查询继续使用 MySQL。</p></div><el-button :loading="syncing" :disabled="dirty || saving || rebuilding || routingBusy || statusRefreshing || !status?.configured" @click="syncVector">同步到 Milvus</el-button></div>
+          <div v-if="needsSync" class="kb-index-action"><div><b>Milvus 待同步</b><p class="kb-hint">同步已有向量。未就绪时查询继续使用 MySQL。</p></div><el-button :loading="syncing" :disabled="dirty || saving || rebuilding || routingBusy || statusRefreshing || !status?.configured || maintenance?.running" @click="syncVector">同步到 Milvus</el-button></div>
           <div v-if="rebuilding && job" class="kb-job" role="status"><el-progress :percentage="job.percent || 0" :stroke-width="6" />{{ job.stage }} · 来源 {{ job.done ?? 0 }}/{{ job.total ?? 0 }}</div>
         </section>
         <el-alert v-if="statusError" :title="statusError" type="warning" :closable="false" class="kb-alert"><el-button text @click="refreshStatus">刷新索引状态</el-button></el-alert>
@@ -300,6 +312,7 @@ defineExpose({ save, resetDefaults, dirty, saving })
 
 <style scoped>
 .knowledge-settings { min-width: 0; color: var(--app-text-1); }
+.kb-maintenance-note { padding: 12px; margin: 0 0 16px; border: 1px solid var(--app-border-weak); border-radius: var(--radius); background: var(--app-brand-soft); color: var(--app-text-2); font-size: var(--font-caption); line-height: 1.7; overflow-wrap: anywhere; }
 .kb-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 20px; }
 .kb-heading h3 { margin: 0 0 4px; font-size: var(--font-heading); }
 .kb-heading p, .kb-hint { color: var(--app-text-3); font-size: var(--font-caption); line-height: 1.7; margin: 4px 0; overflow-wrap: anywhere; }

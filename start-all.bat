@@ -7,7 +7,7 @@ setlocal
 REM ============================================================
 REM  learn-hub launcher (Docker)
 REM
-REM    Does: start Docker engine -> compose up -> wait ready -> open UI
+REM    Does: start Docker engine -> compose up -> restart reused backend -> wait ready -> open UI
 REM    Entry   : http://localhost:<WEB_HOST_PORT from deploy\.env, default 8888>
 REM              (nginx serves UI, /api proxied to backend)
 REM
@@ -101,25 +101,72 @@ REM ---------- 2/4 starting containers ----------
 echo [2/4] starting containers (MySQL + backend + frontend)...
 if not exist "deploy\.env" echo   NOTE: deploy\.env missing -> AI features disabled (copy .env.example to .env and fill the key)
 
+if /i "%MODE%"=="build" goto :compose_start
+
 docker image inspect learn-hub-backend:local >nul 2>&1
 if errorlevel 1 goto :need_build
 docker image inspect learn-hub-frontend:local >nul 2>&1
 if errorlevel 1 goto :need_build
 
+:compose_start
 pushd "%~dp0deploy"
+REM Identify the backend through the selected Compose project, never a global name.
+REM Compare StartedAt as well: compose up may start an existing stopped container.
+set "OLD_BACKEND_ID="
+set "OLD_BACKEND_STARTED="
+set "OLD_BACKEND_RUNNING="
+for /f "delims=" %%s in ('docker compose ps --all -q backend 2^>nul') do set "OLD_BACKEND_ID=%%s"
+if defined OLD_BACKEND_ID for /f "tokens=1,2" %%s in ('docker inspect -f "{{.State.Running}} {{.State.StartedAt}}" "%OLD_BACKEND_ID%" 2^>nul') do (
+    set "OLD_BACKEND_RUNNING=%%s"
+    set "OLD_BACKEND_STARTED=%%t"
+)
+if defined OLD_BACKEND_ID if not defined OLD_BACKEND_STARTED goto :compose_missing_backend
 if /i "%MODE%"=="build" goto :compose_build
 docker compose up -d
 set "COMPOSE_RC=%errorlevel%"
-popd
-if not "%COMPOSE_RC%"=="0" goto :compose_fail
-goto :wait_stack
+goto :compose_started
 
 :compose_build
 docker compose up -d --build
 set "COMPOSE_RC=%errorlevel%"
+:compose_started
+if not "%COMPOSE_RC%"=="0" goto :compose_pop_fail
+set "BACKEND_ID="
+set "MYSQL_ID="
+set "FRONTEND_ID="
+set "BACKEND_STARTED="
+for /f "delims=" %%s in ('docker compose ps --all -q backend 2^>nul') do set "BACKEND_ID=%%s"
+for /f "delims=" %%s in ('docker compose ps --all -q mysql 2^>nul') do set "MYSQL_ID=%%s"
+for /f "delims=" %%s in ('docker compose ps --all -q frontend 2^>nul') do set "FRONTEND_ID=%%s"
+if not defined BACKEND_ID goto :compose_missing_backend
+for /f "delims=" %%s in ('docker inspect -f "{{.State.StartedAt}}" "%BACKEND_ID%" 2^>nul') do set "BACKEND_STARTED=%%s"
+if not defined BACKEND_STARTED goto :compose_missing_backend
+if not "%OLD_BACKEND_RUNNING%"=="true" goto :compose_ready
+if not "%BACKEND_ID%"=="%OLD_BACKEND_ID%" goto :compose_ready
+if not "%BACKEND_STARTED%"=="%OLD_BACKEND_STARTED%" goto :compose_ready
+echo   Restarting the existing backend to load the installed application...
+docker compose restart --no-deps --timeout 30 backend
+set "COMPOSE_RC=%errorlevel%"
+if not "%COMPOSE_RC%"=="0" goto :restart_pop_fail
+:compose_ready
 popd
-if not "%COMPOSE_RC%"=="0" goto :compose_fail
 goto :wait_stack
+
+:compose_pop_fail
+popd
+goto :compose_fail
+
+:restart_pop_fail
+popd
+echo   [ERROR] backend restart failed (exit %COMPOSE_RC%); see output above
+set "SOME_FAIL=1"
+goto :summary
+
+:compose_missing_backend
+popd
+echo   [ERROR] cannot identify the backend in this Compose project; not restarting another container
+set "SOME_FAIL=1"
+goto :summary
 
 :need_build
 echo   [ERROR] missing local images: learn-hub-backend:local / learn-hub-frontend:local
@@ -140,14 +187,20 @@ set /a waited=0
 set "MYSQLST="
 set "BEST="
 set "FEST="
-for /f "delims=" %%s in ('docker inspect -f "{{.State.Health.Status}}" %MYSQL_NAME% 2^>nul') do set "MYSQLST=%%s"
-for /f "delims=" %%s in ('docker inspect -f "{{.State.Health.Status}}" %BACKEND_NAME% 2^>nul') do set "BEST=%%s"
-for /f "delims=" %%s in ('docker inspect -f "{{.State.Status}}" %FRONTEND_NAME% 2^>nul') do set "FEST=%%s"
+if defined MYSQL_ID for /f "delims=" %%s in ('docker inspect -f "{{.State.Health.Status}}" "%MYSQL_ID%" 2^>nul') do set "MYSQLST=%%s"
+if defined BACKEND_ID for /f "delims=" %%s in ('docker inspect -f "{{.State.Health.Status}}" "%BACKEND_ID%" 2^>nul') do set "BEST=%%s"
+if defined FRONTEND_ID for /f "delims=" %%s in ('docker inspect -f "{{.State.Status}}" "%FRONTEND_ID%" 2^>nul') do set "FEST=%%s"
 if /i "%BEST%"=="healthy" if /i "%FEST%"=="running" goto :stack_ready
 set /a waited+=3
-if %waited% geq 180 goto :stack_ready
+if %waited% geq 180 goto :stack_timeout
 timeout /t 3 /nobreak >nul
 goto :waitstack
+
+:stack_timeout
+echo   [ERROR] services did not become ready within 180s; backend status: %BEST%
+echo   Backend log: docker logs %BACKEND_ID%
+set "SOME_FAIL=1"
+goto :summary
 
 :stack_ready
 if "%MYSQLST%"=="" set "MYSQLST=not found"
@@ -201,7 +254,7 @@ exit /b 0
 
 REM ---------- dev mode: handled by start-dev.bat ----------
 :dev_mode
-call "%~dp0start-dev.bat" %2 %3
+call "%~dp0start-dev.bat" %*
 exit /b %errorlevel%
 
 REM ---------- helpers ----------

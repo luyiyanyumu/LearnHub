@@ -5,6 +5,7 @@ import { compileScript, parse } from '@vue/compiler-sfc'
 import * as vue from 'vue'
 import * as profileView from './modelProfileView.js'
 import { extractPromptFromMd } from './promptFromMd.js'
+import { maintenanceUpdateHint } from './knowledgeIndexView.js'
 
 // Run the real Settings setup with mock APIs. No DOM, user database or model service is used.
 const source = readFileSync(new URL('../components/SettingsDialog.vue', import.meta.url), 'utf8')
@@ -14,7 +15,7 @@ const setupSource = compiled.replace(/^import\s+([\s\S]*?)\s+from\s+['"]([^'"]+)
   .replace('export default', 'return')
 const componentFactory = new Function('modules', setupSource)
 
-function mountSettings(initialProfiles = []) {
+function mountSettings(initialProfiles = [], maintenance = { enabled: true, pending: true, message: '后台维护已排队，等待执行' }) {
   const previousWindow = globalThis.window
   globalThis.window = new EventTarget()
   const calls = [], messages = []
@@ -36,6 +37,8 @@ function mountSettings(initialProfiles = []) {
     vue, 'element-plus': { ElMessage: { success: message('success'), warning: message('warning'), error: message('error'), info: message('info') }, ElMessageBox: { confirm: async () => {} } },
     '../api': { modelApi, settingsApi, categoryApi: {}, tagApi: {}, aiApi: {}, wikiApi: {} },
     '../utils/modelProfileView': profileView, '../utils/promptFromMd': { extractPromptFromMd },
+    '../api/knowledgeMaintenance.js': { knowledgeMaintenanceApi: { async status() { return maintenance } } },
+    '../utils/knowledgeIndexView': { maintenanceUpdateHint },
   }
   const renderer = vue.createRenderer({
     createElement: tag => ({ tag, children: [] }), createText: text => ({ text }), createComment: text => ({ text }),
@@ -76,7 +79,7 @@ test('embedding creation is explicit, blank by default, refreshes configuration 
   } finally { h.cleanup() }
 })
 
-test('embedding assignment, service change and deletion notify status while rebuild remains manual', async () => {
+test('embedding assignment and service changes show backend pending state without browser-triggered rebuilds', async () => {
   const h = mountSettings([chat, embed])
   try {
     let events = 0
@@ -88,11 +91,24 @@ test('embedding assignment, service change and deletion notify status while rebu
     h.state.editor.model = 'vector-new'
     await h.state.saveProfile()
     assert.equal(h.calls[1].body.apiKey, '__KEEP__')
-    assert.match(h.messages.at(-1).value, /重建向量索引/)
+    assert.match(h.messages.at(-1).value, /后台维护已排队/)
+    assert.doesNotMatch(h.messages.at(-1).value, /已完成|手动重建/)
     await h.state.removeProfile(embed)
     assert.equal(h.state.routing.table[0].target, 'disabled')
     assert.deepEqual(h.calls.map(c => c.method), ['routing', 'update', 'remove'])
     assert.equal(events, 3)
+  } finally { h.cleanup() }
+})
+
+test('embedding changes honor a disabled maintenance switch instead of promising background updates', async () => {
+  const h = mountSettings([chat, embed], { enabled: false, message: '自动维护已关闭' })
+  try {
+    await h.state.loadRouting()
+    await h.state.setTaskTarget(h.state.routing.table[0], 'embed')
+    assert.match(h.messages.at(-1).value, /自动维护已关闭/)
+    assert.match(h.messages.at(-1).value, /立即维护/)
+    assert.doesNotMatch(h.messages.at(-1).value, /后台将自动/)
+    assert.deepEqual(h.calls.map(c => c.method), ['routing'])
   } finally { h.cleanup() }
 })
 

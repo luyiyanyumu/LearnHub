@@ -854,7 +854,9 @@ public class WikiService {
      * 同步期间界面除了转圈什么都做不了；异步后能显示**真实阶段**（调用模型/校验/写入）
      * 与**真实进度**（流式累计的生成字数），失败也能看到具体原因。
      */
-    public Map<String, Object> startGenerate(String topicKey, String targetId) {
+    public synchronized Map<String, Object> startGenerate(String topicKey, String targetId) {
+        for (Job active : jobs.values()) if (active.topicKey.equals(topicKey) && "running".equals(active.status))
+            return jobView(active.id);
         Topic topic = resolve(topicKey);
         if ("entity".equals(topic.type())) return entityCompileService.startRegenerate(topic.key(), targetId);
         if ("index".equals(topic.type()) || "lint".equals(topic.type())) {
@@ -1108,7 +1110,7 @@ public class WikiService {
             }
             return out;
         } catch (Exception e) {
-            throw new IllegalStateException("AI 调用失败：" + e.getMessage());
+            throw new IllegalStateException("AI 调用失败：" + KnowledgeMaintenanceService.failureReason(e), e);
         }
     }
 
@@ -1395,6 +1397,13 @@ public class WikiService {
         return s == null || !"0".equals(s.getSettingValue());
     }
 
+    private org.springframework.beans.factory.ObjectProvider<KnowledgeMaintenanceService> maintenance;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setMaintenanceProvider(org.springframework.beans.factory.ObjectProvider<KnowledgeMaintenanceService> provider) {
+        this.maintenance = provider;
+    }
+
     public void setAutoRefresh(boolean on) {
         AppSetting s = settingMapper.selectById(SETTING_AUTO_REFRESH);
         if (s == null) {
@@ -1418,11 +1427,11 @@ public class WikiService {
      * <p>
      * {@code fallbackExecution = true}：万一将来有非事务路径发这个事件，也照常处理，不要静默漏掉。
      * <p>
-     * 只处理**已经生成过**的主题：没生成过的主题自动生成属于"用户没要求就花钱"，
-     * 那条路径必须由用户自己在界面上点。
+     * 完整应用由统一维护队列接管首次生成、标签、实体及失败重试；以下保留独立服务的旧增量路径。
      */
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT, fallbackExecution = true)
     public void onKnowledgeChanged(KnowledgeChangedEvent event) {
+        if (maintenance != null && maintenance.getIfAvailable() != null) return;
         if (!autoRefreshEnabled()) {
             return;
         }

@@ -65,3 +65,5 @@ learnhub:
   skills-dir: ${LEARNHUB_SKILLS_DIR:}
   # Optional isolated code runner; empty keeps workflow-only tools available.
   code-runner-url: ${LEARNHUB_CODE_RUNNER_URL:}
+  # Optional isolated public-page renderer; only the deployment operator configures this endpoint.
+  scrapling-url: ${LEARNHUB_SCRAPLING_URL:}

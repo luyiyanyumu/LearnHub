@@ -105,6 +105,13 @@ jobs:
         run: docker compose -f deploy/docker-compose.release.yml config --quiet
       - name: Backend tests and package
         run: mvn -B -f backend/pom.xml verify
+      - name: Web fetcher isolation and extraction tests
+        run: python3 -B -m unittest discover -s tools/web-fetcher -p 'test_*.py' -v
+      - name: Verify optional Scrapling browser runtime
+        run: |
+          docker build -f tools/web-fetcher/Dockerfile -t learnhub-web-fetcher:ci .
+          docker run --rm --init --network none --read-only --tmpfs /tmp:rw,nosuid,nodev,size=512m --shm-size=512m --cap-drop ALL --security-opt no-new-privileges --pids-limit 256 --memory 1g --cpus 2 learnhub-web-fetcher:ci python -B -m unittest discover -s /app -p 'test_*.py' -v
+          docker run --rm --init --network none --read-only --tmpfs /tmp:rw,nosuid,nodev,size=512m --shm-size=512m --cap-drop ALL --security-opt no-new-privileges --pids-limit 256 --memory 1g --cpus 2 learnhub-web-fetcher:ci python /app/smoke.py
       - name: Database migration checks on isolated MySQL containers
         env:
           LEARNHUB_MIGRATION_TESTS: 'true'

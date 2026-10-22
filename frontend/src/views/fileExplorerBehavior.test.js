@@ -33,6 +33,7 @@ async function harness(initialQuery = {}) {
   ]
   let result = { list: [{ id: 1, originName: '示例.md', ext: 'md' }], total: 41 }
   let pageLoader = null
+  let reextractLoader = null
   let uploadWait = null
   const modules = {
     vue,
@@ -50,7 +51,7 @@ async function harness(initialQuery = {}) {
         async rename(id) { writes.push({ action: 'rename', id }) },
         async updateSummary(id) { writes.push({ action: 'summary', id }) },
         async updateCategory(id) { writes.push({ action: 'category', id }) },
-        async reextract(id) { writes.push({ action: 'reextract', id }); return { textStatus: 'ok' } },
+        async reextract(id) { writes.push({ action: 'reextract', id }); return reextractLoader ? reextractLoader(id) : { textStatus: 'ok' } },
         async download(id) { writes.push({ action: 'download', id }); return { data: null } },
         async detail(id) { return { id, ext: 'md', originName: '路由示例.md' } },
       },
@@ -67,6 +68,7 @@ async function harness(initialQuery = {}) {
     state, route, pageCalls, writes, navigation,
     setFolders(next) { directory = next }, setResult(next) { result = next },
     setPageLoader(loader) { pageLoader = loader },
+    setReextractLoader(loader) { reextractLoader = loader },
     holdUpload() { uploadWait = deferred(); return uploadWait },
     async close() { app.unmount(); await flush(); if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow); else delete globalThis.window },
   }
@@ -183,4 +185,69 @@ test('an upload batch retains its original folder while navigation changes the c
     assert.equal(target.value, '')
     assert.equal(h.state.uploading, false)
   } finally { await h.close() }
+})
+
+test('legacy skipped documents explain how to retry without retaining the obsolete size restriction', async () => {
+  const h = await harness()
+  try {
+    const row = { id: 21, originName: '合成大文件.pdf', textStatus: 'skipped', textError: '文件超过 20MB，未抽取正文' }
+    assert.equal(h.state.textLabel(row), '待重抽')
+    assert.match(h.state.textHint(row), /此前.*重抽正文/)
+    assert.doesNotMatch(h.state.textHint(row), /20MB/)
+    h.state.readerStatus = 'skipped'
+    h.state.readerError = row.textError
+    assert.equal(h.state.statusHint(), h.state.textHint(row))
+    await h.state.onReextract(row)
+    assert.deepEqual(h.writes, [{ action: 'reextract', id: 21 }])
+  } finally { await h.close() }
+})
+
+test('re-extraction ignores duplicate clicks for the same file and remains busy until the list refreshes', async () => {
+  const h = await harness()
+  try {
+    const row = { id: 21, textStatus: 'skipped' }
+    const extraction = deferred(), refresh = deferred()
+    h.setReextractLoader(() => extraction.promise)
+    h.setPageLoader(() => refresh.promise)
+    const pending = h.state.onReextract(row)
+    assert.equal(h.state.isReextracting(row), true)
+    assert.equal(h.state.isReextracting({ id: 21, __folder: true }), false)
+    await h.state.onReextract({ ...row, id: '21' })
+    assert.deepEqual(h.writes, [{ action: 'reextract', id: 21 }])
+    extraction.resolve({ textStatus: 'ok', textChars: 123 })
+    await flush()
+    assert.equal(h.state.isReextracting(row), true)
+    refresh.resolve({ list: [{ ...row, textStatus: 'ok', textChars: 123 }], total: 1 })
+    await pending
+    assert.equal(h.state.isReextracting(row), false)
+    assert.equal(h.state.list[0].textStatus, 'ok')
+  } finally { await h.close() }
+})
+
+test('re-extraction failures release only the failed file so it can be retried', async () => {
+  const h = await harness()
+  try {
+    const first = { id: 21 }, second = { id: 22 }
+    const wait = deferred()
+    h.setReextractLoader(id => id === 21 ? Promise.reject(new Error('合成抽取失败')) : wait.promise)
+    const pending = h.state.onReextract(second)
+    await assert.rejects(h.state.onReextract(first), /合成抽取失败/)
+    assert.equal(h.state.isReextracting(first), false)
+    assert.equal(h.state.isReextracting(second), true)
+    h.setReextractLoader(async () => ({ textStatus: 'ok' }))
+    await h.state.onReextract(first)
+    assert.equal(h.writes.filter(call => call.id === 21).length, 2)
+    wait.resolve({ textStatus: 'ok' })
+    await pending
+    assert.equal(h.state.isReextracting(second), false)
+  } finally { await h.close() }
+})
+
+test('re-extraction requests wait for large document processing instead of the default 15 second timeout', async () => {
+  const apiSource = readFileSync(new URL('../api/index.js', import.meta.url), 'utf8')
+  const block = apiSource.match(/export const fileApi = (\{[\s\S]*?\n\})\r?\n/)[1]
+  const calls = []
+  const api = new Function('request', `return (${block})`)({ post(...args) { calls.push(args) } })
+  api.reextract(21)
+  assert.deepEqual(calls, [['/files/21/reextract', {}, { timeout: 0 }]])
 })

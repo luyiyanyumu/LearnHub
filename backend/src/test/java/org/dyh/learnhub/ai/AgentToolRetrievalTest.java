@@ -16,6 +16,7 @@ import org.dyh.learnhub.service.RetrievalContextService;
 import org.dyh.learnhub.service.RetrievalHit;
 import org.dyh.learnhub.service.SettingsService;
 import org.dyh.learnhub.service.WebService;
+import org.dyh.learnhub.service.WebPageService;
 import org.dyh.learnhub.vo.AiChatVO;
 import org.dyh.learnhub.vo.NoteVO;
 import org.dyh.learnhub.vo.QuickRefVO;
@@ -210,8 +211,11 @@ class AgentToolRetrievalTest {
     void successfulWebToolSkipsCheckingOnlyTheInitialPassages() throws Exception {
         String url = "https://example.invalid/reference";
         when(settings.webEnabled()).thenReturn(true);
-        when(web.fetch(url)).thenReturn(new WebService.FetchResult(url, 200, "text/html",
-                "模型实际看到的外部资料正文", false));
+        WebPageService pages = mock(WebPageService.class);
+        agent.setWebPageService(pages);
+        when(pages.read(eq("session"), eq(url), eq(""), eq(0), eq(8000), eq("auto"), anyLong()))
+                .thenReturn(new WebPageService.PageRead("synthetic-page", url, 200, "text/html", "http", "",
+                        "模型实际看到的外部资料正文", 0, -1, 14, false, false, false, ""));
         var initial = initialContext();
         configureConversation(initial, "web_fetch", Map.of("url", url));
 

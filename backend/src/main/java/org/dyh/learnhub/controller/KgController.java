@@ -7,6 +7,9 @@ import org.dyh.learnhub.service.KgOntology;
 import org.dyh.learnhub.service.KgPipelineService;
 import org.dyh.learnhub.service.KgReasoner;
 import org.dyh.learnhub.service.KgService;
+import org.dyh.learnhub.service.KnowledgeMaintenanceService;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -25,7 +28,7 @@ import java.util.Map;
  * <ul>
  *   <li>{@code GET  /api/kg/graph}   节点 + 边（结构边现算，语义边来自 kg_edge）</li>
  *   <li>{@code GET  /api/kg/version} 版本指纹：前端每几秒问一次，变了才重画图（"实时"的实现方式）</li>
- *   <li>{@code POST /api/kg/rebuild} 调模型重建语义关联（花 token，需用户主动触发）</li>
+ *   <li>{@code POST /api/kg/rebuild} 手动重建语义关联；后台也会随原文变化维护</li>
  * </ul>
  *
  * <h3>概念层（真正的知识图谱）</h3>
@@ -51,6 +54,17 @@ public class KgController {
     private final KgService kgService;
     private final KgGraphService conceptGraph;
     private final KgPipelineService pipeline;
+    private ObjectProvider<KnowledgeMaintenanceService> maintenance;
+
+    @Autowired
+    void setMaintenance(ObjectProvider<KnowledgeMaintenanceService> maintenance) {
+        this.maintenance = maintenance;
+    }
+
+    private void graphChanged() {
+        KnowledgeMaintenanceService coordinator = maintenance == null ? null : maintenance.getIfAvailable();
+        if (coordinator != null) coordinator.graphChanged();
+    }
 
     // ---------------- 文档层（原有） ----------------
 
@@ -91,7 +105,9 @@ public class KgController {
     /** 跑构建流水线（花 token：抽取三元组走云端，可在设置里改成本地） */
     @PostMapping("/concept/build")
     public Result<Map<String, Object>> build() {
-        return Result.ok(pipeline.start());
+        Map<String, Object> result = pipeline.start();
+        graphChanged();
+        return Result.ok(result);
     }
 
     @GetMapping("/concept/jobs/{jobId}")
@@ -115,7 +131,9 @@ public class KgController {
     /** 只跑规则推理，不调模型（免费，可反复点） */
     @PostMapping("/concept/reason")
     public Result<Map<String, Object>> reason() {
-        return Result.ok(conceptGraph.reason());
+        Map<String, Object> result = conceptGraph.reason();
+        graphChanged();
+        return Result.ok(result);
     }
 
     /**
@@ -129,6 +147,7 @@ public class KgController {
     @PostMapping("/concept/link-wiki")
     public Result<Map<String, Object>> linkWiki() {
         int linked = pipeline.relinkWikiPages();
+        graphChanged();
         return Result.ok(Map.of(
                 "linked", linked,
                 "total", conceptGraph.nodes().size(),
@@ -144,7 +163,9 @@ public class KgController {
     /** 人工合并两个实体：A 的边全部转到 B，A 的名字进 B 的别名，然后删 A */
     @PostMapping("/concept/merge")
     public Result<Map<String, Object>> merge(@RequestParam String from, @RequestParam String to) {
-        return Result.ok(conceptGraph.mergeNodes(from, to));
+        Map<String, Object> result = conceptGraph.mergeNodes(from, to);
+        graphChanged();
+        return Result.ok(result);
     }
 
     /** 实体识别探针：给一句话，看认出哪些概念（用来调试"为什么它没答上来"） */
@@ -173,11 +194,15 @@ public class KgController {
 
     @DeleteMapping("/concept/nodes/{id}")
     public Result<Map<String, Object>> deleteNode(@PathVariable String id) {
-        return Result.ok(conceptGraph.deleteNode(id));
+        Map<String, Object> result = conceptGraph.deleteNode(id);
+        graphChanged();
+        return Result.ok(result);
     }
 
     @DeleteMapping("/concept/relations/{id}")
     public Result<Map<String, Object>> deleteRelation(@PathVariable Long id) {
-        return Result.ok(conceptGraph.deleteRelation(id));
+        Map<String, Object> result = conceptGraph.deleteRelation(id);
+        graphChanged();
+        return Result.ok(result);
     }
 }

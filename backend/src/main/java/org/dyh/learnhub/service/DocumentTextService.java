@@ -55,15 +55,13 @@ public class DocumentTextService {
     /** 存库正文上限（字符）。再长对检索与模型都没意义，只会拖慢一切 */
     public static final int MAX_TEXT_CHARS = 400_000;
 
-    /** 超过这个大小直接不抽：避免上传接口被一个大文件卡住（如实标注 skipped） */
-    private static final long MAX_EXTRACT_BYTES = 20L * 1024 * 1024;
-
     /** PDF 页数上限：几百页的文档抽完对知识库也无用 */
     private static final int MAX_PDF_PAGES = 300;
 
     public static final String STATUS_OK = "ok";
     public static final String STATUS_EMPTY = "empty";
     public static final String STATUS_UNSUPPORTED = "unsupported";
+    /** 兼容旧记录：历史上因文件大小跳过，重抽后由实际结果覆盖。 */
     public static final String STATUS_SKIPPED = "skipped";
     public static final String STATUS_FAILED = "failed";
 
@@ -83,14 +81,10 @@ public class DocumentTextService {
      *
      * @param path 磁盘上的文件
      * @param ext  小写扩展名（不含点）
-     * @param size 文件大小
+     * @param size 文件大小，保留调用兼容；不再作为是否抽取的条件
      */
     public Extracted extract(Path path, String ext, long size) {
         String e = ext == null ? "" : ext.toLowerCase(Locale.ROOT);
-        if (size > MAX_EXTRACT_BYTES) {
-            return new Extracted(STATUS_SKIPPED, null,
-                    "文件超过 " + (MAX_EXTRACT_BYTES / 1024 / 1024) + "MB，未抽取正文（可按文件名与说明检索）", 0);
-        }
         if (e.isEmpty()) {
             return new Extracted(STATUS_UNSUPPORTED, null, "没有扩展名，无法判断类型", 0);
         }

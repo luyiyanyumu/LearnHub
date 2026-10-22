@@ -33,8 +33,7 @@ import java.util.concurrent.Executors;
  * <p>为什么第 ① 步的标注不能省：三元组的 {@code sources} 靠它回填成「笔记#5」这种可点的来源。
  * 没有来源的图，人没法判断该不该信 —— 这和 wiki 引用标注是同一个道理。
  *
- * <p>这一步**默认不自动跑**：它会花云端 token，而且只有你说要才该动图。
- * 素材变了之后由「重建概念图谱」按钮触发（和 ③ 局部重编译一样，保持人工确认）。
+ * <p>手动整批构建保留；自动维护由 {@link KgMaintenanceService} 按变化来源分批完成。
  */
 @Service
 public class KgPipelineService {
@@ -80,7 +79,7 @@ public class KgPipelineService {
         public int total;
         public int done;
         public String detail = "";
-        public String status = "running";
+        public volatile String status = "running";
         public String error;
         public String model;
         public int triples;
@@ -96,6 +95,10 @@ public class KgPipelineService {
         jobs.put(job.id, job);
         runner.submit(() -> build(job));
         return view(job.id);
+    }
+
+    public boolean hasRunningJobs() {
+        return jobs.values().stream().anyMatch(job -> "running".equals(job.status));
     }
 
     public Map<String, Object> view(String id) {
@@ -360,6 +363,11 @@ public class KgPipelineService {
             }
         }
         return linked;
+    }
+
+    /** Reuse the current Wiki descriptions after automatic source graph maintenance. */
+    public Map<String, Object> refreshEntityEmbeddings() {
+        return graph.embedEntities(wikiTexts());
     }
 
     /** wiki 实体页正文（给实体向量化当描述，比只有名字强得多） */

@@ -11,6 +11,7 @@ import org.dyh.learnhub.mapper.ContentFolderMapper;
 import org.dyh.learnhub.mapper.FileInfoMapper;
 import org.dyh.learnhub.mapper.NoteMapper;
 import org.dyh.learnhub.service.FolderService;
+import org.dyh.learnhub.service.EntityLinker;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -169,9 +170,12 @@ class DatabaseMigrationTest {
         migrate(url);
         JdbcTemplate db = jdbc(url);
         assertThat(db.queryForObject("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()",
-                Integer.class)).isEqualTo(30); // 29 application tables and Flyway history
+                Integer.class)).isEqualTo(31); // 30 application tables and Flyway history
         assertThat(db.queryForList("SELECT version FROM flyway_schema_history ORDER BY installed_rank", String.class))
-                .containsExactly("1", "2", "3", "4");
+                .containsExactly("1", "2", "3", "4", "5", "6");
+        assertThat(db.queryForObject("SELECT COLLATION_NAME FROM information_schema.COLUMNS "
+                + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'kg_node' AND COLUMN_NAME = 'norm'", String.class))
+                .isEqualTo("utf8mb4_bin");
         assertThat(db.queryForObject("SELECT COUNT(*) FROM note", Integer.class)).isEqualTo(2);
         assertEveryPersistentEntityColumnExists(url);
         assertThat(db.queryForObject("SELECT COUNT(*) FROM information_schema.REFERENTIAL_CONSTRAINTS "
@@ -182,7 +186,7 @@ class DatabaseMigrationTest {
         db.update("DELETE FROM note");
         migrate(url);
         assertThat(db.queryForObject("SELECT COUNT(*) FROM note", Integer.class)).isZero();
-        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(4);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(6);
     }
 
     @Test
@@ -196,7 +200,7 @@ class DatabaseMigrationTest {
         migrate(url);
         JdbcTemplate db = jdbc(url);
         assertThat(db.queryForList("SELECT version FROM flyway_schema_history ORDER BY installed_rank", String.class))
-                .containsExactly("0", "1", "2", "3", "4");
+                .containsExactly("0", "1", "2", "3", "4", "5", "6");
         assertThat(structure(url)).containsExactlyElementsOf(structure(freshUrl));
         assertThat(indexes(url)).containsExactlyElementsOf(indexes(freshUrl));
         assertThat(db.queryForObject("SELECT COUNT(*) FROM note", Integer.class)).isEqualTo(1);
@@ -214,7 +218,7 @@ class DatabaseMigrationTest {
                 Integer.class)).isEqualTo(2);
         migrate(url);
         assertThat(db.queryForObject("SELECT COUNT(*) FROM note", Integer.class)).isEqualTo(1);
-        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(5);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(7);
     }
 
     @Test
@@ -236,7 +240,7 @@ class DatabaseMigrationTest {
 
         migrate(url);
         assertThat(db.queryForList("SELECT version FROM flyway_schema_history ORDER BY installed_rank", String.class))
-                .containsExactly("1", "2", "3", "4");
+                .containsExactly("1", "2", "3", "4", "5", "6");
         assertThat(db.queryForObject("SELECT purpose FROM model_profile WHERE id = 'old-chat'", String.class))
                 .isEqualTo("chat");
         assertThat(db.queryForObject("SELECT api_key FROM model_profile WHERE id = 'old-chat'", String.class))
@@ -256,7 +260,7 @@ class DatabaseMigrationTest {
         assertThat(db.queryForObject("SELECT content_hash FROM kb_index_state WHERE id = 'note:92001'", String.class))
                 .isEqualTo("original-content-hash");
         migrate(url);
-        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(4);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(6);
     }
 
     @Test
@@ -286,6 +290,9 @@ class DatabaseMigrationTest {
         try (Connection connection = db.getDataSource().getConnection()) {
             ScriptUtils.executeSqlScript(connection, new ClassPathResource("schema.sql"));
         }
+        assertThat(db.queryForObject("SELECT COLLATION_NAME FROM information_schema.COLUMNS "
+                + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'kg_node' AND COLUMN_NAME = 'norm'", String.class))
+                .isEqualTo("utf8mb4_bin");
         db.update("INSERT INTO content_folder (id, kind, name, parent_id) VALUES (96001, 'note', '已收纳', 0), (96002, 'file', '资料', 0)");
         db.update("INSERT INTO note (id, title, content, folder_id) VALUES (96001, '保留笔记', '正文', 96001)");
         db.update("INSERT INTO file_info (id, origin_name, store_name, folder_id) VALUES (96001, 'demo.md', 'kept.md', 96002)");
@@ -294,9 +301,72 @@ class DatabaseMigrationTest {
         assertThat(db.queryForObject("SELECT folder_id FROM file_info WHERE id=96001", Long.class)).isEqualTo(96002);
         assertThat(db.queryForObject("SELECT COUNT(*) FROM content_folder", Integer.class)).isEqualTo(2);
         assertThat(db.queryForList("SELECT version FROM flyway_schema_history ORDER BY installed_rank", String.class))
-                .containsExactly("0", "1", "2", "3", "4");
+                .containsExactly("0", "1", "2", "3", "4", "5", "6");
         migrate(url);
         assertThat(db.queryForObject("SELECT COUNT(*) FROM content_folder", Integer.class)).isEqualTo(2);
+    }
+
+    @Test
+    void versionFiveUpgradePreservesGraphAndPartialProgressWhileKeepingDistinctNormalizedNamesSeparate() throws Exception {
+        String url = emptyDatabase();
+        application(url, "spring.flyway.target=5").run(context -> assertThat(context).hasNotFailed());
+        JdbcTemplate db = jdbc(url);
+        String firstName = "SyntheticCafe";
+        String secondName = "SyntheticCafé";
+        String firstNorm = EntityLinker.normalize(firstName);
+        String secondNorm = EntityLinker.normalize(secondName);
+        String firstId = EntityLinker.id(firstName);
+        String secondId = EntityLinker.id(secondName);
+        String targetId = EntityLinker.id("SyntheticTarget");
+        assertThat(secondNorm).isNotEqualTo(firstNorm);
+        assertThat(secondId).isNotEqualTo(firstId);
+        byte[] oldVector = new byte[] {0, 0, (byte) 128, 63};
+        db.update("INSERT INTO kg_node (id, name, norm, aliases, brief, wiki_key, source_count, embedding, "
+                        + "embedding_space, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 7, ?, "
+                        + "'synthetic-space', '2025-01-01 10:00:00', '2025-01-02 10:00:00')",
+                firstId, firstName, firstNorm, "SyntheticAlias", "合成节点说明", "entity:synthetic", oldVector);
+        db.update("INSERT INTO kg_node (id, name, norm) VALUES (?, ?, ?)",
+                targetId, "SyntheticTarget", EntityLinker.normalize("SyntheticTarget"));
+        db.update("INSERT INTO kg_relation (head_id, relation, tail_id, evidence, sources, weight, origin, model) "
+                        + "VALUES (?, 'part_of', ?, '合成的手工证据。', '笔记#99001', 0.75, 'manual', 'synthetic-model')",
+                firstId, targetId);
+        String progressKey = "internal.kg_maintenance.v1.source.资料.99001";
+        String progress = "{\"version\":1,\"fingerprint\":\"synthetic-revision\",\"nextBatch\":2,"
+                + "\"model\":\"synthetic-model\",\"triples\":[]}";
+        db.update("INSERT INTO app_setting (setting_key, setting_value) VALUES (?, ?)", progressKey, progress);
+        String nodeSnapshot = "SELECT id, name, norm, type, aliases, brief, wiki_key, source_count, "
+                + "HEX(embedding) AS vector_hex, embedding_space, created_at, updated_at FROM kg_node ORDER BY id";
+        var nodesBefore = db.queryForList(nodeSnapshot);
+        var edgesBefore = db.queryForList("SELECT * FROM kg_relation ORDER BY id");
+
+        // A different Java identity was rejected by the old accent-insensitive database key.
+        assertThatThrownBy(() -> db.update("INSERT INTO kg_node (id, name, norm) VALUES (?, ?, ?)",
+                secondId, secondName, secondNorm)).isInstanceOf(org.springframework.dao.DuplicateKeyException.class);
+        migrate(url);
+        assertThat(db.queryForObject("SELECT COLLATION_NAME FROM information_schema.COLUMNS "
+                + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'kg_node' AND COLUMN_NAME = 'norm'", String.class))
+                .isEqualTo("utf8mb4_bin");
+        assertThat(db.queryForList(nodeSnapshot)).containsExactlyElementsOf(nodesBefore);
+        assertThat(db.queryForList("SELECT * FROM kg_relation ORDER BY id")).containsExactlyElementsOf(edgesBefore);
+        assertThat(db.queryForObject("SELECT setting_value FROM app_setting WHERE setting_key = ?", String.class, progressKey))
+                .isEqualTo(progress);
+
+        db.update("INSERT INTO kg_node (id, name, norm) VALUES (?, ?, ?)", secondId, secondName, secondNorm);
+        assertThat(db.queryForObject("SELECT id FROM kg_node WHERE norm = ?", String.class, firstNorm)).isEqualTo(firstId);
+        assertThat(db.queryForObject("SELECT id FROM kg_node WHERE norm = ?", String.class, secondNorm)).isEqualTo(secondId);
+        assertThatThrownBy(() -> db.update("INSERT INTO kg_node (id, name, norm) VALUES ('e-duplicate', ?, ?)",
+                secondName, secondNorm)).isInstanceOf(org.springframework.dao.DuplicateKeyException.class);
+        var upgradedNodes = db.queryForList(nodeSnapshot);
+        // Both the migration SQL itself and subsequent application startup can be repeated safely.
+        try (Connection connection = db.getDataSource().getConnection()) {
+            ScriptUtils.executeSqlScript(connection, new ClassPathResource("db/migration/V6__exact_knowledge_graph_identity.sql"));
+        }
+        migrate(url);
+        assertThat(db.queryForList(nodeSnapshot)).containsExactlyElementsOf(upgradedNodes);
+        assertThat(db.queryForList("SELECT * FROM kg_relation ORDER BY id")).containsExactlyElementsOf(edgesBefore);
+        assertThat(db.queryForObject("SELECT setting_value FROM app_setting WHERE setting_key = ?", String.class, progressKey))
+                .isEqualTo(progress);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history WHERE version='6'", Integer.class)).isEqualTo(1);
     }
 
     @Configuration(proxyBeanMethods = false)
@@ -429,7 +499,7 @@ class DatabaseMigrationTest {
         jdbc(url).update("""
                 INSERT INTO flyway_schema_history
                 (installed_rank, version, description, type, script, checksum, installed_by, execution_time, success)
-                VALUES (5, '999', 'future release', 'SQL', 'V999__future.sql', 1, 'root', 0, true)
+                VALUES (7, '999', 'future release', 'SQL', 'V999__future.sql', 1, 'root', 0, true)
                 """);
         application(url).run(context -> assertThat(context).hasFailed());
     }
@@ -439,7 +509,7 @@ class DatabaseMigrationTest {
         String url = emptyDatabase();
         application(url, "spring.flyway.locations=classpath:db/migration,classpath:db/intentional-failure")
                 .run(context -> assertThat(context).hasFailed());
-        assertThat(jdbc(url).queryForObject("SELECT success FROM flyway_schema_history WHERE version = '5'", Boolean.class))
+        assertThat(jdbc(url).queryForObject("SELECT success FROM flyway_schema_history WHERE version = '7'", Boolean.class))
                 .isFalse();
     }
 }

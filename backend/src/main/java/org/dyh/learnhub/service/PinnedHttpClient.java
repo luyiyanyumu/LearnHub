@@ -12,6 +12,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import javax.net.ssl.SNIHostName;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSocket;
@@ -37,6 +42,11 @@ import javax.net.ssl.SSLSocketFactory;
  * 省掉 gzip 解压这一层。
  */
 public final class PinnedHttpClient {
+    private static final ScheduledExecutorService DEADLINES = Executors.newSingleThreadScheduledExecutor(task -> {
+        Thread worker = new Thread(task, "web-http-deadlines");
+        worker.setDaemon(true);
+        return worker;
+    });
 
     private PinnedHttpClient() {
     }
@@ -59,9 +69,20 @@ public final class PinnedHttpClient {
      */
     public static Response get(InetAddress pinned, URI uri, String userAgent, long maxBytes,
                                int connectTimeoutMs, int readTimeoutMs) {
+        return get(pinned, uri, userAgent, maxBytes, connectTimeoutMs, readTimeoutMs, 0);
+    }
+
+    /** A total deadline also closes slow streams that continually avoid the socket's idle timeout. */
+    public static Response get(InetAddress pinned, URI uri, String userAgent, long maxBytes,
+                               int connectTimeoutMs, int readTimeoutMs, long totalTimeoutMs) {
         boolean https = "https".equalsIgnoreCase(uri.getScheme());
         int port = portOf(uri);
         Socket socket = new Socket();
+        AtomicBoolean expired = new AtomicBoolean();
+        ScheduledFuture<?> deadline = totalTimeoutMs > 0 ? DEADLINES.schedule(() -> {
+            expired.set(true);
+            try { socket.close(); } catch (Exception ignored) { }
+        }, totalTimeoutMs, TimeUnit.MILLISECONDS) : null;
         try {
             socket.connect(new InetSocketAddress(pinned, port), connectTimeoutMs);
             socket.setSoTimeout(readTimeoutMs);
@@ -99,12 +120,17 @@ public final class PinnedHttpClient {
                     + "Connection: close\r\n\r\n";
             out.write(request.getBytes(StandardCharsets.ISO_8859_1));
             out.flush();
-            return readResponse(in, maxBytes);
+            Response response = readResponse(in, maxBytes);
+            if (expired.get()) throw new IllegalStateException("网页抓取时间预算已用尽");
+            return response;
         } catch (IllegalStateException e) {
+            if (expired.get()) throw new IllegalStateException("网页抓取时间预算已用尽");
             throw e;
         } catch (Exception e) {
+            if (expired.get()) throw new IllegalStateException("网页抓取时间预算已用尽");
             throw new IllegalStateException("抓取失败：" + e.getMessage());
         } finally {
+            if (deadline != null) deadline.cancel(false);
             try {
                 socket.close();
             } catch (Exception ignored) {

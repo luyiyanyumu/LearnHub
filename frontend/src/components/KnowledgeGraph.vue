@@ -1,6 +1,7 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref, useId, watch } from 'vue'
-import { createGraphLayout, fitGraphBounds, placeGraphLabels, reconcileGraphLayout, stepGraphLayout } from '../utils/knowledgeGraphLayout.js'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef, useId, watch } from 'vue'
+import { GRAPH_SIMULATION_NODE_LIMIT, createGraphLayout, fitGraphBounds, placeGraphLabels, reconcileGraphLayout, stepGraphLayout } from '../utils/knowledgeGraphLayout.js'
+import { createGraphHitIndex, createGraphRenderer, graphNodeScreenRadius, parseGraphColor } from '../utils/knowledgeGraphRenderer.js'
 
 const props = defineProps({
   nodes: { type: Array, default: () => [] },
@@ -11,12 +12,18 @@ const props = defineProps({
 })
 const emit = defineEmits(['select', 'open'])
 const wrapRef = ref(null)
+const canvasRef = ref(null)
+const largeGraph = computed(() => props.nodes.length > GRAPH_SIMULATION_NODE_LIMIT)
 const view = reactive({ w: 900, h: 540, x: 0, y: 0, k: 1 })
-const hoverId = ref(''), dragging = ref(''), frame = ref(0)
+const hoverId = ref(''), dragging = ref(''), frame = ref(0), layoutMode = ref('')
+const keyboardId = ref(''), rendererType = ref(''), overviewLabels = shallowRef([]), labelsPending = ref(false)
 const arrowId = `kg-arrow-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`
 const sim = new Map()
 let layout = createGraphLayout(), alpha = 1, raf = 0, ro = null, fitTimer = 0
 let userAdjusted = false, needsFit = false, panFrom = null, dragFrom = null, moved = 0
+let renderer = null, drawRaf = 0, labelTimer = 0, pointerRaf = 0, pointerEvent = null, themeObserver = null
+let graphDirty = true, focusDirty = true, hitDirty = true, paletteDirty = true, palette = null, typeColors = null
+let hitIndex = createGraphHitIndex(), mounted = false, nodeMoved = false
 
 const nodeTypes = { category: '分类', tag: '标签', note: '笔记', ref: '速查卡', file: '资料', concept: '概念' }
 const nodeById = computed(() => new Map(props.nodes.map((node) => [node.id, node])))
@@ -34,24 +41,41 @@ const physicsNodes = computed(() => props.nodes.map((n) => {
   return { ...n, degree, r: base + Math.min(5, Math.sqrt(degree) * 1.4) }
 }))
 const focusId = computed(() => {
-  const id = hoverId.value || props.activeId
+  const id = hoverId.value || keyboardId.value || props.activeId
   return nodeById.value.has(id) ? id : ''
+})
+const incidentEdges = computed(() => {
+  const index = new Map()
+  for (const edge of props.edges) {
+    for (const id of new Set([edge.source, edge.target])) {
+      if (!index.has(id)) index.set(id, [])
+      index.get(id).push(edge)
+    }
+  }
+  return index
 })
 const neighbors = computed(() => {
   if (!focusId.value) return null
   const ids = new Set([focusId.value])
-  for (const e of props.edges) {
+  for (const e of incidentEdges.value.get(focusId.value) || []) {
     if (e.source === focusId.value) ids.add(e.target)
     if (e.target === focusId.value) ids.add(e.source)
   }
   return ids
 })
-const renderNodes = computed(() => {
+// World geometry depends on positions, never on the camera. The large renderer
+// retains its GPU buffers throughout a pan/zoom gesture.
+const positionNodes = computed(() => {
   frame.value
-  return physicsNodes.value.map((n) => ({ ...n, x: sim.get(n.id)?.x || 0, y: sim.get(n.id)?.y || 0,
-    r: Math.max(n.r, (3.3 + Math.min(2.5, Math.sqrt(n.degree) * 0.5)) / view.k) }))
+  return physicsNodes.value.map((n) => ({ ...n, x: sim.get(n.id)?.x || 0, y: sim.get(n.id)?.y || 0 }))
 })
+const graphBounds = computed(() => positionNodes.value.reduce((bounds, n) => ({
+  left: Math.min(bounds.left, n.x), right: Math.max(bounds.right, n.x),
+  top: Math.min(bounds.top, n.y), bottom: Math.max(bounds.bottom, n.y),
+}), { left: Infinity, right: -Infinity, top: Infinity, bottom: -Infinity }))
+const renderNodes = computed(() => largeGraph.value ? [] : positionNodes.value.map(n => ({ ...n, r: graphNodeScreenRadius(n, view.k) / view.k })))
 const renderEdges = computed(() => {
+  if (largeGraph.value) return []
   const byId = new Map(renderNodes.value.map((n) => [n.id, n]))
   return props.edges.map((e, index) => {
     const a = byId.get(e.source), b = byId.get(e.target)
@@ -67,17 +91,81 @@ const renderEdges = computed(() => {
       focused: !!focusId.value && (e.source === focusId.value || e.target === focusId.value) }
   }).filter(Boolean)
 })
-const renderLabels = computed(() => placeGraphLabels(renderNodes.value, view, {
+const renderLabels = computed(() => largeGraph.value ? labelsPending.value ? [] : overviewLabels.value : placeGraphLabels(renderNodes.value, view, {
   focusId: focusId.value, neighborIds: neighbors.value || new Set(),
   maxLabels: view.k < 0.75 ? 18 : view.k < 1.5 ? 28 : 48,
 }))
 const focusNodeLabel = computed(() => nodeById.value.get(focusId.value)?.label || '')
 const relationCaption = computed(() => {
   if (!focusId.value) return ''
-  const edges = renderEdges.value.filter((e) => e.focused)
+  const edges = incidentEdges.value.get(focusId.value) || []
   const labels = [...new Set(edges.map((e) => e.label || e.relation).filter(Boolean))]
   return `${edges.length} 条关系${labels.length ? ` · ${labels.slice(0, 3).join(' / ')}${labels.length > 3 ? ' …' : ''}` : ''}`
 })
+const keyboardCaption = computed(() => {
+  const n = nodeById.value.get(keyboardId.value)
+  return n ? `${n.id === props.activeId ? '已选中，' : ''}${n.label}，${nodeTypes[n.type] || n.type}，${degreeMap.value.get(n.id) || 0} 条关联。Enter 选择，Shift+Enter 打开，Escape 清除。` : ''
+})
+
+function readPalette() {
+  if (!paletteDirty && palette) return palette
+  const style = getComputedStyle(wrapRef.value)
+  const token = name => parseGraphColor(style.getPropertyValue(name).trim())
+  const brand = token('--app-brand'), text = token('--app-text-1'), muted = token('--app-text-2')
+  const mix = (a, b, amount) => a.map((v, i) => v * amount + b[i] * (1 - amount))
+  palette = { brand, text, border: token('--app-border'), card: token('--app-card'), semantic: mix(brand, token('--app-text-3'), 0.55) }
+  typeColors = { category: brand, tag: token('--app-brand-soft'), note: mix(brand, text, 0.62),
+    ref: mix(brand, muted, 0.34), file: mix(token('--app-brand-deep'), muted, 0.72), concept: mix(brand, text, 0.78) }
+  paletteDirty = false
+  return palette
+}
+function drawCanvas() {
+  drawRaf = 0
+  if (!mounted || !renderer || !largeGraph.value) return
+  readPalette()
+  if (graphDirty) {
+    const colors = new Map()
+    renderer.setGraph(positionNodes.value.map(n => {
+      const community = props.communities[n.id]
+      let color = typeColors[n.type] || palette.brand
+      if (n.type === 'concept' && community != null) {
+        if (!colors.has(community)) colors.set(community, parseGraphColor(nodeFill(n)))
+        color = colors.get(community)
+      }
+      return { ...n, color }
+    }), props.edges)
+    graphDirty = false; focusDirty = true
+  }
+  if (hitDirty) { hitIndex = createGraphHitIndex(positionNodes.value); hitDirty = false }
+  if (focusDirty) { renderer.setFocus(focusId.value, neighbors.value); focusDirty = false }
+  renderer.render(view, palette)
+}
+function scheduleCanvasDraw() {
+  if (mounted && largeGraph.value && !drawRaf) drawRaf = requestAnimationFrame(drawCanvas)
+}
+function scheduleLabels() {
+  if (!mounted || !largeGraph.value) return
+  labelsPending.value = true
+  clearTimeout(labelTimer)
+  // Keep gestures on the GPU path. Collision placement runs once after the
+  // gesture settles, rather than sorting/indexing every node on each wheel tick.
+  labelTimer = setTimeout(() => {
+    const nodes = positionNodes.value.map(n => ({ ...n, r: graphNodeScreenRadius(n, view.k) / view.k }))
+    overviewLabels.value = placeGraphLabels(nodes, view, { focusId: focusId.value, neighborIds: neighbors.value || new Set(), maxLabels: view.k < 0.75 ? 18 : view.k < 1.5 ? 28 : 48 })
+    labelsPending.value = false
+  }, 140)
+}
+watch(positionNodes, () => { graphDirty = true; hitDirty = true; scheduleCanvasDraw(); scheduleLabels() })
+watch(focusId, () => { focusDirty = true; scheduleCanvasDraw(); scheduleLabels() })
+watch(() => [view.x, view.y, view.k, view.w, view.h], () => { scheduleCanvasDraw(); scheduleLabels() })
+watch(canvasRef, canvas => {
+  renderer?.destroy(); renderer = null
+  if (!canvas) return
+  renderer = createGraphRenderer(canvas, { onTypeChange: type => { rendererType.value = type; scheduleCanvasDraw() } })
+  rendererType.value = renderer.type
+  graphDirty = true; focusDirty = true; hitDirty = true
+  scheduleCanvasDraw(); scheduleLabels()
+}, { flush: 'post' })
 
 function nodeFill(n) {
   const community = props.communities[n.id]
@@ -99,12 +187,13 @@ function rebuildState() {
     { aspectRatio: view.w / view.h, rootId: props.layoutRootId })
   if (next === layout) return false
   layout = next
+  layoutMode.value = layout.mode || ''
   if (raf) cancelAnimationFrame(raf)
   raf = 0
   clearTimeout(fitTimer)
   needsFit = false
   userAdjusted = false
-  hoverId.value = ''
+  hoverId.value = ''; keyboardId.value = ''
   onWindowCancel()
   frame.value++
   return true
@@ -126,8 +215,7 @@ function reheat(value = 0.7) {
 }
 function fitView() {
   // Camera fitting must not depend on the previous zoom's minimum screen-size circles.
-  const nodes = physicsNodes.value.map(n => ({ ...n, ...sim.get(n.id) }))
-  Object.assign(view, fitGraphBounds(nodes, view.w, view.h))
+  Object.assign(view, fitGraphBounds(positionNodes.value, view.w, view.h))
 }
 function scheduleFit() {
   clearTimeout(fitTimer)
@@ -165,15 +253,16 @@ function removePointer() {
 function onNodeDown(evt, node) {
   if (evt.button !== 0) return
   evt.stopPropagation()
-  dragging.value = node.id; dragFrom = svgPoint(evt); moved = 0
+  dragging.value = node.id; dragFrom = svgPoint(evt); moved = 0; nodeMoved = false
   listenPointer()
 }
 function onBackgroundDown(evt) {
   if (evt.button !== 0 || evt.target.closest('.kg-node, .kg-controls, .kg-focus-card')) return
+  hoverId.value = ''; keyboardId.value = ''
   panFrom = { sx: evt.clientX, sy: evt.clientY }; moved = 0
   listenPointer()
 }
-function onWindowMove(evt) {
+function applyPointerMove(evt) {
   if (panFrom) {
     const dx = evt.clientX - panFrom.sx, dy = evt.clientY - panFrom.sy
     moved += Math.hypot(dx, dy)
@@ -190,21 +279,45 @@ function onWindowMove(evt) {
   if (moved > 4) userAdjusted = true
   state.x = position.x; state.y = position.y
   dragFrom = position
-  reheat(0.4)
+  nodeMoved = true
+  if (largeGraph.value && renderer?.updateNodePosition) {
+    renderer.updateNodePosition(dragging.value, state.x, state.y)
+    clearTimeout(labelTimer); labelsPending.value = true
+    scheduleCanvasDraw()
+  } else reheat(0.4)
+}
+function onWindowMove(evt) {
+  pointerEvent = evt
+  if (!pointerRaf) pointerRaf = requestAnimationFrame(() => { pointerRaf = 0; const latest = pointerEvent; pointerEvent = null; if (latest) applyPointerMove(latest) })
+}
+function flushPointerMove() {
+  if (pointerRaf) cancelAnimationFrame(pointerRaf)
+  pointerRaf = 0
+  const latest = pointerEvent; pointerEvent = null
+  if (latest) applyPointerMove(latest)
 }
 function onWindowUp() {
+  flushPointerMove()
   const id = dragging.value, wasPan = !!panFrom
   removePointer(); dragging.value = ''; panFrom = null
+  if (id && nodeMoved && largeGraph.value) frame.value++
+  nodeMoved = false
   if (moved <= 4 && (id || wasPan)) emit('select', id ? nodeById.value.get(id) || null : null)
 }
-function onWindowCancel() { removePointer(); dragging.value = ''; panFrom = null }
+function onWindowCancel() {
+  if (pointerRaf) cancelAnimationFrame(pointerRaf)
+  pointerRaf = 0; pointerEvent = null
+  if (dragging.value && nodeMoved && largeGraph.value) frame.value++
+  nodeMoved = false
+  removePointer(); dragging.value = ''; panFrom = null
+}
 function clampView() {
-  const nodes = renderNodes.value
-  if (!nodes.length) return
-  const left = view.x + Math.min(...nodes.map((n) => n.x)) * view.k
-  const right = view.x + Math.max(...nodes.map((n) => n.x)) * view.k
-  const top = view.y + Math.min(...nodes.map((n) => n.y)) * view.k
-  const bottom = view.y + Math.max(...nodes.map((n) => n.y)) * view.k
+  if (!positionNodes.value.length) return
+  const bounds = graphBounds.value
+  const left = view.x + bounds.left * view.k
+  const right = view.x + bounds.right * view.k
+  const top = view.y + bounds.top * view.k
+  const bottom = view.y + bounds.bottom * view.k
   if (right < view.w * 0.2) view.x += view.w * 0.2 - right
   if (left > view.w * 0.8) view.x -= left - view.w * 0.8
   if (bottom < view.h * 0.2) view.y += view.h * 0.2 - bottom
@@ -212,7 +325,7 @@ function clampView() {
 }
 function applyZoom(factor, x = view.w / 2, y = view.h / 2) {
   userAdjusted = true
-  const scale = Math.max(0.08, Math.min(4, view.k * factor))
+  const scale = Math.max(0.001, Math.min(4, view.k * factor))
   view.x = x - (x - view.x) / view.k * scale
   view.y = y - (y - view.y) / view.k * scale
   view.k = scale
@@ -231,8 +344,66 @@ function onNodeFocus(evt, node) {
   hoverId.value = node.id
   if (evt.target.matches(':focus-visible')) focusNode(node.id)
 }
+function canvasHit(evt) {
+  if (hitDirty) { hitIndex = createGraphHitIndex(positionNodes.value); hitDirty = false }
+  const rect = wrapRef.value.getBoundingClientRect()
+  return hitIndex.hitTest(evt.clientX - rect.left, evt.clientY - rect.top, view)
+}
+function onCanvasDown(evt) {
+  if (evt.button !== 0) return
+  keyboardId.value = ''
+  // Mouse focus must not change the camera or choose an unrelated first node.
+  evt.preventDefault()
+  canvasRef.value?.focus({ preventScroll: true })
+  const node = canvasHit(evt)
+  if (node) { hoverId.value = node.id; onNodeDown(evt, node) }
+  else onBackgroundDown(evt)
+}
+function onCanvasMove(evt) {
+  if (panFrom || dragging.value) return
+  keyboardId.value = ''
+  hoverId.value = canvasHit(evt)?.id || ''
+}
+function onCanvasOpen(evt) {
+  const node = canvasHit(evt)
+  if (node) emit('open', nodeById.value.get(node.id) || node)
+}
+function ensureNodeVisible(id) {
+  const p = sim.get(id)
+  if (!p) return
+  const x = view.x + p.x * view.k, y = view.y + p.y * view.k
+  if (x < 32 || x > view.w - 32 || y < 64 || y > view.h - 64) {
+    view.x = view.w / 2 - p.x * view.k; view.y = view.h / 2 - p.y * view.k
+    userAdjusted = true
+  }
+}
+function onCanvasFocus(evt) {
+  if (!evt.target.matches(':focus-visible')) return
+  keyboardId.value = focusId.value || props.nodes[0]?.id || ''
+  ensureNodeVisible(keyboardId.value)
+}
+function onCanvasKey(evt) {
+  if (['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp', 'Home', 'End'].includes(evt.key)) {
+    evt.preventDefault()
+    const nodes = positionNodes.value
+    if (!nodes.length) return
+    const current = nodes.findIndex(n => n.id === (keyboardId.value || focusId.value))
+    const step = evt.key === 'ArrowLeft' || evt.key === 'ArrowUp' ? -1 : 1
+    const index = evt.key === 'Home' ? 0 : evt.key === 'End' ? nodes.length - 1 : current < 0 ? 0 : (current + step + nodes.length) % nodes.length
+    hoverId.value = ''; keyboardId.value = nodes[index].id
+    ensureNodeVisible(keyboardId.value)
+  } else if (evt.key === 'Enter' || evt.key === ' ') {
+    evt.preventDefault()
+    const node = nodeById.value.get(keyboardId.value || focusId.value)
+    if (node) emit(evt.key === 'Enter' && evt.shiftKey ? 'open' : 'select', node)
+  } else if (evt.key === 'Escape') {
+    evt.preventDefault(); hoverId.value = ''; keyboardId.value = ''; emit('select', null)
+  } else if (evt.key === '+' || evt.key === '=') { evt.preventDefault(); zoomBy(1.2) }
+  else if (evt.key === '-') { evt.preventDefault(); zoomBy(0.83) }
+}
 defineExpose({ resetView, zoomBy, reheat, fitView, focusNode })
 onMounted(() => {
+  mounted = true
   const element = wrapRef.value
   view.w = Math.max(240, element.clientWidth); view.h = Math.max(320, element.clientHeight)
   rebuildState()
@@ -245,16 +416,31 @@ onMounted(() => {
   }
   resize(); reheat(); scheduleFit()
   ro = new ResizeObserver(resize); ro.observe(element)
+  themeObserver = new MutationObserver(() => {
+    paletteDirty = true; graphDirty = true; scheduleCanvasDraw()
+  })
+  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] })
+  scheduleCanvasDraw(); scheduleLabels()
 })
 onBeforeUnmount(() => {
+  mounted = false
   if (raf) cancelAnimationFrame(raf)
-  clearTimeout(fitTimer); ro?.disconnect(); removePointer()
+  if (drawRaf) cancelAnimationFrame(drawRaf)
+  clearTimeout(fitTimer); clearTimeout(labelTimer); ro?.disconnect(); themeObserver?.disconnect(); onWindowCancel()
+  renderer?.destroy(); renderer = null
 })
 </script>
 
 <template>
   <div ref="wrapRef" class="kg-wrap" @pointerdown="onBackgroundDown" @wheel="onWheel">
-    <svg class="kg-svg" :width="view.w" :height="view.h" aria-label="知识关联图谱，可拖拽、滚轮缩放，Tab 聚焦节点，Enter 选择">
+    <canvas v-if="largeGraph" ref="canvasRef" class="kg-canvas" role="group" tabindex="0"
+      :aria-label="`知识关联图谱，${nodes.length} 个节点，${edges.length} 条关系`" :aria-describedby="`${arrowId}-instructions ${arrowId}-keyboard`"
+      :data-renderer="rendererType" :data-node-count="nodes.length" :data-edge-count="edges.length"
+      @pointerdown.stop="onCanvasDown" @pointermove="onCanvasMove" @pointerleave="hoverId = ''"
+      @dblclick="onCanvasOpen" @focus="onCanvasFocus" @blur="keyboardId = ''" @keydown="onCanvasKey" />
+    <span v-if="largeGraph" :id="`${arrowId}-instructions`" class="kg-sr-only">方向键切换节点，Home 或 End 跳到首尾，Enter 或空格选择，Shift+Enter 打开，Escape 清除。也可在图谱搜索框查找任意节点。</span>
+    <span v-if="largeGraph" :id="`${arrowId}-keyboard`" class="kg-sr-only" role="status" aria-live="polite">{{ keyboardCaption }}</span>
+    <svg class="kg-svg" :class="{ 'kg-overlay': largeGraph }" :width="view.w" :height="view.h" :aria-hidden="largeGraph ? true : undefined" :aria-label="largeGraph ? undefined : '知识关联图谱，可拖拽、滚轮缩放，Tab 聚焦节点，Enter 选择'">
       <defs>
         <marker :id="arrowId" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" :markerWidth="7 / view.k" :markerHeight="7 / view.k" orient="auto">
           <path d="M0,0 L10,5 L0,10 z" fill="var(--app-brand)" />
@@ -287,7 +473,7 @@ onBeforeUnmount(() => {
         </g>
       </g>
     </svg>
-    <div v-if="hoverId && focusNodeLabel && hoverId !== activeId" class="kg-focus-card" aria-live="polite">
+    <div v-if="(hoverId || keyboardId) && focusNodeLabel && (focusId !== activeId || keyboardId)" class="kg-focus-card">
       <strong>{{ focusNodeLabel }}</strong><span>{{ relationCaption }}</span>
     </div>
     <div class="kg-controls" aria-label="图谱视图控制" @pointerdown.stop>
@@ -297,7 +483,8 @@ onBeforeUnmount(() => {
       <span class="kg-control-divider" />
       <button type="button" class="kg-fit" title="显示完整图谱" @click="resetView">适应视图</button>
     </div>
-    <div class="kg-hint">拖拽移动 · 滚轮缩放 · 选中查看关系</div>
+    <div class="kg-hint">{{ layoutMode === 'overview' ? '大图总览 · ' : '' }}拖拽移动 · 滚轮缩放 · 选中查看关系</div>
+    <div v-if="largeGraph && rendererType === 'unavailable'" class="kg-render-error" role="status">图形绘制暂不可用，仍可通过右侧搜索查看概念和关系。</div>
   </div>
 </template>
 
@@ -305,6 +492,11 @@ onBeforeUnmount(() => {
 .kg-wrap { position: relative; width: 100%; height: 100%; min-height: 320px; overflow: hidden; border-radius: var(--radius); background: var(--app-card); cursor: grab; touch-action: none; }
 .kg-wrap:active { cursor: grabbing; }
 .kg-svg { display: block; }
+.kg-canvas { display: block; position: absolute; inset: 0; width: 100%; height: 100%; outline: none; }
+.kg-canvas:focus-visible { outline: 2px solid var(--app-brand); outline-offset: -3px; }
+.kg-overlay { position: absolute; inset: 0; pointer-events: none; }
+.kg-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+.kg-render-error { position: absolute; left: 16px; right: 16px; top: 50%; padding: 16px; text-align: center; background: var(--app-card); color: var(--app-text-2); font-size: 13px; }
 .kg-edge { stroke: var(--app-border); stroke-width: 1.2; opacity: .7; transition: opacity var(--dur-fast) ease; }
 .kg-edge-concept, .kg-edge-semantic { stroke: color-mix(in srgb, var(--app-brand) 55%, var(--app-text-3)); opacity: .45; }
 .kg-edge-derived, .kg-edge-semantic { stroke-dasharray: 5 4; }

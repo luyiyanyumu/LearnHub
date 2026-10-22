@@ -32,6 +32,11 @@ import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeoutException;
 import javax.net.ssl.SNIHostName;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSocket;
@@ -92,6 +97,12 @@ public class WebService {
     private static final int MAX_BODY_CHARS = 100_000;
     private static final int MAX_REDIRECTS = 5;
     private static final Duration FETCH_TIMEOUT = Duration.ofSeconds(30);
+    private static final ThreadPoolExecutor DNS = new ThreadPoolExecutor(2, 2, 30, TimeUnit.SECONDS,
+            new ArrayBlockingQueue<>(64), task -> {
+                Thread worker = new Thread(task, "web-public-dns");
+                worker.setDaemon(true);
+                return worker;
+            });
 
     /**
      * 二进制下载（入库用）的上限：与后端 multipart 上限对齐（50MB）。
@@ -362,16 +373,27 @@ public class WebService {
      * 代价是 HTTP 协议要自己写一点点（HTTP/1.0 + Connection: close，正文以 EOF 定界）。
      */
     public FetchResult fetch(String url) {
+        return fetch(url, FETCH_TIMEOUT.toMillis());
+    }
+
+    public FetchResult fetch(String url, long timeoutMs) {
         if (!StringUtils.hasText(url)) {
             throw new IllegalStateException("URL 为空");
         }
+        if (timeoutMs <= 0) throw new IllegalStateException("网页抓取时间预算已用尽");
+        long started = System.nanoTime();
+        long budget = Math.min(timeoutMs, 120_000);
         URI current = parseAndValidate(url.trim());
         int redirects = 0;
         for (;;) {
             // 解析 + 校验 + **固定**：后面所有连接都用这个地址，不再让底层再解析一次
-            InetAddress pinned = resolvePublic(current);
+            long dnsBudget = budget - TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+            InetAddress pinned = resolvePublic(current, dnsBudget);
+            long remaining = budget - java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+            if (remaining <= 0) throw new IllegalStateException("网页抓取时间预算已用尽");
             PinnedHttpClient.Response response = PinnedHttpClient.get(
-                    pinned, current, USER_AGENT, MAX_RESPONSE_BYTES, 15_000, (int) FETCH_TIMEOUT.toMillis());
+                    pinned, current, USER_AGENT, MAX_RESPONSE_BYTES, (int) Math.min(15_000, remaining),
+                    (int) Math.min(FETCH_TIMEOUT.toMillis(), remaining), remaining);
             int code = response.status();
 
             if (code >= 300 && code < 400) {
@@ -409,14 +431,29 @@ public class WebService {
                 throw new IllegalStateException("不认识的 charset：" + charsetName);
             }
             String text = new String(raw, charset);
-            boolean truncated = text.length() > MAX_BODY_CHARS;
-            if (truncated) {
-                text = text.substring(0, MAX_BODY_CHARS);
-            }
             // 非 2xx 也返回：状态码是被抓取资源状态的一部分，不是这次调用的失败
-            String body = "html".equals(kind) ? HtmlToMarkdown.convert(text) : text;
-            return new FetchResult(current.toString(), code, contentType, body, truncated);
+            return extracted(current.toString(), code, contentType, kind, text);
         }
+    }
+
+    /** Validate the browser entry URL without ever letting a failed HTTP validation trigger a fallback. */
+    void validatePublicFetchUrl(String url) {
+        validatePublicFetchUrl(url, FETCH_TIMEOUT.toMillis());
+    }
+
+    void validatePublicFetchUrl(String url, long timeoutMs) {
+        resolvePublic(parseAndValidate(url), timeoutMs);
+    }
+
+    static FetchResult extracted(String url, int status, String contentType, String kind, String text) {
+        String body = "html".equals(kind) ? HtmlToMarkdown.convert(text, url) : text;
+        boolean truncated = body.length() > MAX_BODY_CHARS;
+        if (truncated) {
+            int end = MAX_BODY_CHARS;
+            if (Character.isHighSurrogate(body.charAt(end - 1)) && Character.isLowSurrogate(body.charAt(end))) end--;
+            body = body.substring(0, end);
+        }
+        return new FetchResult(url, status, contentType, body, truncated);
     }
 
     private URI parseAndValidate(String url) {
@@ -449,7 +486,7 @@ public class WebService {
     private InetAddress resolvePublic(URI uri) {
         InetAddress[] addresses;
         try {
-            addresses = InetAddress.getAllByName(uri.getHost());
+            addresses = lookupAddresses(uri.getHost());
         } catch (Exception e) {
             throw new IllegalStateException("域名解析失败：" + uri.getHost());
         }
@@ -460,6 +497,32 @@ public class WebService {
             }
         }
         return addresses[0];
+    }
+
+    InetAddress[] lookupAddresses(String host) throws java.net.UnknownHostException {
+        return InetAddress.getAllByName(host);
+    }
+
+    private InetAddress resolvePublic(URI uri, long timeoutMs) {
+        if (timeoutMs <= 0) throw new IllegalStateException("网页抓取时间预算已用尽");
+        Future<InetAddress> lookup;
+        try { lookup = DNS.submit(() -> resolvePublic(uri)); }
+        catch (java.util.concurrent.RejectedExecutionException busy) {
+            throw new IllegalStateException("网页域名解析繁忙，请稍后重试");
+        }
+        try { return lookup.get(timeoutMs, TimeUnit.MILLISECONDS); }
+        catch (InterruptedException interrupted) {
+            lookup.cancel(true);
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("网页抓取已中断");
+        } catch (TimeoutException timeout) {
+            lookup.cancel(true);
+            throw new IllegalStateException("网页抓取时间预算已用尽");
+        } catch (java.util.concurrent.ExecutionException failure) {
+            Throwable cause = failure.getCause();
+            if (cause instanceof IllegalStateException validation) throw validation;
+            throw new IllegalStateException("网页域名解析失败");
+        }
     }
 
     /** 主机名本身就是 IP 字面量（此时不做 SNI，证书按该 IP 校验） */

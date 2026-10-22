@@ -332,7 +332,7 @@ PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 CREATE TABLE IF NOT EXISTS kg_node (
   id VARCHAR(24) NOT NULL COMMENT '规范实体 id：e-<sha256(归一化名) 前 10 位>',
   name VARCHAR(120) NOT NULL COMMENT '显示名（首次出现时的写法）',
-  norm VARCHAR(120) NOT NULL COMMENT '归一化名：折叠空白/全角转半角/去括注/小写',
+  norm VARCHAR(120) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT '归一化名：折叠空白/全角转半角/去括注/小写',
   type VARCHAR(16) NOT NULL DEFAULT 'concept' COMMENT 'concept/tool/language/framework/command/term',
   aliases VARCHAR(500) NULL COMMENT '别名，用 | 分隔（含括注里的写法）',
   brief VARCHAR(500) NULL COMMENT '一句话说明：它是什么',
@@ -346,6 +346,14 @@ CREATE TABLE IF NOT EXISTS kg_node (
   UNIQUE KEY uk_kg_node_norm (norm),
   KEY idx_kg_node_name (name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='知识图谱节点（实体/概念）';
+
+-- EntityLinker already normalizes names before hashing; the unique key must preserve its remaining distinctions.
+SET @c := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'kg_node' AND COLUMN_NAME = 'norm'
+    AND COLLATION_NAME <> 'utf8mb4_bin');
+SET @ddl := IF(@c > 0,
+  'ALTER TABLE kg_node MODIFY COLUMN norm VARCHAR(120) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT ''归一化名：折叠空白/全角转半角/去括注/小写''', 'DO 0');
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 CREATE TABLE IF NOT EXISTS kg_relation (
   id BIGINT NOT NULL AUTO_INCREMENT,

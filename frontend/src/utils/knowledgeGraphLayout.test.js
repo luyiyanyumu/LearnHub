@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createGraphLayout, fitGraphBounds, placeGraphLabels, reconcileGraphLayout, stepGraphLayout } from './knowledgeGraphLayout.js'
+import { GRAPH_SIMULATION_NODE_LIMIT, createGraphLayout, fitGraphBounds, placeGraphLabels, reconcileGraphLayout, stepGraphLayout } from './knowledgeGraphLayout.js'
 
 const nodes = ['agent', 'rag', 'graph', 'java', 'jvm', 'island'].map((id) => ({ id, label: id, type: 'concept', r: 9 }))
 const edges = [{ source: 'agent', target: 'rag' }, { source: 'rag', target: 'graph' }, { source: 'java', target: 'jvm' }]
@@ -136,4 +136,86 @@ test('selection labels prioritize the selected node and its neighbors instead of
   const labels = placeGraphLabels(selected, view, { focusId: 'selected', neighborIds: new Set(['selected', 'neighbor']) })
   assert.deepEqual(labels.map((label) => label.id), ['selected', 'neighbor'])
   assert.equal(labels[0].text, 'Selected complete concept')
+})
+
+function syntheticOverview(count = 5000) {
+  const nodes = Array.from({ length: count }, (_, index) => ({ id: `synthetic-${index}`, label: `合成概念 ${index}`,
+    type: 'concept', r: 9, degree: 4 }))
+  const edges = nodes.slice(1).map((node, index) => ({ source: nodes[index].id, target: node.id }))
+  const communities = Object.fromEntries(nodes.map((node, index) => [node.id, Math.floor(index / 30)]))
+  return { nodes, edges, communities }
+}
+
+test('a complete 5000-node overview settles without simulation, remains deterministic, and preserves every relationship', () => {
+  const { nodes, edges, communities } = syntheticOverview()
+  const layout = createGraphLayout(nodes, edges, communities)
+  assert.equal(layout.fixed, true)
+  assert.equal(layout.mode, 'overview')
+  assert.equal(layout.positions.size, nodes.length)
+  assert.equal([...layout.adjacency.values()].reduce((sum, neighbors) => sum + neighbors.length, 0), edges.length * 2)
+  for (const state of layout.positions.values()) assert.ok(Object.values(state).every(Number.isFinite))
+  const reversed = createGraphLayout([...nodes].reverse(), [...edges].reverse(), communities)
+  assert.deepEqual(layout.positions, reversed.positions)
+  assert.deepEqual(layout.groups, reversed.groups)
+  const original = structuredClone(layout.positions)
+  for (let tick = 0; tick < 150; tick++) stepGraphLayout(nodes, edges, layout.positions, layout, { alpha: 0.97 ** tick })
+  assert.deepEqual(layout.positions, original, 'a static overview never runs all-pairs repulsion or edge springs')
+  for (let i = 0; i < layout.groups.length; i++) for (let j = i + 1; j < layout.groups.length; j++) {
+    const a = layout.groups[i], b = layout.groups[j]
+    assert.ok(Math.hypot(a.x - b.x, a.y - b.y) >= a.radius + b.radius + 23, 'community bounds do not overlap')
+  }
+})
+
+test('simulation is retained for small graphs and large selected neighborhoods retain their stable rings', () => {
+  const { nodes, edges, communities } = syntheticOverview(GRAPH_SIMULATION_NODE_LIMIT + 1)
+  const small = createGraphLayout(nodes.slice(0, GRAPH_SIMULATION_NODE_LIMIT), edges, communities)
+  assert.equal(small.fixed, false)
+  assert.equal(small.mode, 'simulation')
+  assert.equal(createGraphLayout(nodes, edges, communities).mode, 'overview')
+  const neighborhood = createGraphLayout(nodes, edges, communities, { rootId: nodes[0].id })
+  assert.equal(neighborhood.fixed, true)
+  assert.equal(neighborhood.mode, 'neighborhood')
+  assert.equal(neighborhood.rootId, nodes[0].id)
+  assert.equal(neighborhood.positions.size, nodes.length)
+})
+
+test('large overview fits desktop and narrow screens, with readable labels outside every other node and label', () => {
+  const { nodes, edges, communities } = syntheticOverview()
+  const layout = createGraphLayout(nodes, edges, communities)
+  const world = nodes.map(node => ({ ...node, ...layout.positions.get(node.id) }))
+  for (const [w, h] of [[1000, 650], [375, 640]]) {
+    const view = { w, h, ...fitGraphBounds(world, w, h) }
+    for (const node of world) {
+      assert.ok(view.x + (node.x - node.r) * view.k >= 63)
+      assert.ok(view.x + (node.x + node.r) * view.k <= w - 63)
+      assert.ok(view.y + (node.y - node.r) * view.k >= 63)
+      assert.ok(view.y + (node.y + node.r) * view.k <= h - 63)
+    }
+    const rendered = world.map(node => ({ ...node, r: Math.max(node.r, 4 / view.k) }))
+    const labels = placeGraphLabels(rendered, view)
+    assert.ok(labels.length > 0 && labels.length <= 28)
+    const boxesOverlap = (a, b) => a.left < b.right + 4 && a.right + 4 > b.left && a.top < b.bottom + 3 && a.bottom + 3 > b.top
+    for (const label of labels) {
+      const box = label.screenBox
+      assert.equal(label.fontSize * view.k, 12)
+      assert.ok(box.left > 6 && box.right < w - 6 && box.top > 6 && box.bottom < h - 54)
+      for (const other of labels) if (other.id !== label.id) assert.equal(boxesOverlap(box, other.screenBox), false)
+      for (const other of rendered) if (other.id !== label.id) {
+        const radius = other.r * view.k + 2, x = view.x + other.x * view.k, y = view.y + other.y * view.k
+        // Only visible nodes are label obstacles, matching the rendered viewport.
+        if (x > 10 && y > 10 && x < w - 10 && y < h - 10) {
+          assert.equal(boxesOverlap(box, { left: x - radius, right: x + radius, top: y - radius, bottom: y + radius }), false)
+        }
+      }
+    }
+  }
+})
+
+test('large disconnected overviews pack all islands without candidate searches or duplicate coordinates', () => {
+  const nodes = Array.from({ length: 4500 }, (_, index) => ({ id: `island-${index}`, type: 'concept', r: 9 }))
+  const layout = createGraphLayout(nodes)
+  assert.equal(layout.groups.length, nodes.length)
+  assert.equal(layout.positions.size, nodes.length)
+  assert.equal(new Set([...layout.positions.values()].map(p => `${p.x}:${p.y}`)).size, nodes.length)
+  assert.equal(layout.fixed, true)
 })

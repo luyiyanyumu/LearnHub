@@ -2,6 +2,7 @@ package org.dyh.learnhub.service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.net.URI;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -57,6 +58,10 @@ public final class HtmlToMarkdown {
      * @return 尽量保留结构与代码块的 Markdown 文本
      */
     public static String convert(String html) {
+        return convert(html, null);
+    }
+
+    public static String convert(String html, String pageUrl) {
         if (html == null || html.isEmpty()) {
             return "";
         }
@@ -73,7 +78,8 @@ public final class HtmlToMarkdown {
             withPlaceholders.append(s, last, pre.start());
             String inner = pre.group(1);
             String lang = detectLang(inner) != null ? detectLang(inner) : detectLang(pre.group(0));
-            String code = stripTags(inner).replace("\r\n", "\n").replace('\r', '\n');
+            // HTML wrapper tags contribute no text; replacing <code> with a space would add indentation.
+            String code = TAG.matcher(inner).replaceAll("").replace("\r\n", "\n").replace('\r', '\n');
             code = decodeEntities(code);
             // 去掉每行尾部空格与整体首尾空行；行首缩进保留（代码语义）
             code = code.replaceAll("(?m)[ \t]+$", "").replaceAll("^\\n+", "").replaceAll("\\n+$", "");
@@ -85,8 +91,9 @@ public final class HtmlToMarkdown {
         s = withPlaceholders.toString();
 
         // ② 行内与块级：顺序有意如此（先具体、后笼统）
-        s = IMG.matcher(s).replaceAll(m -> "![](" + m.group(1).trim() + ")");
-        s = A.matcher(s).replaceAll(m -> "[" + stripTags(m.group(2)).trim() + "](" + m.group(1).trim() + ")");
+        s = IMG.matcher(s).replaceAll(m -> Matcher.quoteReplacement("![](" + absolute(m.group(1).trim(), pageUrl) + ")"));
+        s = A.matcher(s).replaceAll(m -> Matcher.quoteReplacement("[" + stripTags(m.group(2)).trim() + "]("
+                + absolute(m.group(1).trim(), pageUrl) + ")"));
         s = CODE.matcher(s).replaceAll(m -> "`" + stripTags(m.group(1)).trim() + "`");
         s = STRONG.matcher(s).replaceAll(m -> "**" + m.group(2).trim() + "**");
         s = EM.matcher(s).replaceAll(m -> "*" + m.group(2).trim() + "*");
@@ -140,6 +147,12 @@ public final class HtmlToMarkdown {
     private static String detectLang(String html) {
         Matcher m = PRE_CLASS.matcher(html);
         return m.find() ? m.group(1).toLowerCase() : null;
+    }
+
+    private static String absolute(String link, String pageUrl) {
+        if (pageUrl == null || pageUrl.isBlank() || link.isBlank()) return link;
+        try { return URI.create(pageUrl).resolve(decodeEntities(link)).toString(); }
+        catch (IllegalArgumentException invalid) { return link; }
     }
 
     private static String stripTags(String s) {

@@ -23,6 +23,10 @@ Windows PowerShell 使用 `Copy-Item .env.example .env` 复制配置模板。启
 | MySQL | `localhost:3307` | `MYSQL_HOST_PORT` |
 | 容器版 Ollama（可选） | `localhost:11434` | `OLLAMA_HOST_PORT` |
 
+Windows 可从仓库根目录运行 `start-all.bat`。每次启动会重启当前 Compose 项目中仍在运行的旧后端，并等待后端健康后再打开网页；本次刚启动或重建的后端不会再次重启。数据库与数据卷保留。普通启动使用已有镜像，修改源码后执行 `start-all.bat build`；`nobrowser nopause` 可用于关闭自动开浏览器与退出暂停。
+
+本地开发使用 `start-all.bat dev` 或 `start-dev.bat`，启动器会重启经绝对 JAR 路径和监听端口确认属于本仓库的 Java 后端，并等待 API 可用。端口被 Docker、其他项目或无法确认归属的旧进程占用时会报错退出；旧启动器通过相对 JAR 路径启动的进程需要先手动退出一次。开发模式使用已打包的 `backend/target/learn-hub-backend-0.0.1-SNAPSHOT.jar`，源码变更后需先重新打包。
+
 ## 模型服务
 
 在「设置 → 模型档案与分工」中管理服务地址、模型名、密钥和用途，再通过「模型分工」指定各任务使用的档案。对话档案用于对话、翻译、主题 wiki 等生成任务；向量嵌入档案用于知识库和图谱的向量索引。智能体会话也可单独选择对话档案。
@@ -206,3 +210,24 @@ curl "http://localhost:18080/api/kb/vector/status"
 ```
 
 上述 curl 多行命令使用 Bash 语法。同步复用当前嵌入空间中已有的向量；更换嵌入服务或模型时，应重建索引。
+
+## 可选动态网页获取
+
+默认 `web_fetch` 先通过 HTTP 获取正文，`web_search` 保持原有搜索方式。需要执行网页自身的 JavaScript 时，可叠加 Scrapling 浏览器服务；无需新增 API key。源码部署在本目录执行：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.web-fetcher.yml up -d --build web-fetcher backend
+```
+
+发布版 Compose 使用包含该功能的后端版本，并从当前仓库构建侧车镜像：
+
+```bash
+docker compose -f docker-compose.release.yml -f docker-compose.web-fetcher.yml build web-fetcher
+docker compose -f docker-compose.release.yml -f docker-compose.web-fetcher.yml up -d web-fetcher backend
+```
+
+发布版仍需原有实例 `.env` 中的版本、数据库与卷配置。覆盖文件不在默认启动链路中；启用后为后端设置 `LEARNHUB_SCRAPLING_URL=http://web-fetcher:8082`，并等待侧车健康。后续更新继续使用相同的两个 `-f` 参数。不要为启用此功能删除数据卷或创建一套新的实例配置。
+
+`web-fetcher` 只在 `learn-hub` 网络提供 8082 端口，不映射到宿主机。容器以非 root 用户运行，使用只读根目录、临时目录和共享内存；没有挂载个人浏览器配置、凭据、业务数据或 Docker socket。配置限额为 2 CPU、1 GiB 内存、256 个进程，`/tmp` 与共享内存各允许 512 MiB；临时内存消耗仍计入容器内存限制。Python 依赖和 Chromium 会增加镜像下载、构建、启动及渲染开销，资源不足时可继续使用 HTTP 获取。
+
+`auto` 仅在 HTTP 返回 403、429、空 HTML 或 JavaScript 页面壳时尝试动态获取，404 不自动渲染。侧车不可用时保留 HTTP 结果并附带 warning；显式 `dynamic` 则返回失败。获取后的正文按会话保存在后端内存中，续读同一快照；重启、到期或缓存淘汰后需要重新获取。接口、缓存边界、独立 JAR 配置及合成示例见 [网页获取说明](../docs/web-fetching.md)。

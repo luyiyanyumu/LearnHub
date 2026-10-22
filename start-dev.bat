@@ -9,7 +9,8 @@ REM  learn-hub local dev mode
 REM
 REM    Use: frontend hot reload (Vite 5174) or debugging the backend jar locally.
 REM          For daily use prefer Docker: start-all.bat (port 8888)
-REM    Needs: Node.js (npm) and JDK 17+ locally; backend jar already built
+REM    Needs: Node.js (npm) and JDK 21+ locally; backend jar already built
+REM    Each start restarts this project's local Java backend, then waits for its API.
 REM
 REM    default     : backend + frontend run in background, no console window
 REM                  output written to logs\backend.log and logs\frontend.log
@@ -20,8 +21,14 @@ REM  the real work is done by tools\run-backend.cmd and tools\run-frontend.cmd
 REM ============================================================
 
 set "SHOW=0"
-if /i "%~1"=="show"  set "SHOW=1"
-if /i "%~1"=="debug" set "SHOW=1"
+set "OPEN=1"
+set "NOPAUSE=0"
+if not "%~1"=="" for %%a in (%*) do (
+    if /i "%%a"=="show" set "SHOW=1"
+    if /i "%%a"=="debug" set "SHOW=1"
+    if /i "%%a"=="nobrowser" set "OPEN=0"
+    if /i "%%a"=="nopause" set "NOPAUSE=1"
+)
 
 set "BE_EXPECT=0"
 set "FE_EXPECT=0"
@@ -48,16 +55,30 @@ if exist "deploy\.env" for /f "usebackq tokens=1,* delims==" %%a in ("deploy\.en
 docker info >nul 2>&1
 if not errorlevel 1 goto :docker_ok
 echo   Docker not running; starting Docker Desktop (~30s on first run)...
-start "" "%LocalAppData%\Programs\DockerDesktop\Docker Desktop.exe"
+set "DDPATH=%LocalAppData%\Programs\DockerDesktop\Docker Desktop.exe"
+if not exist "%DDPATH%" set "DDPATH=C:\Program Files\Docker\Docker\Docker Desktop.exe"
+if not exist "%DDPATH%" goto :docker_unavailable
+start "" "%DDPATH%"
+set /a waited=0
 :waitdocker
 timeout /t 3 /nobreak >nul
+set /a waited+=3
 docker info >nul 2>&1
-if errorlevel 1 goto :waitdocker
+if not errorlevel 1 goto :docker_ok
+if %waited% geq 180 goto :docker_unavailable
+goto :waitdocker
+
+:docker_unavailable
+echo   [ERROR] Docker Desktop is unavailable or did not become ready within 180s
+set "SOME_FAIL=1"
+goto :summary
+
 :docker_ok
 
 docker inspect %MYSQL_NAME% >nul 2>&1
 if errorlevel 1 goto :no_mysql
 docker start %MYSQL_NAME% >nul 2>&1
+if errorlevel 1 goto :mysql_start_failed
 echo   MySQL container %MYSQL_NAME% ready (port %MYSQL_PORT%)
 goto :step_backend
 
@@ -67,12 +88,14 @@ echo   Deploy first: start-all.bat build
 set "SOME_FAIL=1"
 goto :summary
 
+:mysql_start_failed
+echo   [ERROR] MySQL container %MYSQL_NAME% could not be started
+set "SOME_FAIL=1"
+goto :summary
+
 REM ---------- 2. backend ----------
 :step_backend
 echo [2/4] starting backend (port 18080)...
-call :port_listening 18080
-if not errorlevel 1 goto :backend_running
-
 if not exist "backend\target\learn-hub-backend-0.0.1-SNAPSHOT.jar" goto :backend_no_jar
 
 set "JAVA_OK="
@@ -83,9 +106,14 @@ if not errorlevel 1 set "JAVA_OK=1"
 if not defined JAVA_OK goto :backend_no_java
 
 :backend_launch
+REM Never stop an arbitrary listener: the helper verifies Java and this exact JAR.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\restart-local-backend.ps1"
+if errorlevel 1 goto :backend_restart_failed
 if not exist "logs" mkdir "logs"
 if "%SHOW%"=="1" goto :backend_show
-powershell -NoProfile -Command "Start-Process -FilePath '%~dp0tools\run-backend.cmd' -WindowStyle Hidden"
+set "LEARNHUB_BACKEND_RUNNER=%~dp0tools\run-backend.cmd"
+powershell -NoProfile -Command "Start-Process -FilePath $env:LEARNHUB_BACKEND_RUNNER -WindowStyle Hidden"
+if errorlevel 1 goto :backend_launch_failed
 echo   backend started in background (no window); log: logs\backend.log
 set "BE_EXPECT=1"
 goto :step_frontend
@@ -96,11 +124,15 @@ echo   backend window started (debug mode, not logged)
 set "BE_EXPECT=1"
 goto :step_frontend
 
-:backend_running
-echo   port 18080 already listening; skip start
-echo   NOTE: if this is the learn-hub-backend container, run: docker stop learn-hub-backend
-set "BE_EXPECT=1"
-goto :step_frontend
+:backend_restart_failed
+echo   [ERROR] backend restart was refused or failed; no other listener was stopped
+set "SOME_FAIL=1"
+goto :summary
+
+:backend_launch_failed
+echo   [ERROR] could not launch the local backend; see output above
+set "SOME_FAIL=1"
+goto :summary
 
 :backend_no_jar
 echo   [ERROR] backend\target\learn-hub-backend-0.0.1-SNAPSHOT.jar not found
@@ -110,7 +142,7 @@ set "SOME_FAIL=1"
 goto :step_frontend
 
 :backend_no_java
-echo   [ERROR] java not found. Install JDK 17+ then reopen this window
+echo   [ERROR] java not found. Install JDK 21+ then reopen this window
 set "SOME_FAIL=1"
 goto :step_frontend
 
@@ -156,12 +188,12 @@ goto :step_wait
 
 REM ---------- 4. waiting for ready ----------
 :step_wait
-echo [4/4] waiting for services (up to 60s)...
+echo [4/4] waiting for the backend API and frontend (up to 30 checks)...
 set /a tries=0
 :waitloop
 set "BE_UP="
 set "FE_UP="
-call :port_listening 18080
+call :backend_ready
 if not errorlevel 1 set "BE_UP=1"
 call :port_listening 5174
 if not errorlevel 1 set "FE_UP=1"
@@ -188,7 +220,8 @@ if not defined FE_UP if not "%FE_EXPECT%"=="1" echo     frontend 5174 : not star
 if "%BE_EXPECT%"=="1" if not defined BE_UP set "SOME_FAIL=1"
 if "%FE_EXPECT%"=="1" if not defined FE_UP set "SOME_FAIL=1"
 
-if defined FE_UP start http://localhost:5174
+if defined SOME_FAIL goto :summary
+if "%OPEN%"=="1" if defined FE_UP start "" http://localhost:5174
 
 :summary
 echo.
@@ -205,11 +238,17 @@ echo   Stop all: stop-all.bat
 echo   Show windows (debug): start-dev.bat show
 echo   Daily use (Docker): start-all.bat
 echo ============================================
-pause
+if not "%NOPAUSE%"=="1" pause
+if defined SOME_FAIL exit /b 1
 exit /b 0
 
 REM ---------- helpers ----------
 :port_listening
 REM %1 = port number; errorlevel 0 means the port is listening
 netstat -ano | findstr /r /c:":%~1 .*LISTENING" >nul
+exit /b %errorlevel%
+
+:backend_ready
+REM An open TCP port can precede Spring/Flyway readiness. Read only one page.
+powershell -NoProfile -Command "try { $r = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:18080/api/files/page?page=1&size=1' -TimeoutSec 2; if ($r.StatusCode -eq 200) { exit 0 }; exit 1 } catch { exit 1 }" >nul 2>&1
 exit /b %errorlevel%

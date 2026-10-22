@@ -1,29 +1,55 @@
 /** Cache content coordinates; scrolling changes viewport coordinates, not this layout. */
 export function createPreviewGeometryCache() {
-  let currentHost = null, currentWidth = 0, geometry = null
-  return {
-    invalidate() { geometry = null },
-    read(host) {
-      if (!host) return { headings: [], anchors: [] }
-      if (geometry && host === currentHost && host.clientWidth === currentWidth) return geometry
+  let currentHost = null, currentWidth = 0, layout = null
+  const currentLayout = host => {
+    if (!layout || host !== currentHost || host.clientWidth !== currentWidth) {
       currentHost = host
       currentWidth = host.clientWidth
-      const origin = host.getBoundingClientRect().top + host.clientTop - host.scrollTop
-      const measured = new Map()
-      const rect = element => {
-        if (!measured.has(element)) measured.set(element, element.getBoundingClientRect())
-        return measured.get(element)
+      layout = { headings: null, geometry: null, measured: new Map() }
+    }
+    return layout
+  }
+  const measureContent = (host, current) => {
+    let origin
+    return element => {
+      if (!current.measured.has(element)) {
+        origin ??= host.getBoundingClientRect().top + host.clientTop - host.scrollTop
+        const bounds = element.getBoundingClientRect()
+        // Store content coordinates so a later anchor read can reuse headings
+        // even when the pane has scrolled since they were first measured.
+        current.measured.set(element, { top: bounds.top - origin, height: bounds.height })
       }
-      const headings = [...host.querySelectorAll('.md-editor-preview h1, .md-editor-preview h2, .md-editor-preview h3, .tiptap h1, .tiptap h2, .tiptap h3')]
+      return current.measured.get(element)
+    }
+  }
+  const readHeadings = (host, current, rect) => {
+    if (!current.headings) {
+      current.headings = [...host.querySelectorAll('.md-editor-preview h1, .md-editor-preview h2, .md-editor-preview h3, .tiptap h1, .tiptap h2, .tiptap h3')]
         .flatMap((element, index) => {
           const bounds = rect(element)
-          return bounds.height > 0 ? [{ index, top: bounds.top - origin }] : []
+          return bounds.height > 0 ? [{ index, top: bounds.top }] : []
         })
+    }
+    return current.headings
+  }
+  return {
+    invalidate() { layout = null },
+    readHeadings(host) {
+      if (!host) return []
+      const current = currentLayout(host)
+      return readHeadings(host, current, measureContent(host, current))
+    },
+    read(host) {
+      if (!host) return { headings: [], anchors: [] }
+      const current = currentLayout(host)
+      if (current.geometry) return current.geometry
+      const rect = measureContent(host, current)
+      const headings = readHeadings(host, current, rect)
       const candidates = [...host.querySelectorAll('.md-editor-preview [data-line], .tiptap [data-line]')]
         .flatMap(element => {
           const line = Number(element.dataset.line), bounds = rect(element)
           return Number.isInteger(line) && line >= 0 && bounds.height > 0
-            ? [{ line, preview: bounds.top - origin }] : []
+            ? [{ line, preview: bounds.top }] : []
         }).sort((a, b) => a.line - b.line)
       const anchors = []
       for (const point of candidates) {
@@ -31,8 +57,8 @@ export function createPreviewGeometryCache() {
         if (previous && (point.line <= previous.line || point.preview < previous.preview)) continue
         anchors.push(point)
       }
-      geometry = { headings, anchors }
-      return geometry
+      current.geometry = { headings, anchors }
+      return current.geometry
     },
   }
 }

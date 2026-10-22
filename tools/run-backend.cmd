@@ -15,27 +15,31 @@ if errorlevel 1 (
 set "JAVA_BIN=java"
 if defined JAVA_HOME if exist "%JAVA_HOME%\bin\java.exe" set "JAVA_BIN=%JAVA_HOME%\bin\java.exe"
 
-set "JAR=target\learn-hub-backend-0.0.1-SNAPSHOT.jar"
+REM Absolute JAR identity lets the launcher distinguish this backend from other projects.
+set "JAR=%CD%\target\learn-hub-backend-0.0.1-SNAPSHOT.jar"
 set "LOGDIR=%~dp0..\logs"
 
-if /i "%~1"=="visible" (
-    echo [后端] %JAVA_BIN% -Dserver.port=18080 -jar %JAR%
-    "%JAVA_BIN%" -Dserver.port=18080 -jar "%JAR%"
-    echo.
-    echo [后端] 进程已退出，退出码 %errorlevel%
-    exit /b %errorlevel%
-)
+if /i "%~1"=="visible" goto :visible
 
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 if exist "%LOGDIR%\backend.log" move /y "%LOGDIR%\backend.log" "%LOGDIR%\backend.prev.log" >nul
 
 echo [后端] 启动时间 %DATE% %TIME% >  "%LOGDIR%\backend.log"
-echo [后端] 工作目录 %CD% >> "%LOGDIR%\backend.log"
+echo [后端] 工作目录 "%CD%" >> "%LOGDIR%\backend.log"
 "%JAVA_BIN%" -version >> "%LOGDIR%\backend.log" 2>&1
-echo [后端] 命令：%JAVA_BIN% -Dserver.port=18080 -jar %JAR% >> "%LOGDIR%\backend.log"
+echo [后端] 命令："%JAVA_BIN%" -Dserver.port=18080 -jar "%JAR%" >> "%LOGDIR%\backend.log"
 echo ------------------------------------------------------------ >> "%LOGDIR%\backend.log"
 
 "%JAVA_BIN%" -Dserver.port=18080 -jar "%JAR%" >> "%LOGDIR%\backend.log" 2>&1
+set "BACKEND_RC=%errorlevel%"
 echo ------------------------------------------------------------ >> "%LOGDIR%\backend.log"
-echo [后端] 进程已退出，退出码 %errorlevel% >> "%LOGDIR%\backend.log"
-exit /b %errorlevel%
+echo [后端] 进程已退出，退出码 %BACKEND_RC% >> "%LOGDIR%\backend.log"
+exit /b %BACKEND_RC%
+
+:visible
+echo [后端] "%JAVA_BIN%" -Dserver.port=18080 -jar "%JAR%"
+"%JAVA_BIN%" -Dserver.port=18080 -jar "%JAR%"
+set "BACKEND_RC=%errorlevel%"
+echo.
+echo [后端] 进程已退出，退出码 %BACKEND_RC%
+exit /b %BACKEND_RC%

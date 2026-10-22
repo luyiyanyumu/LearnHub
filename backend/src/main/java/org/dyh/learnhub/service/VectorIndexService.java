@@ -270,10 +270,14 @@ public class VectorIndexService {
     private final Map<String, Job> jobs = new ConcurrentHashMap<>();
 
     public Map<String, Object> startRebuild() {
-        Job job = new Job(UUID.randomUUID().toString().substring(0, 8));
-        jobs.put(job.id, job);
-        runner.submit(() -> rebuild(job));
-        return jobView(job.id);
+        // A timed-out observer or a manual click can rejoin the existing job instead of rebuilding twice.
+        synchronized (jobs) {
+            for (Job existing : jobs.values()) if ("running".equals(existing.status)) return jobView(existing.id);
+            Job job = new Job(UUID.randomUUID().toString().substring(0, 8));
+            jobs.put(job.id, job);
+            runner.submit(() -> rebuild(job));
+            return jobView(job.id);
+        }
     }
 
     public Map<String, Object> jobView(String id) {
@@ -638,6 +642,12 @@ public class VectorIndexService {
     private final java.util.concurrent.atomic.AtomicBoolean autoQueued =
             new java.util.concurrent.atomic.AtomicBoolean(false);
     private volatile long lastAutoRunAt = 0;
+    private org.springframework.beans.factory.ObjectProvider<KnowledgeMaintenanceService> maintenance;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setMaintenanceProvider(org.springframework.beans.factory.ObjectProvider<KnowledgeMaintenanceService> provider) {
+        this.maintenance = provider;
+    }
 
     public boolean autoIndexEnabled() {
         EmbeddingClient.Snapshot target = embedder.snapshot();
@@ -656,16 +666,14 @@ public class VectorIndexService {
             phase = org.springframework.transaction.event.TransactionPhase.AFTER_COMMIT,
             fallbackExecution = true)
     public void onKnowledgeChanged(org.dyh.learnhub.common.KnowledgeChangedEvent event) {
+        // The server coordinator owns automatic scheduling, including pause and recovery.
+        if (maintenance != null && maintenance.getIfAvailable() != null) return;
         if (!autoIndexEnabled()) {
             return;
         }
         long since = System.currentTimeMillis() - lastAutoRunAt;
-        if (since < AUTO_INDEX_MIN_GAP_MS) {
-            // 刚跑过就跳过：短时间内高频改动没必要每次都扫（下次事件会再来）
-            return;
-        }
         if (autoQueued.compareAndSet(false, true)) {
-            scheduler.schedule(this::runAutoIndex, AUTO_INDEX_DEBOUNCE_MS,
+            scheduler.schedule(this::runAutoIndex, Math.max(AUTO_INDEX_DEBOUNCE_MS, AUTO_INDEX_MIN_GAP_MS - since),
                     java.util.concurrent.TimeUnit.MILLISECONDS);
         }
     }

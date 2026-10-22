@@ -121,4 +121,16 @@ public interface KbChunkMapper extends BaseMapper<KbChunk> {
             + "FROM file_info f LEFT JOIN category c ON c.id = f.category_id "
             + "WHERE f.text_status = 'ok' AND f.text_content IS NOT NULL")
     List<Map<String, Object>> allFiles();
+
+    /** Lock and recheck the source after model extraction, before advancing an automatic graph checkpoint. */
+    @Select("SELECT id, title, content FROM note WHERE id = #{id} FOR UPDATE")
+    Map<String, Object> maintenanceNote(@Param("id") Long id);
+
+    @Select("SELECT id, title, content FROM quick_ref WHERE id = #{id} FOR UPDATE")
+    Map<String, Object> maintenanceRef(@Param("id") Long id);
+
+    @Select("SELECT id, origin_name AS title, CASE WHEN text_status = 'ok' AND text_content IS NOT NULL THEN "
+            + "CONCAT(IFNULL(summary, ''), CASE WHEN IFNULL(summary,'') = '' THEN '' ELSE '\\n' END, "
+            + "IFNULL(text_content, '')) ELSE '' END AS content FROM file_info WHERE id = #{id} FOR UPDATE")
+    Map<String, Object> maintenanceFile(@Param("id") Long id);
 }

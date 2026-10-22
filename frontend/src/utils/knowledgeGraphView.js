@@ -1,4 +1,13 @@
 /** Keep the exploration filters and hop expansion consistent with the visible graph. */
+export function graphCommunityOptions(nodes, groups) {
+  const byId = new Map(nodes.map(node => [node.id, node]))
+  return groups.map(group => ({ ...group,
+    title: (group.nodeIds || []).map(id => byId.get(id)).filter(Boolean)
+      .sort((a, b) => (b.degree || 0) - (a.degree || 0)).slice(0, 2)
+      .map(node => node.label || node.name || node.id).join(' / ') || `社区 #${group.communityId}`,
+  }))
+}
+
 export function filterConceptGraph(nodes, edges, { relations = null, origin = 'all', community = '', communities = {}, focus = null, showIsolated = false } = {}) {
   const allowed = new Set(nodes.filter(n => community === '' || String(communities[n.id]) === String(community)).map(n => n.id))
   const shownEdges = edges.filter(e => allowed.has(e.source) && allowed.has(e.target)

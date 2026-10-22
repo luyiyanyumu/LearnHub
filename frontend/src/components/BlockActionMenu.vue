@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, toRaw } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   addActionBlockBelow, canIndentActionBlock, convertActionBlock, deleteActionBlock,
@@ -67,6 +67,10 @@ function choose(item) {
   if (!item) return
   const target = createBlockTarget(props.editor.state.doc, item.pos)
   if (!target) return
+  // Keep the original node snapshot while merely moving within the same block.
+  // After an edit, a new node at the same position must become a fresh target.
+  if (active.value?.pos === target.pos && active.value.dom === item.dom
+    && toRaw(active.value.node) === target.node) return
   active.value = { ...target, dom: item.dom }
   scheduleLocation()
 }
@@ -222,23 +226,32 @@ function menuKeydown(event) {
     : (index + (event.key === 'ArrowUp' ? -1 : 1) + buttons.length) % buttons.length
   buttons[next]?.focus()
 }
-function scrollChanged() { close(); if (active.value) scheduleLocation() }
+// The grip uses coordinates within host, so host and block move together on
+// scroll. Only layout changes need fresh geometry.
+function scrollChanged() { close() }
+function layoutChanged() { close(); if (active.value) scheduleLocation() }
 let scroller = null
+let hostResizeObserver = null
 onMounted(() => {
   props.editor.on('selectionUpdate', selectionChanged)
   props.editor.on('transaction', transactionChanged)
   document.addEventListener('pointerdown', outside, true)
-  window.addEventListener('resize', scrollChanged)
+  window.addEventListener('resize', layoutChanged)
   scroller = props.host?.closest('.pv-scroll')
   scroller?.addEventListener('scroll', scrollChanged, { passive: true })
+  if (props.host) {
+    hostResizeObserver = new ResizeObserver(layoutChanged)
+    hostResizeObserver.observe(props.host)
+  }
 })
 onBeforeUnmount(() => {
   if (clipboardTarget) clipboardTarget.deleted = true
   props.editor.off('selectionUpdate', selectionChanged)
   props.editor.off('transaction', transactionChanged)
   document.removeEventListener('pointerdown', outside, true)
-  window.removeEventListener('resize', scrollChanged)
+  window.removeEventListener('resize', layoutChanged)
   scroller?.removeEventListener('scroll', scrollChanged)
+  hostResizeObserver?.disconnect()
   clearTimeout(leaveTimer)
   cancelAnimationFrame(locationFrame)
   locationFrame = 0

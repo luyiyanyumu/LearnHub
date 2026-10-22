@@ -149,6 +149,30 @@ class AgentLoopContextTest {
         assertEquals(before, json.valueToTree(messages));
     }
 
+    @Test void finalAnswerKeepsWebSnapshotCoverageWhenItsContentNeedsExcerpting() throws Exception {
+        List<Object> messages = conversation("small", "one", "two");
+        ObjectNode body = json.createObjectNode().put("ok", true).put("page_id", "synthetic-page")
+                .put("url", "https://example.invalid/article").put("offset", 8000).put("next_offset", 16000)
+                .put("total_chars", 64000).put("has_more", true).put("source_truncated", false)
+                .put("fetch_mode", "dynamic").put("content", "合成网页正文 ".repeat(30_000));
+        ((ObjectNode) messages.get(3)).put("name", "web_fetch").put("content", body.toString());
+        JsonNode before = json.valueToTree(messages);
+
+        List<Object> finalMessages = AgentLoopContext.forFinalAnswer(messages, json, "请核对合成资料");
+
+        JsonNode tool = finalMessages.stream().map(message -> (JsonNode) json.valueToTree(message))
+                .filter(node -> "call-old".equals(node.path("tool_call_id").asText())).findFirst().orElseThrow();
+        JsonNode visible = json.readTree(tool.path("content").asText());
+        assertEquals("synthetic-page", visible.path("page_id").asText());
+        assertEquals(16000, visible.path("next_offset").asInt());
+        assertTrue(visible.path("has_more").asBoolean());
+        assertFalse(visible.path("source_truncated").asBoolean());
+        assertEquals(64000, visible.path("total_chars").asInt());
+        assertEquals("dynamic", visible.path("fetch_mode").asText());
+        assertEquals(before, json.valueToTree(messages));
+        assertFinalBudget(finalMessages);
+    }
+
     @Test void finalAnswerTrimsHugeLatestSingleBatchIncludingHistoricalArguments() throws Exception {
         String question = "请总结合成单批材料，但不要执行新操作。";
         ObjectNode latestCall = call("latest-call");

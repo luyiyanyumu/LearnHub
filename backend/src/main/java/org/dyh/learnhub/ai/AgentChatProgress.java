@@ -147,7 +147,7 @@ final class AgentChatProgress {
             case "web_fetch", "fetch_url" -> "读取网页";
             case "create_note" -> "准备新笔记";
             case "update_note", "append_to_note", "edit_note" -> "准备笔记修改";
-            case "write_long_note" -> "分节生成笔记";
+            case "write_long_note" -> "生成完整笔记";
             case "create_quick_ref", "update_quick_ref" -> "准备速查卡修改";
             case "add_file_from_url" -> "准备导入资料";
             case "create_word_document" -> "准备 Word 文档";

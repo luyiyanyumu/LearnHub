@@ -12,15 +12,23 @@ test('unconfigured and disabled embeddings leave keyword retrieval available wit
   assert.doesNotMatch(unconfigured.description, /BGE|Ollama/i)
 })
 
-test('changed model spaces require explicit rebuilding and never describe incompatible vectors as available', () => {
-  const view = knowledgeIndexView({ configured: true, enabled: true, chunks: 20, compatibleChunks: 0, embeddingChanged: true, stale: true })
-  assert.equal(view.label, '嵌入索引需重建')
+test('changed model spaces wait for backend maintenance and never describe incompatible vectors as available', () => {
+  const view = knowledgeIndexView({ configured: true, enabled: true, chunks: 20, compatibleChunks: 0, embeddingChanged: true, stale: true }, false, { enabled: true, pending: true, message: '模型变更已排队，等待后台更新' })
+  assert.equal(view.label, '嵌入索引待更新')
   assert.equal(view.keywordOnly, true)
   assert.equal(view.canRebuild, true)
   assert.equal(view.warning, true)
-  assert.match(view.description, /手动重建/)
+  assert.match(view.description, /模型变更已排队/)
+  assert.doesNotMatch(view.description, /手动重建|已更新完成/)
   assert.equal(knowledgeIndexView({ chunks: 20, compatibleChunks: 8, stale: true }).keywordOnly, false)
   assert.equal(knowledgeIndexView({ chunks: 20, compatibleChunks: 8, stale: true }).label, '索引待更新')
+})
+
+test('disabled or unread maintenance never promises an automatic rebuild', () => {
+  const stale = { configured: true, chunks: 20, compatibleChunks: 0, stale: true }
+  assert.match(knowledgeIndexView(stale, false, { enabled: false }).description, /自动维护已关闭/)
+  assert.doesNotMatch(knowledgeIndexView(stale, false, { enabled: false }).description, /后台会自动/)
+  assert.match(knowledgeIndexView(stale).description, /查看后台更新状态/)
 })
 
 test('new and legacy status snapshots distinguish no index, ready, loading and unavailable', () => {

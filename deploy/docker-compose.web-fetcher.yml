@@ -1,0 +1,47 @@
+# Optional browser-backed fetching. Use with docker-compose.yml or
+# docker-compose.release.yml; the default stack does not depend on this service.
+# docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.web-fetcher.yml up -d --build web-fetcher backend
+services:
+  backend:
+    environment:
+      LEARNHUB_SCRAPLING_URL: http://web-fetcher:8082
+    depends_on:
+      web-fetcher:
+        condition: service_healthy
+
+  web-fetcher:
+    build:
+      context: ..
+      dockerfile: tools/web-fetcher/Dockerfile
+    image: learn-hub-web-fetcher:local
+    restart: unless-stopped
+    init: true
+    user: "10001:10001"
+    environment:
+      HOME: /tmp/web-fetcher-home
+      XDG_CACHE_HOME: /tmp/web-fetcher-cache
+      PYTHONDONTWRITEBYTECODE: "1"
+    # Internal service only: no host port, Docker socket, browser profile,
+    # application data or credentials are mounted into this container.
+    expose: ["8082"]
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777,nosuid,nodev
+    shm_size: 512mb
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 1g
+    cpus: 2
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "2"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8082/health', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks: [learn-hub]

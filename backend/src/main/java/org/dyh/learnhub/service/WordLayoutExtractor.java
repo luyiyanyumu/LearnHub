@@ -12,7 +12,6 @@ import javax.xml.parsers.ParserConfigurationException;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -64,7 +63,6 @@ public class WordLayoutExtractor {
     }
 
     private Parsed parse(Path path) throws IOException {
-        if (Files.size(path) > 20L * 1024 * 1024) throw new IOException("Word 文件超过 20 MiB，未抽取正文");
         Parsed out = new Parsed();
         try (ZipFile zip = new ZipFile(path.toFile())) {
             List<? extends ZipEntry> entries = zip.stream().toList();

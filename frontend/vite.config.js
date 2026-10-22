@@ -68,6 +68,7 @@ export default defineConfig({
       'element-plus/es/components/radio-button/style/css',
       'element-plus/es/components/radio-group/style/css',
       'element-plus/es/components/select/style/css',
+      'element-plus/es/components/select-v2/style/css',
       'element-plus/es/components/slider/style/css',
       'element-plus/es/components/switch/style/css',
       'element-plus/es/components/tab-pane/style/css',

@@ -1,6 +1,8 @@
 package org.dyh.learnhub.entity;
 
 import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.FieldStrategy;
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
@@ -45,7 +47,8 @@ public class FileInfo {
     /** 正文字数（列表展示用，避免把 MEDIUMTEXT 拉回来） */
     private Integer textChars;
 
-    /** 抽取失败/跳过的原因，界面展示与排查用 */
+    /** 抽取失败/跳过的原因；重抽成功时必须将旧原因显式清空。 */
+    @TableField(updateStrategy = FieldStrategy.ALWAYS)
     private String textError;
 
     /**

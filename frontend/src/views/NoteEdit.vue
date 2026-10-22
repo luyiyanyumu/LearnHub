@@ -1334,6 +1334,7 @@ async function scrollToHeading(idx) {
 
 let scrollRaf = 0
 const previewGeometry = createPreviewGeometryCache()
+const outlineVisible = computed(() => outlineDrawer.value || (layoutMode.value === 'wide' && outlineOpen.value))
 function onPreviewLayoutChange() {
   previewGeometry.invalidate()
   if (!props.active || !showPreviewPane.value) return
@@ -1346,14 +1347,20 @@ function onPreviewScroll() {
   if (pv && scrollSyncSource === 'preview') {
     queueScrollSync()
   }
-  if (scrollRaf) return
+  if (!outlineVisible.value || scrollRaf) return
   scrollRaf = requestAnimationFrame(() => {
     scrollRaf = 0
     const el = pvScrollRef.value
-    if (!el || !props.active || !showPreviewPane.value) return
-    activeIdx.value = activeHeadingIndex(previewGeometry.read(el).headings, el.scrollTop + 40)
+    if (!el || !props.active || !showPreviewPane.value || !outlineVisible.value) return
+    activeIdx.value = activeHeadingIndex(previewGeometry.readHeadings(el), el.scrollTop + 40)
   })
 }
+watch([outlineVisible, showPreviewPane, () => props.active], ([shown, preview, active]) => {
+  // Reopening the outline must reflect the current reading position without
+  // waiting for another scroll. Hidden outlines do no per-frame work.
+  if (shown && preview && active) nextTick(onPreviewScroll)
+  else if (scrollRaf) { cancelAnimationFrame(scrollRaf); scrollRaf = 0 }
+})
 
 // ---- 源码区 ↔ 预览区：按相同内容块在两侧的实际像素位置联动 ----
 // 逻辑行号只用于配对。长段落软换行、代码块、表格的高度不同，不能按行数插值。

@@ -18,17 +18,38 @@ import java.util.function.BiFunction;
 import java.util.function.BiConsumer;
 import java.util.regex.Pattern;
 
-/** Persisted, source-backed executable workflows; model proposals never bypass server review. */
+/**
+ * Persisted, source-backed executable workflows; model proposals never bypass server review.
+ *
+ * <p>中文说明：自适应工具的注册表与生命周期管理。模型可以「提议」新工具定义，但提议必须经过
+ * 本类的服务器端审核、来源校验与测试，才会被持久化成可执行工具。
+ *
+ * <p>这是「模型能改自己可用工具」这条高风险通路上唯一的把关点，四条铁律：
+ * <ol>
+ *   <li>提议不等于授权：{@code test}/{@code evolve} 会独立复核定义与来源，不信任模型自述；</li>
+ *   <li>工具必须有真实来源背书（{@code source_refs} 与能力缺口说明），不允许凭空造工具；</li>
+ *   <li>注册表有数量与体积上限，防止无限膨胀；</li>
+ *   <li>版本号做乐观并发，避免并行提议互相覆盖。</li>
+ * </ol>
+ */
 @Service
 public class ToolEvolutionService {
     private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(ToolEvolutionService.class);
+    /** 注册表在设置表中的存储键；改它会「丢失」已有自适应工具，属破坏性变更。 */
     static final String REGISTRY_KEY = "agent.adaptive_tools.v1";
+    /** 自适应工具数量上限，超出后需要先清理旧工具。 */
     private static final int MAX_TOOLS = 12;
+    /** 整个注册表序列化后的字符上限。 */
     private static final int MAX_REGISTRY_CHARS = 512_000;
+    /** 单个工具参数 schema 的字符上限。 */
     private static final int MAX_SCHEMA_CHARS = 6_000;
+    /** 能力目录 schema 的字符上限（喂给模型的清单，用于控制提示词体量）。 */
     private static final int MAX_CATALOG_SCHEMA_CHARS = 24_000;
+    /** 单个工具执行计划的字符上限。 */
     private static final int MAX_PLAN_CHARS = 32_000;
+    /** 工具内嵌源码的字符上限。 */
     private static final int MAX_CODE_CHARS = 24_000;
+    /** 控制类工具名：它们负责「管理工具」，本身不参与进化，避免自我增殖。 */
     private static final Set<String> CONTROL_TOOLS = Set.of("inspect_capabilities", "test_adaptive_tool", "evolve_tool", "manage_adaptive_tool");
     private static final Set<String> DEFINITION_FIELDS = Set.of("name", "description", "gap", "extends_tool", "expected_version", "parameters", "steps", "output", "source_refs", "tests", "capability_key", "distinct_reason");
     private static final Pattern NAME = Pattern.compile("adaptive_[a-z][a-z0-9_]{2,47}");
@@ -97,6 +118,14 @@ public class ToolEvolutionService {
         return test(proposal, builtins, writes, null);
     }
 
+    /**
+     * 中文说明：试运行一个工具提议——不写注册表、不触碰真实业务原语。
+     *
+     * <p>流程为「定义复核 → 来源校验 → 源码分析 → 跑合成测试 → 产出指纹」。
+     * 返回值恒为 {@code registered=false}，即本方法不产生副作用；真正落库见 {@link #evolve}。
+     *
+     * @param observer 可选的观测回调，用于把工具与参数事件透出给前端；可为 null
+     */
     public Map<String, Object> test(JsonNode proposal, List<Object> builtins, Set<String> writes, BiConsumer<String, JsonNode> observer) {
         try {
             long started = System.nanoTime();
@@ -116,6 +145,19 @@ public class ToolEvolutionService {
         }
     }
 
+    /**
+     * 中文说明：把已通过复核的提议正式注册为自适应工具——这是唯一会写注册表的入口。
+     *
+     * <p>三点值得注意：
+     * <ul>
+     *   <li>{@code synchronized}：整段「读注册表 → 改 → 写回」必须原子，否则并行提议会互相丢更新；</li>
+     *   <li>方法内部会重新完整复核并重跑测试，不复用 {@link #test} 的旧结论（防 TOCTOU）；</li>
+     *   <li>配合 {@code expected_version} 做乐观锁，版本不匹配直接拒绝，避免覆盖他人改动。</li>
+     * </ul>
+     *
+     * @param writes    当前会话被授权可写的范围，用于收敛工具副作用
+     * @param sessionId 触发进化的会话，用于审计留痕
+     */
     public synchronized Map<String, Object> evolve(JsonNode proposal, List<Object> builtins, Set<String> writes, String sessionId) {
         return evolve(proposal, builtins, writes, sessionId, null);
     }
@@ -287,6 +329,15 @@ public class ToolEvolutionService {
         catch (RuntimeException e) { LOG.warn("自适应工具运行记录未保存：{} v{}", name, version); }
     }
 
+    /**
+     * 中文说明：核验工具定义里声明的 {@code source_refs} 是否真实存在且内容未变。
+     *
+     * <p>这是「工具必须有来源背书」的落地检查：逐条比对 {@code path + sha256} 与当前源码快照，
+     * 只要有一条对不上就拒绝注册。这样模型无法凭空编造一个「基于某实现」的工具，
+     * 也无法在源码改动后继续用过期的事实声称工具仍然成立。
+     *
+     * @throws IllegalArgumentException 引用缺失、数量越界、源码不可用或指纹不匹配
+     */
     private void validateSource(JsonNode def, List<Object> builtins) {
         JsonNode refs = def.path("source_refs");
         if (!refs.isArray() || refs.isEmpty() || refs.size() > 8) throw new IllegalArgumentException("需要 1~8 项实际读取的 source_refs（path 与 sha256）");
@@ -302,6 +353,15 @@ public class ToolEvolutionService {
         }
     }
 
+    /**
+     * 中文说明：对提议做「结构 + 业务语义 + 安全边界」三重复核，通过后返回规范化的工具定义。
+     *
+     * <p>检查顺序有意为之——先卡字段白名单（拒绝未知字段，防止参数偷渡），再校验命名、描述、
+     * 能力缺口说明，然后交给 {@code workflow} 校验步骤与写入范围，最后卡体积上限。
+     * 每一步失败都抛 {@link IllegalArgumentException}，由上层转成 {@code adaptive_test_failed}。
+     *
+     * @param writes 当前会话的可写范围；工具步骤不得越界
+     */
     private ObjectNode reviewDefinition(JsonNode proposal, List<Object> builtins, Set<String> writes) {
         if (proposal == null || !proposal.isObject()) throw new IllegalArgumentException("definition 必须是对象");
         ObjectNode def = (ObjectNode) proposal.deepCopy();
@@ -327,6 +387,18 @@ public class ToolEvolutionService {
 
     private record TestReport(boolean ok, int passed, ArrayNode results, long elapsedMs) {}
 
+    /**
+     * 中文说明：在沙箱里跑「合成测试」，用模拟的工具结果代替真实副作用。
+     *
+     * <p>为什么必须跑测试：注册后的工具会进入模型可调用的真实工具集，一旦有缺陷会直接污染后续
+     * 所有对话。所以要求 2~6 项用例、且含正常与边界两类；含代码步骤时还要求独立执行环境可用，
+     * 否则宁可不注册也不降级执行。
+     *
+     * <p>副作用防护：所有外部工具调用都从 {@code tool_results} 里取预置结果，取不到即报错，
+     * 因此测试阶段不可能真正读写用户数据；另有 48 秒总预算兜底，防止死循环。
+     *
+     * @return 测试报告，{@code ok=false} 时 {@code results} 里保留每项用例的失败诊断
+     */
     private TestReport runTests(JsonNode def, List<Object> builtins, BiConsumer<String, JsonNode> observer, long started) {
         JsonNode tests = def.path("tests");
         if (!tests.isArray() || tests.size() < 2 || tests.size() > 6) throw new IllegalArgumentException("工具须提供 2~6 项合成测试（正常与边界输入）");

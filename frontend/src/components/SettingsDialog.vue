@@ -2,12 +2,27 @@
 import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { categoryApi, tagApi, settingsApi, aiApi, wikiApi, modelApi } from '../api'
+import { knowledgeMaintenanceApi } from '../api/knowledgeMaintenance.js'
+import { maintenanceUpdateHint } from '../utils/knowledgeIndexView'
 import { extractPromptFromMd } from '../utils/promptFromMd'
 import { MODEL_CONFIGURATION_CHANGED_EVENT, canRemoveProfile, chatProfiles, createModelDiscoveryLoader,
   discoveredModelSelection, embeddingProfileSpaceChanged, isEmbeddingTask, paramProfileSelection,
   preferredDiscoveredModels, profilePurpose, profileSaveBody, profileTargetsForTask, routingTargetLabel } from '../utils/modelProfileView'
 
 const visible = defineModel({ type: Boolean, default: false })
+const maintenanceStatus = ref(null)
+const embeddingMaintenanceHint = computed(() => maintenanceUpdateHint(maintenanceStatus.value))
+let maintenanceRead = 0
+let settingsDisposed = false
+async function refreshMaintenanceStatus() {
+  const ticket = ++maintenanceRead
+  try {
+    const status = await knowledgeMaintenanceApi.status()
+    if (!settingsDisposed && ticket === maintenanceRead) maintenanceStatus.value = status
+  } catch {
+    if (!settingsDisposed && ticket === maintenanceRead) maintenanceStatus.value = null
+  }
+}
 
 const activeTab = ref('ai')
 const saving = ref(false)
@@ -87,7 +102,7 @@ function resetDiscovery() {
   discoveryLoader.reset()
 }
 watch(() => editor.value.open, open => { if (!open) resetDiscovery() }, { flush: 'sync' })
-onBeforeUnmount(() => discoveryLoader.dispose())
+onBeforeUnmount(() => { discoveryLoader.dispose(); settingsDisposed = true; maintenanceRead++ })
 
 function notifyModelConfigurationChanged() {
   window.dispatchEvent(new CustomEvent(MODEL_CONFIGURATION_CHANGED_EVENT))
@@ -210,7 +225,7 @@ async function saveProfile() {
     editor.value.open = false
     await loadRouting()
     notifyModelConfigurationChanged()
-    if (embeddingChanged) ElMessage.warning('嵌入配置已更新，请到知识库维护重建向量索引')
+    if (embeddingChanged) { await refreshMaintenanceStatus(); if (!settingsDisposed) ElMessage.info('嵌入配置已更新；' + embeddingMaintenanceHint.value) }
     else ElMessage.success(profilePurpose(e) === 'embedding' ? '已保存嵌入档案，可在下方“向量嵌入”分工中选择' : '已保存')
   } catch (err) {
     /* 拦截器已提示 */
@@ -253,7 +268,7 @@ async function removeProfile(p) {
   if (!canRemoveProfile(p, profiles.value)) return
   try {
     const consequence = profilePurpose(p) === 'embedding'
-      ? '使用此档案的向量嵌入会变为未配置，关键词检索仍可用。选择其他嵌入服务或模型后，请重建向量索引。'
+      ? '使用此档案的向量嵌入会变为未配置，关键词检索仍可用。选择其他服务或模型后，' + embeddingMaintenanceHint.value
       : '指向它的对话任务会回退到默认对话配置。'
     await ElMessageBox.confirm(
       `删除档案「${p.name}」？${consequence}密钥一并删除且不可恢复。`,
@@ -401,7 +416,7 @@ async function setTaskTarget(row, target) {
     notifyModelConfigurationChanged()
     if (isEmbeddingTask(row)) {
       if (target === 'disabled') ElMessage.success('已关闭向量嵌入，关键词检索仍可用')
-      else ElMessage.warning('已切换向量嵌入，请到知识库维护重建向量索引')
+      else { await refreshMaintenanceStatus(); if (!settingsDisposed) ElMessage.info('已切换向量嵌入；' + embeddingMaintenanceHint.value) }
     } else ElMessage.success('已切换（下一次该任务生效）')
   } catch (e) {
     // 失败必须说出来：静默失败最难查（这次就是被静默吞掉才没人发现）
@@ -849,6 +864,7 @@ watch(visible, (v) => {
     loadTags()
     loadSkills()
     loadRouting()
+    refreshMaintenanceStatus()
   } else {
     resetDiscovery()
   }
@@ -1254,7 +1270,7 @@ function notifyMetaChanged() {
                   <el-radio-button value="embedding" :disabled="editorActiveChat">向量嵌入</el-radio-button>
                 </el-radio-group>
                 <p v-if="editorActiveChat" class="hint">当前对话默认档案不能改为嵌入用途，请先启用另一个对话档案。</p>
-                <p v-else-if="editor.purpose === 'embedding'" class="hint">使用服务的嵌入接口，不参与对话。切换已使用的嵌入服务或模型后需要重建索引。</p>
+                <p v-else-if="editor.purpose === 'embedding'" class="hint">使用服务的嵌入接口，不参与对话。{{ embeddingMaintenanceHint }}</p>
               </div>
               <label class="fl">服务商</label>
               <el-select v-model="editor.provider" style="width: 100%">
@@ -1336,7 +1352,7 @@ function notifyMetaChanged() {
               批量摘要类任务（主题 wiki、检索词扩展）优先本地档案——免费且够用。
               <b>检索重排是例外</b>：它要读懂"问题与候选的关系"，97 条用例实测本地 8B 几乎无增益
               （MRR 0.759/0.743，≈不重排），换云端档案是 0.902——所以默认指向当前生效档案。
-              <b>向量嵌入</b>只选嵌入档案，也可设为未配置以使用关键词检索。更换嵌入服务或模型后需手动重建索引。
+              <b>向量嵌入</b>只选嵌入档案，也可设为未配置以使用关键词检索。{{ embeddingMaintenanceHint }}
               <b>对话的模型不在这里选</b>：在智能体界面按会话选 —— 每个会话可固定一个档案，或选「默认」用当前生效档案。
             </p>
             <div v-for="row in routing.table" :key="row.task" class="route-row">
