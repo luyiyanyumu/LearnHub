@@ -21,6 +21,9 @@ export function validateKnowledgeValues(values, defaults, fields) {
     let value = values[field.key]
     if (value === '' || value == null) value = defaults[field.key] ?? field.default
     effective[field.key] = value
+    if (field.type === 'select' && !field.options?.some(option => option.value === value)) {
+      errors.push(`${field.label}需要选择有效选项`)
+    }
     if (field.type !== 'number') continue
     const number = Number(value)
     if (!Number.isFinite(number) || (Number(field.step ?? 1) >= 1 && !Number.isInteger(number))) {
@@ -42,6 +45,12 @@ export function validateKnowledgeValues(values, defaults, fields) {
     errors.push('Wiki 与全局图谱预算合计须为原文及来源标签保留至少 256 字符')
   }
   return [...new Set(errors)]
+}
+
+export function knowledgeChunkingHint(values = {}) {
+  return values.chunkStrategy === 'semantic_long'
+    ? '长资料语义切割仅作用于达到起始长度的资料库文件；笔记、速查卡和短资料保留结构切割。建立索引时使用现有嵌入模型计算边界，会增加重建耗时。保存后需重建索引。'
+    : '按标题和段落切割，完整保留代码、公式与表格。可为长篇资料库文件选择语义切割；笔记与速查卡保持结构切割。更改切割参数后需重建索引。'
 }
 
 export function diagnosticPercent(value) {

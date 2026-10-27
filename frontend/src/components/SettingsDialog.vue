@@ -1095,6 +1095,7 @@ function notifyMetaChanged() {
           type="button"
           class="nav-item"
           :class="{ on: pane === g.id }"
+          @focus="$event.currentTarget.scrollIntoView({ block: 'nearest', inline: 'nearest' })"
           @click="pane = g.id"
         >{{ g.name }}</button>
       </nav>
@@ -1646,6 +1647,8 @@ function notifyMetaChanged() {
   gap: 16px;
   /* 固定高度 + 内容区自己滚动：设置项再多也不会把弹窗撑到整屏 */
   height: 62vh;
+  min-width: 0;
+  min-height: 0;
 }
 .settings-nav {
   display: flex;
@@ -1679,6 +1682,7 @@ function notifyMetaChanged() {
   overflow-y: auto;
   padding-right: 4px;
   min-width: 0;
+  min-height: 0;
   overscroll-behavior: contain;
 }
 :global(.settings-dialog.has-knowledge .settings-body) { height: 68vh; }
@@ -1703,6 +1707,7 @@ function notifyMetaChanged() {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
   padding: 8px 10px;
   border: 1px solid var(--app-border-weak);
   border-radius: 8px;
@@ -1717,6 +1722,8 @@ function notifyMetaChanged() {
   align-items: center;
   gap: 8px;
   min-width: 0;
+  flex: 1 1 220px;
+  overflow-wrap: anywhere;
   flex-wrap: wrap;
 }
 .profile-name {
@@ -1730,6 +1737,8 @@ function notifyMetaChanged() {
   display: flex;
   gap: 6px;
   flex-shrink: 0;
+  flex-wrap: wrap;
+  max-width: 100%;
 }
 /* 预设「＋服务商」按钮 */
 .preset-chips {
@@ -1976,10 +1985,11 @@ html.dark .model-warn {
 .field-row {
   display: flex;
   gap: 18px;
+  flex-wrap: wrap;
 }
 
 .field.grow {
-  flex: 1 1 0;
+  flex: 1 1 180px;
 }
 
 .lbl {
@@ -1998,6 +2008,8 @@ html.dark .model-warn {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .unit {
@@ -2063,11 +2075,31 @@ html.dark .model-warn {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
   margin-bottom: 10px;
 }
 
 :deep(.el-textarea__inner),
 :deep(.el-select__wrapper) {
   font-family: inherit;
+}
+
+.settings-pane :deep(.el-select),
+.settings-pane :deep(.el-input),
+.settings-pane :deep(.el-input-number) { max-width: 100%; }
+.sec-title, .sec-actions { flex-wrap: wrap; min-width: 0; }
+
+@media (max-width: 600px) {
+  .route-row { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .profile-acts .el-button + .el-button { margin-left: 0; }
+  .profile-main { flex-basis: 100%; }
+  .skill-newid { max-width: 100%; }
+  .knowledge-footer-hint { flex-basis: 100%; }
+}
+
+@media (max-height: 600px) {
+  .settings-body { height: 52vh; }
+  :global(.settings-dialog.has-knowledge .settings-body) { height: 56vh; }
 }
 </style>

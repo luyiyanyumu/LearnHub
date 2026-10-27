@@ -5,33 +5,15 @@ import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/**
- * 文本分块器（纯函数，可脱离 Spring 单测）。
- *
- * <h3>为什么需要专门的切法</h3>
- * 语义检索的效果一半取决于"块切得好不好"：切太碎会丢上下文（一句话被腰斩），
- * 切太长会让向量被稀释（一个 5000 字的块里只有 3 行相关，整块的向量就很泛）。
- * 这里的做法是**按标题分节、节内按段落聚合到目标长度、超长段落再按句号滑动切**，块间保留重叠。
- *
- * <h3>2026-09 补的第二个问题：块要带上下文</h3>
- * 原来只切正文、不带所属小节，于是块开头一句"它包含以下三种"离开标题就无从判断指什么，
- * 检索时也匹配不到标题里的词 —— 这正是 contextual retrieval 要解决的问题。
- * 现在每块都带 {@link Chunk#heading()}（所属小节路径），嵌入时用
- * {@link #embedText} 把「文档标题 · 小节」前置再向量化。
- */
+/** Structure-aware pure splitter. Atomic code, display math and tables retain their complete syntax. */
 public final class TextChunker {
-
-    private TextChunker() {
-    }
-
-    /** 目标块大小（字符）。600~900 是"够上下文、向量又不被稀释"的常见区间 */
+    private TextChunker() { }
     public static final int TARGET = 800;
-    /** 相邻块的重叠，避免关键句正好落在切点上被割裂 */
+    /** Character budget; an atomic block is never partially copied for overlap. */
     public static final int OVERLAP = 120;
-    /** 单块上限，硬性兜底 */
+    /** Hard limit for ordinary text. A single atomic block may exceed it without being broken. */
     public static final int MAX = 1200;
 
-    /** Immutable splitter settings shared by indexing, retrieval and synthetic diagnostics. */
     public record Options(int target, int overlap, int max) {
         public Options {
             if (target < 1 || overlap < 0 || overlap >= target || target > max)
@@ -39,231 +21,341 @@ public final class TextChunker {
         }
         public static Options defaults() { return new Options(TARGET, OVERLAP, MAX); }
     }
-
-    /** Markdown 标题行（# ~ ######）；PDF/纯文本没有标题时这一层自然为空 */
     private static final Pattern HEADING = Pattern.compile("^(#{1,6})\\s*(.+?)\\s*#*$");
-
-    /** 代码围栏：``` 或 ~~~ */
-    private static final Pattern FENCE = Pattern.compile("^\\s*(```|~~~)");
-
-    /** HTML 标签（笔记里从语雀粘来的 `# <font style="...">标题</font>` 很常见） */
+    private static final Pattern FENCE = Pattern.compile("^\\s*(`{3,}|~{3,})(.*)$");
+    private static final Pattern MATH_ENV = Pattern.compile(
+            "\\\\begin\\{((?:equation|align|alignat|aligned|gather|gathered|multline|flalign|displaymath|eqnarray|split|cases)\\*?)\\}");
+    private static final Pattern TABLE_SEPARATOR = Pattern.compile(
+            "^\\s*\\|?\\s*:?-{3,}:?\\s*(?:\\|\\s*:?-{3,}:?\\s*)*\\|?\\s*$");
+    private static final Pattern HTML_TABLE_OPEN = Pattern.compile("<table(?:\\s|>)", Pattern.CASE_INSENSITIVE);
+    private static final Pattern HTML_TABLE_CLOSE = Pattern.compile("</table\\s*>", Pattern.CASE_INSENSITIVE);
     private static final Pattern HTML_TAG = Pattern.compile("<[^>]{1,200}>");
-
-    /** Markdown 强调标记 */
     private static final Pattern MD_EMPHASIS = Pattern.compile("[*_`~]");
 
-    /**
-     * 清洗小节标题：去掉 HTML 标签与 Markdown 强调标记，折叠空白。
-     *
-     * <p>为什么必须做：实测 note#5（5.9 万字、本库最大来源）的标题是
-     * {@code <font style="color:rgb(0, 0, 0)">一、Java核心基础</font>} 这种带标签的写法，
-     * 直接把原文丢进嵌入等于往向量里塞了一堆 {@code rgb(0, 0, 0)} 噪声；
-     * 存进 {@code kb_chunk.heading} 也没法给人看。
-     */
     public static String cleanHeading(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return "";
-        }
+        if (raw == null || raw.isBlank()) return "";
         String s = HTML_TAG.matcher(raw).replaceAll("");
         s = MD_EMPHASIS.matcher(s).replaceAll("");
         return s.replaceAll("[\\s\\u00a0]+", " ").trim();
     }
+    public record Chunk(String heading, String text) { }
+    /** Natural paragraphs/sentence groups or complete protected blocks, in document order. */
+    public record Unit(String heading, String text, boolean protectedBlock) { }
 
-    /** 块：所属小节路径（可能为空）+ 正文 */
-    public record Chunk(String heading, String text) {
-    }
-
-    /**
-     * 切块（带小节归属）。新代码用这个。
-     *
-     * @param text 原文（可为 null）
-     * @return 块列表；短于目标的整篇作为一块
-     */
     public static List<Chunk> splitWithHeadings(String text) {
         return splitWithHeadings(text, Options.defaults());
     }
-
     public static List<Chunk> splitWithHeadings(String text, Options options) {
-        if (options == null) options = Options.defaults();
+        Options effective = options == null ? Options.defaults() : options;
         List<Chunk> out = new ArrayList<>();
-        if (text == null || text.isBlank()) {
-            return out;
-        }
-        String s = text.replace("\r\n", "\n").replace('\r', '\n').trim();
-
-        // ① 先按标题切成"节"，每节记住自己的标题路径（H1 > H2 > H3）
-        List<Chunk> sections = new ArrayList<>();
-        List<String> stack = new ArrayList<>();
-        StringBuilder body = new StringBuilder();
-        String currentHeading = "";
-        boolean inFence = false;
-        for (String line : s.split("\n", -1)) {
-            // 代码围栏内部的一切都是代码：里面的 `# 注释` 不是标题。
-            // 实测：不判断围栏时，SQL/Bash 示例里的注释会被当成分节标题，
-            // 于是"查询表中所有字段"变成了一堆块的小节路径（把真实层级冲掉）。
-            if (FENCE.matcher(line).find()) {
-                inFence = !inFence;
-                body.append(line).append('\n');
+        List<Unit> current = new ArrayList<>();
+        String heading = null;
+        // Semantic boundary detection needs small local units; ordinary structure chunking
+        // must not inherit that granularity and split an otherwise complete sentence.
+        for (Unit unit : structureUnits(text, effective)) {
+            if (heading != null && !heading.equals(unit.heading())) {
+                emit(out, heading, current);
+                current.clear();
+            }
+            heading = unit.heading();
+            if (unit.protectedBlock() && unit.text().length() > effective.max()) {
+                emit(out, heading, current);
+                current.clear();
+                out.add(new Chunk(heading, unit.text()));
                 continue;
             }
-            Matcher m = inFence ? null : HEADING.matcher(line.trim());
-            if (m != null && m.matches()) {
-                if (body.length() > 0) {
-                    sections.add(new Chunk(currentHeading, body.toString().trim()));
-                    body.setLength(0);
-                }
-                int level = m.group(1).length();
-                while (stack.size() >= level) {
-                    stack.remove(stack.size() - 1);
-                }
-                String title = cleanHeading(m.group(2));
-                if (title.isEmpty()) {
-                    continue;
-                }
-                stack.add(title);
-                currentHeading = String.join(" > ", stack);
-                continue;
+            int length = joinedLength(current);
+            int combined = length + 2 + unit.text().length();
+            boolean closerAfterAdding = Math.abs(combined - effective.target()) <= Math.abs(length - effective.target());
+            if (!current.isEmpty() && (combined > effective.max()
+                    || combined > effective.target() && !closerAfterAdding)) {
+                emit(out, heading, current);
+                List<Unit> overlap = overlapUnits(current, effective.overlap());
+                current.clear();
+                // Never emit an overlap-only duplicate because the next atomic block is large.
+                if (!overlap.isEmpty() && joinedLength(overlap) + 2 + unit.text().length() <= effective.max())
+                    current.addAll(overlap);
             }
-            body.append(line).append('\n');
+            current.add(unit);
         }
-        if (body.length() > 0) {
-            sections.add(new Chunk(currentHeading, body.toString().trim()));
-        }
-        if (sections.isEmpty()) {
-            sections.add(new Chunk("", s));
-        }
-
-        // ② 节内再按长度切（复用段落聚合逻辑），每块继承所属小节
-        for (Chunk sec : sections) {
-            for (String piece : splitPlain(sec.text(), options)) {
-                out.add(new Chunk(sec.heading(), piece));
-            }
-        }
-        return out.stream().filter(c -> !c.text().isBlank()).toList();
+        emit(out, heading, current);
+        return List.copyOf(out);
     }
-
+    private static List<Unit> structureUnits(String text, Options options) {
+        List<Unit> units = new ArrayList<>();
+        for (Unit block : scanBlocks(text)) {
+            if (block.protectedBlock() || block.text().length() <= options.max()) {
+                units.add(block);
+                continue;
+            }
+            // Extract complete sentences from long PDF/plain-text paragraphs. A line wrap
+            // is not a semantic boundary; retain it inside the original sentence.
+            int start = 0;
+            for (int i = 0; i < block.text().length(); i++) {
+                if (!proseSentenceEnd(block.text(), i)) continue;
+                addOrdinary(units, block.heading(), block.text().substring(start, i + 1), options.max());
+                start = i + 1;
+            }
+            addOrdinary(units, block.heading(), block.text().substring(start), options.max());
+        }
+        return units;
+    }
+    private static void addOrdinary(List<Unit> units, String heading, String text, int max) {
+        String rest = text.strip();
+        int start = 0;
+        while (rest.length() - start > max) {
+            int cut = start + max;
+            // Only an individual sentence exceeding the hard limit needs a fallback cut.
+            // Prefer a word boundary without turning a short prefix into its own chunk.
+            for (int i = cut; i >= start + max / 2; i--) {
+                if (Character.isWhitespace(rest.charAt(i))) { cut = i; break; }
+            }
+            if (Character.isHighSurrogate(rest.charAt(cut - 1)) && Character.isLowSurrogate(rest.charAt(cut))) cut--;
+            if (cut == start) cut = Math.min(rest.length(), start + 2);
+            units.add(new Unit(heading, rest.substring(start, cut).strip(), false));
+            start = cut;
+            while (start < rest.length() && Character.isWhitespace(rest.charAt(start))) start++;
+        }
+        if (start < rest.length()) units.add(new Unit(heading, rest.substring(start), false));
+    }
     /**
-     * 切块（只取正文）。
-     *
-     * @deprecated 新代码请用 {@link #splitWithHeadings} —— 带上下文的版本检索效果更好
+     * Normalize line endings, retain protected block contents, and subdivide long ordinary paragraphs.
+     * Sentence groups use a smaller budget so optional semantic aggregation can compare local topics.
      */
+    public static List<Unit> structuralUnits(String text, Options options) {
+        Options effective = options == null ? Options.defaults() : options;
+        int budget = Math.min(effective.max(), Math.max(100, effective.target() / 3));
+        List<Unit> units = new ArrayList<>();
+        for (Unit block : scanBlocks(text)) {
+            if (block.protectedBlock()) units.add(block);
+            else for (String piece : sentenceGroups(block.text(), budget))
+                units.add(new Unit(block.heading(), piece, false));
+        }
+        return List.copyOf(units);
+    }
+    /** @deprecated Prefer the version preserving heading context. */
     @Deprecated
     public static List<String> split(String text) {
-        return splitPlain(text, Options.defaults());
+        return splitWithHeadings(text).stream().map(Chunk::text).toList();
     }
-
-    /**
-     * 送进嵌入模型的文本：把「文档标题 · 小节」前置到块正文之前。
-     * <p>这一步是 contextual retrieval 的核心：只喂正文时，向量里没有"这段在讲什么主题"的信息；
-     * 前置上下文之后，连标题里出现的词也能召回这个块。
-     */
     public static String embedText(String docTitle, String heading, String body) {
         StringBuilder sb = new StringBuilder();
-        if (docTitle != null && !docTitle.isBlank()) {
-            sb.append(docTitle.trim());
-        }
+        if (docTitle != null && !docTitle.isBlank()) sb.append(docTitle.trim());
         if (heading != null && !heading.isBlank()) {
-            if (sb.length() > 0) {
-                sb.append(" · ");
-            }
+            if (!sb.isEmpty()) sb.append(" · ");
             sb.append(heading.trim());
         }
-        if (sb.length() == 0) {
-            return body == null ? "" : body;
-        }
+        if (sb.isEmpty()) return body == null ? "" : body;
         return sb.append('\n').append(body == null ? "" : body).toString();
     }
 
-    private static List<String> splitPlain(String text, Options options) {
-        List<String> out = new ArrayList<>();
-        if (text == null || text.isBlank()) {
-            return out;
-        }
-        String s = text.replace("\r\n", "\n").replace('\r', '\n').trim();
-        if (s.length() <= options.target()) {
-            out.add(s);
-            return out;
-        }
-        // ① 先按空行切段（Markdown/文档的自然边界）
-        List<String> paras = new ArrayList<>();
-        for (String p : s.split("\n\\s*\n")) {
-            String t = p.trim();
-            if (!t.isEmpty()) {
-                paras.add(t);
-            }
-        }
-        StringBuilder cur = new StringBuilder();
-        for (String p : paras) {
-            if (p.length() > options.max()) {
-                // ② 超长段落（如整篇没有空行的代码/论文）：先把不完整的收尾，再按句子滑窗切
-                if (cur.length() > 0) {
-                    out.add(cur.toString().trim());
-                    cur.setLength(0);
-                }
-                out.addAll(splitLong(p, options));
+    private static List<Unit> scanBlocks(String text) {
+        List<Unit> blocks = new ArrayList<>();
+        if (text == null || text.isBlank()) return blocks;
+        String[] lines = text.replace("\r\n", "\n").replace('\r', '\n').split("\n", -1);
+        String[] headings = new String[6];
+        String heading = "";
+        StringBuilder paragraph = new StringBuilder();
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i];
+            int blockEnd = protectedEnd(lines, i);
+            if (blockEnd >= i) {
+                flushParagraph(blocks, paragraph, heading);
+                blocks.add(new Unit(heading, joinLines(lines, i, blockEnd), true));
+                i = blockEnd;
                 continue;
             }
-            if (cur.length() > 0 && cur.length() + p.length() + 1 > options.target()) {
-                out.add(cur.toString().trim());
-                // 重叠：把上一块尾部几个字符带进下一块（保持句子连续感）
-                String tail = tailOf(cur.toString(), options.overlap());
-                cur.setLength(0);
-                if (!tail.isEmpty()) {
-                    cur.append(tail).append('\n');
-                }
+            Matcher title = HEADING.matcher(line.strip());
+            if (title.matches()) {
+                flushParagraph(blocks, paragraph, heading);
+                String clean = cleanHeading(title.group(2));
+                if (clean.isEmpty()) continue;
+                int level = title.group(1).length() - 1;
+                for (int j = level; j < headings.length; j++) headings[j] = null;
+                headings[level] = clean;
+                List<String> path = new ArrayList<>();
+                for (String part : headings) if (part != null) path.add(part);
+                heading = String.join(" > ", path);
+            } else if (line.isBlank()) {
+                flushParagraph(blocks, paragraph, heading);
+            } else {
+                if (!paragraph.isEmpty()) paragraph.append('\n');
+                paragraph.append(line);
             }
-            if (cur.length() > 0) {
-                cur.append('\n');
-            }
-            cur.append(p);
         }
-        if (cur.length() > 0) {
-            out.add(cur.toString().trim());
-        }
-        // Paragraph overlap can itself push a block past max; enforce the promised bound.
-        List<String> bounded = new ArrayList<>();
-        for (String piece : out) {
-            if (piece.length() <= options.max()) bounded.add(piece);
-            else bounded.addAll(splitLong(piece, options));
-        }
-        return bounded.stream().filter(x -> !x.isBlank()).toList();
+        flushParagraph(blocks, paragraph, heading);
+        return blocks;
     }
-
-    /** 超长段落按句子边界滑窗 */
-    private static List<String> splitLong(String p, Options options) {
-        List<String> out = new ArrayList<>();
-        // 句子边界：中英文句号/问号/感叹号/分号/换行
-        String[] sentences = p.split("(?<=[。！？；!?;\\n])");
-        StringBuilder cur = new StringBuilder();
-        for (String sen : sentences) {
-            if (cur.length() > 0 && cur.length() + sen.length() > options.target()) {
-                out.add(cur.toString().trim());
-                String tail = tailOf(cur.toString(), options.overlap());
-                cur.setLength(0);
-                if (!tail.isEmpty()) {
-                    cur.append(tail);
-                }
+    private static int protectedEnd(String[] lines, int start) {
+        String line = lines[start];
+        Matcher fence = FENCE.matcher(line);
+        if (fence.matches()) {
+            String marker = fence.group(1);
+            char type = marker.charAt(0);
+            for (int i = start + 1; i < lines.length; i++) {
+                String candidate = lines[i].strip();
+                int n = 0;
+                while (n < candidate.length() && candidate.charAt(n) == type) n++;
+                if (n >= marker.length() && candidate.substring(n).isBlank()) return i;
             }
-            cur.append(sen);
-            // 单句仍然超长（极端情况）：硬切
-            while (cur.length() > options.max()) {
-                out.add(cur.substring(0, options.max()).trim());
-                String rest = cur.substring(options.max() - options.overlap());
-                cur.setLength(0);
-                cur.append(rest);
+            // Drafts with an unfinished fence must not turn code comments into headings.
+            return lines.length - 1;
+        }
+        // Recognize the outer container before math syntax inside its caption/header cells.
+        if (HTML_TABLE_OPEN.matcher(line).find()) {
+            int depth = 0;
+            for (int i = start; i < lines.length; i++) {
+                depth += matchCount(HTML_TABLE_OPEN, lines[i]) - matchCount(HTML_TABLE_CLOSE, lines[i]);
+                if (depth <= 0) return i;
             }
+            return lines.length - 1;
         }
-        if (cur.length() > 0) {
-            out.add(cur.toString().trim());
+        if (start + 1 < lines.length && hasPipe(line) && TABLE_SEPARATOR.matcher(lines[start + 1]).matches()) {
+            int end = start + 1;
+            while (end + 1 < lines.length && !lines[end + 1].isBlank() && hasPipe(lines[end + 1])) end++;
+            return end;
         }
-        return out;
+        int dollars = unescapedIndex(line, "$$", 0);
+        if (dollars >= 0) return delimitedEnd(lines, start, "$$", dollars + 2);
+        int bracket = unescapedIndex(line, "\\[", 0);
+        if (bracket >= 0) return delimitedEnd(lines, start, "\\]", bracket + 2);
+        Matcher environment = MATH_ENV.matcher(line);
+        if (environment.find()) {
+            String open = "\\begin{" + environment.group(1) + "}";
+            String close = "\\end{" + environment.group(1) + "}";
+            int depth = 0;
+            for (int i = start; i < lines.length; i++) {
+                depth += occurrences(lines[i], open) - occurrences(lines[i], close);
+                if (depth <= 0) return i;
+            }
+            return lines.length - 1;
+        }
+        return -1;
     }
-
-    private static String tailOf(String s, int n) {
-        if (s == null || s.isEmpty() || n <= 0) {
+    private static int delimitedEnd(String[] lines, int start, String close, int firstOffset) {
+        for (int i = start; i < lines.length; i++)
+            if (unescapedIndex(lines[i], close, i == start ? firstOffset : 0) >= 0) return i;
+        return lines.length - 1;
+    }
+    private static int unescapedIndex(String text, String marker, int from) {
+        for (int pos = text.indexOf(marker, from); pos >= 0; pos = text.indexOf(marker, pos + marker.length())) {
+            int escapes = 0;
+            for (int i = pos - 1; i >= 0 && text.charAt(i) == '\\'; i--) escapes++;
+            if (escapes % 2 == 0) return pos;
+        }
+        return -1;
+    }
+    private static boolean hasPipe(String line) { return unescapedIndex(line, "|", 0) >= 0; }
+    private static int occurrences(String text, String token) {
+        int count = 0;
+        for (int pos = text.indexOf(token); pos >= 0; pos = text.indexOf(token, pos + token.length())) count++;
+        return count;
+    }
+    private static int matchCount(Pattern pattern, String text) {
+        int count = 0;
+        Matcher matcher = pattern.matcher(text);
+        while (matcher.find()) count++;
+        return count;
+    }
+    private static String joinLines(String[] lines, int start, int end) {
+        StringBuilder text = new StringBuilder();
+        for (int i = start; i <= end; i++) {
+            if (i > start) text.append('\n');
+            text.append(lines[i]);
+        }
+        return text.toString();
+    }
+    private static void flushParagraph(List<Unit> blocks, StringBuilder paragraph, String heading) {
+        if (!paragraph.isEmpty()) {
+            blocks.add(new Unit(heading, paragraph.toString().strip(), false));
+            paragraph.setLength(0);
+        }
+    }
+    private static List<String> sentenceGroups(String text, int budget) {
+        List<String> pieces = new ArrayList<>();
+        int start = 0;
+        while (start < text.length()) {
+            int limit = Math.min(text.length(), start + budget);
+            int cut = limit;
+            if (limit < text.length()) {
+                int boundary = -1;
+                for (int i = start; i < limit; i++) if (sentenceEnd(text, i)) boundary = i + 1;
+                if (boundary > start) cut = boundary;
+                if (cut > start && Character.isHighSurrogate(text.charAt(cut - 1))
+                        && Character.isLowSurrogate(text.charAt(cut))) cut--;
+                if (cut == start) cut = Math.min(text.length(), start + 2);
+            }
+            String piece = text.substring(start, cut).strip();
+            if (!piece.isEmpty()) pieces.add(piece);
+            start = cut;
+            while (start < text.length() && Character.isWhitespace(text.charAt(start))) start++;
+        }
+        return pieces;
+    }
+    private static boolean sentenceEnd(String text, int i) {
+        char c = text.charAt(i);
+        if ("。！？；!?;\n".indexOf(c) >= 0) return true;
+        if (c != '.') return false;
+        if (i > 0 && i + 1 < text.length() && Character.isDigit(text.charAt(i - 1))
+                && Character.isDigit(text.charAt(i + 1))) return false;
+        return i + 1 == text.length() || Character.isWhitespace(text.charAt(i + 1));
+    }
+    private static boolean proseSentenceEnd(String text, int i) {
+        char c = text.charAt(i);
+        if (c == '\n' || !sentenceEnd(text, i)) return false;
+        if (c == '.' && i > 0 && Character.isDigit(text.charAt(i - 1))) {
+            // A numbered item such as "  12. Explain ..." starts a sentence;
+            // its marker must not be emitted as the end of the previous chunk.
+            int start = i;
+            while (start > 0 && Character.isDigit(text.charAt(start - 1))) start--;
+            while (start > 0 && (text.charAt(start - 1) == ' ' || text.charAt(start - 1) == '\t'
+                    || text.charAt(start - 1) == '\r')) start--;
+            if (start == 0 || text.charAt(start - 1) == '\n') return false;
+        }
+        return true;
+    }
+    private static int joinedLength(List<Unit> units) {
+        return units.stream().mapToInt(unit -> unit.text().length()).sum() + Math.max(0, units.size() - 1) * 2;
+    }
+    private static void emit(List<Chunk> out, String heading, List<Unit> units) {
+        if (!units.isEmpty()) out.add(new Chunk(heading == null ? "" : heading,
+                String.join("\n\n", units.stream().map(Unit::text).toList())));
+    }
+    private static List<Unit> overlapUnits(List<Unit> units, int budget) {
+        List<Unit> tail = new ArrayList<>();
+        int used = 0;
+        for (int i = units.size() - 1; i >= 0 && used < budget; i--) {
+            Unit unit = units.get(i);
+            int separator = tail.isEmpty() ? 0 : 2;
+            int remaining = budget - used - separator;
+            if (remaining <= 0) break;
+            if (unit.text().length() <= remaining) {
+                tail.add(0, unit);
+                used += separator + unit.text().length();
+            } else {
+                if (!unit.protectedBlock()) {
+                    String suffix = plainTail(unit.text(), remaining);
+                    if (!suffix.isEmpty()) tail.add(0, new Unit(unit.heading(), suffix, false));
+                }
+                break;
+            }
+        }
+        return tail;
+    }
+    private static String plainTail(String text, int budget) {
+        int earliest = Math.max(0, text.length() - budget);
+        int start = -1;
+        for (int i = Math.max(0, earliest - 1); i < text.length() - 1; i++) {
+            if (proseSentenceEnd(text, i)) {
+                start = i + 1;
+                break;
+            }
+        }
+        if (start < 0) return "";
+        String tail = text.substring(start).strip();
+        // Do not transplant an unfinished inline-code span as ordinary overlap.
+        if (tail.indexOf('`') >= 0 && text.substring(0, start).chars().filter(c -> c == '`').count() % 2 != 0)
             return "";
-        }
-        String t = s.trim();
-        return t.length() <= n ? t : t.substring(t.length() - n);
+        return tail;
     }
 }

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { compileScript, parse } from '@vue/compiler-sfc'
 import * as vue from 'vue'
+import * as retrievalDisplay from '../utils/retrievalDisplay.js'
 
 const source = readFileSync(new URL('./AgentRunTrace.vue', import.meta.url), 'utf8')
 const compiled = compileScript(parse(source).descriptor, { id: 'agent-run-trace-behavior', inlineTemplate: true })
@@ -15,8 +16,10 @@ function harness(initialProps = {}) {
   let now = 100_000
   let timerId = 0
   const timers = new Map()
+  const openedSources = []
+  const inspections = []
   const props = vue.reactive({ entries: [], running: false, startedAt: 0, elapsedMs: 0, failed: false, ...initialProps })
-  const component = factory({ vue }, { now: () => now },
+  const component = factory({ vue, '../utils/retrievalDisplay.js': retrievalDisplay }, { now: () => now },
     callback => { const id = ++timerId; timers.set(id, callback); return id },
     id => timers.delete(id))
   const renderer = vue.createRenderer({
@@ -41,13 +44,13 @@ function harness(initialProps = {}) {
     nextSibling(node) { return node.parent?.children[node.parent.children.indexOf(node) + 1] || null },
   })
   const root = { children: [] }
-  const app = renderer.createApp({ setup: () => () => vue.h(component, props) })
+  const app = renderer.createApp({ setup: () => () => vue.h(component, { ...props, onOpenSource: source => openedSources.push(source), onInspect: () => inspections.push(true) }) })
   app.mount(root)
   const all = (node = root) => [node, ...node.children.flatMap(child => all(child))]
   const text = (node = root) => `${node.text || ''}${node.children.map(child => text(child)).join('')}`
   const find = predicate => all().find(predicate)
   return {
-    props, timers, all, text, find,
+    props, timers, openedSources, inspections, all, text, find,
     button: () => find(node => node.tag === 'button'),
     async flush() { await vue.nextTick(); await vue.nextTick() },
     async tick(ms) { now += ms; timers.forEach(callback => callback()); await this.flush() },
@@ -204,4 +207,98 @@ test('failed and waiting outcomes remain distinct while pending plans are presen
       assert.match(h.text(h.button()), state === 'error' ? /1 项未成功/ : /1 项待确认/)
     } finally { h.dispose() }
   }
+})
+
+test('step disclosure shows the actual tool arguments, linked sources and safe websites only after opening', async () => {
+  const source = { type: 'note', id: 9001, title: '合成笔记 · 检索方法', snippet: '<b>先检索，再核对原文。</b>', seq: 2, channels: ['vector'] }
+  const h = harness({ running: true, entries: [{ id: 'lookup', kind: 'tool', title: '检索相关知识', status: 'completed',
+    tools: [{ name: 'search_knowledge', title: '检索知识库', arguments: { query: '合成关键词', limit: 3 } }],
+    sources: [source], websites: [{ title: '合成示例站点', url: 'https://example.com/synthetic?q=demo', snippet: '<b>合成网页摘要</b>' }],
+    result: '找到与问题相关的合成来源。',
+  }] })
+  try {
+    const button = h.find(node => node.tag === 'button' && node.props['aria-controls']?.includes('-step-'))
+    assert.equal(button.props.type, 'button')
+    assert.equal(button.props['aria-expanded'], false)
+    assert.match(h.text(button), /1 项工具 · 1 条资料 · 1 个网站 · 查看详情/)
+    assert.equal(h.find(node => String(node.props?.class).includes('entry-records')), undefined)
+    button.props.onClick()
+    await h.flush()
+    assert.equal(button.props['aria-expanded'], true)
+    assert.ok(h.find(node => node.props?.id === button.props['aria-controls']))
+    assert.match(h.text(), /检索知识库.*search_knowledge.*调用参数.*合成关键词/s)
+    assert.equal(h.inspections.length, 1)
+    assert.match(h.text(), /第 3 段 · 语义.*先检索，再核对原文。/)
+    const sourceButton = h.find(node => node.tag === 'button' && node.props.class === 'record-source-link')
+    sourceButton.props.onClick()
+    assert.deepEqual(h.openedSources, [source])
+    const link = h.find(node => node.tag === 'a')
+    assert.equal(link.props.href, 'https://example.com/synthetic?q=demo')
+    assert.equal(link.props.target, '_blank')
+    assert.equal(link.props.rel, 'noopener noreferrer')
+    assert.match(h.text(), /合成网页摘要.*返回结果预览.*相关的合成来源/)
+  } finally { h.dispose() }
+})
+
+test('same-id streamed replacements preserve an opened step while new operation details arrive', async () => {
+  const h = harness({ running: true, entries: [{ id: 'fetch', title: '读取网页', status: 'running', toolName: 'web_fetch' }] })
+  try {
+    let button = h.find(node => node.tag === 'button' && node.props['aria-controls']?.includes('-step-'))
+    button.props.onClick()
+    await h.flush()
+    const regionId = button.props['aria-controls']
+    h.props.entries = [{ id: 'fetch', title: '读取网页', status: 'error', tools: [{ name: 'web_fetch', title: '读取网页', arguments: { url: 'https://example.org/synthetic' } }],
+      websites: [{ url: 'https://example.org/synthetic' }], error: '合成错误：网页返回 404。', elapsedMs: 6000 }]
+    await h.flush()
+    button = h.find(node => node.tag === 'button' && node.props['aria-controls'] === regionId)
+    assert.equal(button.props['aria-expanded'], true)
+    assert.match(h.text(), /失败原因合成错误：网页返回 404。/)
+    h.props.running = false
+    await h.flush()
+    assert.equal(h.button().props['aria-expanded'], true, 'completion must not hide a step being inspected')
+    assert.equal(h.all().filter(node => node.tag === 'li' && String(node.props.class).includes('trace-entry')).length, 1)
+    button.props.onClick()
+    await h.flush()
+    assert.equal(button.props['aria-expanded'], false)
+    assert.equal(h.find(node => node.props?.id === regionId), undefined)
+  } finally { h.dispose() }
+})
+
+test('untrusted previews remain plain text and bounded; unsafe URLs never become links', async () => {
+  const malicious = '<img src=x onerror="alert(1)">'
+  const h = harness({ running: true, entries: [{ id: 'safe', title: '合成工具', status: 'error',
+    tools: [{ name: 'synthetic_tool', arguments: { content: malicious + 'x'.repeat(5000) } }],
+    websites: [{ url: 'javascript:alert(1)' }, { url: 'data:text/html,unsafe' }, { url: 'file:///private' }, { url: 'https://name:password@example.com/private' }],
+    sources: [{ type: 'note', id: '../invalid', title: malicious, snippet: '合成无效来源' }], result: malicious + 'z'.repeat(8000), error: malicious,
+  }] })
+  try {
+    h.find(node => node.tag === 'button' && node.props['aria-controls']?.includes('-step-')).props.onClick()
+    await h.flush()
+    assert.equal(h.find(node => node.tag === 'a'), undefined)
+    assert.equal(h.find(node => node.props?.class === 'record-source-link'), undefined)
+    assert.match(h.text(), /此资料未提供可打开的来源位置/)
+    assert.equal(h.find(node => node.tag === 'img'), undefined)
+    assert.equal(h.all().some(node => Object.hasOwn(node.props || {}, 'innerHTML')), false)
+    const previews = h.all().filter(node => node.tag === 'pre')
+    assert.equal(previews.length, 3)
+    assert.ok(previews.every(node => h.text(node).length <= 4020))
+    assert.match(h.text(), /预览已截断/)
+  } finally { h.dispose() }
+})
+
+test('legacy records show only their recorded tool and never invent websites or source links', async () => {
+  const h = harness({ running: true, entries: [
+    { id: 'legacy', title: '读取笔记', status: 'completed', toolName: 'get_note' },
+    { id: 'missing', title: '分析请求', detail: '已选择 2 项工具操作', status: 'completed' },
+  ] })
+  try {
+    const buttons = h.all().filter(node => node.tag === 'button' && node.props['aria-controls']?.includes('-step-'))
+    assert.equal(buttons.length, 1)
+    buttons[0].props.onClick()
+    await h.flush()
+    assert.match(h.text(), /get_note.*未记录调用参数/)
+    assert.match(h.text(), /此步骤未记录工具、网站或资料明细/)
+    assert.equal(h.find(node => node.tag === 'a'), undefined)
+    assert.doesNotMatch(h.text(), /网站与网页|检索资料/)
+  } finally { h.dispose() }
 })

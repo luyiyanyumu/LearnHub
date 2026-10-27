@@ -38,6 +38,7 @@ import java.sql.Connection;
 import java.lang.reflect.Modifier;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -172,7 +173,10 @@ class DatabaseMigrationTest {
         assertThat(db.queryForObject("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()",
                 Integer.class)).isEqualTo(31); // 30 application tables and Flyway history
         assertThat(db.queryForList("SELECT version FROM flyway_schema_history ORDER BY installed_rank", String.class))
-                .containsExactly("1", "2", "3", "4", "5", "6");
+                .containsExactly("1", "2", "3", "4", "5", "6", "7");
+        assertThat(db.queryForObject("SELECT DATA_TYPE FROM information_schema.COLUMNS "
+                + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'kb_chunk' AND COLUMN_NAME = 'chunk_text'", String.class))
+                .isEqualTo("mediumtext");
         assertThat(db.queryForObject("SELECT COLLATION_NAME FROM information_schema.COLUMNS "
                 + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'kg_node' AND COLUMN_NAME = 'norm'", String.class))
                 .isEqualTo("utf8mb4_bin");
@@ -186,7 +190,7 @@ class DatabaseMigrationTest {
         db.update("DELETE FROM note");
         migrate(url);
         assertThat(db.queryForObject("SELECT COUNT(*) FROM note", Integer.class)).isZero();
-        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(6);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(7);
     }
 
     @Test
@@ -200,7 +204,7 @@ class DatabaseMigrationTest {
         migrate(url);
         JdbcTemplate db = jdbc(url);
         assertThat(db.queryForList("SELECT version FROM flyway_schema_history ORDER BY installed_rank", String.class))
-                .containsExactly("0", "1", "2", "3", "4", "5", "6");
+                .containsExactly("0", "1", "2", "3", "4", "5", "6", "7");
         assertThat(structure(url)).containsExactlyElementsOf(structure(freshUrl));
         assertThat(indexes(url)).containsExactlyElementsOf(indexes(freshUrl));
         assertThat(db.queryForObject("SELECT COUNT(*) FROM note", Integer.class)).isEqualTo(1);
@@ -218,7 +222,7 @@ class DatabaseMigrationTest {
                 Integer.class)).isEqualTo(2);
         migrate(url);
         assertThat(db.queryForObject("SELECT COUNT(*) FROM note", Integer.class)).isEqualTo(1);
-        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(7);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(8);
     }
 
     @Test
@@ -240,7 +244,7 @@ class DatabaseMigrationTest {
 
         migrate(url);
         assertThat(db.queryForList("SELECT version FROM flyway_schema_history ORDER BY installed_rank", String.class))
-                .containsExactly("1", "2", "3", "4", "5", "6");
+                .containsExactly("1", "2", "3", "4", "5", "6", "7");
         assertThat(db.queryForObject("SELECT purpose FROM model_profile WHERE id = 'old-chat'", String.class))
                 .isEqualTo("chat");
         assertThat(db.queryForObject("SELECT api_key FROM model_profile WHERE id = 'old-chat'", String.class))
@@ -260,7 +264,7 @@ class DatabaseMigrationTest {
         assertThat(db.queryForObject("SELECT content_hash FROM kb_index_state WHERE id = 'note:92001'", String.class))
                 .isEqualTo("original-content-hash");
         migrate(url);
-        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(6);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history", Integer.class)).isEqualTo(7);
     }
 
     @Test
@@ -301,7 +305,7 @@ class DatabaseMigrationTest {
         assertThat(db.queryForObject("SELECT folder_id FROM file_info WHERE id=96001", Long.class)).isEqualTo(96002);
         assertThat(db.queryForObject("SELECT COUNT(*) FROM content_folder", Integer.class)).isEqualTo(2);
         assertThat(db.queryForList("SELECT version FROM flyway_schema_history ORDER BY installed_rank", String.class))
-                .containsExactly("0", "1", "2", "3", "4", "5", "6");
+                .containsExactly("0", "1", "2", "3", "4", "5", "6", "7");
         migrate(url);
         assertThat(db.queryForObject("SELECT COUNT(*) FROM content_folder", Integer.class)).isEqualTo(2);
     }
@@ -367,6 +371,53 @@ class DatabaseMigrationTest {
         assertThat(db.queryForObject("SELECT setting_value FROM app_setting WHERE setting_key = ?", String.class, progressKey))
                 .isEqualTo(progress);
         assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history WHERE version='6'", Integer.class)).isEqualTo(1);
+    }
+
+    @Test
+    void versionSixUpgradePreservesExistingVectorsAndStoresAtomicCodeLargerThanTextLimit() throws Exception {
+        String url = emptyDatabase();
+        application(url, "spring.flyway.target=6").run(context -> assertThat(context).hasNotFailed());
+        JdbcTemplate db = jdbc(url);
+        assertThat(db.queryForObject("SELECT DATA_TYPE FROM information_schema.COLUMNS "
+                + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'kb_chunk' AND COLUMN_NAME = 'chunk_text'", String.class))
+                .isEqualTo("text");
+        String original = "```java\nfinal class SyntheticOriginal {}\n```";
+        byte[] vector = new byte[] {0, 0, (byte) 128, 63, 0, 0, 0, 64};
+        db.update("INSERT INTO kb_chunk (source_type, source_id, seq, title, heading, chunk_text, char_len, vec, dim, model, embedding_space) "
+                        + "VALUES ('file', 97001, 0, '合成原有资料', '完整代码', ?, ?, ?, 2, 'synthetic-embed', 'synthetic-space')",
+                original, original.length(), vector);
+        db.update("INSERT INTO kb_index_state (id, source_type, source_id, content_hash, embedding_space, chunks) "
+                + "VALUES ('file:97001', 'file', 97001, 'preserve-synthetic-hash', 'synthetic-space', 1)");
+        var before = db.queryForList("SELECT id, source_type, source_id, seq, title, heading, chunk_text, char_len, "
+                + "HEX(vec) AS vector_hex, dim, model, embedding_space, created_at, updated_at FROM kb_chunk WHERE source_id=97001");
+        var stateBefore = db.queryForList("SELECT * FROM kb_index_state WHERE id='file:97001'");
+
+        migrate(url);
+        assertThat(db.queryForObject("SELECT DATA_TYPE FROM information_schema.COLUMNS "
+                + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'kb_chunk' AND COLUMN_NAME = 'chunk_text'", String.class))
+                .isEqualTo("mediumtext");
+        assertThat(db.queryForList("SELECT id, source_type, source_id, seq, title, heading, chunk_text, char_len, "
+                + "HEX(vec) AS vector_hex, dim, model, embedding_space, created_at, updated_at FROM kb_chunk WHERE source_id=97001"))
+                .containsExactlyElementsOf(before);
+        assertThat(db.queryForList("SELECT * FROM kb_index_state WHERE id='file:97001'"))
+                .containsExactlyElementsOf(stateBefore);
+
+        String longCode = "```java\nfinal class SyntheticLargeExample {\n"
+                + "    // 合成注释：用于验证知识库结构块完整存储。\n".repeat(3000) + "}\n```";
+        assertThat(longCode.getBytes(StandardCharsets.UTF_8).length).isGreaterThan(65_535);
+        db.update("INSERT INTO kb_chunk (source_type, source_id, seq, title, heading, chunk_text, char_len, vec, dim, model, embedding_space) "
+                        + "VALUES ('file', 97002, 0, '合成长代码资料', '完整代码', ?, ?, ?, 2, 'synthetic-embed', 'synthetic-space')",
+                longCode, longCode.length(), vector);
+        assertThat(db.queryForObject("SELECT chunk_text FROM kb_chunk WHERE source_id=97002", String.class)).isEqualTo(longCode);
+        assertThat(db.queryForObject("SELECT OCTET_LENGTH(chunk_text) FROM kb_chunk WHERE source_id=97002", Integer.class))
+                .isEqualTo(longCode.getBytes(StandardCharsets.UTF_8).length);
+        try (Connection connection = db.getDataSource().getConnection()) {
+            ScriptUtils.executeSqlScript(connection,
+                    new ClassPathResource("db/migration/V7__preserve_atomic_knowledge_chunks.sql"));
+        }
+        migrate(url);
+        assertThat(db.queryForObject("SELECT chunk_text FROM kb_chunk WHERE source_id=97002", String.class)).isEqualTo(longCode);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM flyway_schema_history WHERE version='7'", Integer.class)).isEqualTo(1);
     }
 
     @Configuration(proxyBeanMethods = false)
@@ -499,7 +550,7 @@ class DatabaseMigrationTest {
         jdbc(url).update("""
                 INSERT INTO flyway_schema_history
                 (installed_rank, version, description, type, script, checksum, installed_by, execution_time, success)
-                VALUES (7, '999', 'future release', 'SQL', 'V999__future.sql', 1, 'root', 0, true)
+                VALUES (8, '999', 'future release', 'SQL', 'V999__future.sql', 1, 'root', 0, true)
                 """);
         application(url).run(context -> assertThat(context).hasFailed());
     }
@@ -509,7 +560,7 @@ class DatabaseMigrationTest {
         String url = emptyDatabase();
         application(url, "spring.flyway.locations=classpath:db/migration,classpath:db/intentional-failure")
                 .run(context -> assertThat(context).hasFailed());
-        assertThat(jdbc(url).queryForObject("SELECT success FROM flyway_schema_history WHERE version = '7'", Boolean.class))
+        assertThat(jdbc(url).queryForObject("SELECT success FROM flyway_schema_history WHERE version = '8'", Boolean.class))
                 .isFalse();
     }
 }

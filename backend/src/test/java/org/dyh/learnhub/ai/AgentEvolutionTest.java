@@ -124,7 +124,7 @@ class AgentEvolutionTest {
         verify(notes, never()).previewEdit(anyLong(), any());
         verify(notes, never()).editContent(anyLong(), any());
         assertTrue(toolResults().stream().anyMatch(output -> !output.path("ok").asBoolean()
-                && output.path("error").asText().contains("未保存")));
+                && output.path("error").asText().contains("自动保存尚未完成")));
     }
 
     @Test void nestedCreateNoteOnlyStagesTheConcreteBuiltinArguments() throws Exception {

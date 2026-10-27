@@ -113,6 +113,89 @@ public class NoteContentEditor {
         return new Edit(content, List.copyOf(changes));
     }
 
+    /** Explicit generated blocks get paragraph boundaries; ordinary precise edits remain byte-for-byte. */
+    public NoteEditRequest.Operation blockInsertion(String original, NoteEditRequest.Operation op) {
+        if (!Set.of("insert_before", "insert_after").contains(op.action())) return op;
+        String source = Objects.requireNonNullElse(original, "");
+        List<Range> located = targets(source, op);
+        if (located.size() != 1) throw new IllegalArgumentException("分节插入须精确定位一处原文");
+        Range target = located.getFirst();
+        Range[] expanded = {target};
+        PARSER.parse(source).accept(new AbstractVisitor() {
+            @Override public void visit(Heading heading) {
+                List<SourceSpan> spans = heading.getSourceSpans();
+                if (spans.isEmpty()) return;
+                int from = spans.getFirst().getInputIndex();
+                SourceSpan last = spans.getLast();
+                int to = last.getInputIndex() + last.getLength();
+                if (target.from() >= from && target.to() <= to) {
+                    if (!(heading.getParent() instanceof Document))
+                        throw new IllegalArgumentException("分节插入不能切开列表或引用中的标题，请定位完整块后重试");
+                    // Include ATX markers/closing hashes and both lines of a Setext heading.
+                    expanded[0] = new Range(from, to);
+                }
+            }
+        });
+        Range anchor = expanded[0];
+        String text = source.substring(anchor.from(), anchor.to());
+        // Canonicalize every locator to the actual occurrence so full and bare
+        // anchors for the same heading can be grouped into one ordered insertion.
+        int cursor = 0, count = 0, at;
+        Integer occurrence = null;
+        while ((at = source.indexOf(text, cursor)) >= 0) {
+            count++;
+            if (at == anchor.from()) { occurrence = count; break; }
+            cursor = at + text.length();
+        }
+        if (occurrence == null) throw new IllegalArgumentException("无法安全定位完整标题，分节插入未生成");
+        int position = "insert_before".equals(op.action()) ? anchor.from() : anchor.to();
+        String body = Objects.requireNonNullElse(op.value(), "");
+        String newline = source.contains("\r\n") ? "\r\n" : "\n";
+        int left = trailingLineBreaks(source.substring(0, position)) + leadingLineBreaks(body);
+        if (position > 0 && left < 2) body = newline.repeat(2 - left) + body;
+        int right = trailingLineBreaks(body) + leadingLineBreaks(source.substring(position));
+        if (position < source.length() && right < 2) body += newline.repeat(2 - right);
+        return new NoteEditRequest.Operation(op.action(), text, body, occurrence, op.all(), null, null,
+                op.style(), op.placement(), op.minLevel(), op.maxLevel());
+    }
+
+    /** Separate generated siblings without trimming indentation, hard-break spaces, code or math. */
+    public static String joinGeneratedBlocks(String first, String second, String original) {
+        String newline = original != null && original.contains("\r\n") ? "\r\n" : "\n";
+        int breaks = trailingLineBreaks(first) + leadingLineBreaks(second);
+        return first + newline.repeat(Math.max(0, 2 - breaks)) + second;
+    }
+
+    /** Apply generated patches from the end so new copies of a later anchor cannot steal its target. */
+    public int originalInsertionPosition(String original, NoteEditRequest.Operation operation) {
+        List<Range> located = targets(original, operation);
+        if (located.size() != 1) throw new IllegalArgumentException("分节任务须定位唯一的原文位置");
+        Range target = located.getFirst();
+        return "insert_after".equals(operation.action()) ? target.to() : target.from();
+    }
+
+    private static int leadingLineBreaks(String text) {
+        int count = 0;
+        for (int index = 0; index < text.length();) {
+            char c = text.charAt(index++);
+            if (c == '\r') { if (index < text.length() && text.charAt(index) == '\n') index++; count++; }
+            else if (c == '\n') count++;
+            else break;
+        }
+        return count;
+    }
+
+    private static int trailingLineBreaks(String text) {
+        int count = 0;
+        for (int index = text.length() - 1; index >= 0;) {
+            char c = text.charAt(index--);
+            if (c == '\n') { if (index >= 0 && text.charAt(index) == '\r') index--; count++; }
+            else if (c == '\r') count++;
+            else break;
+        }
+        return count;
+    }
+
     private List<Range> targets(String content, NoteEditRequest.Operation op) {
         if (op.text() == null || op.text().isEmpty()) throw new IllegalArgumentException("text 不能为空；请提供要定位的原文");
         if (Boolean.TRUE.equals(op.all()) && op.occurrence() != null) {

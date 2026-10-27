@@ -59,6 +59,12 @@ public class VectorIndexService {
     private final org.dyh.learnhub.service.vector.MilvusVectorStore milvusStore;
     private final PlatformTransactionManager transactionManager;
     private KnowledgeBaseSettings knowledgeSettings;
+    private KnowledgeChunkingService chunkingService;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setChunkingService(KnowledgeChunkingService service) { this.chunkingService = service; }
+    private KnowledgeChunkingService chunker() {
+        return chunkingService == null ? new KnowledgeChunkingService(embedder) : chunkingService;
+    }
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     public void setKnowledgeSettings(KnowledgeBaseSettings settings) { this.knowledgeSettings = settings; }
     private KnowledgeBaseSettings.Config config() {
@@ -347,7 +353,7 @@ public class VectorIndexService {
 
     private PreparedSource prepareSource(Source source, EmbeddingClient.Snapshot target, boolean contextual,
                                          KnowledgeBaseSettings.Config cfg) {
-        List<TextChunker.Chunk> chunks = TextChunker.splitWithHeadings(source.text(), cfg.chunkOptions());
+        List<TextChunker.Chunk> chunks = chunker().split(source.type(), source.text(), target, cfg);
         if (chunks.isEmpty()) return new PreparedSource(source, List.of());
         List<String> inputs = chunks.stream().map(c -> contextual
                 ? TextChunker.embedText(source.title(), c.heading(), c.text()) : c.text()).toList();
@@ -487,9 +493,8 @@ public class VectorIndexService {
     }
 
     private static String sourceHash(Source source, String space, boolean contextual, KnowledgeBaseSettings.Config cfg) {
-        // Version every fingerprint: enforcing max after overlap changes even the default splitter.
-        String parameters = "\u0000split:v2:" + cfg.chunkTarget() + ":" + cfg.chunkOverlap() + ":" + cfg.chunkMax()
-                + ":input:" + cfg.embeddingInputChars();
+        // Both structure protection and semantic settings version the persisted boundaries.
+        String parameters = "\u0000split:v4:" + cfg.indexingFingerprint();
         return KgService.sha256(space + "\u0000" + contextual + "\u0000"
                 + (source.title() == null ? "" : source.title()) + "\u0000"
                 + (source.text() == null ? "" : source.text()) + parameters);
@@ -719,6 +724,59 @@ public class VectorIndexService {
                       String text, double score, int seq) {
     }
 
+    /** Only return boundaries whose source text, model space and splitter settings are still current. */
+    @org.springframework.transaction.annotation.Transactional(readOnly = true,
+            isolation = org.springframework.transaction.annotation.Isolation.REPEATABLE_READ)
+    public Map<String, List<TextChunker.Chunk>> persistedChunks(List<Map<String, Object>> documents,
+                                                               KnowledgeBaseSettings.Config cfg) {
+        EmbeddingClient.Snapshot target = embedder.snapshot();
+        if (target == null || !target.configured()) return Map.of();
+        Map<String, KbIndexState> states = new LinkedHashMap<>();
+        for (KbIndexState state : stateMapper.selectList(null)) states.put(state.getId(), state);
+        Map<String, List<KbChunk>> stored = new LinkedHashMap<>();
+        for (KbChunk row : mapper.loadPassages()) {
+            stored.computeIfAbsent(KbIndexState.key(row.getSourceType(), row.getSourceId()), k -> new ArrayList<>()).add(row);
+        }
+        Map<String, List<TextChunker.Chunk>> result = new LinkedHashMap<>();
+        for (Map<String, Object> document : documents) {
+            Long id = num(document.get("source_id"));
+            if (id == null) continue;
+            Source source = new Source(str(document.get("source_type")), id, str(document.get("title")),
+                    str(document.get("category")), str(document.get("content")));
+            String key = KbIndexState.key(source.type(), source.id());
+            KbIndexState state = states.get(key);
+            List<KbChunk> rows = stored.get(key);
+            if (state == null || rows == null || state.getChunks() == null || state.getChunks() != rows.size()
+                    || !target.spaceFingerprint().equals(state.getEmbeddingSpace())
+                    || !sourceHash(source, target.spaceFingerprint(), cfg.contextualEmbed(), cfg).equals(state.getContentHash())) continue;
+            rows.sort(java.util.Comparator.comparingInt(row -> row.getSeq() == null ? -1 : row.getSeq()));
+            boolean valid = true;
+            for (int i = 0; i < rows.size(); i++) {
+                KbChunk row = rows.get(i);
+                if (row.getSeq() == null || row.getSeq() != i || row.getChunkText() == null || row.getChunkText().isBlank()
+                        || !target.spaceFingerprint().equals(row.getEmbeddingSpace())) { valid = false; break; }
+            }
+            if (valid) result.put(key, rows.stream().map(row -> new TextChunker.Chunk(str(row.getHeading()), row.getChunkText())).toList());
+        }
+        return Map.copyOf(result);
+    }
+
+    /** Bounded in-memory diagnostic cache. Normal queries never calculate semantic boundaries. */
+    private final Map<String, List<TextChunker.Chunk>> syntheticChunks = new LinkedHashMap<>(16, .75f, true);
+
+    public synchronized List<TextChunker.Chunk> syntheticChunks(String type, String title, String content,
+                                                               KnowledgeBaseSettings.Config cfg) {
+        EmbeddingClient.Snapshot target = embedder.snapshot();
+        String space = target == null ? "" : target.spaceFingerprint();
+        String key = KgService.sha256(type + "\u0000" + title + "\u0000" + content + "\u0000" + space + "\u0000" + cfg.indexingFingerprint());
+        List<TextChunker.Chunk> cached = syntheticChunks.get(key);
+        if (cached != null) return cached;
+        List<TextChunker.Chunk> chunks = List.copyOf(chunker().split(type, content, target, cfg));
+        syntheticChunks.put(key, chunks);
+        while (syntheticChunks.size() > 32) syntheticChunks.remove(syntheticChunks.keySet().iterator().next());
+        return chunks;
+    }
+
     /**
      * 作废块缓存。
      *
@@ -741,6 +799,12 @@ public class VectorIndexService {
     }
 
     public List<Hit> search(String query, int topK, KnowledgeBaseSettings.Config cfg) {
+        return search(query, topK, cfg, null);
+    }
+
+    /** Restrict stale sources before relative-score filtering and source diversification. */
+    public List<Hit> search(String query, int topK, KnowledgeBaseSettings.Config cfg, Set<String> freshKeys) {
+        if (freshKeys != null && freshKeys.isEmpty()) return List.of();
         if (query == null || query.isBlank() || topK <= 0 || !settingsService.vectorEnabled() || !cfg.vectorEnabled()) {
             return List.of();
         }
@@ -783,6 +847,10 @@ public class VectorIndexService {
             candidates = active.search(target.spaceFingerprint(), qv, Math.max(topK * cfg.vectorPoolMultiplier(), cfg.vectorPoolMin()));
             if (active == milvusStore && candidates.isEmpty())
                 candidates = mysqlStore.search(target.spaceFingerprint(), qv, Integer.MAX_VALUE);
+            // Stale ANN neighbors must not consume the bounded pool ahead of valid sources.
+            if (active == milvusStore && freshKeys != null && candidates.stream().anyMatch(c ->
+                    !freshKeys.contains(c.sourceType() + ":" + c.sourceId() + ":" + c.seq())))
+                candidates = mysqlStore.search(target.spaceFingerprint(), qv, Integer.MAX_VALUE);
         } catch (Exception e) {
             log.warn("向量后端（{}）检索失败，本轮退化为 MySQL 全扫：{}", configuredBackend(), e.toString());
             // 立刻标记不可用：否则 Milvus 真的挂了之后，每轮对话都要先等一次连接超时才降级
@@ -798,6 +866,7 @@ public class VectorIndexService {
         }
         List<Hit> hits = new ArrayList<>();
         for (org.dyh.learnhub.service.vector.VectorStore.VecHit c : candidates) {
+            if (freshKeys != null && !freshKeys.contains(c.sourceType() + ":" + c.sourceId() + ":" + c.seq())) continue;
             if (Double.isFinite(c.score()) && c.score() >= cfg.vectorMinScore()) {
                 hits.add(new Hit(c.sourceType(), c.sourceId(), c.title(), c.category(),
                         c.text(), c.score(), c.seq()));
@@ -860,7 +929,7 @@ public class VectorIndexService {
         for (Map<String, Object> doc : docs) {
             if (!(doc.get("source_id") instanceof Number id)) continue;
             String type = text(doc.get("source_type")), title = text(doc.get("title")), category = text(doc.get("category"));
-            List<TextChunker.Chunk> chunks = TextChunker.splitWithHeadings(text(doc.get("content")), cfg.chunkOptions());
+            List<TextChunker.Chunk> chunks = syntheticChunks(type, title, text(doc.get("content")), cfg);
             for (int seq = 0; seq < chunks.size(); seq++) {
                 TextChunker.Chunk chunk = chunks.get(seq);
                 passages.add(new Hit(type, id.longValue(), title, category, chunk.text(), 0, seq));

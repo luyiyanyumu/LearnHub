@@ -335,6 +335,50 @@ class WikiRetrievalServiceTest {
     }
 
     @Test
+    void sourcePassagesReuseFreshSemanticBoundariesAndTheirExactSequence() {
+        String content = "Synthetic introduction.\n\nReAct loops with tools.\n\nSynthetic appendix.";
+        when(sources.currentSources("file", List.of(3L))).thenReturn(List.of(raw(3, "Source", content)));
+        VectorIndexService index = mock(VectorIndexService.class);
+        service.setVectorIndex(index);
+        List<TextChunker.Chunk> stored = List.of(new TextChunker.Chunk("Intro", "Synthetic introduction."),
+                new TextChunker.Chunk("Tool loop", "ReAct loops with tools."),
+                new TextChunker.Chunk("Appendix", "Synthetic appendix."));
+        KnowledgeBaseSettings.Config cfg = KnowledgeBaseSettings.defaults();
+        when(index.persistedChunks(anyList(), same(cfg))).thenReturn(Map.of("file:3", stored));
+
+        RetrievalHit hit = service.sourcePassages("ReAct", List.of(section("ReAct", List.of("file:3"))), 4, cfg).getFirst();
+
+        assertEquals("file:3:1", hit.key());
+        assertEquals(stored.get(1).text(), hit.text());
+        assertNotEquals(TextChunker.splitWithHeadings(content).getFirst().text(), hit.text());
+        verify(index).persistedChunks(argThat(documents -> documents.size() == 1
+                && "file".equals(documents.getFirst().get("source_type"))
+                && Long.valueOf(3).equals(documents.getFirst().get("source_id"))
+                && content.equals(documents.getFirst().get("content"))
+                && "Source".equals(documents.getFirst().get("title"))
+                && "current category".equals(documents.getFirst().get("category"))), same(cfg));
+        verifyNoMoreInteractions(index);
+    }
+
+    @Test
+    void sourcePassagesUseStructuralFallbackWhenIndexIsStaleOrUnavailable() {
+        String content = "# Current source\nReAct now uses the updated loop.";
+        when(sources.currentSources("file", List.of(3L))).thenReturn(List.of(raw(3, "Source", content)));
+        VectorIndexService index = mock(VectorIndexService.class);
+        service.setVectorIndex(index);
+        when(index.persistedChunks(anyList(), any())).thenReturn(Map.of())
+                .thenThrow(new IllegalStateException("index offline"));
+
+        for (int attempt = 0; attempt < 2; attempt++) {
+            RetrievalHit hit = service.sourcePassages("ReAct", List.of(section("ReAct", List.of("file:3"))), 4).getFirst();
+            assertEquals("file:3:0", hit.key());
+            assertEquals(TextChunker.splitWithHeadings(content).getFirst().text(), hit.text());
+        }
+        verify(index, times(2)).persistedChunks(anyList(), any());
+        verifyNoMoreInteractions(index);
+    }
+
+    @Test
     void wikiAliasQueryCanLocateCanonicalPageTitleInCurrentSourceWithoutAHeadingMatch() {
         WikiRetrievalService.Section section = new WikiRetrievalService.Section(1L, "entity-react", "ReAct", "section-1",
                 "定义", "Reasoning and Acting 的模型生成导览", List.of("note:1"), List.of(), 1);

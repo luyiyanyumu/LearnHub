@@ -23,9 +23,13 @@ import java.util.regex.Pattern;
 @RequiredArgsConstructor
 public class WikiRetrievalService {
     private KnowledgeBaseSettings knowledgeSettings;
+    private VectorIndexService vectorIndex;
 
     @Autowired(required = false)
     public void setKnowledgeSettings(KnowledgeBaseSettings settings) { this.knowledgeSettings = settings; }
+
+    @Autowired(required = false)
+    public void setVectorIndex(VectorIndexService vectorIndex) { this.vectorIndex = vectorIndex; }
 
     private KnowledgeBaseSettings.Config config() {
         return knowledgeSettings == null ? KnowledgeBaseSettings.defaults() : knowledgeSettings.snapshot();
@@ -217,6 +221,8 @@ public class WikiRetrievalService {
         }
         List<String> queryTerms = queryTerms(question);
         List<RetrievalHit> first = new ArrayList<>(), extras = new ArrayList<>();
+        Map<String, List<Map<String, Object>>> currentSources = new LinkedHashMap<>();
+        List<Map<String, Object>> documents = new ArrayList<>();
         for (String type : List.of("note", "quick_ref", "file")) {
             List<Long> ids = headings.keySet().stream().map(WikiRetrievalService::parseRef)
                     .filter(ref -> type.equals(ref.type())).map(Ref::id).toList();
@@ -229,15 +235,31 @@ public class WikiRetrievalService {
                 continue;
             }
             if (docs == null) continue;
+            List<Map<String, Object>> usable = new ArrayList<>();
             for (Map<String, Object> row : docs) {
                 if (row == null) continue;
                 Long id = positiveId(row.get("id"));
                 if (id == null || !ids.contains(id) || value(row.get("content")).isBlank()) continue;
+                usable.add(row);
+                Map<String, Object> document = new LinkedHashMap<>(row);
+                document.put("source_type", type);
+                document.put("source_id", id);
+                documents.add(document);
+            }
+            currentSources.put(type, usable);
+        }
+        Map<String, List<TextChunker.Chunk>> persisted = persistedChunks(documents, cfg);
+        for (var entry : currentSources.entrySet()) {
+            String type = entry.getKey();
+            for (Map<String, Object> row : entry.getValue()) {
+                Long id = positiveId(row.get("id"));
                 String ref = type + ":" + id;
                 List<String> headingTerms = queryTerms(String.join(" ", headings.get(ref)));
                 Set<String> sourceSubjects = new LinkedHashSet<>(subjectTerms(queryTerms));
                 for (String title : titles.get(ref)) sourceSubjects.addAll(subjectTerms(queryTerms(title)));
-                List<TextChunker.Chunk> chunks = TextChunker.splitWithHeadings(value(row.get("content")), cfg.chunkOptions());
+                List<TextChunker.Chunk> chunks = persisted.get(ref);
+                if (chunks == null || chunks.isEmpty())
+                    chunks = TextChunker.splitWithHeadings(value(row.get("content")), cfg.chunkOptions());
                 List<RetrievalHit> ranked = new ArrayList<>();
                 for (int seq = 0; seq < chunks.size(); seq++) {
                     TextChunker.Chunk chunk = chunks.get(seq);
@@ -262,6 +284,19 @@ public class WikiRetrievalService {
         Map<String, RetrievalHit> unique = new LinkedHashMap<>();
         for (RetrievalHit hit : first) unique.putIfAbsent(hit.key(), hit);
         return unique.values().stream().limit(Math.min(limit, MAX_HITS)).toList();
+    }
+
+    /** Query-time lookup only: source/model/settings freshness is checked by the vector index. */
+    private Map<String, List<TextChunker.Chunk>> persistedChunks(List<Map<String, Object>> documents,
+                                                               KnowledgeBaseSettings.Config cfg) {
+        if (vectorIndex == null || documents.isEmpty()) return Map.of();
+        try {
+            Map<String, List<TextChunker.Chunk>> chunks = vectorIndex.persistedChunks(documents, cfg);
+            return chunks == null ? Map.of() : chunks;
+        } catch (Exception unavailable) {
+            log.warn("Wiki 已存分块暂不可读，回退当前正文结构切块：{}", unavailable.getClass().getSimpleName());
+            return Map.of();
+        }
     }
 
     private Map<String, Boolean> freshness(List<WikiPage> input) {

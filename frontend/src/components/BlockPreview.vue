@@ -37,6 +37,7 @@ import { nextTableCell } from '../utils/tableNavigation'
 import { insertTableLineBreak } from '../utils/tableLineBreak'
 import { createDeferredSync } from '../utils/deferredSync'
 import { createExternalContentSync } from '../utils/externalContentSync'
+import { insertEditorDocument, replaceEditorDocument } from '../utils/editorDocumentChange.js'
 import { HeadingAnchorAttr, findNoteAnchor } from '../utils/headingAnchorAttr'
 import BlockActionMenu from './BlockActionMenu.vue'
 
@@ -260,7 +261,9 @@ function applyExternalContent(markdown) {
   if (!ed || ed.isDestroyed) return
   contentSync.cancel()
   invalidateToolbarTargets()
-  ed.commands.setContent(renderContent(markdown), { emitUpdate: false })
+  // Initial loads and source-editor synchronization are not AI/history edits.
+  ed.chain().command(({ tr }) => { tr.setMeta('addToHistory', false); return true })
+    .setContent(renderContent(markdown), { emitUpdate: false }).run()
   lastEmitted = markdown
   refreshTableContext()
   actions.value?.close()
@@ -487,7 +490,57 @@ function insertMath(tex, display = false) {
   return ed.chain().focus().insertContent(node).run()
 }
 
-defineExpose({ runTool, applyFormat, captureToolbarTarget, flushContent, insertMath,
+function parseMarkdownDocument(markdown) {
+  const container = document.createElement('div')
+  container.innerHTML = renderContent(markdown)
+  return ProseMirrorDOMParser.fromSchema(editor.value.schema).parse(container)
+}
+
+function prepareMarkdownChange() {
+  const ed = editor.value
+  if (!props.active || props.readonly || !ed || ed.isDestroyed || ed.view.composing) return false
+  // Explicit edits may originate while the preview is hidden by source mode.
+  // Flush that source first, while still respecting an unfinished composition.
+  externalSync.setAvailable(true)
+  const ready = externalSync.prepare()
+  externalSync.setAvailable(previewAvailable())
+  if (!ready) return false
+  contentSync.flush()
+  invalidateToolbarTargets()
+  actions.value?.close()
+  return true
+}
+
+/** Apply one complete AI batch without a setContent reset or stealing focus. */
+function applyMarkdownChange(markdown) {
+  if (!prepareMarkdownChange()) return false
+  const source = String(markdown ?? '')
+  const applied = replaceEditorDocument(editor.value, parseMarkdownDocument(source))
+  if (!applied) return false
+  contentSync.cancel()
+  externalSync.cancel()
+  lastEmitted = source
+  if (previewAvailable() && props.sourceLinesActive) refreshDataLines(source)
+  emit('update', source)
+  refreshTableContext()
+  queueLayoutChange()
+  return true
+}
+
+/** Insert at the stored caret/selection; the parent keeps inactive tabs isolated. */
+function insertMarkdownAtCursor(markdown) {
+  const source = String(markdown ?? '')
+  if (!source.trim() || !prepareMarkdownChange()) return false
+  const applied = insertEditorDocument(editor.value, parseMarkdownDocument(source), { block: true })
+  if (!applied) return false
+  contentSync.cancel()
+  syncDown()
+  refreshTableContext()
+  queueLayoutChange()
+  return true
+}
+
+defineExpose({ runTool, applyFormat, captureToolbarTarget, flushContent, insertMath, applyMarkdownChange, insertMarkdownAtCursor,
   hasPendingContent: contentSync.hasPending,
   undo: () => runHistory('undo'), redo: () => runHistory('redo') })
 
@@ -709,7 +762,7 @@ watch(() => props.sourceLinesActive, (active) => {
 
 <style scoped>
 /* A4 宽度排版：内容按 A4 纸宽(210mm)居中，所见即所得，方便打印 */
-.block-preview { position: relative; }
+.block-preview { position: relative; min-width: 0; max-width: 100%; }
 .block-preview :deep(.tiptap) { position: relative; z-index: 1; }
 .block-preview :deep(.tiptap) {
   outline: none;
@@ -717,8 +770,10 @@ watch(() => props.sourceLinesActive, (active) => {
   line-height: 1.8;
   color: var(--app-text-1);
   max-width: 210mm;
+  min-width: 0;
+  overflow-wrap: anywhere;
   margin: 0 auto;
-  padding: 24px 28px;
+  padding: 24px clamp(14px, 4%, 28px);
 }
 /* 标题字号：**与 md-editor 预览共用同一组变量**（style.css 里的 --md-h1..--md-h6）。
    块编辑器是笔记页的**默认**渲染器（只有 ?editor=md 才走 md-editor），所以这套字号必须两处都有 ——
@@ -746,9 +801,11 @@ watch(() => props.sourceLinesActive, (active) => {
 .block-preview :deep(.tiptap th > p + p), .block-preview :deep(.tiptap td > p + p) { margin-top: .35em; }
 .block-preview :deep(.tiptap th) { background: color-mix(in srgb, var(--app-text-1) 6%, transparent); font-weight: 600; }
 .block-preview :deep(.tiptap img) { max-width: 100%; height: auto; vertical-align: middle; }
-.block-table-toolbar { position: sticky; top: 8px; z-index: 8; display: flex; flex-wrap: wrap; align-items: center; gap: 5px; width: fit-content; max-width: calc(100% - 24px); margin: 8px auto -36px; padding: 5px 7px; border: 1px solid var(--app-border); border-radius: 8px; background: color-mix(in srgb, var(--app-card) 94%, transparent); box-shadow: 0 4px 18px #0002; font-size: 12px; }
-.block-table-toolbar button { border: 1px solid var(--app-border-weak); border-radius: 5px; padding: 3px 7px; background: transparent; color: var(--app-text-1); cursor: pointer; font: inherit; }
+.block-preview :deep(.tableWrapper) { max-width: 100%; overflow-x: auto; }
+.block-table-toolbar { position: sticky; top: 8px; z-index: 8; display: flex; flex-wrap: wrap; align-items: center; gap: 5px; width: fit-content; max-width: calc(100% - 24px); max-height: min(136px, 28dvh); overflow: auto; scrollbar-width: thin; margin: 8px auto 12px; padding: 5px 7px; border: 1px solid var(--app-border); border-radius: 8px; background: color-mix(in srgb, var(--app-card) 94%, transparent); box-shadow: 0 4px 18px #0002; font-size: 12px; }
+.block-table-toolbar button { flex-shrink: 0; min-height: 26px; white-space: nowrap; border: 1px solid var(--app-border-weak); border-radius: 5px; padding: 3px 7px; background: transparent; color: var(--app-text-1); cursor: pointer; font: inherit; }
 .block-table-toolbar button:hover { background: var(--app-brand-soft); }
+.block-table-toolbar button:focus-visible { outline: 2px solid var(--app-brand); outline-offset: 1px; }
 .block-table-toolbar button:disabled { opacity: .45; cursor: default; }
 .block-table-label { color: var(--app-text-2); margin-right: 2px; white-space: nowrap; }
 .block-preview :deep(.selectedCell) { background: color-mix(in srgb, var(--app-brand) 16%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--app-brand) 60%, transparent); }
@@ -818,5 +875,10 @@ watch(() => props.sourceLinesActive, (active) => {
   font-size: 12.5px;
 }
 .block-preview.is-compact :deep(.code-block-cm .cm-head) { gap: 6px; padding: 3px 8px; }
+
+@media (max-width: 520px) {
+  .block-preview :deep(.tiptap) { padding: 16px 14px; }
+  .block-preview :deep(.tiptap th), .block-preview :deep(.tiptap td) { padding: 6px 8px; }
+}
 
 </style>

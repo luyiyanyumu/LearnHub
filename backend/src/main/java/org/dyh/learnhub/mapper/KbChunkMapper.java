@@ -18,8 +18,13 @@ public interface KbChunkMapper extends BaseMapper<KbChunk> {
      * 一次读回内存（1MB 量级）再暴力余弦，比"把向量取出来算"更简单也更快。
      */
     @Select("SELECT id, source_type AS sourceType, source_id AS sourceId, seq, title, category, "
-            + "chunk_text AS chunkText, char_len AS charLen, vec, dim, model, embedding_space AS embeddingSpace FROM kb_chunk")
+            + "heading, chunk_text AS chunkText, char_len AS charLen, vec, dim, model, embedding_space AS embeddingSpace FROM kb_chunk")
     List<KbChunk> loadAll();
+
+    /** Reuse persisted boundaries on the query path without loading vector blobs. */
+    @Select("SELECT source_type AS sourceType, source_id AS sourceId, seq, heading, chunk_text AS chunkText, "
+            + "embedding_space AS embeddingSpace FROM kb_chunk ORDER BY source_type, source_id, seq")
+    List<KbChunk> loadPassages();
 
     /** 索引规模与模型（界面展示 / 判断是否需要重建） */
     @Select("SELECT CONCAT(COUNT(*), ':', IFNULL(SUM(char_len), 0), ':', IFNULL(MAX(model), ''), ':', "
@@ -116,7 +121,7 @@ public interface KbChunkMapper extends BaseMapper<KbChunk> {
 
     /** 资料：把用户手填说明拼在前面 —— 说明本身也是"这份文档讲了什么"的高价值上下文 */
     @Select("SELECT f.id AS id, f.origin_name AS title, "
-            + "CONCAT(IFNULL(f.summary, ''), CASE WHEN IFNULL(f.summary,'') = '' THEN '' ELSE '\\n' END, "
+            + "CONCAT(IFNULL(f.summary, ''), CASE WHEN IFNULL(f.summary,'') = '' THEN '' ELSE CHAR(10) END, "
             + "IFNULL(f.text_content, '')) AS content, c.name AS category "
             + "FROM file_info f LEFT JOIN category c ON c.id = f.category_id "
             + "WHERE f.text_status = 'ok' AND f.text_content IS NOT NULL")

@@ -1,0 +1,3 @@
+git_head=b9b43162cf47322b4a131535205f3c3ae7eee7f4
+sha256=c6ebd5654b2a2649bbfc3fdb1338636a29442a00ce37b7f2d16b64852bd8b762
+path=backend/src/main/java/org/dyh/learnhub/service/TextChunker.java

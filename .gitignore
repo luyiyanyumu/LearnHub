@@ -72,3 +72,11 @@ milvus-data/
 
 # 含真实资料的工作截图保留本地；公开项目介绍使用 readme-* 示例截图。
 /docs-shots/*-2026-10-08.png
+
+# ===== Windows 启动器构建产物 =====
+/LearnHub.exe
+/launcher/**/bin/
+/launcher/**/obj/
+/launcher/publish/
+/launcher/ui/node_modules/
+/launcher/ui/dist/

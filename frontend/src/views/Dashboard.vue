@@ -318,7 +318,7 @@ onBeforeUnmount(() => {
 
 .lower {
   display: grid;
-  grid-template-columns: 3fr 2fr;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
   gap: 16px;
 }
 
@@ -326,6 +326,8 @@ onBeforeUnmount(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .card-title {
@@ -400,5 +402,10 @@ onBeforeUnmount(() => {
   .lower {
     grid-template-columns: 1fr;
   }
+}
+
+@media (max-width: 480px) {
+  .stat-grid { grid-template-columns: minmax(0, 1fr); }
+  .stat-card :deep(.el-card__body) { padding: 14px; }
 }
 </style>

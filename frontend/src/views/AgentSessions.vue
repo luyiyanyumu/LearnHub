@@ -269,15 +269,19 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  height: 100dvh;
+  min-height: 480px;
   box-sizing: border-box;
-  overflow: hidden;
+  overflow: visible;
 }
+.head { flex-shrink: 0; min-width: 0; }
 .agent-layout {
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
   grid-template-columns: 268px minmax(0, 1fr);
   gap: 12px;
+  min-width: 0;
 }
 
 /* ---- 会话侧栏 ---- */
@@ -295,6 +299,7 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  flex-shrink: 0;
   padding: 10px 12px;
   border-bottom: 1px solid var(--app-border-weak);
 }
@@ -406,6 +411,9 @@ onBeforeUnmount(() => {
 .side-foot {
   padding: 8px 10px;
   border-top: 1px solid var(--app-border-weak);
+  flex-shrink: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 /* ---- 对话区 ---- */
@@ -427,6 +435,7 @@ onBeforeUnmount(() => {
   justify-content: center;
   gap: 8px;
   text-align: center;
+  padding: 16px;
 }
 .empty-t {
   margin: 0;
@@ -455,8 +464,8 @@ onBeforeUnmount(() => {
   height: 100%;
 }
 
-@media (max-width: 760px) {
-  .agent-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: 8px; }
+@media (max-width: 960px) {
+  .agent-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(280px, 1fr); gap: 8px; }
   .sess-side { display: grid; grid-template-columns: 76px minmax(0, 1fr); max-height: 144px; }
   .side-head { flex-direction: column; justify-content: center; padding: 6px; gap: 4px; border-bottom: 0; }
   .side-list { display: flex; align-items: stretch; overflow-x: auto; overflow-y: hidden; max-height: 100px; gap: 4px; }

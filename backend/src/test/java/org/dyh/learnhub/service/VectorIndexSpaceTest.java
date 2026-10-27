@@ -62,7 +62,7 @@ class VectorIndexSpaceTest {
         KbIndexState state = new KbIndexState(); state.setId("note:1"); state.setSourceType("note"); state.setSourceId(1L);
         state.setEmbeddingSpace(space); state.setChunks(1);
         state.setContentHash(KgService.sha256(space + "\u0000" + true + "\u0000标题\u0000正文说明，保留来源内容。"
-                + "\u0000split:v2:800:120:1200:input:6000"));
+                + "\u0000split:v4:" + KnowledgeBaseSettings.defaults().indexingFingerprint()));
         return state;
     }
 
@@ -176,6 +176,30 @@ class VectorIndexSpaceTest {
         assertEquals(1, service.search("问题", 6).size());
         verify(mysql).search(eq(a.spaceFingerprint()), any(float[].class), anyInt());
         verify(mysql, never()).search(eq(b.spaceFingerprint()), any(float[].class), anyInt());
+    }
+
+    @Test void staleTopScoreCannotExcludeFreshEvidenceFromTheRelativeScoreBand() {
+        when(mysql.hasVectors(a.spaceFingerprint())).thenReturn(true);
+        when(embedder.embed(a, "问题")).thenReturn(new float[]{1, 0});
+        when(mysql.search(eq(a.spaceFingerprint()), any(float[].class), anyInt())).thenReturn(List.of(
+                new VectorStore.VecHit(1, "note", 1L, 0, "过期主题", "", "过期正文", .99),
+                new VectorStore.VecHit(2, "file", 2L, 0, "当前主题", "", "有效证据", .70)));
+        var result = service.search("问题", 6, KnowledgeBaseSettings.defaults(), java.util.Set.of("file:2:0"));
+        assertEquals(1, result.size());
+        assertEquals("有效证据", result.getFirst().text());
+    }
+
+    @Test void staleAnnCandidatesTriggerAnUnboundedFreshMysqlFallback() {
+        syncAnn();
+        when(milvus.hasVectors(a.spaceFingerprint())).thenReturn(true);
+        when(mysql.hasVectors(a.spaceFingerprint())).thenReturn(true);
+        when(embedder.embed(a, "问题")).thenReturn(new float[]{1, 0});
+        when(milvus.search(eq(a.spaceFingerprint()), any(float[].class), anyInt())).thenReturn(List.of(
+                new VectorStore.VecHit(1, "note", 1L, 0, "过期主题", "", "过期正文", .99)));
+        when(mysql.search(eq(a.spaceFingerprint()), any(float[].class), eq(Integer.MAX_VALUE))).thenReturn(List.of(
+                new VectorStore.VecHit(2, "file", 2L, 0, "当前主题", "", "有效证据", .70)));
+        assertEquals("有效证据", service.search("问题", 6, KnowledgeBaseSettings.defaults(), java.util.Set.of("file:2:0")).getFirst().text());
+        verify(mysql).search(eq(a.spaceFingerprint()), any(float[].class), eq(Integer.MAX_VALUE));
     }
 
     @Test void automaticIncrementalSkipsChangedAndMixedSpacesWithoutEmbedding() {

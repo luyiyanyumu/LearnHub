@@ -1,0 +1,21 @@
+{
+  "name": "learnhub-launcher-ui",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 4177",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 4177",
+    "test": "node --test tests/*.test.js"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "2.3.2",
+    "element-plus": "2.14.5",
+    "vue": "3.5.44"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "6.0.8",
+    "vite": "8.3.5"
+  }
+}

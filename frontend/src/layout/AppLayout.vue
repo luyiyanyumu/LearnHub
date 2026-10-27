@@ -99,7 +99,7 @@ const navItems = [
 
 /** 侧栏折叠：收起后只剩图标（64px 图标栏），状态持久化到 localStorage */
 const collapsed = ref(localStorage.getItem('lh-sidebar-collapsed') === '1')
-const narrowViewport = window.matchMedia('(max-width: 680px)')
+const narrowViewport = window.matchMedia('(max-width: 1024px)')
 const narrowScreen = ref(narrowViewport.matches)
 const sidebarCollapsed = computed(() => collapsed.value || narrowScreen.value)
 const syncNarrowScreen = event => { narrowScreen.value = event.matches }
@@ -195,12 +195,17 @@ function toggleCollapse() {
 .layout {
   display: flex;
   height: 100%;
+  height: 100dvh;
+  min-width: 0;
+  min-height: 0;
 }
 
 .side {
   width: 224px;
   flex-shrink: 0;
   min-height: 0;
+  max-height: 100dvh;
+  overflow-y: auto;
   background: var(--app-side);
   border-right: 1px solid var(--app-border);
   display: flex;
@@ -363,6 +368,7 @@ function toggleCollapse() {
 .content {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   overflow: auto;
   background: var(--app-bg);
   transition: background-color var(--dur) ease;
@@ -510,5 +516,13 @@ function toggleCollapse() {
   justify-content: center;
   min-height: 40px;
   padding: 0;
+}
+
+@media (max-height: 600px) {
+  .logo, .side.collapsed .logo { min-height: 56px; padding-block: 10px; }
+  .nav-caption { padding-block: 4px; }
+  .workspace-nav, .side.collapsed .workspace-nav { padding-bottom: 8px; gap: 2px; }
+  .side-foot, .side.collapsed .side-foot { padding-block: 6px; }
+  .foot-note { display: none; }
 }
 </style>

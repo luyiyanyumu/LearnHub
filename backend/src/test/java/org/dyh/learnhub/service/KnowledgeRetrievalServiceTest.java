@@ -39,13 +39,23 @@ class KnowledgeRetrievalServiceTest {
         service = new KnowledgeRetrievalService(sources, vectors, graph, reranker, settings, routing, client, wiki);
         when(settings.vectorEnabled()).thenReturn(true);
         when(settings.kgInjectEnabled()).thenReturn(true);
+        // These fixtures represent an indexed corpus unless an individual test marks it stale.
+        when(vectors.persistedChunks(anyList(), any())).thenAnswer(inv -> {
+            List<Map<String, Object>> documents = inv.getArgument(0);
+            KnowledgeBaseSettings.Config config = inv.getArgument(1);
+            Map<String, List<TextChunker.Chunk>> chunks = new java.util.LinkedHashMap<>();
+            for (Map<String, Object> document : documents)
+                chunks.put(document.get("source_type") + ":" + document.get("source_id"),
+                        TextChunker.splitWithHeadings(String.valueOf(document.get("content")), config.chunkOptions()));
+            return chunks;
+        });
     }
 
     @Test
     void fusedSearchAddsGraphOnlyPassagesAndMergesChannelsForTheSamePassage() {
         when(sources.allNotes()).thenReturn(List.of(source(1, "ReAct", "ReAct 以循环执行工具。"),
                 source(2, "记忆", "受控记忆保存推理过程中观察到的信息。")));
-        when(vectors.search("ReAct", 24)).thenReturn(List.of(
+        when(vectors.search(eq("ReAct"), eq(24), any(), anySet())).thenReturn(List.of(
                 new VectorIndexService.Hit("note", 1L, "old title", "", "ReAct 以循环执行工具。", .8, 0)));
         when(graph.search("ReAct", 24)).thenReturn(List.of(
                 hit(1, 0, "ReAct 以循环执行工具。", "graph", "ReAct → Agent 循环"),
@@ -68,13 +78,14 @@ class KnowledgeRetrievalServiceTest {
         assertEquals(1, hits.size());
         assertEquals(List.of("keyword"), hits.getFirst().channels());
         assertEquals(0, hits.getFirst().seq());
-        verifyNoInteractions(vectors, graph, reranker, routing, client);
+        verify(vectors, never()).search(anyString(), anyInt(), any(), anySet());
+        verifyNoInteractions(graph, reranker, routing, client);
     }
 
     @Test
     void vectorFailureKeepsCurrentKeywordEvidence() {
         when(sources.allFiles()).thenReturn(List.of(source(8, "容器教程", "Docker 使用容器隔离程序。")));
-        when(vectors.search(anyString(), anyInt())).thenThrow(new IllegalStateException("offline"));
+        when(vectors.search(anyString(), anyInt(), any(), anySet())).thenThrow(new IllegalStateException("offline"));
         List<RetrievalHit> hits = service.search("Docker", 5, "fused", false);
         assertEquals("file", hits.getFirst().sourceType());
         assertEquals(List.of("keyword"), hits.getFirst().channels());
@@ -82,9 +93,41 @@ class KnowledgeRetrievalServiceTest {
     }
 
     @Test
+    void persistedSemanticPassagesParticipateInKeywordVectorFusionAndNeighborExpansion() {
+        when(sources.allFiles()).thenReturn(List.of(source(8, "合成教程", "原始正文缓存策略。训练策略。")));
+        String passage = "缓存策略。";
+        when(vectors.persistedChunks(anyList(), any())).thenReturn(Map.of("file:8", List.of(
+                new TextChunker.Chunk("缓存", passage), new TextChunker.Chunk("缓存", "缓存的相邻解释。"))));
+        when(vectors.search(eq("缓存"), eq(24), any(), anySet())).thenReturn(List.of(new VectorIndexService.Hit("file", 8L, "合成教程", "", passage, .8, 0)));
+        var hits = service.search("缓存", 1, "fused", false);
+        assertEquals(passage, hits.getFirst().text());
+        assertTrue(hits.getFirst().channels().contains("vector"));
+        when(graph.search("缓存", 24)).thenReturn(List.of(new RetrievalHit("file", 8L, "合成教程", "", passage,
+                1, 0, List.of("graph"), List.of("缓存 → 一致性"))));
+        var fused = service.search("缓存", 1, "fused", true).getFirst();
+        assertTrue(fused.channels().containsAll(List.of("keyword", "vector", "graph")));
+        assertEquals(List.of("缓存 → 一致性"), fused.graphRelations());
+        var neighbors = service.relatedSections(hits, 1).get(hits.getFirst().key());
+        assertEquals("缓存的相邻解释。", neighbors.passages().getFirst().text());
+        verify(vectors, never()).syntheticChunks(anyString(), anyString(), anyString(), any());
+    }
+
+    @Test
+    void staleTitleContextCannotReuseAnOldVectorEvenWhenBodyAndSequenceMatch() {
+        String body = "缓存的一致性说明。";
+        when(sources.allNotes()).thenReturn(List.of(source(1, "新主题", body)));
+        when(vectors.persistedChunks(anyList(), any())).thenReturn(Map.of());
+        when(vectors.search(eq("缓存"), eq(24), any(), anySet())).thenReturn(List.of(new VectorIndexService.Hit("note", 1L, "旧主题", "", body, .9, 0)));
+        assertTrue(service.search("缓存", 5, "vector", false).isEmpty());
+        var fallback = service.search("缓存", 5, "fused", false);
+        assertEquals(List.of("keyword"), fallback.getFirst().channels());
+        assertEquals("新主题", fallback.getFirst().title());
+    }
+
+    @Test
     void changedOrDeletedVectorPassagesAreNotFusedWithCurrentChunks() {
         when(sources.allNotes()).thenReturn(List.of(source(1, "ReAct", "ReAct 当前正确的内容。")));
-        when(vectors.search("ReAct", 24)).thenReturn(List.of(
+        when(vectors.search(eq("ReAct"), eq(24), any(), anySet())).thenReturn(List.of(
                 new VectorIndexService.Hit("note", 1L, "ReAct", "", "已删除的错误内容。", .99, 0),
                 new VectorIndexService.Hit("note", 2L, "ReAct", "", "已删除整篇来源。", .98, 0)));
         List<RetrievalHit> fused = service.search("ReAct", 5, "fused", false);
@@ -99,7 +142,7 @@ class KnowledgeRetrievalServiceTest {
     void successfulSemanticMatchDoesNotTriggerARewriteOnKeywordMiss() {
         when(sources.allNotes()).thenReturn(List.of(source(3, "版本控制", "git reset 撤销暂存。")));
         when(settings.queryRewriteEnabled()).thenReturn(true);
-        when(vectors.search("退回改动", 24)).thenReturn(List.of(
+        when(vectors.search(eq("退回改动"), eq(24), any(), anySet())).thenReturn(List.of(
                 new VectorIndexService.Hit("note", 3L, "版本控制", "", "git reset 撤销暂存。", .82, 0)));
         assertEquals(List.of("vector"), service.search("退回改动", 5, "fused", false).getFirst().channels());
         verifyNoInteractions(client, routing);
@@ -272,7 +315,7 @@ class KnowledgeRetrievalServiceTest {
                 anyString(), isNull(), any());
         verify(routing, times(1)).forTask(ModelRouting.TASK_GROUNDING);
         verify(routing, never()).forTask(ModelRouting.TASK_REWRITE);
-        verify(vectors).search("attachHandler", 24);
+        verify(vectors).search(eq("attachHandler"), eq(24), any(), anySet());
         verify(reranker, times(1)).rerank(eq(query), anyList());
     }
 
@@ -286,7 +329,7 @@ class KnowledgeRetrievalServiceTest {
                 anyString(), isNull(), any())).thenReturn(new ObjectMapper().readTree(
                 "{\"content\":\"{\\\"missing\\\":[],\\\"queries\\\":[]}\"}"));
         assertEquals(1, service.search(query, 5, "fused", false).size());
-        verify(vectors, times(1)).search(anyString(), eq(24));
+        verify(vectors, times(1)).search(anyString(), eq(24), any(), anySet());
         when(client.chat(anyList(), isNull(), anyString(), anyString(), anyString(), anyInt(), anyDouble(),
                 anyString(), isNull(), any())).thenThrow(new IllegalStateException("offline"));
         assertEquals(1, service.search(query, 5, "fused", false).size());
@@ -302,9 +345,9 @@ class KnowledgeRetrievalServiceTest {
         service.search(query, 5, "fused", false);
         verify(client, times(1)).chat(anyList(), isNull(), anyString(), anyString(), anyString(), anyInt(), anyDouble(),
                 anyString(), isNull(), any());
-        verify(vectors).search("Alpha", 24);
-        verify(vectors).search("Beta", 24);
-        verify(vectors, never()).search("Gamma", 24);
+        verify(vectors).search(eq("Alpha"), eq(24), any(), anySet());
+        verify(vectors).search(eq("Beta"), eq(24), any(), anySet());
+        verify(vectors, never()).search(eq("Gamma"), eq(24), any(), anySet());
         verify(routing, times(1)).forTask(ModelRouting.TASK_REWRITE);
         verify(routing, never()).forTask(ModelRouting.TASK_GROUNDING);
     }
@@ -320,7 +363,7 @@ class KnowledgeRetrievalServiceTest {
         }
         rows.add(source(99, "运行实现", "HiddenHandler 提供处理函数调用示例。"));
         when(sources.allNotes()).thenReturn(rows);
-        when(vectors.search(query, 24)).thenReturn(vectorHits);
+        when(vectors.search(eq(query), eq(24), any(), anySet())).thenReturn(vectorHits);
         when(settings.queryRewriteEnabled()).thenReturn(true);
         when(routing.forTask(ModelRouting.TASK_GROUNDING)).thenReturn(
                 new ModelRouting.ModelTarget("test", "test", "http://local", "", "test-model", false));

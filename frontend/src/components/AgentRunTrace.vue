@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, useId, watch } from 'vue'
+import { retrievalChannels, retrievalKey, retrievalPosition, retrievalSnippet, retrievalSourcePath, retrievalTitle } from '../utils/retrievalDisplay.js'
 
 const props = defineProps({
   entries: { type: Array, default: () => [] },
@@ -8,9 +9,11 @@ const props = defineProps({
   elapsedMs: { type: Number, default: 0 },
   failed: { type: Boolean, default: false },
 })
+const emit = defineEmits(['open-source', 'inspect'])
 
 const traceId = `agent-run-trace-${useId()}`
 const expanded = ref(props.running)
+const expandedSteps = ref(new Set())
 const now = ref(Date.now())
 const localStartedAt = ref(now.value)
 const stoppedElapsed = ref(0)
@@ -66,6 +69,68 @@ function statusOf(entry) {
   return Object.hasOwn(statusLabels, entry.status) ? entry.status : 'interrupted'
 }
 
+function stepKey(entry, index) {
+  return entry.id || `step-${index}`
+}
+
+function stepRegion(index) {
+  return `${traceId}-step-${index}`
+}
+
+function toolsOf(entry) {
+  const tools = Array.isArray(entry.tools) ? entry.tools.filter(tool => tool && typeof tool.name === 'string' && tool.name.trim()) : []
+  return tools.length ? tools : entry.toolName ? [{ name: entry.toolName, title: entry.title }] : []
+}
+
+function sourcesOf(entry) {
+  return Array.isArray(entry.sources) ? entry.sources.filter(source => source && typeof source === 'object') : []
+}
+
+function safeWebsiteUrl(value) {
+  if (typeof value !== 'string' || value.length > 4096) return null
+  try {
+    const url = new URL(value)
+    return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? url.href : null
+  } catch { return null }
+}
+
+function websitesOf(entry) {
+  return (Array.isArray(entry.websites) ? entry.websites : []).filter(site => site && safeWebsiteUrl(site.url))
+}
+
+function preview(value, limit = 2000) {
+  if (value == null) return ''
+  let text
+  try { text = typeof value === 'string' ? value : JSON.stringify(value, null, 2) } catch { return '无法显示此条操作记录' }
+  if (typeof text !== 'string') return ''
+  return text.length > limit ? `${text.slice(0, limit)}\n…（预览已截断）` : text
+}
+
+function hasDetails(entry) {
+  return toolsOf(entry).length || sourcesOf(entry).length || websitesOf(entry).length || preview(entry.result) || preview(entry.error)
+}
+
+function detailSummary(entry) {
+  return [[toolsOf(entry).length, '项工具'], [sourcesOf(entry).length, '条资料'], [websitesOf(entry).length, '个网站']]
+    .filter(([count]) => count).map(([count, label]) => `${count} ${label}`).join(' · ')
+}
+
+function toggleStep(entry, index) {
+  const key = stepKey(entry, index)
+  const next = new Set(expandedSteps.value)
+  if (next.has(key)) next.delete(key)
+  else {
+    next.add(key)
+    emit('inspect')
+  }
+  expandedSteps.value = next
+}
+
+watch(executionEntries, value => {
+  const keys = new Set(value.map(stepKey))
+  expandedSteps.value = new Set([...expandedSteps.value].filter(key => keys.has(key)))
+})
+
 function stopClock() {
   if (clock !== null) clearInterval(clock)
   clock = null
@@ -81,7 +146,7 @@ watch(() => props.running, (running, wasRunning) => {
     clock = setInterval(() => { now.value = Date.now() }, 1000)
   } else if (wasRunning) {
     stoppedElapsed.value = Math.max(positiveNumber(props.elapsedMs), now.value - (positiveNumber(props.startedAt) || localStartedAt.value), 0)
-    expanded.value = false
+    expanded.value = expanded.value && expandedSteps.value.size > 0
   }
 }, { immediate: true })
 
@@ -152,12 +217,61 @@ onBeforeUnmount(stopClock)
             <svg v-else-if="statusOf(entry) === 'pending'" viewBox="0 0 16 16"><circle cx="8" cy="8" r="4.5" /></svg>
           </span>
           <div class="entry-content">
-            <div class="entry-heading">
-              <span class="entry-title">{{ entry.title || '处理步骤' }}</span>
-              <span class="entry-status" :class="{ 'visually-hidden': statusOf(entry) === 'completed' }">{{ statusLabels[statusOf(entry)] }}</span>
-              <span v-if="positiveNumber(entry.elapsedMs) >= 1000" class="entry-time">{{ duration(entry.elapsedMs) }}</span>
+            <component
+              :is="hasDetails(entry) ? 'button' : 'div'"
+              :type="hasDetails(entry) ? 'button' : undefined"
+              class="entry-summary"
+              :class="{ 'is-expandable': !!hasDetails(entry) }"
+              :aria-expanded="hasDetails(entry) ? expandedSteps.has(stepKey(entry, index)) : undefined"
+              :aria-controls="hasDetails(entry) ? stepRegion(index) : undefined"
+              @click="hasDetails(entry) && toggleStep(entry, index)"
+            >
+              <span class="entry-heading">
+                <span class="entry-title">{{ entry.title || '处理步骤' }}</span>
+                <span class="entry-status" :class="{ 'visually-hidden': statusOf(entry) === 'completed' }">{{ statusLabels[statusOf(entry)] }}</span>
+                <span v-if="positiveNumber(entry.elapsedMs) >= 1000" class="entry-time">{{ duration(entry.elapsedMs) }}</span>
+                <svg v-if="hasDetails(entry)" class="entry-chevron" :class="{ 'is-open': expandedSteps.has(stepKey(entry, index)) }" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg>
+              </span>
+              <span v-if="entry.detail && entry.detail !== entry.title" class="entry-detail">{{ entry.detail }}</span>
+              <span v-if="hasDetails(entry)" class="entry-detail-hint">{{ detailSummary(entry) }}{{ detailSummary(entry) ? ' · ' : '' }}{{ expandedSteps.has(stepKey(entry, index)) ? '收起详情' : '查看详情' }}</span>
+              <span v-else-if="entry.kind !== 'update'" class="entry-detail-hint is-muted">{{ statusOf(entry) === 'running' ? '操作明细将在执行后更新' : '此步骤未记录工具、网站或资料明细' }}</span>
+            </component>
+            <div v-if="hasDetails(entry) && expandedSteps.has(stepKey(entry, index))" :id="stepRegion(index)" class="entry-records" :aria-label="`${entry.title || '处理步骤'}详情`">
+              <section v-if="toolsOf(entry).length" class="record-group">
+                <h4>工具操作 <span>{{ toolsOf(entry).length }}</span></h4>
+                <ul class="record-list">
+                  <li v-for="(tool, toolIndex) in toolsOf(entry)" :key="`${tool.name}-${toolIndex}`" class="tool-record">
+                    <div class="record-title">{{ tool.title || '工具操作' }} <code>{{ preview(tool.name, 160) }}</code></div>
+                    <template v-if="tool.arguments != null"><span class="record-label">调用参数</span><pre class="record-preview" tabindex="0" :aria-label="`${tool.title || tool.name}调用参数`">{{ preview(tool.arguments) }}</pre></template>
+                    <p v-else class="record-muted">未记录调用参数。</p>
+                  </li>
+                </ul>
+              </section>
+              <section v-if="sourcesOf(entry).length" class="record-group">
+                <h4>检索资料 <span>{{ sourcesOf(entry).length }}</span></h4>
+                <ul class="record-list">
+                  <li v-for="source in sourcesOf(entry)" :key="retrievalKey(source)">
+                    <button v-if="retrievalSourcePath(source)" type="button" class="record-source-link" @click="emit('open-source', source)">{{ retrievalTitle(source) || '未命名资料' }}<span aria-hidden="true">↗</span></button>
+                    <span v-else class="record-title">{{ retrievalTitle(source) || '未命名资料' }}</span>
+                    <div v-if="retrievalPosition(source) || retrievalChannels(source).length" class="record-muted">{{ [retrievalPosition(source), ...retrievalChannels(source)].filter(Boolean).join(' · ') }}</div>
+                    <p v-if="retrievalSnippet(source, 360)" class="record-snippet">{{ retrievalSnippet(source, 360) }}</p>
+                    <p v-if="!retrievalSourcePath(source)" class="record-muted">此资料未提供可打开的来源位置。</p>
+                  </li>
+                </ul>
+              </section>
+              <section v-if="websitesOf(entry).length" class="record-group">
+                <h4>网站与网页 <span>{{ websitesOf(entry).length }}</span></h4>
+                <ul class="record-list">
+                  <li v-for="(site, siteIndex) in websitesOf(entry)" :key="`${site.url}-${siteIndex}`">
+                    <a class="record-website-link" :href="safeWebsiteUrl(site.url)" target="_blank" rel="noopener noreferrer">{{ preview(site.title || site.url, 240) }}<span aria-hidden="true">↗</span></a>
+                    <span class="record-url">{{ safeWebsiteUrl(site.url) }}</span>
+                    <p v-if="site.snippet" class="record-snippet">{{ retrievalSnippet(site, 360) }}</p>
+                  </li>
+                </ul>
+              </section>
+              <section v-if="preview(entry.error)" class="record-group record-error"><h4>失败原因</h4><pre class="record-preview" tabindex="0" aria-label="失败原因">{{ preview(entry.error) }}</pre></section>
+              <section v-if="preview(entry.result)" class="record-group"><h4>返回结果预览</h4><pre class="record-preview" tabindex="0" aria-label="返回结果预览">{{ preview(entry.result, 4000) }}</pre></section>
             </div>
-            <p v-if="entry.detail && entry.detail !== entry.title" class="entry-detail">{{ entry.detail }}</p>
           </div>
         </li>
       </ol>
@@ -281,6 +395,31 @@ onBeforeUnmount(stopClock)
 .trace-entry.is-waiting .entry-status { color: var(--app-brand-deep); }
 .entry-time { margin-left: auto; }
 .entry-detail { margin: 3px 0 0; color: var(--app-text-3); white-space: pre-wrap; overflow-wrap: anywhere; }
+.entry-summary { display: block; width: 100%; min-width: 0; box-sizing: border-box; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; }
+.entry-summary.is-expandable { min-height: 32px; cursor: pointer; border-radius: var(--radius, 8px); }
+.entry-summary.is-expandable:hover .entry-title { color: var(--app-brand-deep); }
+.entry-summary:focus-visible, .record-source-link:focus-visible, .record-website-link:focus-visible, .record-preview:focus-visible { outline: 2px solid var(--app-brand); outline-offset: 3px; border-radius: 3px; }
+.entry-summary .entry-detail { display: block; }
+.entry-detail-hint { display: block; margin-top: 3px; font-size: 11px; color: var(--app-brand-deep); }
+.entry-detail-hint.is-muted, .record-muted { color: var(--app-text-3); }
+.entry-chevron { flex: 0 0 14px; align-self: center; transition: transform var(--dur-fast, 0.15s) ease; }
+.entry-chevron.is-open { transform: rotate(90deg); }
+.entry-records { min-width: 0; margin: 8px 0 4px; padding: 12px; border: 1px solid var(--app-border); border-radius: var(--radius, 8px); background: var(--app-bg); }
+.record-group + .record-group { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--app-border); }
+.record-group h4 { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; color: var(--app-text-1); font: inherit; font-weight: 600; }
+.record-group h4 > span { color: var(--app-text-3); font-weight: 400; }
+.record-list { padding: 0; margin: 0; list-style: none; }
+.record-list > li + li { padding-top: 10px; margin-top: 10px; border-top: 1px solid var(--app-border-weak); }
+.record-title { color: var(--app-text-1); overflow-wrap: anywhere; }
+.record-title code { display: inline; color: var(--app-text-2); background: var(--app-code-bg); padding: 1px 4px; border-radius: 3px; overflow-wrap: anywhere; white-space: normal; }
+.record-label { display: block; margin-top: 6px; color: var(--app-text-3); font-size: 11px; }
+.record-preview { max-height: 240px; overflow: auto; margin: 4px 0 0; padding: 8px; border-radius: 4px; color: var(--app-text-2); background: var(--app-code-bg); font-size: 11px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.record-source-link, .record-website-link { display: inline-flex; align-items: baseline; gap: 5px; max-width: 100%; min-height: 24px; padding: 0; border: 0; background: transparent; color: var(--app-brand-deep); font: inherit; text-align: left; text-decoration: none; overflow-wrap: anywhere; cursor: pointer; }
+.record-source-link:hover, .record-website-link:hover { text-decoration: underline; }
+.record-url { display: block; color: var(--app-text-3); font-size: 11px; overflow-wrap: anywhere; }
+.record-snippet { margin: 4px 0 0; color: var(--app-text-2); overflow-wrap: anywhere; }
+.record-muted { margin: 4px 0 0; font-size: 11px; overflow-wrap: anywhere; }
+.record-error h4 { color: var(--el-color-danger, #f56c6c); }
 .trace-empty { padding: 4px 0 4px 24px; margin: 0; color: var(--app-text-3); }
 .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 @keyframes trace-spin { to { transform: rotate(360deg); } }

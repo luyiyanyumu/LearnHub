@@ -23,9 +23,9 @@ Windows PowerShell 使用 `Copy-Item .env.example .env` 复制配置模板。启
 | MySQL | `localhost:3307` | `MYSQL_HOST_PORT` |
 | 容器版 Ollama（可选） | `localhost:11434` | `OLLAMA_HOST_PORT` |
 
-Windows 可从仓库根目录运行 `start-all.bat`。每次启动会重启当前 Compose 项目中仍在运行的旧后端，并等待后端健康后再打开网页；本次刚启动或重建的后端不会再次重启。数据库与数据卷保留。普通启动使用已有镜像，修改源码后执行 `start-all.bat build`；`nobrowser nopause` 可用于关闭自动开浏览器与退出暂停。
+Windows 可使用 [LearnHub.exe 启动器](../launcher/README.md)。将 EXE 放在仓库根目录，或在窗口中选择项目目录；Docker 模式会检查引擎、项目容器和前后端健康，提供启动、停止、单独重启前后端、构建镜像、查看日志及脱敏诊断导出。停止保留容器和数据卷，关闭启动器窗口后业务服务继续运行。修改源码后使用构建操作更新前后端镜像。
 
-本地开发使用 `start-all.bat dev` 或 `start-dev.bat`，启动器会重启经绝对 JAR 路径和监听端口确认属于本仓库的 Java 后端，并等待 API 可用。端口被 Docker、其他项目或无法确认归属的旧进程占用时会报错退出；旧启动器通过相对 JAR 路径启动的进程需要先手动退出一次。开发模式使用已打包的 `backend/target/learn-hub-backend-0.0.1-SNAPSHOT.jar`，源码变更后需先重新打包。
+本地开发可在启动器中切换到本地模式，使用本机 Java 后端与 Vite 前端，以及项目 Compose 中的数据库。需要 JDK 21+、Node.js 22.14+、已安装的前端依赖及打包完成的 `backend/target/learn-hub-backend-0.0.1-SNAPSHOT.jar`；后端源码变更后需先重新打包。启停仅作用于能确认属于所选项目的进程；端口被 Docker、其他项目或无法确认归属的进程占用时，会显示冲突并拒绝停止该进程。
 
 ## 模型服务
 
@@ -185,7 +185,7 @@ BACKEND_CONTAINER_NAME=learn-hub-secondary-backend
 FRONTEND_CONTAINER_NAME=learn-hub-secondary-frontend
 ```
 
-独立数据还需要独立的 Compose 项目名，例如执行 `docker compose --project-name learn-hub-secondary up -d --build`；后续运维命令也使用相同项目名。Windows 的 `start-all.bat` 会读取 `deploy/.env` 中的端口和容器名。
+独立数据还需要独立的 Compose 项目名，例如在该实例的 `deploy/.env` 中设置 `COMPOSE_PROJECT_NAME=learn-hub-secondary`，再执行 `docker compose up -d --build`；后续运维命令也使用相同配置。Windows EXE 启动器读取所选项目的 Compose 配置及端口，不按全局容器名称操作其他实例。
 
 ### 前端无法连接后端
 

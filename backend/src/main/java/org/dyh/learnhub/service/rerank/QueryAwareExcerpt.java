@@ -26,6 +26,20 @@ public final class QueryAwareExcerpt {
 
     private QueryAwareExcerpt() { }
 
+    public record Relevance(double total, double additional) { }
+
+    /** Distinct question concepts, with a separate score for evidence absent from the seed. */
+    public static Relevance relevance(String question, String text, String covered) {
+        if (text == null || text.isBlank()) return new Relevance(0, 0);
+        List<Term> terms = terms(question);
+        List<Match> found = matches(text, terms);
+        Set<Integer> existing = new java.util.HashSet<>();
+        if (covered != null && !covered.isBlank())
+            matches(covered, terms).forEach(match -> existing.add(match.term()));
+        return new Relevance(score(found, 0, text.length()),
+                score(found.stream().filter(match -> !existing.contains(match.term())).toList(), 0, text.length()));
+    }
+
     /**
      * Returns an exact substring of {@code text}, preserving code and newlines. With no matching
      * question terms the prefix is retained. No generated paraphrase is added to the evidence.

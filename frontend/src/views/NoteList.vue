@@ -487,21 +487,21 @@ async function reloadMeta() {
 
 <style scoped>
 .notes-page { max-width: 1760px; width: 100%; box-sizing: border-box; margin: 0 auto; padding: 24px 28px 96px; }
-.notes-heading { display: flex; justify-content: space-between; align-items: center; gap: 24px; margin-bottom: 16px; }
-.notes-heading-copy { display: flex; align-items: baseline; gap: 16px; min-width: 0; }
+.notes-heading { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px 24px; margin-bottom: 16px; }
+.notes-heading-copy { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 16px; min-width: 0; }
 .notes-heading .page-h2 { font-size: var(--font-title); line-height: var(--lh-title); letter-spacing: -.04em; }
 .notes-description { color: var(--app-text-3); font-size: var(--font-caption); line-height: var(--lh-caption); }
-.notes-heading-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.notes-heading-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; max-width: 100%; }
 .notes-heading-actions :deep(.el-button) { height: 40px; padding: 0 18px; border-radius: var(--radius); margin: 0; }
-.note-workspace.el-card { min-width: 0; border-radius: var(--radius-xl); box-shadow: var(--shadow-sm); }
+.note-workspace.el-card { min-width: 0; container: note-collection / inline-size; border-radius: var(--radius-xl); box-shadow: var(--shadow-sm); }
 .note-content :deep(.el-card__body) { padding: 0; }
 .note-toolbar { gap: 12px; margin: 0; padding: 16px 20px 8px; }
 .note-toolbar :deep(.el-input), .note-toolbar :deep(.el-select), .note-toolbar :deep(.el-button) { --el-component-size: 40px; }
 .note-toolbar :deep(.el-select__wrapper) { min-height: var(--control-h); }
-.note-toolbar .note-search { flex: 1 1 260px; width: auto; max-width: 420px; }
+.note-toolbar .note-search { flex: 1 1 260px; width: auto; min-width: 0; max-width: min(100%, 420px); }
 .note-search :deep(.el-input-group__append) { background: var(--app-card); color: var(--app-text-2); }
-.note-filters { display: flex; gap: 10px; margin-left: auto; }
-.note-filter { width: 148px; }
+.note-filters { display: flex; flex-wrap: wrap; gap: 10px; margin-left: auto; min-width: 0; max-width: 100%; }
+.note-filter { width: 148px; max-width: 100%; }
 .note-toolbar > .el-button + .el-button { margin-left: 0; }
 .reset-filter { padding: 0 8px; }
 .note-content :deep(.folder-explorer) { margin: 0; padding: 12px 20px; border-bottom: 1px solid var(--app-border-weak); }
@@ -518,7 +518,7 @@ async function reloadMeta() {
 .directory-count { color: var(--app-text-3); font-size: var(--font-caption); white-space: nowrap; }
 .directory-count span { margin: 0 4px; }
 .directory-count b { font-weight: 550; color: var(--app-text-2); font-variant-numeric: tabular-nums; }
-.selection-actions { min-height: 32px; gap: 8px; }
+.selection-actions { min-height: 32px; flex-wrap: wrap; gap: 8px; max-width: 100%; }
 .selection-actions :deep(.el-button + .el-button) { margin-left: 0; }
 .selection-count { color: var(--app-brand-deep); font-size: var(--font-caption); white-space: nowrap; }
 .note-table.el-table { width: calc(100% - 24px); margin: 0 12px; --el-table-header-bg-color: var(--app-bg); --el-table-border-color: var(--app-border-weak); --el-table-row-hover-bg-color: color-mix(in srgb, var(--app-brand-soft) 55%, var(--app-card)); }
@@ -589,7 +589,8 @@ async function reloadMeta() {
 .delete-menu-item { color: var(--el-color-danger); }
 .notes-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 12px 20px; margin-top: 4px; border-top: 1px solid var(--app-border-weak); }
 .notes-footer > span { font-size: var(--font-caption); color: var(--app-text-3); }
-.pager { display: flex; justify-content: flex-end; margin-left: auto; }
+.pager { display: flex; justify-content: flex-start; width: max-content; min-width: 0; max-width: 100%; overflow-x: auto; margin-left: auto; }
+.pager :deep(.el-pagination) { flex: 0 0 auto; }
 @media (max-width: 1100px) {
   .notes-page { padding: 20px 24px 96px; }
   .notes-heading { gap: 16px; }
@@ -609,8 +610,7 @@ async function reloadMeta() {
   .reset-filter { height: 28px; }
   .note-content :deep(.folder-explorer) { padding: 12px 16px; }
   .note-content :deep(.explorer-toolbar) { gap: 6px; }
-  .note-content :deep(.explorer-path) { order: 2; flex-basis: 100%; }
-  .note-content :deep(.explorer-actions) { order: 1; flex-basis: auto; justify-content: flex-end; }
+  .note-content :deep(.explorer-actions) { justify-content: flex-end; }
   .folder-context { padding: 4px 16px 10px; }
   .folder-context-title { gap: 6px 10px; }
   .note-table.el-table { width: calc(100% - 16px); margin: 0 8px; }
@@ -628,5 +628,14 @@ async function reloadMeta() {
   .note-content :deep(.explorer-history) { gap: 0; }
   .note-content :deep(.explorer-history .el-button) { width: 28px; padding: 4px; }
   .note-content :deep(.explorer-actions .el-button) { padding-right: 8px; padding-left: 8px; }
+}
+/* The collection can be narrow even on a wide screen with navigation open. */
+@container note-collection (max-width: 680px) {
+  .note-toolbar .note-search { flex-basis: 100%; max-width: 100%; }
+  .note-filters { flex: 1 1 100%; margin-left: 0; }
+  .note-filter { flex: 1 1 132px; min-width: 0; width: auto; }
+  .note-table :deep(.el-table-fixed-column--right) { position: static !important; right: auto !important; }
+  .note-table :deep(.el-table-fixed-column--right::before),
+  .note-table :deep(.el-table-fixed-column--right::after) { display: none; box-shadow: none !important; }
 }
 </style>

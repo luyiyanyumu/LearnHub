@@ -54,9 +54,13 @@ public class GraphEvidenceService {
     private final KgCommunityMapper communityMapper;
     private final GraphEvidenceSourceMapper sourceMapper;
     private KnowledgeBaseSettings knowledgeSettings;
+    private VectorIndexService vectorIndex;
 
     @Autowired(required = false)
     public void setKnowledgeSettings(KnowledgeBaseSettings settings) { this.knowledgeSettings = settings; }
+
+    @Autowired(required = false)
+    public void setVectorIndex(VectorIndexService vectorIndex) { this.vectorIndex = vectorIndex; }
 
     private KnowledgeBaseSettings.Config config() {
         return knowledgeSettings == null ? KnowledgeBaseSettings.defaults() : knowledgeSettings.snapshot();
@@ -83,6 +87,7 @@ public class GraphEvidenceService {
             }
         }
         Map<SourceRef, Document> documents = documents(refs);
+        Map<String, List<TextChunker.Chunk>> persisted = persistedChunks(documents, cfg);
         Map<SourceRef, List<CurrentChunk>> chunks = new LinkedHashMap<>();
         Map<String, Match> matches = new LinkedHashMap<>();
         for (Relation relation : relations) {
@@ -91,7 +96,8 @@ public class GraphEvidenceService {
                 if (doc == null) continue;
                 int evidenceAt = doc.normalized().text().indexOf(relation.evidence());
                 if (evidenceAt < 0) continue;
-                List<CurrentChunk> indexed = chunks.computeIfAbsent(ref, key -> currentChunks(doc, cfg.chunkOptions()));
+                List<CurrentChunk> indexed = chunks.computeIfAbsent(ref, key -> currentChunks(doc, cfg.chunkOptions(),
+                        persisted.get(key.type() + ":" + key.id())));
                 boolean found = false;
                 for (CurrentChunk chunk : indexed) {
                     if (!chunk.normalized().contains(relation.evidence())) continue;
@@ -108,9 +114,11 @@ public class GraphEvidenceService {
                 .limit(take).map(Match::hit).toList();
     }
 
-    /** 与关键词及向量索引使用同一正文分块器；无需向量索引也能生成相同块序号。 */
-    private static List<CurrentChunk> currentChunks(Document document, TextChunker.Options options) {
-        List<TextChunker.Chunk> pieces = TextChunker.splitWithHeadings(document.content(), options);
+    /** Reuse verified stored boundaries; changed or unindexed sources use the structural fallback. */
+    private static List<CurrentChunk> currentChunks(Document document, TextChunker.Options options,
+                                                   List<TextChunker.Chunk> stored) {
+        List<TextChunker.Chunk> pieces = stored == null || stored.isEmpty()
+                ? TextChunker.splitWithHeadings(document.content(), options) : stored;
         Normalized literal = literal(document.content());
         Map<String, String> located = new LinkedHashMap<>();
         List<CurrentChunk> out = new ArrayList<>();
@@ -123,6 +131,26 @@ public class GraphEvidenceService {
             out.add(new CurrentChunk(seq, text, normalized));
         }
         return out;
+    }
+
+    /** Does not calculate semantic boundaries or call an embedding model during a query. */
+    private Map<String, List<TextChunker.Chunk>> persistedChunks(Map<SourceRef, Document> documents,
+                                                               KnowledgeBaseSettings.Config cfg) {
+        if (vectorIndex == null || documents.isEmpty()) return Map.of();
+        List<Map<String, Object>> normalized = new ArrayList<>();
+        for (var entry : documents.entrySet()) {
+            SourceRef ref = entry.getKey();
+            Document doc = entry.getValue();
+            normalized.add(Map.of("source_type", ref.type(), "source_id", ref.id(), "title", doc.title(),
+                    "category", doc.category(), "content", doc.content()));
+        }
+        try {
+            Map<String, List<TextChunker.Chunk>> chunks = vectorIndex.persistedChunks(normalized, cfg);
+            return chunks == null ? Map.of() : chunks;
+        } catch (Exception unavailable) {
+            // Current raw-source verification remains available when the stored index cannot be read.
+            return Map.of();
+        }
     }
 
     private static String locateChunk(String chunk, Normalized literal, Normalized document) {

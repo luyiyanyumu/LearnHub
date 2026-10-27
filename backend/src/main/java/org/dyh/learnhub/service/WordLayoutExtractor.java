@@ -48,22 +48,32 @@ public class WordLayoutExtractor {
                 parsed.chars, pages.size());
     }
 
-    /** Search text uses the same equation conversion as the reading view. */
+    /** Search text retains block structure while sharing equation conversion with the reading view. */
     public String plainText(Path path) throws IOException {
-        Parsed parsed = parse(path);
+        Parsed parsed = parse(path, true);
         StringBuilder text = new StringBuilder();
-        for (var block : parsed.blocks) {
+        for (int i = 0; i < parsed.blocks.size(); i++) {
+            var block = parsed.blocks.get(i);
             if (block.type().equals("formula") && block.latex() != null) text.append("$$").append(block.latex()).append("$$");
+            else if (block.type().equals("heading")) text.append("#".repeat(Math.max(1, Math.min(6, block.level()))))
+                    .append(' ').append(block.text().replace('\n', ' '));
+            else if (parsed.searchTables.containsKey(i)) text.append(parsed.searchTables.get(i));
             else text.append(block.text());
-            if (block.latexStatus() != null && !block.latexStatus().equals("restored"))
+            if (block.latexStatus() != null && !block.latexStatus().equals("restored")) {
+                if (parsed.searchTables.containsKey(i)) text.append("\n\n");
                 text.append(" [公式未完整还原：").append(block.latexMessage()).append(']');
-            text.append('\n');
+            }
+            text.append("\n\n");
         }
         return DocumentTextService.tidy(text.toString());
     }
 
     private Parsed parse(Path path) throws IOException {
-        Parsed out = new Parsed();
+        return parse(path, false);
+    }
+
+    private Parsed parse(Path path, boolean forSearch) throws IOException {
+        Parsed out = new Parsed(forSearch);
         try (ZipFile zip = new ZipFile(path.toFile())) {
             List<? extends ZipEntry> entries = zip.stream().toList();
             if (entries.size() > MAX_PARTS) throw new IOException("Word 文件内部对象过多，未抽取正文");
@@ -217,20 +227,51 @@ public class WordLayoutExtractor {
     private void table(Node node, Parsed out, int depth, String override) throws IOException {
         checkDepth(depth);
         Inline contents = new Inline();
+        List<List<String>> rows = out.forSearch ? new ArrayList<>() : null;
         for (Node row : wrappedWords(node, "tr", depth)) {
             boolean first = true;
+            List<String> cells = out.forSearch ? new ArrayList<>() : null;
             for (Node cell : wrappedWords(row, "tc", depth + 1)) {
                 if (!first) contents.append("\t", true);
                 Inline value = new Inline(); inline(cell, value, out, depth + 1);
-                contents.append(value.text.toString().strip(), true);
+                String cellText = value.text.toString().strip();
+                contents.append(cellText, true);
+                if (cells != null) cells.add(cellText);
                 contents.formulas.addAll(value.formulas);
                 first = false;
             }
+            if (rows != null && !cells.isEmpty()) rows.add(cells);
             contents.append("\n", true);
         }
         String value = DocumentTextService.tidy(contents.text.toString());
-        if (!value.isEmpty()) out.add(new PdfLayoutExtractor.Block(override == null ? "table" : override, value, 0,
-                null, null, null, null, contents.formulas.isEmpty() ? null : contents.status(), contents.message()));
+        if (!value.isEmpty()) {
+            int blockIndex = out.blocks.size();
+            out.add(new PdfLayoutExtractor.Block(override == null ? "table" : override, value, 0,
+                    null, null, null, null, contents.formulas.isEmpty() ? null : contents.status(), contents.message()));
+            if (rows != null) out.searchTables.put(blockIndex, markdownTable(rows));
+        }
+    }
+
+    /** Read cells directly: the reader's tab text cannot distinguish cell line breaks from row breaks. */
+    private static String markdownTable(List<List<String>> rows) throws IOException {
+        int columns = rows.stream().mapToInt(List::size).max().orElse(0);
+        if (columns == 0) return "";
+        if ((long) columns * (rows.size() + 1) > MAX_CHARS)
+            throw new IOException("Word 表格补齐列后超过抽取长度上限");
+        StringBuilder table = new StringBuilder();
+        for (int row = 0; row < rows.size(); row++) {
+            table.append('|');
+            for (int col = 0; col < columns; col++) {
+                String cell = col < rows.get(row).size() ? rows.get(row).get(col) : "";
+                // Entities also protect a pipe immediately preceded by a LaTeX backslash.
+                table.append(' ').append(cell.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                        .replace("|", "&#124;").replace("\r\n", "\n").replace('\r', '\n')
+                        .replace("\n", "<br>").replace("\t", "&#9;")).append(" |");
+            }
+            if (row == 0) table.append('\n').append('|').append(" --- |".repeat(columns));
+            if (row < rows.size() - 1) table.append('\n');
+        }
+        return table.toString();
     }
 
     private void formula(Node node, Parsed out, String override) throws IOException {
@@ -316,11 +357,14 @@ public class WordLayoutExtractor {
     }
     private static final class Parsed {
         final List<PdfLayoutExtractor.Block> blocks = new ArrayList<>();
+        final boolean forSearch;
+        final Map<Integer, String> searchTables = new LinkedHashMap<>();
         final OmmlLatexConverter converter = new OmmlLatexConverter();
         final Map<String, String> styleNames = new LinkedHashMap<>(), outlineLevels = new LinkedHashMap<>();
         final Set<String> warnings = new LinkedHashSet<>();
         long expandedBytes;
         int chars;
+        Parsed(boolean forSearch) { this.forSearch = forSearch; }
         void add(PdfLayoutExtractor.Block block) throws IOException {
             int length = Math.max(block.text().length(), block.latex() == null ? 0 : block.latex().length());
             if ((long) chars + length > MAX_CHARS || blocks.size() >= 20_000) throw new IOException("Word 正文超过抽取长度上限");

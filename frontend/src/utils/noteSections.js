@@ -26,43 +26,57 @@
 const FENCE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/
 
 /** ATX 标题：`## 名称`（允许结尾有装饰性的 #） */
-const HEADING_RE = /^(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$/
+const HEADING_RE = /^ {0,3}(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$/
 
 /** 单节超过这个字数就不再整节重写，退化成"只新增子小节"（见 REFERENCE） */
 export const SECTION_REWRITE_MAX = 8000
 
 /**
- * 扫出**不在围栏里**的标题行。
+ * 扫出**不在代码围栏或完整多行公式里**的标题行。
  * 返回的偏移量都按 `md` 的字符下标算（不是行号），贴回补丁时直接用。
  */
 export function scanHeadings(md) {
   const text = md == null ? '' : String(md)
   const heads = []
   let fence = null
+  const lines = text.split('\n')
+  const offsets = []
   let offset = 0
-  for (const raw of text.split('\n')) {
+  for (const raw of lines) { offsets.push(offset); offset += raw.length + 1 }
+  for (let index = 0; index < lines.length; index++) {
+    const raw = lines[index]
     // 逐行匹配时先摘掉行尾的 \r：JS 的 `.` 不匹配 \r，CRLF 正文否则一条标题都认不出来。
     // 偏移量仍然用 raw 的长度算，补丁才会落在原文的正确位置上。
     const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw
     const f = FENCE_RE.exec(line)
-    if (f) {
-      const marker = f[1][0]
-      if (!fence) fence = marker
-      else if (fence === marker) fence = null
-    } else if (!fence) {
-      const m = HEADING_RE.exec(line)
-      if (m) {
-        heads.push({
-          level: m[1].length,
-          heading: m[2].trim(),
-          start: offset,
-          // 标题行结束（含换行）——正文从这里开始
-          end: offset + raw.length + 1,
-          lineLength: raw.length,
-        })
-      }
+    if (fence) {
+      if (f && f[1][0] === fence.marker && f[1].length >= fence.length && !f[2].trim()) fence = null
+      continue
     }
-    offset += raw.length + 1
+    if (f) { fence = { marker: f[1][0], length: f[1].length }; continue }
+    // 与数学渲染器一致：只有找到闭合定界符才视作公式；未闭合的输入仍是普通文本。
+    // 整块跳过也防止公式中的 ```、# 或另一种数学定界符扰乱后续扫描。
+    const math = /^ {0,3}(\$\$|\\\[)/.exec(line)
+    if (math) {
+      const closer = math[1] === '$$' ? '$$' : '\\]'
+      if (line.indexOf(closer, math[0].length) >= 0) continue
+      let end = -1
+      for (let next = index + 1; next < lines.length; next++) {
+        if (lines[next].includes(closer)) { end = next; break }
+      }
+      if (end >= 0) { index = end; continue }
+    }
+    const m = HEADING_RE.exec(line)
+    if (m) {
+      heads.push({
+        level: m[1].length,
+        heading: m[2].trim(),
+        start: offsets[index],
+        // 标题行结束（含换行）——正文从这里开始
+        end: offsets[index] + raw.length + 1,
+        lineLength: raw.length,
+      })
+    }
   }
   return heads
 }
@@ -197,24 +211,15 @@ export function demoteSectionHeadings(md, sectionLevel) {
   const level = Number(sectionLevel)
   if (!Number.isFinite(level) || level < 1 || level >= 6) return text
   const out = []
-  let fence = null
-  for (const raw of text.split('\n')) {
-    const hasCr = raw.endsWith('\r')
-    const line = hasCr ? raw.slice(0, -1) : raw
-    const f = FENCE_RE.exec(line)
-    if (f) {
-      const marker = f[1][0]
-      if (!fence) fence = marker
-      else if (fence === marker) fence = null
-      out.push(raw)
-      continue
-    }
-    const m = fence ? null : HEADING_RE.exec(line)
-    // 代码块里的 `## ` 不是标题（同 scanHeadings 的理由）；6 级标题已到底，不再降
-    if (m && m[1].length <= level && m[1].length < 6) out.push('#' + raw)
-    else out.push(raw)
+  let cursor = 0
+  for (const heading of scanHeadings(text)) {
+    if (heading.level > level) continue
+    const markerStart = heading.start + /^ */.exec(text.slice(heading.start))[0].length
+    out.push(text.slice(cursor, markerStart), '#')
+    cursor = markerStart
   }
-  return out.join('\n')
+  out.push(text.slice(cursor))
+  return out.join('')
 }
 
 /**

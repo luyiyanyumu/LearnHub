@@ -31,9 +31,12 @@ public class KnowledgeBaseSettings {
     }
 
     private static final List<Field> FIELDS = List.of(
+            new Field("chunkStrategy", "kb.chunk_strategy", "切割方式", "index", "select", "structure", null, null, null, true, "结构切割保护代码、公式与表格；长资料语义切割只对长篇资料库文件生效，笔记与速查卡仍按结构切割。使用现有嵌入模型预计算边界，保存后需重建索引。", List.of(Map.of("label", "结构切割", "value", "structure"), Map.of("label", "长资料语义切割", "value", "semantic_long"))),
             new Field("chunkTarget", "kb.chunk_target", "目标片段长度", "index", "number", 800, 100, 8000, 10, true, "按标题和段落聚合到目标字符数。", List.of()),
             new Field("chunkOverlap", "kb.chunk_overlap", "片段重叠长度", "index", "number", 120, 0, 4000, 10, true, "须小于目标长度，保留相邻片段的上下文。", List.of()),
-            new Field("chunkMax", "kb.chunk_max", "片段最大长度", "index", "number", 1200, 100, 16000, 10, true, "不得小于目标长度。", List.of()),
+            new Field("chunkMax", "kb.chunk_max", "片段最大长度", "index", "number", 1200, 100, 16000, 10, true, "普通文字的最大长度，不得小于目标长度；代码、公式与表格可完整保留并超出此限制。", List.of()),
+            new Field("semanticMinChars", "kb.semantic_min_chars", "语义切割起始长度", "index", "number", 4000, 2000, 100000, 100, true, "长资料语义切割模式下，达到此字符数的资料库文件才预计算语义边界；笔记与速查卡仍按结构切割。保存后需重建索引。", List.of()),
+            new Field("semanticBreakpointPercentile", "kb.semantic_breakpoint_percentile", "语义边界百分位", "index", "number", 85, 50, 99, 1, true, "长资料语义切割模式下，根据相邻片段语义差异的百分位选择边界；越高越少切分，仍保护代码、公式与表格。保存后需重建索引。", List.of()),
             new Field("embedBatchSize", "kb.embed_batch_size", "嵌入请求批量", "index", "number", 16, 1, 128, 1, false, "每次嵌入请求提交的片段数。", List.of()),
             new Field("embeddingInputChars", "kb.embedding_input_chars", "嵌入文本上限", "index", "number", 6000, 128, 32000, 100, true, "含标题和小节，超出上限的输入截断。", List.of()),
             new Field("vectorEnabled", "ai.vector_enabled", "启用向量检索", "retrieval", "boolean", true, null, null, null, false, "关闭后继续使用词面检索。", List.of()),
@@ -62,7 +65,7 @@ public class KnowledgeBaseSettings {
             new Field("maxPassages", "kb.max_passages", "最多注入原文数", "context", "number", 8, 1, 24, 1, false, "不得超过候选上限；同小节扩展不增加原文条目。", List.of()),
             new Field("totalChars", "kb.total_chars", "总上下文预算", "context", "number", 7000, 1000, 64000, 100, false, "包含说明、标签、分隔符、原文、Wiki 和图谱。", List.of()),
             new Field("passageChars", "kb.passage_chars", "单段原文上限", "context", "number", 1200, 128, 16000, 100, false, "超出时取问题相关原文摘录，不得超过总预算。", List.of()),
-            new Field("neighborCount", "kb.neighbor_count", "同小节相邻片段数", "context", "number", 2, 0, 2, 1, false, "按下一段、上一段顺序，仅扩展同来源同小节。", List.of()),
+            new Field("neighborCount", "kb.neighbor_count", "同小节相邻片段数", "context", "number", 2, 0, 2, 1, false, "比较前后相邻片段与问题的关联，优先补充缺失概念；仅扩展同来源同小节。", List.of()),
             new Field("wikiChars", "kb.wiki_chars", "Wiki 导览预算", "context", "number", 1000, 0, 10000, 100, false, "完整小节超预算时归还空间给原文。", List.of()),
             new Field("wikiSections", "kb.wiki_sections", "最多注入 Wiki 小节数", "context", "number", 2, 0, 12, 1, false, "限制实际加入上下文的完整小节。", List.of()),
             new Field("globalGraphChars", "kb.global_graph_chars", "全局图谱预算", "context", "number", 2500, 0, 12000, 100, false, "Wiki 与图谱预算之和须给总预算留下至少256字符。", List.of()),
@@ -94,9 +97,12 @@ public class KnowledgeBaseSettings {
 
     public record Config(Map<String, Object> values) {
         public Config { values = Collections.unmodifiableMap(new LinkedHashMap<>(values)); }
+        public String chunkStrategy() { return (String) values.getOrDefault("chunkStrategy", "structure"); }
         public int chunkTarget() { return ((Number) values.get("chunkTarget")).intValue(); }
         public int chunkOverlap() { return ((Number) values.get("chunkOverlap")).intValue(); }
         public int chunkMax() { return ((Number) values.get("chunkMax")).intValue(); }
+        public int semanticMinChars() { return ((Number) values.getOrDefault("semanticMinChars", 4000)).intValue(); }
+        public int semanticBreakpointPercentile() { return ((Number) values.getOrDefault("semanticBreakpointPercentile", 85)).intValue(); }
         public int embedBatchSize() { return ((Number) values.get("embedBatchSize")).intValue(); }
         public int embeddingInputChars() { return ((Number) values.get("embeddingInputChars")).intValue(); }
         public boolean vectorEnabled() { return (Boolean) values.get("vectorEnabled"); }
@@ -133,7 +139,8 @@ public class KnowledgeBaseSettings {
         public int groundingAnswerChars() { return ((Number) values.get("groundingAnswerChars")).intValue(); }
         public TextChunker.Options chunkOptions() { return new TextChunker.Options(chunkTarget(), chunkOverlap(), chunkMax()); }
         public String indexingFingerprint() {
-            return chunkTarget() + ":" + chunkOverlap() + ":" + chunkMax() + ":" + contextualEmbed() + ":" + embeddingInputChars();
+            return chunkTarget() + ":" + chunkOverlap() + ":" + chunkMax() + ":" + contextualEmbed() + ":" + embeddingInputChars()
+                    + ":" + chunkStrategy() + ":" + semanticMinChars() + ":" + semanticBreakpointPercentile();
         }
     }
 

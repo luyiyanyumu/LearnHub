@@ -44,6 +44,32 @@ class AgentSessionProgressTest {
         assertEquals("completed", rows(messages.get(1)).getFirst().get("status"));
     }
 
+    @Test @SuppressWarnings("unchecked") void replyOptionsRecoverOnTheirOwnAnswerAndKeepApplicationBoundNote() throws Exception {
+        String payload = json.writeValueAsString(Map.of("noteId", 12L, "actions", List.of(
+                Map.of("kind", "merge_note", "label", "融入合成笔记", "noteId", 999, "script", "synthetic-hidden"),
+                Map.of("kind", "follow_up", "label", "继续推导", "prompt", "继续完成该合成推导"))));
+        when(events.selectList(any())).thenReturn(List.of(event("user", "合成问题一"), event("assistant", "合成答一"),
+                event("reply_actions", payload), event("user", "合成问题二"), event("assistant", "合成答二")));
+        var messages = sessions.messagesForDisplay("synthetic-session");
+        var restored = (List<Map<String, Object>>) messages.get(1).get("replyActions");
+        assertEquals(2, restored.size());
+        assertEquals(12L, restored.getFirst().get("noteId"));
+        assertFalse(restored.getFirst().containsKey("script"));
+        assertEquals(List.of(), messages.get(3).get("replyActions"));
+    }
+
+    @Test @SuppressWarnings("unchecked") void truncatedReplyOptionsCannotRestoreWriteButtonsAndOldHistoryHasNoDefaults() throws Exception {
+        String payload = json.writeValueAsString(Map.of("noteId", 12L, "truncated", true, "actions", List.of(
+                Map.of("kind", "save_note", "label", "保存残缺答复"),
+                Map.of("kind", "follow_up", "label", "继续", "prompt", "继续未完成的合成答案"))));
+        when(events.selectList(any())).thenReturn(List.of(event("user", "合成旧问题"), event("assistant", "合成旧回答"),
+                event("user", "合成新问题"), event("assistant", "合成截断回答"), event("reply_actions", payload)));
+        var messages = sessions.messagesForDisplay("synthetic-session");
+        assertEquals(List.of(), messages.get(1).get("replyActions"));
+        var restored = (List<Map<String, Object>>) messages.get(3).get("replyActions");
+        assertEquals(List.of("follow_up"), restored.stream().map(action -> action.get("kind")).toList());
+    }
+
     @Test void failedRoundWithoutAnswerRemainsVisibleBeforeTheNextQuestion() throws Exception {
         when(events.selectList(any())).thenReturn(List.of(event("user", "合成问题一"), event("tool", "已准备确认预览"),
                 event("progress", snapshot("error")), event("user", "合成问题二"), event("assistant", "合成回答二")));
@@ -75,6 +101,43 @@ class AgentSessionProgressTest {
         assertFalse(row.containsKey("rawReasoning"));
         assertEquals(0L, row.get("elapsedMs"));
         assertEquals(0L, messages.get(1).get("elapsedMs"));
+    }
+
+    @Test @SuppressWarnings("unchecked") void operationDetailsRestoreWithTheirAnswerAndUnknownFieldsStayHidden() throws Exception {
+        Map<String, Object> step = new java.util.LinkedHashMap<>(Map.of("id", "web-step", "kind", "tool",
+                "status", "error", "title", "读取网页", "toolName", "web_fetch"));
+        step.put("tools", List.of(Map.of("name", "web_fetch", "title", "读取网页",
+                "arguments", Map.of("url", "https://example.com/synthetic-guide", "api_key", "synthetic-hidden-key"))));
+        step.put("websites", List.of(Map.of("url", "https://example.com/synthetic-guide", "title", "合成网站")));
+        step.put("sources", List.of(Map.of("type", "note", "id", 701, "title", "合成笔记", "seq", 0,
+                "passageKey", "note:701:0", "snippet", "合成原文片段")));
+        step.put("result", "合成返回预览");
+        step.put("error", "合成页面返回 404");
+        step.put("rawReasoning", "synthetic-hidden-reasoning");
+        String payload = json.writeValueAsString(Map.of("progress", List.of(step)));
+        when(events.selectList(any())).thenReturn(List.of(event("user", "合成问题"), event("assistant", "合成答案"), event("progress", payload)));
+        var restored = rows(sessions.messagesForDisplay("synthetic-session").get(1)).getFirst();
+        assertEquals("合成页面返回 404", restored.get("error"));
+        assertEquals("合成返回预览", restored.get("result"));
+        assertEquals("web_fetch", ((List<Map<String, Object>>) restored.get("tools")).getFirst().get("name"));
+        assertEquals("https://example.com/synthetic-guide", ((List<Map<String, Object>>) restored.get("websites")).getFirst().get("url"));
+        assertEquals("合成笔记", ((List<Map<String, Object>>) restored.get("sources")).getFirst().get("title"));
+        assertFalse(restored.containsKey("rawReasoning"));
+        assertFalse(restored.toString().contains("synthetic-hidden-key"));
+        assertFalse(restored.toString().contains("synthetic-hidden-reasoning"));
+    }
+
+    @Test void boundedDetailSnapshotsAboveTheOldSummaryLimitStillRestore() throws Exception {
+        List<Map<String, Object>> details = new java.util.ArrayList<>();
+        for (int i = 0; i < 110; i++) details.add(Map.of("id", "synthetic-" + i, "kind", "tool",
+                "status", "completed", "title", "读取合成资料", "result", "合成".repeat(1100)));
+        String payload = json.writeValueAsString(Map.of("progress", details));
+        assertTrue(payload.length() > 200_000);
+        when(events.selectList(any())).thenReturn(List.of(event("user", "合成长任务"), event("progress", payload)));
+        var restored = rows(sessions.messagesForDisplay("synthetic-session").get(1));
+        assertEquals(110, restored.size());
+        assertTrue(restored.getFirst().get("result") instanceof String);
+        assertFalse(((String) restored.getFirst().get("result")).isBlank());
     }
 
     @Test void resolvedActionsUpdateBothParentAndChildAndCancelIsNotAnExecutionError() throws Exception {

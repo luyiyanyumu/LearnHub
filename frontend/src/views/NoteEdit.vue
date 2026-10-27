@@ -18,12 +18,9 @@ import {
 } from '../utils/agentNoteMerge'
 // 「分节融入」：长笔记不再整篇重写，改成"先定位小节、只改写那一节、只贴回那一节"
 import {
-  SECTION_REWRITE_MAX,
   appendNoteSection,
-  appendToSection,
   applySectionPatch,
   buildNoteOutline,
-  splitNoteSections,
 } from '../utils/noteSections'
 import { isDark } from '../composables/useTheme'
 import { focusMode } from '../composables/useViewMode'
@@ -46,7 +43,9 @@ import { createDeferredSync } from '../utils/deferredSync'
 import { createSourceInsert } from '../utils/sourceToolbar'
 import { DEFAULT_FLOWCHART_SOURCE } from '../utils/flowchart.js'
 import { mermaidFrameHtml } from '../utils/mermaidPreview.js'
-import { AGENT_NOTE_UPDATED_EVENT, matchesOpenNote } from '../utils/agentNoteEdit'
+import { AGENT_NOTE_UPDATED_EVENT, AGENT_NOTE_PREPARE_EVENT, AGENT_NOTE_INSERT_EVENT, matchesOpenNote } from '../utils/agentNoteEdit'
+import { mergeSectionTargets, generateSectionBatch, composeSectionBatch } from '../utils/noteSectionBatch.js'
+import { replaceSourceContent, insertSourceContent } from '../utils/sourceAgentEdit.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -63,6 +62,7 @@ const noteQuery = computed(() => props.noteQuery || route.query)
 const id = computed(() => managedTab.value ? props.noteId : route.params.id)
 const isNew = computed(() => !id.value)
 const editorDomId = `note-editor-${useId().replace(/[^a-zA-Z0-9_-]/g, '-')}`
+const agentEditorKey = computed(() => props.tabKey || editorDomId)
 const loading = ref(true)
 const loadError = ref('')
 const noteReady = ref(false)
@@ -445,6 +445,8 @@ const aiResult = ref('')
  * 为空 = 整篇重写（预览显示整篇）。两者的确认动作不同，所以状态要分开存。
  */
 const mergePatch = ref(null)
+const aiSourceSnapshot = ref(null)
+const aiTargetEditorKey = ref('')
 /** 弹窗里的说明文字：润色/融入的等待方式不同（分段 vs 整篇），各说各的 */
 const aiHint = ref('')
 
@@ -458,6 +460,21 @@ const aiHint = ref('')
 const aiProgress = ref({ total: 0, index: 0, percent: 0, elapsed: 0, phase: '' })
 let aiTimer = null
 let aiAbort = null
+let aiRunSequence = 0
+const aiApplying = ref(false)
+
+function beginAiRun(externalSignal) {
+  const sequence = ++aiRunSequence
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  if (externalSignal?.aborted) abort()
+  else externalSignal?.addEventListener('abort', abort, { once: true })
+  aiAbort = controller
+  return { controller,
+    isCurrent: () => sequence === aiRunSequence && !editorDisposed,
+    release: () => externalSignal?.removeEventListener('abort', abort),
+  }
+}
 
 function startAiProgress() {
   aiProgress.value = { total: 0, index: 0, percent: 0, elapsed: 0, phase: '正在连接 AI…' }
@@ -496,6 +513,7 @@ function onAiProgress(event, payload) {
 
 /** 取消处理：中断流式请求（后端任务会在当前段结束后自然收尾） */
 function cancelAiProcess() {
+  aiRunSequence++
   if (aiAbort) {
     aiAbort.abort()
     aiAbort = null
@@ -514,26 +532,25 @@ function onAiDialogClose() {
 }
 
 async function aiProcess(mode) {
-  flushBlockContent()
-  const content = form.value.content || ''
-  if (!content.trim()) {
-    ElMessage.warning('正文为空，先写点内容再让 AI 处理')
-    return
-  }
+  if (aiBusy.value) return
+  const run = beginAiRun()
   aiBusy.value = true
-  aiLabel.value = mode === 'format' ? 'AI 整理格式' : 'AI 润色'
-  aiHint.value = '长文按 4000 字分段逐段处理，思考型模型单段可能耗时 1–3 分钟；'
-    + '进度按「已完成段数」推进，段内不动属正常。可继续等待，或点「取消处理」中止。'
-  aiResult.value = ''
-  // 润色/整理格式走的是"整篇替换"，把可能残留的分节补丁清掉：
-  // 否则点确认时贴回去的会是上一次融入留下的那一节（同一个弹窗、同一个确认按钮）
-  mergePatch.value = null
-  // 先开弹窗：进度就显示在弹窗里，而不是让用户对着一个不动的按钮等三分钟
-  aiDialog.value = true
-  startAiProgress()
-  aiAbort = new AbortController()
   try {
-    const out = await aiApi.polishStream({ text: content, mode }, onAiProgress, aiAbort.signal)
+    await prepareCurrentAgentNote({ noteId: id.value || null, editorKey: agentEditorKey.value, allowNew: isNew.value, signal: run.controller.signal })
+    if (!run.isCurrent() || run.controller.signal.aborted) return
+    flushBlockContent()
+    const content = form.value.content || ''
+    if (!content.trim()) { ElMessage.warning('正文为空，先写点内容再让 AI 处理'); return }
+    aiSourceSnapshot.value = content
+    aiTargetEditorKey.value = agentEditorKey.value
+    aiLabel.value = mode === 'format' ? 'AI 整理格式' : 'AI 润色'
+    aiHint.value = '长文按完整段落、公式和代码块分批处理；进度按已完成的分段推进，全部成功后统一预览。'
+    aiResult.value = ''
+    mergePatch.value = null
+    aiDialog.value = true
+    startAiProgress()
+    const out = await aiApi.polishStream({ text: content, mode }, (event, payload) => { if (run.isCurrent()) onAiProgress(event, payload) }, run.controller.signal)
+    if (!run.isCurrent() || run.controller.signal.aborted) return
     aiProgress.value.percent = 100
     // 原样返回 = 模型判断无可改动，明确告知而不是让人以为没生效
     if (out.trim() === content.trim()) {
@@ -543,20 +560,24 @@ async function aiProcess(mode) {
     }
     aiResult.value = out
   } catch (e) {
+    if (!run.isCurrent()) return
     aiDialog.value = false
     // 流式绕过了 axios 拦截器，错误提示要在这里补上（文案风格与拦截器保持一致）
     const msg = e?.message || 'AI 处理失败'
     if (msg !== '已取消处理') ElMessage.error(msg)
   } finally {
-    aiAbort = null
-    stopAiProgress()
-    aiBusy.value = false
+    run.release()
+    if (run.isCurrent()) {
+      aiAbort = null; stopAiProgress(); aiBusy.value = false
+      if (run.controller.signal.aborted) { aiDialog.value = false; mergePatch.value = null; aiResult.value = '' }
+    }
   }
 }
 
 /** 确认按钮的文案：整篇替换 / 替换本节 / 追加到本节 / 末尾新增一节，动作不同就别说成一样 */
 const mergeApplyLabel = computed(() => {
   const kind = mergePatch.value?.kind
+  if (kind === 'batch-sections') return `应用这 ${mergePatch.value.patches.length} 处修改`
   if (kind === 'replace-section') return '替换本节'
   if (kind === 'append-section') return '追加到本节'
   if (kind === 'append-note-section') return '新增这一节'
@@ -570,20 +591,39 @@ const mergeApplyLabel = computed(() => {
  * 后者贴之前会核对原文区间（见 noteSections.applySectionPatch）：用户在模型跑的过程中
  * 改过字就直接放弃并报错，**宁可什么都不做，也不要把改好的节贴到错的位置**。
  */
-function aiApply() {
+async function aiApply() {
+  if (aiBusy.value || aiApplying.value) return
+  if (aiTargetEditorKey.value && aiTargetEditorKey.value !== agentEditorKey.value) return
+  aiApplying.value = true
+  try { await applyAiResult() }
+  finally { aiApplying.value = false }
+}
+
+async function applyAiResult() {
+  try { await prepareCurrentAgentNote({ noteId: id.value || null, editorKey: agentEditorKey.value, allowNew: isNew.value }) }
+  catch (error) { ElMessage.error(error.message); return }
   flushBlockContent()
+  if (aiSourceSnapshot.value != null && aiSourceSnapshot.value !== form.value.content) {
+    ElMessage.warning('正文在生成预览后发生了变化，最新草稿已保存，请重新生成改动预览')
+    return
+  }
   const patch = mergePatch.value
   if (patch) {
     try {
       const source = form.value.content || ''
       const after = fixHtmlQuotes(patch.after)
-      const next = patch.kind === 'replace-section'
+      const next = patch.kind === 'batch-sections'
+        ? composeSectionBatch(source, patch.patches)
+        : patch.afterSection ? composeSectionBatch(source, [patch])
+        : patch.kind === 'replace-section'
         ? applySectionPatch(source, patch.section, after)
         : patch.kind === 'append-section'
-          ? appendToSection(source, patch.section, after)
+          ? applySectionPatch(source, patch.section, after)
           : appendNoteSection(source, patch.heading, after)
-      form.value.content = next
-      if (patch.kind === 'replace-section') {
+      applyAgentContent(next)
+      if (patch.kind === 'batch-sections') {
+        ElMessage.success(`已应用 ${patch.patches.length} 处修改，可撤销；确认无误后点「保存」`)
+      } else if (patch.kind === 'replace-section') {
         ElMessage.success(`已替换「${patch.heading}」这一节，确认无误后点「保存」`)
       } else if (patch.kind === 'append-section') {
         ElMessage.success(`已在「${patch.heading}」末尾追加内容，原正文未改动；确认无误后点「保存」`)
@@ -595,7 +635,8 @@ function aiApply() {
       return
     }
   } else {
-    form.value.content = fixHtmlQuotes(aiResult.value)
+    try { applyAgentContent(aiResult.value) }
+    catch (error) { ElMessage.error(error.message); return }
     ElMessage.success('已用 AI 结果替换正文，确认无误后点「保存」')
   }
   mergePatch.value = null
@@ -619,14 +660,89 @@ function aiApply() {
 function publishAgentNote() {
   if (!props.active) return
   window.dispatchEvent(new CustomEvent(AGENT_NOTE_CONTEXT_EVENT, {
-    detail: {
-      noteId: id.value ? Number(id.value) : null,
-      title: form.value.title || '',
-      isNew: isNew.value,
-      context: (form.value.content || '').slice(0, 4000),
-      dirty: dirty.value,
-    },
+    detail: currentAgentNote(),
   }))
+}
+
+function currentAgentNote(noteId = id.value) {
+  return { noteId: noteId ? Number(noteId) : null, editorKey: agentEditorKey.value,
+    title: form.value.title || '', isNew: !noteId,
+    context: (form.value.content || '').slice(0, 4000), dirty: dirty.value }
+}
+
+function ownsAgentRequest(request) {
+  if (!props.active || editorDisposed || !noteReady.value) return false
+  if (request.editorKey && request.editorKey !== agentEditorKey.value) return false
+  return request.noteId == null ? request.allowNew && isNew.value : matchesOpenNote(id.value, request.noteId)
+}
+
+async function prepareCurrentAgentNote(request = {}) {
+  if (!ownsAgentRequest(request)) throw new Error('当前笔记已切换，请回到目标笔记重试')
+  const ownerKey = agentEditorKey.value
+  const originalId = id.value
+  const stillCurrent = () => props.active && !editorDisposed && ownerKey === agentEditorKey.value
+    && (originalId == null ? !id.value || matchesOpenNote(id.value, lastPersistedNoteId) : matchesOpenNote(id.value, originalId))
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (request.signal?.aborted || !stillCurrent()) throw new Error('当前笔记已切换或操作已取消，未继续修改')
+    flushBlockContent()
+    if (editorRef.value?.getEditorView?.()?.composing) throw new Error('请结束当前输入法输入后重试；草稿已保留')
+    if (previewUnsynced.value && !useBlockPreview && !syncPreviewToSource(true)) throw new Error('预览草稿无法同步，请先处理编辑器中的提示')
+    if (agentEditConflict.value) throw new Error('笔记存在版本冲突，请先加载最新正文；本地草稿已保留')
+    if (saving.value || dirty.value || isNew.value) {
+      const saved = await save({ silent: true })
+      if (!saved) throw new Error(saveError.value || '笔记自动保存失败，草稿已保留，未执行本次修改')
+      await nextTick()
+    }
+    if (request.signal?.aborted || !stillCurrent()) throw new Error('当前笔记已切换或操作已取消，未继续修改')
+    flushBlockContent()
+    if (editorRef.value?.getEditorView?.()?.composing) throw new Error('请结束当前输入法输入后重试；草稿已保留')
+    if (!dirty.value) {
+      const context = currentAgentNote(id.value || lastPersistedNoteId)
+      if (!context.noteId) throw new Error('新笔记尚未完成创建，请稍后重试')
+      window.dispatchEvent(new CustomEvent(AGENT_NOTE_CONTEXT_EVENT, { detail: context }))
+      return context
+    }
+  }
+  throw new Error('自动保存期间正文仍在变化，请稍停输入后重试；草稿已保留')
+}
+
+function onAgentPrepare(e) {
+  const request = e?.detail
+  if (request?.respond && ownsAgentRequest(request)) request.respond(prepareCurrentAgentNote(request))
+}
+
+function applyAgentContent(content) {
+  const next = fixHtmlQuotes(content || '')
+  const sourceView = editorRef.value?.getEditorView?.()
+  if (toolbarSide === 'editor' && sourceView?.state && sourceView?.dispatch) {
+    if (!replaceSourceContent(sourceView, next)) throw new Error('请结束当前输入法输入后重试')
+  } else if (blockPreviewRef.value?.applyMarkdownChange
+      && !blockPreviewRef.value.applyMarkdownChange(next) && props.active) {
+    throw new Error('编辑器仍在输入或尚未就绪，请结束当前输入后重试')
+  }
+  form.value.content = next
+}
+
+async function insertCurrentAgentNote(request) {
+  const answer = String(request.answer || '').trim()
+  if (!answer) throw new Error('没有可插入的正文')
+  const prepared = await prepareCurrentAgentNote(request)
+  if (request.signal?.aborted || !ownsAgentRequest({ ...request, noteId: prepared.noteId, allowNew: false })) throw new Error('当前笔记已切换，未插入内容')
+  const sourceView = toolbarSide === 'editor' ? editorRef.value?.getEditorView?.() : null
+  if (sourceView?.state && sourceView?.dispatch) {
+    if (!insertSourceContent(sourceView, answer, { block: true })) throw new Error('请结束当前输入法输入后重试')
+    form.value.content = sourceView.state.doc.toString()
+  } else if (!blockPreviewRef.value?.insertMarkdownAtCursor?.(answer)) {
+    throw new Error('编辑器尚未就绪，请在目标位置放置光标后重试')
+  }
+  flushBlockContent()
+  publishAgentNote()
+  return { ...currentAgentNote(), ok: true }
+}
+
+function onAgentInsert(e) {
+  const request = e?.detail
+  if (request?.respond && ownsAgentRequest(request)) request.respond(insertCurrentAgentNote(request))
 }
 watch([id, () => form.value.title, dirty], publishAgentNote)
 
@@ -646,7 +762,9 @@ async function onAgentNoteUpdated(e) {
       agentEditConflict.value = true
       return
     }
-    form.value.content = fixHtmlQuotes(latest.content || '')
+    applyAgentContent(latest.content || '')
+    flushBlockContent()
+    if (!blockPreviewRef.value?.hasPendingContent?.()) previewUnsynced.value = false
     savedSnapshot.value = formFingerprint()
     lastSavedAt.value = new Date()
     publishAgentNote()
@@ -701,72 +819,44 @@ async function wholeMergeLimit() {
  * 返回改写后的这一节正文；返回 null 表示模型判断"笔记里已经讲过"。
  * 结果写进 `mergePatch`，等用户在预览里点确认。
  */
-async function mergeIntoSections({ answer, question }) {
+async function mergeIntoSections({ answer, question, signal, isCurrent = () => true }) {
   flushBlockContent()
   const source = form.value.content || ''
   const title = form.value.title || ''
-  const split = splitNoteSections(source)
   const { text: outline } = buildNoteOutline(source)
 
   // ① 定位：只喂大纲（编号 + 标题 + 字数 + 子标题 + 开头一句），输出只有一行 JSON
   const loc = await aiApi.mergeLocate({ title, outline, question, answer })
-  if (loc?.action === 'covered') return null
-  const reason = loc?.reason ? `定位：${loc.reason}` : ''
-
-  // ② 改写：只喂那一节
-  const index = Number(loc?.index) || 0
-  const target = index > 0 ? split.sections[index - 1] : null
-  const insertNew = !target
-  if (insertNew && !split.sections.length && loc?.action !== 'append') {
-    throw new Error('这篇笔记没有可用的小节，且模型没有给出放置位置，请重试')
-  }
-  if (index > 0 && !target) {
-    throw new Error('模型定位到的小节不存在（笔记可能已改动），请重试')
-  }
-  // 小节本身太大就不再整节重写，只往里加一块（输出同样有界）
-  const mode = !insertNew && target.size > SECTION_REWRITE_MAX ? 'insert' : 'rewrite'
-  const heading = insertNew ? (loc?.heading || '补充') : target.heading
-  const body = insertNew ? '' : target.body
-
-  const done = await aiApi.mergeSectionStream(
-    { title, outline, heading, section: body, question, answer, mode },
-    onAiProgress,
-    aiAbort.signal,
-  )
-  const added = fixHtmlQuotes(done?.content || '')
-  if (!added.trim()) throw new Error('模型没有给出可用的内容，请重试')
-
-  if (insertNew) {
-    mergePatch.value = {
-      kind: 'append-note-section',
-      section: null,
-      heading,
-      mode,
-      reason,
-      before: '',
-      after: added,
-    }
-  } else if (mode === 'insert') {
-    const after = [body.trimEnd(), added.trim()].filter(Boolean).join('\n\n')
-    mergePatch.value = {
-      kind: 'append-section',
-      section: target,
-      heading: target.heading,
-      mode,
-      reason,
-      before: body,
-      after,
-    }
-  } else {
-    mergePatch.value = {
-      kind: 'replace-section',
-      section: target,
-      heading: target.heading,
-      mode,
-      reason,
-      before: body,
-      after: added,
-    }
+  if (signal?.aborted || !isCurrent()) throw new Error('已取消处理')
+  const targets = mergeSectionTargets(source, loc)
+  if (!targets.length) return null
+  const outputs = await generateSectionBatch(targets, async (target, index, signal) => {
+    const scope = targets.length > 1 ? `\n本分工只处理「${target.heading}」，仅融入与此小节有关的内容，其他分工会处理其余内容。` : ''
+    const done = await aiApi.mergeSectionStream({ title, outline, heading: target.heading,
+      section: target.section?.body || '', question: question + scope,
+      answer: target.answer || answer, mode: target.mode },
+      targets.length === 1 ? (event, payload) => { if (isCurrent()) onAiProgress(event, payload) } : () => {}, signal)
+    return fixHtmlQuotes(done?.content || '')
+  }, { signal, onProgress(completed, total) {
+    if (!isCurrent()) return
+    aiProgress.value.total = total
+    aiProgress.value.index = completed
+    aiProgress.value.percent = Math.round(completed / total * 100)
+    aiProgress.value.phase = `已完成 ${completed}/${total} 处分工，完成后统一预览`
+  } })
+  const patches = targets.map((target, index) => ({
+    kind: !target.section ? 'append-note-section' : target.mode === 'insert' ? 'append-section' : 'replace-section',
+    section: target.section, afterSection: target.afterSection, heading: target.heading, mode: target.mode,
+    reason: target.reason || '', before: target.section?.body || '',
+    after: target.mode === 'insert' ? [target.section.body.trimEnd(), outputs[index].trim()].filter(Boolean).join('\n\n') : outputs[index],
+  }))
+  // Validate the complete batch before exposing an applicable preview.
+  if (signal?.aborted || !isCurrent()) throw new Error('已取消处理')
+  composeSectionBatch(source, patches)
+  mergePatch.value = patches.length === 1 ? patches[0] : {
+    kind: 'batch-sections', patches, reason: `已完成 ${patches.length} 处独立分工，将一次应用`,
+    before: patches.map(p => `## ${p.heading}\n\n${p.before || '（新增小节）'}`).join('\n\n'),
+    after: patches.map(p => `## ${p.heading}\n\n${p.after}`).join('\n\n'),
   }
   return mergePatch.value.after
 }
@@ -790,12 +880,15 @@ async function mergeIntoSections({ answer, question }) {
  */
 async function onAgentMerge(e) {
   if (!props.active) return
-  flushBlockContent()
   const d = e?.detail || {}
-  const noteId = d.noteId || null
+  if (d.editorKey && d.editorKey !== agentEditorKey.value) return
+  if (d.noteId != null && !matchesOpenNote(id.value, d.noteId)) return
+  if (aiBusy.value) return
+  flushBlockContent()
+  let noteId = d.noteId || null
   const answer = (d.answer || '').trim()
   const reply = (ok, message) => window.dispatchEvent(new CustomEvent(AGENT_NOTE_MERGE_RESULT_EVENT, {
-    detail: { noteId, ok, message },
+    detail: { noteId, editorKey: agentEditorKey.value, requestId: d.requestId, ok, message },
   }))
   if (!answer) {
     ElMessage.warning('这条回答是空的，没有可融入的内容')
@@ -803,32 +896,38 @@ async function onAgentMerge(e) {
     return
   }
   // 融入结果回来时如果用户已经切走笔记，就别把 A 的内容应用到 B 上（本文件开头那类事故）
-  const expectId = id.value
+  const run = beginAiRun(d.signal)
   aiBusy.value = true
-  aiLabel.value = '融入当前笔记'
-  aiResult.value = ''
-  mergePatch.value = null
-  aiDialog.value = true
-  startAiProgress()
-  aiAbort = new AbortController()
   try {
+    const prepared = await prepareCurrentAgentNote({ noteId: id.value || null, editorKey: agentEditorKey.value, allowNew: isNew.value, signal: run.controller.signal })
+    if (!run.isCurrent() || run.controller.signal.aborted) return
+    noteId = prepared.noteId
+    const expectId = prepared.noteId
+    aiSourceSnapshot.value = form.value.content || ''
+    aiTargetEditorKey.value = agentEditorKey.value
+    aiLabel.value = '融入当前笔记'
+    aiResult.value = ''
+    mergePatch.value = null
+    aiDialog.value = true
+    startAiProgress()
     const source = form.value.content || ''
     const question = d.question || ''
     const sectionPath = source.length > (await wholeMergeLimit())
+    if (!run.isCurrent() || run.controller.signal.aborted) return
     aiHint.value = sectionPath
-      ? '长笔记按小节融入：先把内容定位到某一节（这一步只喂大纲），再只改写那一节；'
-        + '其余部分不经过模型、不会被改动。确认无误后点「替换本节」，再点「保存」才会落库。'
+      ? '长笔记按任务定位一个或多个小节，最多三项同时生成，全部完成后统一预览。其余正文保持原样；确认应用前会自动保存当前草稿。'
       : '整篇一次重写：模型会把回答按结构并进对应小节（或新增合适的小节），产出完整新正文；'
         + '确认无误后再点「替换正文」，然后点「保存」才会落库。'
     const out = sectionPath
-      ? await mergeIntoSections({ answer, question })
+      ? await mergeIntoSections({ answer, question, signal: run.controller.signal, isCurrent: run.isCurrent })
       : await aiApi.mergeNoteStream(
         { noteId: noteId ? Number(noteId) : undefined, title: form.value.title || '', note: source, question, answer },
-        onAiProgress,
-        aiAbort.signal,
+        (event, payload) => { if (run.isCurrent()) onAiProgress(event, payload) },
+        run.controller.signal,
       )
-    aiProgress.value = 100
-    if (String(expectId) !== String(id.value)) {
+    if (!run.isCurrent() || run.controller.signal.aborted) return
+    aiProgress.value.percent = 100
+    if (!props.active || !matchesOpenNote(expectId, id.value || lastPersistedNoteId)) {
       aiDialog.value = false
       ElMessage.warning('期间切换了笔记，已放弃本次融入（正文未改动）')
       reply(false, '期间切换了笔记，已放弃本次融入（正文未改动）')
@@ -845,25 +944,31 @@ async function onAgentMerge(e) {
     // "新增一节"被说成"只替换这一节"，用户会以为正文被换掉了。
     const patch = mergePatch.value
     if (patch) {
-      const what = patch.kind === 'replace-section'
+      const what = patch.kind === 'batch-sections'
+        ? `共 ${patch.patches.length} 处修改一次应用`
+        : patch.kind === 'replace-section'
         ? `只替换「${patch.heading}」这一节`
         : patch.kind === 'append-section'
           ? `在「${patch.heading}」末尾追加，已有内容不动`
+          : patch.afterSection ? `在「${patch.afterSection.heading}」之后新增「${patch.heading}」`
           : `在末尾新增一节「${patch.heading}」`
       reply(true, `已在笔记页打开融入预览（${what}），确认后点「${mergeApplyLabel.value}」`)
     } else {
       reply(true, '已在笔记页打开融入预览，确认后点「替换正文」')
     }
   } catch (err) {
+    if (!run.isCurrent()) return
     aiDialog.value = false
     mergePatch.value = null
     const msg = err?.message || 'AI 处理失败'
     if (msg !== '已取消处理') ElMessage.error(msg + '（正文保持原样）')
     reply(false, msg)
   } finally {
-    aiAbort = null
-    stopAiProgress()
-    aiBusy.value = false
+    run.release()
+    if (run.isCurrent()) {
+      aiAbort = null; stopAiProgress(); aiBusy.value = false
+      if (run.controller.signal.aborted) { aiDialog.value = false; mergePatch.value = null; aiResult.value = '' }
+    }
   }
 }
 
@@ -1007,19 +1112,28 @@ const lastSavedAt = ref(null)
  */
 const saveError = ref('')
 
-async function save() {
-  if (saving.value || loading.value || loadError.value || !noteReady.value) return
+let saveTask = null
+let lastPersistedNoteId = null
+function save(options = {}) {
+  if (saveTask) return saveTask
+  saveTask = persistNote(options).finally(() => { saveTask = null })
+  return saveTask
+}
+
+async function persistNote({ silent = false } = {}) {
+  if (saving.value || loading.value || loadError.value || !noteReady.value) return false
   if (agentEditConflict.value) {
     ElMessage.warning('库中正文已更新，请先点击「加载最新正文」，避免旧草稿覆盖智能体的改动')
-    return
+    return false
   }
   if (!form.value.title.trim()) {
-    ElMessage.warning('标题不能为空')
-    return
+    saveError.value = '标题不能为空，请先填写笔记标题'
+    if (!silent) ElMessage.warning(saveError.value)
+    return false
   }
   flushBlockContent()
   // 预览里还有没反推回源码的改动时，直接保存会把它丢掉 —— 先自动同步（失败则中止保存）
-  if (previewUnsynced.value && !useBlockPreview && !syncPreviewToSource(true)) return
+  if (previewUnsynced.value && !useBlockPreview && !syncPreviewToSource(true)) return false
   saving.value = true
   saveError.value = ''
   try {
@@ -1045,9 +1159,10 @@ async function save() {
         previewUnsynced.value = false
       }
       justCreatedId = String(created.id)
+      lastPersistedNoteId = created.id
       savedFolderId.value = folderAtSave
       lastSavedAt.value = new Date()
-      ElMessage.success('笔记已创建')
+      if (!silent) ElMessage.success('笔记已创建')
       const query = { ...noteQuery.value }
       delete query.draft
       if (managedTab.value) {
@@ -1060,6 +1175,7 @@ async function save() {
       // 原来在 await 之后才取指纹，会把"保存期间新打的字"误标成已保存（服务端并没有这些内容）。
       const fingerprintAtSave = formFingerprint()
       await noteApi.update(id.value, payload)
+      lastPersistedNoteId = id.value
       savedFolderId.value = folderAtSave
       savedSnapshot.value = fingerprintAtSave
       // 清掉「预览里有未反推回源码的改动」标记。
@@ -1072,12 +1188,15 @@ async function save() {
         previewUnsynced.value = false
       }
       lastSavedAt.value = new Date()
-      ElMessage.success('已保存')
+      if (!silent) ElMessage.success('已保存')
     }
+    publishAgentNote()
+    return true
   } catch (e) {
     // 保存失败：内容还在编辑器里、dirty 仍为真，但必须让失败看得见并可重试，
     // 否则「未保存」和「保存失败」在界面上长得一样。
     saveError.value = e?.message || '保存失败'
+    return false
   } finally {
     saving.value = false
   }
@@ -1143,8 +1262,13 @@ const pvScrollRef = ref(null)
 
 watch(editorPct, (v) => localStorage.setItem('lh-editor-pct', String(Math.round(v))))
 
-/** 响应式档位：宽(三栏) / 中(两栏,隐大纲) / 窄(Tab 切换编辑/预览) */
+/** 源码与预览的档位独立于大纲，分屏时仍可保留大纲。 */
 const layoutMode = ref('wide') // wide | mid | tab
+const layoutWidth = ref(0)
+const canDockOutline = computed(() => layoutWidth.value >= 720)
+const outlineRailWidth = computed(() => Math.min(232, Math.max(180, Math.round(layoutWidth.value * 0.22))))
+const outlineInlineVisible = computed(() => canDockOutline.value && outlineOpen.value && !focusMode.value)
+const outlinePanelId = `${editorDomId}-outline`
 let resizeObserver = null
 
 // ---- 第二行工具条：窄屏横向滚动（滚轮横向滚动 + 左右边缘渐隐提示）----
@@ -1156,6 +1280,7 @@ function updateToolsScroll() {
   const max = el.scrollWidth - el.clientWidth
   toolsScroll.left = el.scrollLeft > 1
   toolsScroll.right = el.scrollLeft < max - 1
+  positionToolMenu()
 }
 /** 有横向溢出时把纵向滚轮转成横向滚动，避免窄屏下工具条被悄悄截断 */
 function onToolsWheel(e) {
@@ -1169,29 +1294,22 @@ function onToolsWheel(e) {
 function measureLayout() {
   if (!props.active) return
   const w = editorWrapRef.value?.clientWidth || window.innerWidth
-  const prev = layoutMode.value
+  layoutWidth.value = w
   layoutMode.value = w >= 1280 ? 'wide' : w >= 860 ? 'mid' : 'tab'
-  if (layoutMode.value === 'wide') {
-    if (prev !== 'wide' && /^#{1,3}\s/m.test(form.value.content || '')) {
-      // 由窄变宽：有标题就自动展开常驻大纲（窄屏时它是隐藏的）
-      outlineOpen.value = true
-    }
-  } else if (prev === 'wide') {
-    // 只在"从宽屏掉到窄屏"时收起常驻栏与抽屉。
-    // 窄屏内部的窗口微调（滚动条出现/消失、缩放几像素）也会触发 resize，
-    // 无条件在这里重置会把刚打开的抽屉立刻关掉。
-    outlineOpen.value = false
-    outlineDrawer.value = false
-  }
   updateToolsScroll()
 }
 
-/** 三栏里预览区随源码栏联动；大纲栏固定 260px（max 15%）由 flex 基准控制 */
+/** Keep both editors usable after resizing, including the space taken by the outline. */
 const editorStyle = computed(() => {
   // 注意：这里**不再**随 previewEditing 变化 —— 右侧已常驻可编辑，
   // 若点一下预览就改分栏比例，每次进入编辑都会重排一次，观感上像页面在抖。
   if (readingMode.value || layoutMode.value === 'tab') return {}
-  return { flex: `0 0 ${editorPct.value}%` }
+  const width = layoutWidth.value
+  const available = Math.max(0, width - 9 - (outlineInlineVisible.value ? outlineRailWidth.value : 0))
+  const min = Math.min(300, available / 2)
+  const max = Math.max(min, available - 320)
+  const preferred = width * editorPct.value / 100
+  return { flex: `0 0 ${Math.min(max, Math.max(min, preferred))}px` }
 })
 
 /** 当前左栏是否显示：Tab 模式下由编辑/预览 Tab 决定 */
@@ -1212,10 +1330,8 @@ const showPreviewPane = computed(() => {
   return true
 })
 
-/** 工具条是否有内容可显示：Tab 模式下切到「预览」且非预览编辑时为空，避免出现空卡片
- *  （单栏阅读模式下永远显示：那一栏正文就是它的作用对象） */
-const showTools = computed(() => readingMode.value || layoutMode.value !== 'tab'
-  || editorTab.value === 'edit' || previewEditing.value)
+// The preview is always editable; its tools remain discoverable before it gains focus.
+const showTools = true
 
 // ---- 拖拽调宽 ----
 let dragging = false
@@ -1228,8 +1344,10 @@ function startDrag(e) {
     const rect = editorWrapRef.value.getBoundingClientRect()
     const pct = ((ev.clientX - rect.left) / rect.width) * 100
     // 两栏时预览占剩余全部；留出最小可读宽度
-    const max = layoutMode.value === 'wide' ? 78 : 72
-    editorPct.value = Math.min(max, Math.max(24, pct))
+    const available = rect.width - 9 - (outlineInlineVisible.value ? outlineRailWidth.value : 0)
+    const min = Math.min(300, available / 2) / rect.width * 100
+    const max = Math.max(min, (available - 320) / rect.width * 100)
+    editorPct.value = Math.min(max, Math.max(min, pct))
   }
   const up = () => {
     dragging = false
@@ -1278,14 +1396,15 @@ watch(() => props.active, active => {
 const activeIdx = ref(-1)
 let outlineScrollTarget = null
 
-/**
- * 窄屏（mid / tab）与阅读模式下的大纲抽屉。
- * <p>
- * 为什么需要：常驻大纲栏的显示条件是 `layoutMode === 'wide'`（编辑区 ≥1280px），
- * 而窄屏下**连「展开大纲」的浮标都没有**（那个浮标的 v-if 同样要求 wide）——
- * 笔记本上把左侧导航和右侧智能体面板一开就够不到 1280px，等于永远没有大纲入口。
- */
+/** 小窗口通过顶栏打开抽屉；展开偏好不随窗口尺寸重置。 */
 const outlineDrawer = ref(false)
+watch(canDockOutline, docked => {
+  if (docked && outlineDrawer.value) {
+    outlineOpen.value = true
+    outlineDrawer.value = false
+  }
+})
+watch(() => props.active, active => { if (!active) outlineDrawer.value = false })
 function prepareOutline() {
   flushBlockContent()
   outlineSync.cancel()
@@ -1298,19 +1417,24 @@ function jumpFromDrawer(idx) {
   outlineDrawer.value = false
   nextTick(() => scrollToHeading(idx))
 }
-/**
- * 大纲当前是否可见：宽屏看常驻侧栏，窄屏看抽屉。
- * 用于「更多 → 展开/收起大纲」的文案与切换 —— 这个菜单项在窄屏原本是个**哑按钮**：
- * 它只切 outlineOpen，而常驻侧栏要求 layoutMode === 'wide'，所以在窄屏点了没有任何反应，
- * 这也是"找不到大纲"的一部分原因。快捷键 toggleOutline 走同一入口。
- */
-const outlineShown = computed(() => (layoutMode.value === 'wide' ? outlineOpen.value : outlineDrawer.value))
-function toggleOutline() {
-  if (!outlineShown.value) prepareOutline()
-  if (layoutMode.value === 'wide') {
-    outlineOpen.value = !outlineOpen.value
+const outlineShown = computed(() => canDockOutline.value ? outlineInlineVisible.value : (!focusMode.value && outlineDrawer.value))
+async function toggleOutline() {
+  if (!props.active || editorDisposed) return
+  const shown = outlineShown.value
+  if (!shown) {
+    prepareOutline()
+    if (focusMode.value) {
+      focusMode.value = false
+      // 恢复导航会改变可用宽度，等布局更新后再选择常驻栏或抽屉。
+      await nextTick()
+      if (!props.active || editorDisposed) return
+      measureLayout()
+    }
+  }
+  if (canDockOutline.value) {
+    outlineOpen.value = !shown
   } else {
-    outlineDrawer.value = !outlineDrawer.value
+    outlineDrawer.value = !shown
   }
 }
 
@@ -1334,7 +1458,7 @@ async function scrollToHeading(idx) {
 
 let scrollRaf = 0
 const previewGeometry = createPreviewGeometryCache()
-const outlineVisible = computed(() => outlineDrawer.value || (layoutMode.value === 'wide' && outlineOpen.value))
+const outlineVisible = computed(() => outlineInlineVisible.value || (!canDockOutline.value && outlineDrawer.value && !focusMode.value))
 function onPreviewLayoutChange() {
   previewGeometry.invalidate()
   if (!props.active || !showPreviewPane.value) return
@@ -1347,7 +1471,7 @@ function onPreviewScroll() {
   if (pv && scrollSyncSource === 'preview') {
     queueScrollSync()
   }
-  if (!outlineVisible.value || scrollRaf) return
+  if (!pv || !outlineVisible.value || scrollRaf) return
   scrollRaf = requestAnimationFrame(() => {
     scrollRaf = 0
     const el = pvScrollRef.value
@@ -1528,7 +1652,7 @@ watch(isDark, () => nextTick(onPreviewLayoutChange))
 // ---- 模式切换 ----
 function toggleFocus() {
   focusMode.value = !focusMode.value
-  if (focusMode.value) outlineOpen.value = false
+  if (focusMode.value) outlineDrawer.value = false
 }
 /**
  * 单栏「阅读」模式 ⇄ 「源码对照」模式。
@@ -1956,14 +2080,37 @@ const paraMenuOpen = ref(false)
 const alignMenuOpen = ref(false)
 /** 菜单 fixed 定位坐标（.ed-tools 有 overflow-x:auto，absolute 会被裁，必须 fixed） */
 const toolMenuPos = ref({ x: 0, y: 0 })
+const toolMenuRef = ref(null)
+let toolMenuAnchor = null
+function positionToolMenu() {
+  if (!toolMenuRef.value || !toolMenuAnchor?.isConnected) return
+  const rect = toolMenuAnchor.getBoundingClientRect()
+  const width = toolMenuRef.value.offsetWidth
+  const height = toolMenuRef.value.offsetHeight
+  const viewportWidth = document.documentElement.clientWidth
+  const viewportHeight = window.innerHeight
+  const below = rect.bottom + 5
+  const top = below + height <= viewportHeight - 8 ? below : rect.top - height - 5
+  toolMenuPos.value = {
+    x: Math.max(8, Math.min(rect.left, viewportWidth - width - 8)),
+    y: Math.max(8, Math.min(top, viewportHeight - height - 8)),
+  }
+}
+function closeToolMenus() {
+  paraMenuOpen.value = false
+  alignMenuOpen.value = false
+  toolMenuAnchor?.focus({ preventScroll: true })
+}
 function openToolMenu(which, e) {
   const willOpen = which === 'para' ? !paraMenuOpen.value : !alignMenuOpen.value
   if (willOpen) {
+    toolMenuAnchor = e.currentTarget
     const r = e.currentTarget.getBoundingClientRect()
     toolMenuPos.value = { x: r.left, y: r.bottom + 5 }
   }
   paraMenuOpen.value = which === 'para' ? willOpen : false
   alignMenuOpen.value = which === 'align' ? willOpen : false
+  if (willOpen) nextTick(positionToolMenu)
 }
 const PARA_ITEMS = [
   { key: 'para', label: '正文' },
@@ -3624,6 +3771,8 @@ onMounted(async () => {
   // 悬浮面板的「融入当前笔记」把 Markdown 追加进正文（见 onAgentMerge）
   window.addEventListener(AGENT_NOTE_MERGE_EVENT, onAgentMerge)
   window.addEventListener(AGENT_NOTE_UPDATED_EVENT, onAgentNoteUpdated)
+  window.addEventListener(AGENT_NOTE_PREPARE_EVENT, onAgentPrepare)
+  window.addEventListener(AGENT_NOTE_INSERT_EVENT, onAgentInsert)
   document.addEventListener('mousedown', onDocDownToolMenus)
   const initializingNew = isNew.value
   const startupSeq = loadSeq
@@ -3638,10 +3787,12 @@ onMounted(async () => {
   if (editorDisposed) return
   await nextTick()
   measureLayout()
-  // 宽屏默认展开大纲（有标题才会显示内容，空内容时大纲区自然为空态）
-  if (layoutMode.value === 'wide' && /^#{1,3}\s/m.test(form.value.content || '')) {
-    outlineOpen.value = true
-  }
+  // Sidebars and split workspaces can resize us without a window resize event.
+  resizeObserver = new ResizeObserver(() => {
+    measureLayout()
+    onPreviewLayoutChange()
+  })
+  if (editorWrapRef.value) resizeObserver.observe(editorWrapRef.value)
   scrollResizeObserver = new ResizeObserver(onPreviewLayoutChange)
   const previewBody = pvScrollRef.value?.querySelector('.pv-inner')
   if (boundSourceScroller) scrollResizeObserver.observe(boundSourceScroller)
@@ -3671,6 +3822,8 @@ onBeforeUnmount(() => {
   window.removeEventListener(NOTE_LINK_NAVIGATE_EVENT, onNoteLinkNavigate)
   window.removeEventListener(AGENT_NOTE_MERGE_EVENT, onAgentMerge)
   window.removeEventListener(AGENT_NOTE_UPDATED_EVENT, onAgentNoteUpdated)
+  window.removeEventListener(AGENT_NOTE_PREPARE_EVENT, onAgentPrepare)
+  window.removeEventListener(AGENT_NOTE_INSERT_EVENT, onAgentInsert)
   // 离开笔记页：广播"现在没开笔记"，面板的主操作随之回退成「保存为笔记」
   if (props.active) window.dispatchEvent(new CustomEvent(AGENT_NOTE_CONTEXT_EVENT, { detail: null }))
   document.removeEventListener('mousedown', onDocDownToolMenus)
@@ -3686,6 +3839,7 @@ onBeforeUnmount(() => {
   clearTimeout(scrollSyncTimer)
   outlineSync.cancel()
   previewLayoutSync.cancel()
+  resizeObserver?.disconnect()
   scrollResizeObserver?.disconnect()
   if (scrollRaf) cancelAnimationFrame(scrollRaf)
   if (scrollSyncRaf) cancelAnimationFrame(scrollSyncRaf)
@@ -3709,7 +3863,7 @@ onBeforeUnmount(() => {
     md-editor 内部那个 CodeMirror 我们没法注入配置，靠继承是唯一的办法。
     组件自身（BlockPreview / CM 组件）另外再声明一次，保证脱离本页也不会误开。
   -->
-  <div class="edit-page" :class="{ 'is-focus': focusMode, 'is-reading': readingMode }" v-loading="loading" spellcheck="false">
+  <div class="edit-page" :class="{ 'is-focus': focusMode, 'is-reading': readingMode, 'is-compact-layout': layoutWidth > 0 && layoutWidth <= 900, 'is-small-layout': layoutWidth > 0 && layoutWidth <= 520 }" v-loading="loading" spellcheck="false">
     <el-alert v-if="loadError" :title="loadError" type="error" :closable="false" show-icon>
       <el-button text @click="loadNote">重试加载</el-button>
     </el-alert>
@@ -3724,7 +3878,7 @@ onBeforeUnmount(() => {
         </svg>
       </button>
 
-      <input ref="titleInputRef" v-model="form.title" class="title-input" placeholder="输入笔记标题…" maxlength="200" />
+      <input ref="titleInputRef" v-model="form.title" class="title-input" aria-label="笔记标题" placeholder="输入笔记标题…" maxlength="200" />
 
       <el-select v-model="form.folderId" class="mini-select folder" aria-label="笔记文件夹" title="笔记所属文件夹，修改后保存生效" filterable>
         <el-option label="未收纳" :value="0" />
@@ -3737,8 +3891,7 @@ onBeforeUnmount(() => {
         <el-option v-for="t in tags" :key="t.id" :label="t.name" :value="t.id" />
       </el-select>
 
-      <span class="flex-spacer"></span>
-
+      <div class="ed-actions">
       <span class="save-state" :class="saveState.cls" :title="saveState.title || saveState.text">
         <i class="ss-dot"></i>{{ saveState.text }}
       </span>
@@ -3801,6 +3954,20 @@ onBeforeUnmount(() => {
         </span>{{ readingMode ? '源码对照' : '阅读模式' }}
       </button>
 
+      <button
+        class="read-exit outline-toggle"
+        :class="{ on: outlineShown }"
+        type="button"
+        :aria-expanded="outlineShown"
+        :aria-controls="outlinePanelId + (canDockOutline ? '-rail' : '-drawer')"
+        :title="outlineShown ? '收起大纲' : '展开大纲'"
+        @mousedown.prevent
+        @click="toggleOutline"
+      >
+        <span class="btn-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 6h14M5 12h9M5 18h12" /></svg></span>
+        大纲
+      </button>
+
       <el-dropdown trigger="click" @command="moreCommand">
         <button class="icon-btn" type="button" title="更多">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
@@ -3835,6 +4002,7 @@ onBeforeUnmount(() => {
       </el-dropdown>
 
       <el-button type="primary" class="save-btn" :loading="saving" @click="save">{{ isNew ? '创建' : '保存' }}</el-button>
+      </div>
     </div>
 
     <el-alert v-if="agentEditConflict" type="warning" :closable="false" show-icon>
@@ -3878,11 +4046,11 @@ onBeforeUnmount(() => {
 
         <!-- 段落类型（语雀「正文 ∨」） -->
         <div class="tb-dd">
-          <button class="tb tb-para" type="button" :class="{ on: paraMenuOpen }" title="段落类型"
+          <button class="tb tb-para" type="button" :class="{ on: paraMenuOpen }" title="段落类型" :aria-expanded="paraMenuOpen" aria-haspopup="true"
             @click="openToolMenu('para', $event)">
             正文<svg class="tb-caret" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5" /></svg>
           </button>
-          <div v-if="paraMenuOpen" class="tb-menu" :style="{ left: toolMenuPos.x + 'px', top: toolMenuPos.y + 'px' }" @mousedown.prevent @click.stop>
+          <div v-if="paraMenuOpen" ref="toolMenuRef" class="tb-menu" :style="{ left: toolMenuPos.x + 'px', top: toolMenuPos.y + 'px' }" @mousedown.prevent @click.stop @keydown.esc.stop="closeToolMenus">
             <button v-for="it in PARA_ITEMS" :key="it.key" class="tb-menu-item" type="button" @click="pickPara(it.key)">
               <span class="tbm-key" :class="{ txt: it.key === 'para' }">{{ it.key === 'para' ? 'T' : it.key === 'quote' ? '❝' : it.key.toUpperCase() }}</span>{{ it.label }}
             </button>
@@ -3903,12 +4071,12 @@ onBeforeUnmount(() => {
 
         <!-- 对齐（语雀「对齐 ∨」） -->
         <div class="tb-dd">
-          <button class="tb" type="button" :class="{ on: alignMenuOpen }" title="对齐方式"
+          <button class="tb" type="button" :class="{ on: alignMenuOpen }" title="对齐方式" :aria-expanded="alignMenuOpen" aria-haspopup="true"
             @click="openToolMenu('align', $event)">
             <svg viewBox="0 0 24 24"><path d="M4.5 6h15M7.5 12h9M5.5 18h13" /></svg>
             <svg class="tb-caret" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5" /></svg>
           </button>
-          <div v-if="alignMenuOpen" class="tb-menu" :style="{ left: toolMenuPos.x + 'px', top: toolMenuPos.y + 'px' }" @mousedown.prevent @click.stop>
+          <div v-if="alignMenuOpen" ref="toolMenuRef" class="tb-menu" :style="{ left: toolMenuPos.x + 'px', top: toolMenuPos.y + 'px' }" @mousedown.prevent @click.stop @keydown.esc.stop="closeToolMenus">
             <button v-for="it in ALIGN_ITEMS" :key="it.key" class="tb-menu-item" type="button" @click="pickAlign(it.key)">
               <svg viewBox="0 0 24 24" v-html="it.icon"></svg>{{ it.label }}
             </button>
@@ -4006,7 +4174,7 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- Tab 模式（窄屏）：编辑 / 预览 切换 -->
-    <div class="ed-tabs" v-if="layoutMode === 'tab' && !readingMode && !previewEditing">
+    <div class="ed-tabs" v-if="layoutMode === 'tab' && !readingMode">
       <button :class="{ on: editorTab === 'edit' }" @click="editorTab = 'edit'">编辑</button>
       <button :class="{ on: editorTab === 'preview' }" @click="editorTab = 'preview'">预览</button>
     </div>
@@ -4164,7 +4332,7 @@ onBeforeUnmount(() => {
       </section>
 
       <!-- 大纲栏 -->
-      <aside v-show="outlineOpen && layoutMode === 'wide'" class="pane pane-outline">
+      <aside v-show="outlineInlineVisible" :id="outlinePanelId + '-rail'" class="pane pane-outline" :style="{ flexBasis: outlineRailWidth + 'px' }" aria-label="笔记大纲">
         <div class="ol-head">
           <span>大纲</span>
           <button class="icon-btn sm" type="button" title="收起大纲" @click="outlineOpen = false">
@@ -4172,65 +4340,45 @@ onBeforeUnmount(() => {
           </button>
         </div>
         <div class="ol-list">
-          <div
+          <button
             v-for="(h, i) in outline"
             :key="i"
             class="ol-item"
+            type="button"
             :class="[`lv${h.level}`, { active: i === activeIdx }]"
+            :aria-current="i === activeIdx ? 'location' : undefined"
             :title="h.text"
             @click="scrollToHeading(i)"
-          >{{ h.text }}</div>
+          >{{ h.text }}</button>
           <div v-if="!outline.length" class="ol-empty">正文里写个标题（# 开头）<br />就会出现在这里</div>
         </div>
       </aside>
 
-      <!-- 大纲收起后的展开浮标 -->
-      <button
-        v-if="!outlineOpen && layoutMode === 'wide' && outline.length"
-        class="outline-fab"
-        type="button"
-        title="展开大纲"
-        @click="outlineOpen = true"
+      <!-- 使用主题抽屉处理遮罩、焦点约束、Escape 与关闭后的焦点恢复。 -->
+      <el-drawer
+        :model-value="outlineDrawer && props.active && !canDockOutline && !focusMode"
+        :id="outlinePanelId + '-drawer'"
+        title="大纲"
+        direction="rtl"
+        size="min(320px, 88vw)"
+        append-to-body
+        class="note-outline-drawer"
+        @update:model-value="outlineDrawer = $event"
       >
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M15 6l-6 6 6 6" /></svg>
-        大纲
-      </button>
-      <!--
-        窄屏 / 阅读模式的大纲入口（宽屏走上面的常驻侧栏 + 收起浮标）。
-        没有它的话，编辑区窄于 1280px 时大纲完全没有入口。
-      -->
-      <button
-        v-if="layoutMode !== 'wide' && outline.length"
-        class="outline-fab outline-fab-narrow"
-        type="button"
-        title="打开大纲"
-        @click="openOutlineDrawer"
-      >
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 6h14M5 12h9M5 18h12" /></svg>
-        大纲
-      </button>
-
-      <!-- 大纲抽屉：点条目跳转后自动关闭 -->
-      <div v-if="outlineDrawer" class="ol-mask" @click="closeOutlineDrawer"></div>
-      <aside v-if="outlineDrawer" class="ol-drawer" role="dialog" aria-label="大纲">
-        <div class="ol-head">
-          <span>大纲</span>
-          <button class="icon-btn sm" type="button" title="关闭大纲" @click="closeOutlineDrawer">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
-          </button>
-        </div>
         <div class="ol-list">
-          <div
+          <button
             v-for="(h, i) in outline"
             :key="'drawer-' + i"
             class="ol-item"
+            type="button"
             :class="[`lv${h.level}`, { active: i === activeIdx }]"
+            :aria-current="i === activeIdx ? 'location' : undefined"
             :title="h.text"
             @click="jumpFromDrawer(i)"
-          >{{ h.text }}</div>
+          >{{ h.text }}</button>
           <div v-if="!outline.length" class="ol-empty">正文里写个标题（# 开头）<br />就会出现在这里</div>
         </div>
-      </aside>
+      </el-drawer>
     </div>
 
     <!-- AI 处理：处理中显示真实分段进度，完成后转为结果预览 -->
@@ -4263,14 +4411,16 @@ onBeforeUnmount(() => {
         -->
         <div v-if="mergePatch" class="ai-patch-head">
           <span class="ai-patch-what">
-            <template v-if="mergePatch.kind === 'replace-section'">只替换「{{ mergePatch.heading }}」这一节，其余部分不动</template>
+            <template v-if="mergePatch.kind === 'batch-sections'">共 {{ mergePatch.patches.length }} 处修改，统一预览与应用，其余部分不动</template>
+            <template v-else-if="mergePatch.kind === 'replace-section'">只替换「{{ mergePatch.heading }}」这一节，其余部分不动</template>
             <template v-else-if="mergePatch.kind === 'append-section'">在「{{ mergePatch.heading }}」这一节末尾追加，已有内容不动</template>
+            <template v-else-if="mergePatch.afterSection">在「{{ mergePatch.afterSection.heading }}」之后新增一节「{{ mergePatch.heading }}」</template>
             <template v-else>在笔记末尾新增一节「{{ mergePatch.heading }}」</template>
           </span>
           <span v-if="mergePatch.reason" class="ai-patch-why">{{ mergePatch.reason }}</span>
         </div>
         <details v-if="mergePatch && mergePatch.before" class="ai-patch-before">
-          <summary>展开这一节的原文（{{ mergePatch.before.length }} 字）对比</summary>
+          <summary>展开修改前的原文（{{ mergePatch.before.length }} 字）对比</summary>
           <pre>{{ mergePatch.before }}</pre>
         </details>
         <MdPreview
@@ -4284,7 +4434,7 @@ onBeforeUnmount(() => {
         <el-button v-if="aiBusy" @click="cancelAiProcess">取消处理</el-button>
         <template v-else>
           <el-button @click="aiDialog = false">取消</el-button>
-          <el-button type="primary" @click="aiApply">{{ mergeApplyLabel }}</el-button>
+          <el-button type="primary" :loading="aiApplying" :disabled="aiApplying" @click="aiApply">{{ mergeApplyLabel }}</el-button>
         </template>
       </template>
     </el-dialog>
@@ -4299,6 +4449,9 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
   padding: 10px 14px 12px;
   gap: 0;
   background: var(--app-bg);
@@ -4307,6 +4460,8 @@ onBeforeUnmount(() => {
 /* ================= 顶部第一行 ================= */
 .ed-top {
   display: flex;
+  flex-wrap: wrap;
+  flex-shrink: 0;
   align-items: center;
   gap: 8px;
   padding: 4px 2px 8px;
@@ -4317,12 +4472,16 @@ onBeforeUnmount(() => {
   top: 0;
   z-index: 6;
   background: var(--app-bg);
-  /* 窄屏兜底：顶行内容优先保全，放不下时横向滚动而不是截断 */
-  overflow-x: auto;
-  scrollbar-width: none;
+  min-width: 0;
 }
-.ed-top::-webkit-scrollbar {
-  display: none;
+.ed-actions {
+  display: flex;
+  flex: 1 1 370px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+  gap: 6px;
 }
 
 .icon-btn {
@@ -4350,8 +4509,9 @@ onBeforeUnmount(() => {
 
 /* 标题输入：无边框大字，像文档标题而不是表单控件 */
 .title-input {
-  flex: 0 1 340px;
-  min-width: 140px;
+  flex: 1 1 180px;
+  min-width: 0;
+  max-width: 100%;
   height: 34px;
   padding: 0 10px;
   font-size: 16px;
@@ -4390,10 +4550,6 @@ onBeforeUnmount(() => {
   width: 150px;
 }
 .mini-select.folder { width: 148px; }
-
-.flex-spacer {
-  flex: 1;
-}
 
 /* 保存状态：安静的圆点 + 文案，绿/灰/琥珀三态 */
 .save-state {
@@ -4503,6 +4659,7 @@ onBeforeUnmount(() => {
 
 .save-btn {
   height: 32px;
+  flex-shrink: 0;
   padding: 0 18px;
   border-radius: 8px;
 }
@@ -4512,22 +4669,25 @@ onBeforeUnmount(() => {
    让这一排按钮从「贴边的图标」变成一块有触感的控制面板。 */
 .ed-tools {
   display: flex;
+  flex-wrap: wrap;
+  flex-shrink: 0;
   align-items: center;
   gap: 2px;
   padding: 5px 6px;
   margin-bottom: 8px;
-  overflow-x: auto;
-  scrollbar-width: none;
-  position: sticky;   /* 与第一行一起冻结在顶部（同一 z 轴，见 .ed-top 的说明） */
-  top: 42px;
+  min-width: 0;
+  max-height: min(112px, 24dvh);
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--app-border) transparent;
+  position: relative;
   z-index: 6;
   background: var(--app-card);
   border: 1px solid var(--app-border);
   border-radius: 10px;
 }
-.ed-tools::-webkit-scrollbar {
-  display: none;
-}
+.ed-tools::-webkit-scrollbar { width: 6px; height: 6px; }
+.ed-tools::-webkit-scrollbar-thumb { background: var(--app-border); border-radius: 6px; }
 /* 窄屏溢出时左右边缘渐隐，提示「还有更多工具可横向滚动」 */
 .ed-tools::before,
 .ed-tools::after {
@@ -4557,6 +4717,7 @@ onBeforeUnmount(() => {
 }
 .tb {
   min-width: 28px;
+  flex-shrink: 0;
   height: 28px;
   padding: 0 6px;
   display: inline-flex;
@@ -4621,8 +4782,11 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
 }
 .ed-format {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
 }
+.ed-format.format-bar { flex-wrap: wrap; }
 
 /* 「正文∨」「对齐∨」下拉（语雀式小浮层，视觉与块菜单一致） */
 .tb-dd {
@@ -4671,6 +4835,9 @@ html.dark .tb.on {
 .tb-menu {
   position: fixed; /* .ed-tools 有 overflow-x:auto，absolute 会被裁；fixed 按视口坐标定位 */
   min-width: 132px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100dvh - 16px);
+  overflow: auto;
   padding: 5px;
   background: var(--app-card);
   border: 1px solid var(--app-border);
@@ -4747,6 +4914,10 @@ html.dark .tb.on {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
+  flex-shrink: 0;
+  max-height: min(104px, 22dvh);
+  overflow: auto;
+  scrollbar-width: thin;
   gap: 4px;
   padding: 4px 8px;
   margin-bottom: 8px;
@@ -4777,6 +4948,8 @@ html.dark .tb.on {
   align-items: center;
   gap: 5px;
   height: 26px;
+  flex-shrink: 0;
+  white-space: nowrap;
   padding: 0 8px;
   font-size: 12px;
   color: var(--app-text-2);
@@ -4858,6 +5031,7 @@ html.dark .tbl-danger:hover {
 /* Tab 模式切换 */
 .ed-tabs {
   display: inline-flex;
+  flex-shrink: 0;
   gap: 2px;
   padding: 0 2px 8px;
 }
@@ -4882,7 +5056,8 @@ html.dark .tbl-danger:hover {
 /* ================= 三栏主体 ================= */
 .editor-wrap {
   flex: 1;
-  min-height: 0;
+  min-width: 0;
+  min-height: 144px;
   display: flex;
   align-items: stretch;
   border-radius: 10px;
@@ -4968,6 +5143,7 @@ html.dark .pane-editor :deep(.md-editor) {
   margin: 0 auto;
   padding: 24px 26px 48px;
 }
+.pv-inner:has(> .block-preview) { padding: 0 0 32px; }
 
 /* 空正文引导占位：弱化居中，与大纲空态同一视觉语言 */
 .pv-empty {
@@ -5209,19 +5385,25 @@ html.dark .pane-editor :deep(.md-editor) {
 }
 .ol-list {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 2px 8px 14px;
+  padding: 2px 8px 96px;
 }
 .ol-item {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  font-family: inherit;
+  text-align: left;
   padding: 5px 8px;
   font-size: 12.8px;
   line-height: 1.5;
   color: var(--app-text-2);
   border-radius: 6px;
   cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
   transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease;
 }
 .ol-item:hover {
@@ -5255,58 +5437,11 @@ html.dark .ol-item.active {
   color: var(--app-text-3);
 }
 
-.outline-fab {
-  position: absolute;
-  right: 14px;
-  top: 12px;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 28px;
-  padding: 0 10px;
-  font-size: 12px;
-  font-family: inherit;
-  color: var(--app-text-3);
-  background: var(--app-card);
-  border: 1px solid var(--app-border);
-  border-radius: 99px;
-  cursor: pointer;
-  box-shadow: var(--shadow-sm);
-  transition: color var(--dur-fast) ease, border-color var(--dur-fast) ease;
-  z-index: 3;
-}
-.outline-fab:hover {
-  color: var(--app-brand-deep);
-  border-color: color-mix(in srgb, var(--app-brand) 40%, var(--app-border));
-}
-/* ---- 窄屏 / 阅读模式的大纲入口与抽屉（宽屏用上面的常驻侧栏）---- */
-.outline-fab-narrow {
-  top: auto;
-  right: 18px;
-  bottom: 18px;
-  z-index: 6;
-}
-.ol-mask {
-  position: absolute;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.28);
-  z-index: 20;
-}
-.ol-drawer {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: min(300px, 78%);
+:global(.note-outline-drawer .el-drawer__body) {
   display: flex;
   flex-direction: column;
-  background: var(--app-card);
-  border-left: 1px solid var(--app-border-weak);
-  box-shadow: -10px 0 28px rgba(0, 0, 0, 0.12);
-  z-index: 21;
-}
-.ol-drawer .ol-head {
-  border-bottom: 1px solid var(--app-border-weak);
+  min-height: 0;
+  padding: 0 8px 12px;
 }
 .editor-wrap {
   position: relative;
@@ -5339,10 +5474,15 @@ html.dark .ol-item.active {
   color: var(--app-brand-deep);
   border-color: color-mix(in srgb, var(--app-brand) 40%, var(--app-border));
 }
+.outline-toggle.on {
+  color: var(--app-brand-deep);
+  background: var(--app-brand-soft);
+  border-color: color-mix(in srgb, var(--app-brand) 35%, var(--app-border));
+}
 
 /* 专注模式：编辑区整体浮起来一点，四周留白加大 */
 .edit-page.is-focus {
-  padding: 14px 26px 18px;
+  padding: 14px clamp(10px, 2vw, 26px) 18px;
 }
 
 .ai-preview {
@@ -5409,6 +5549,7 @@ html.dark .ol-item.active {
 
 .ai-progress-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -5433,4 +5574,14 @@ html.dark .ol-item.active {
   line-height: 1.8;
   color: var(--app-text-2);
 }
+
+.is-compact-layout .title-input { flex-basis: calc(100% - 46px); }
+.is-compact-layout .mini-select { flex: 1 1 100px; width: auto; min-width: 0; }
+.is-compact-layout .ed-actions { flex-basis: 100%; }
+.is-small-layout .ed-actions { gap: 4px; }
+.is-small-layout .ai-act { padding-inline: 6px; }
+.is-small-layout .read-exit { padding-inline: 8px; }
+.is-small-layout .save-state { margin-right: auto; }
+.is-small-layout .pv-inner:not(:has(> .block-preview)) { padding: 14px 12px 32px; }
+.is-small-layout .tb-sep { margin-inline: 3px; }
 </style>

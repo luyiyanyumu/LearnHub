@@ -11,6 +11,7 @@ import { fixHtmlQuotes } from './htmlQuotes.js'
 import { groundingDisplay } from './groundingDisplay.js'
 import { mermaidFrameHtml } from './mermaidPreview.js'
 import * as agentProgress from './agentProgress.js'
+import * as replyActions from './replyActions.js'
 
 const source = readFileSync(new URL('../components/AgentPanel.vue', import.meta.url), 'utf8')
 const compiled = compileScript(parse(source).descriptor, { id: 'agent-model-behavior-test' }).content
@@ -36,6 +37,7 @@ test('restored sessions retain their chat profile when model profiles arrive bef
     '../utils/htmlQuotes': { fixHtmlQuotes }, '../utils/agentNoteMerge': noteMerge,
     '../utils/mermaidPreview.js': { mermaidFrameHtml },
     '../utils/agentProgress.js': agentProgress,
+    '../utils/replyActions.js': replyActions,
     '../utils/agentNoteEdit': noteEdit, '../utils/retrievalDisplay': retrievalDisplay,
     '../utils/groundingDisplay': { groundingDisplay }, '../utils/modelProfileView': profileView,
     '../composables/useTheme': { isDark: vue.ref(false) },

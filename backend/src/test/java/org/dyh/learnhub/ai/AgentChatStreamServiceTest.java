@@ -98,7 +98,11 @@ class AgentChatStreamServiceTest {
             return caller.apply("create_note", json.valueToTree(Map.of("title", "合成笔记", "content", "合成正文")));
         });
         NoteVO note = new NoteVO();
-        note.setId(21L); note.setTitle("合成原文"); note.setContent("不可出现在过程摘要里的合成正文");
+        String preview = "可展示的合成原文片段";
+        String omittedTail = "不可出现在过程摘要里的合成正文";
+        String secret = "synthetic-progress-secret";
+        note.setId(21L); note.setTitle("合成原文");
+        note.setContent(preview + "\napi_key=" + secret + "\n" + "合成正文段落。".repeat(160) + omittedTail);
         when(notes.detail(21L)).thenReturn(note);
         stubPending();
         whenChat().thenReturn(tool(adaptive, Map.of()), answer());
@@ -114,7 +118,28 @@ class AgentChatStreamServiceTest {
         assertEquals(101L, tools.get(2).get("actionId"));
         assertEquals(tools.get(0).get("id"), tools.get(1).get("parentId"));
         assertEquals(tools.get(0).get("id"), tools.get(2).get("parentId"));
-        assertFalse(json.writeValueAsString(result.getProgress()).contains("不可出现在过程摘要"));
+        // Execution details deliberately expose a bounded read preview; milestone summaries do not.
+        JsonNode read = json.valueToTree(tools.get(1));
+        JsonNode source = read.path("sources").get(0);
+        assertEquals("note", source.path("type").asText());
+        assertEquals(21L, source.path("id").asLong());
+        assertEquals("合成原文", source.path("title").asText());
+        assertTrue(source.path("snippet").asText().startsWith(preview));
+        assertTrue(source.path("snippet").asText().length() <= 501);
+        assertTrue(read.path("result").asText().length() <= 1801);
+        assertTrue(read.path("result").asText().contains(preview));
+        for (Map<String, Object> row : result.getProgress()) {
+            assertFalse(String.valueOf(row.get("title")).contains(preview));
+            assertFalse(String.valueOf(row.get("detail")).contains(preview));
+        }
+        String finalTrace = json.writeValueAsString(result.getProgress());
+        String pushedTrace = json.writeValueAsString(emitted);
+        JsonNode savedTrace = persisted().path("progress");
+        for (String trace : List.of(finalTrace, pushedTrace, savedTrace.toString())) {
+            assertFalse(trace.contains(omittedTail), "full note bodies must stay out of bounded progress previews");
+            assertFalse(trace.contains(secret), "credentials in read previews must be redacted");
+        }
+        assertEquals(json.readTree(finalTrace), savedTrace);
         assertEquals(1, result.getPendingActions().size());
         verify(notes, never()).save(any());
     }

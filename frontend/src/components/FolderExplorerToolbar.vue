@@ -144,12 +144,14 @@ defineExpose({ manageFolder })
 </template>
 
 <style scoped>
-.folder-explorer { min-width: 0; margin-bottom: 12px; }
-.explorer-toolbar { display: flex; align-items: center; gap: 12px; min-width: 0; padding: 8px 10px; background: var(--app-card); border: 1px solid var(--app-border); border-radius: var(--radius-lg); }
-.explorer-history, .explorer-actions { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.folder-explorer { min-width: 0; container: folder-navigation / inline-size; margin-bottom: 12px; }
+.explorer-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; min-width: 0; padding: 8px 10px; background: var(--app-card); border: 1px solid var(--app-border); border-radius: var(--radius-lg); }
+.explorer-history, .explorer-actions { display: flex; align-items: center; gap: 4px; flex: 0 1 auto; max-width: 100%; }
+.explorer-history { flex-shrink: 0; }
+.explorer-actions { flex-wrap: wrap; min-width: 0; }
 .explorer-history :deep(.el-button + .el-button), .explorer-actions :deep(.el-button + .el-button) { margin-left: 0; }
 .explorer-history :deep(.el-button) { padding: 6px; width: 30px; height: 30px; }
-.explorer-path { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; padding: 2px 6px; min-height: 32px; overflow-x: auto; background: var(--app-bg); border-radius: 6px; scrollbar-width: thin; }
+.explorer-path { flex: 1 1 160px; min-width: 0; display: flex; align-items: center; gap: 4px; padding: 2px 6px; min-height: 32px; overflow-x: auto; background: var(--app-bg); border-radius: 6px; scrollbar-width: thin; }
 .path-icon { flex: 0 0 17px; width: 17px; height: 17px; margin: 0 4px; color: var(--app-brand-deep); }
 .path-separator { flex: 0 0 12px; width: 12px; height: 12px; color: var(--app-text-3); }
 .path-segment { flex: 0 0 auto; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; border-radius: 4px; padding: 5px 8px; background: transparent; color: var(--app-text-2); font: inherit; font-size: 13px; cursor: pointer; }
@@ -159,11 +161,10 @@ button.path-segment:hover:not(:disabled) { color: var(--app-brand-deep); backgro
 .path-segment:focus-visible { outline: 2px solid var(--app-brand); outline-offset: -2px; }
 .current { cursor: default; }
 .explorer-error { margin: 6px 10px 0; color: var(--el-color-danger); font-size: 13px; overflow-wrap: anywhere; }
-@media (max-width: 760px) {
+@container folder-navigation (max-width: 680px) {
   .explorer-toolbar { gap: 6px; flex-wrap: wrap; padding: 8px; }
-  .explorer-history { order: 0; }
-  .explorer-actions { order: 1; margin-left: auto; }
-  .explorer-path { order: 2; flex-basis: 100%; }
+  .explorer-path { flex-basis: 120px; }
+  .explorer-actions { flex-basis: 100%; justify-content: flex-end; }
   .path-segment { max-width: 180px; }
 }
 </style>

@@ -1,14 +1,17 @@
 package org.dyh.learnhub.ai;
 
+import com.fasterxml.jackson.databind.JsonNode;
+
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/** Real orchestration milestones only; never model reasoning, prompts or tool arguments. */
+/** Real orchestration milestones and bounded, sanitized execution facts; never private model reasoning. */
 final class AgentChatProgress {
     private static final int MAX_STEPS = 160;
+    private static final int MAX_DETAILS_CHARS = 900_000;
     private final AgentService.ChatListener listener;
     private final long started = System.nanoTime();
     private final Map<String, Map<String, Object>> rows = new LinkedHashMap<>();
@@ -17,6 +20,7 @@ final class AgentChatProgress {
     private String sessionId;
     private boolean userRecorded;
     private boolean ownsSession;
+    private int detailsChars;
 
     AgentChatProgress(AgentService.ChatListener listener) {
         this.listener = listener;
@@ -42,7 +46,17 @@ final class AgentChatProgress {
         return start("tool", toolTitle(name), null, compact(name, 80), parentId);
     }
 
+    String tool(String name, String parentId, String arguments) {
+        return start("tool", toolTitle(name), null, compact(name, 80), parentId,
+                AgentProgressDetails.tool(name, arguments));
+    }
+
     String start(String kind, String title, String detail, String toolName, String parentId) {
+        return start(kind, title, detail, toolName, parentId, Map.of());
+    }
+
+    private String start(String kind, String title, String detail, String toolName, String parentId,
+                         Map<String, Object> details) {
         if (rows.size() >= MAX_STEPS) return null;
         String id = "step-" + (++sequence);
         Map<String, Object> row = new LinkedHashMap<>();
@@ -57,11 +71,43 @@ final class AgentChatProgress {
         row.put("at", Instant.now().toString());
         rows.put(id, row);
         starts.put(id, System.nanoTime());
+        details(id, details);
         emit(row);
         return id;
     }
 
     void complete(String id, String detail) { finish(id, "completed", detail); }
+
+    void selectedTools(String id, JsonNode calls) { details(id, AgentProgressDetails.tools(calls)); }
+
+    void sources(String id, List<Map<String, Object>> sources) { details(id, AgentProgressDetails.sources(sources)); }
+
+    void result(String id, String tool, JsonNode result) { details(id, AgentProgressDetails.result(tool, result)); }
+
+    private void details(String id, Map<String, Object> details) {
+        Map<String, Object> row = rows.get(id);
+        if (row == null || details.isEmpty()) return;
+        int before = detailSize(row);
+        Map<String, Object> merged = new LinkedHashMap<>(row);
+        merged.putAll(details);
+        int after = detailSize(merged);
+        if (detailsChars - before + after > MAX_DETAILS_CHARS) {
+            // Keep steps/statuses and their already shown facts when this exceptionally long trace fills up.
+            if (!row.containsKey("result")) row.put("result", "本轮执行明细已达到保存上限，后续仍保留步骤与状态。");
+            return;
+        }
+        row.putAll(details);
+        detailsChars += after - before;
+    }
+
+    private static int detailSize(Map<String, Object> row) {
+        int size = 0;
+        for (String key : List.of("tools", "sources", "websites", "result", "error")) {
+            Object value = row.get(key);
+            if (value != null) size += value.toString().length();
+        }
+        return size;
+    }
 
     void action(String id, long actionId) {
         if (actionId > 0 && rows.containsKey(id)) rows.get(id).put("actionId", actionId);
@@ -148,6 +194,8 @@ final class AgentChatProgress {
             case "create_note" -> "准备新笔记";
             case "update_note", "append_to_note", "edit_note" -> "准备笔记修改";
             case "write_long_note" -> "生成完整笔记";
+            case "write_note_sections" -> "分批生成笔记片段";
+            case "set_reply_actions" -> "设置本轮操作选项";
             case "create_quick_ref", "update_quick_ref" -> "准备速查卡修改";
             case "add_file_from_url" -> "准备导入资料";
             case "create_word_document" -> "准备 Word 文档";

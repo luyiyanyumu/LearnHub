@@ -16,9 +16,15 @@ class TextChunkerParametersTest {
     }
 
     @Test void maximumStillHoldsWhenParagraphOverlapWouldOtherwiseExceedIt() {
-        String text = "甲".repeat(70) + "\n\n" + "乙".repeat(115);
+        String first = "甲".repeat(45) + "。" + "前".repeat(23) + "。";
+        String second = "乙".repeat(114) + "。";
+        String text = first + "\n\n" + second;
         var chunks = TextChunker.splitWithHeadings(text, new TextChunker.Options(100, 30, 120));
-        assertTrue(chunks.size() >= 3);
+        // The 24-character complete-sentence overlap cannot fit beside the intact
+        // 115-character paragraph. Drop overlap rather than splitting that paragraph.
+        assertEquals(2, chunks.size());
+        assertEquals(first, chunks.getFirst().text());
+        assertEquals(second, chunks.getLast().text());
         assertTrue(chunks.stream().allMatch(chunk -> chunk.text().length() <= 120));
     }
 

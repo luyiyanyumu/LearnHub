@@ -1,0 +1,82 @@
+{
+  "fixture_sha256": "c5e3016f9554834af66f42e5df4fdac887c6f9884881bc68872cd2fd6b25e418",
+  "original_measured_source_sha256": {
+    "TextChunker.java": "ae1e1f0c831f78089af6b8165c46e86a0549dc29670c0b3fb725b5d18de9268e",
+    "SemanticChunker.java": "8e9ae5ed76321fde42f01cbbcd2ff9abaa4c03fce08a1c8437c20eec30450b45"
+  },
+  "final_product_source_sha256": {
+    "TextChunker.java": "1370b1f090d5d8b1c6fd306e5cd01add866a5f4ec0958daba2168b3ce32cf682",
+    "SemanticChunker.java": "8e9ae5ed76321fde42f01cbbcd2ff9abaa4c03fce08a1c8437c20eec30450b45"
+  },
+  "structural_units_identical": true,
+  "structural_units_sha256": "39d60d2f74ca8a7d1676a0d5a3291858681e19c061610bec729e4b17daafb194",
+  "model_calls": 0,
+  "timing_policy": "Original measured build/query times retained unchanged; this validation only checks outputs and cached-vector retrieval metrics.",
+  "variants": {
+    "legacy": {
+      "chunks_identical": true,
+      "metrics_identical": true,
+      "per_question_evidence_and_ranking_identical": true,
+      "chunks_sha256": "98fd628bc119ba4968bf3875a0c07429908545e5900dd9d1331d67ffbc1d2d75",
+      "metrics": {
+        "questions": 31,
+        "evidence_hit_at_1": 0.9354838709677419,
+        "evidence_hit_at_3": 1.0,
+        "evidence_hit_budget": 1.0,
+        "complete_evidence_budget": 0.967741935483871,
+        "mean_evidence_character_coverage": 0.9877366035723807,
+        "mrr": 0.967741935483871,
+        "chunks": 38,
+        "mean_chunk_chars": 597.6052631578947,
+        "max_chunk_chars": 934,
+        "protected_blocks": 4,
+        "broken_protected_blocks": 1,
+        "broken_by_type": {
+          "code": 1
+        }
+      }
+    },
+    "structural": {
+      "chunks_identical": true,
+      "metrics_identical": true,
+      "per_question_evidence_and_ranking_identical": true,
+      "chunks_sha256": "a72efc743fdcd8dfd6e7e2cae3d75b7252355017de342234189b50907c8fc75f",
+      "metrics": {
+        "questions": 31,
+        "evidence_hit_at_1": 0.9032258064516129,
+        "evidence_hit_at_3": 1.0,
+        "evidence_hit_budget": 1.0,
+        "complete_evidence_budget": 0.967741935483871,
+        "mean_evidence_character_coverage": 0.9877366035723807,
+        "mrr": 0.946236559139785,
+        "chunks": 38,
+        "mean_chunk_chars": 583.0263157894736,
+        "max_chunk_chars": 1080,
+        "protected_blocks": 4,
+        "broken_protected_blocks": 0,
+        "broken_by_type": {}
+      }
+    },
+    "semantic": {
+      "chunks_identical": true,
+      "metrics_identical": true,
+      "per_question_evidence_and_ranking_identical": true,
+      "chunks_sha256": "c07002d138b7d0a2dafaa1e06e6377598c21af1eb09909635d2c84cec3150267",
+      "metrics": {
+        "questions": 31,
+        "evidence_hit_at_1": 0.9032258064516129,
+        "evidence_hit_at_3": 1.0,
+        "evidence_hit_budget": 1.0,
+        "complete_evidence_budget": 1.0,
+        "mean_evidence_character_coverage": 1.0,
+        "mrr": 0.946236559139785,
+        "chunks": 40,
+        "mean_chunk_chars": 516.55,
+        "max_chunk_chars": 1080,
+        "protected_blocks": 4,
+        "broken_protected_blocks": 0,
+        "broken_by_type": {}
+      }
+    }
+  }
+}

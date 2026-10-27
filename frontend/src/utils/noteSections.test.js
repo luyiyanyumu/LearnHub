@@ -65,6 +65,36 @@ test('tilde fences close only on the same marker', () => {
   assert.deepEqual(splitNoteSections(md2).sections.map((s) => s.heading), ['A', 'B'])
 })
 
+for (const [opening, closing] of [['$$', '$$'], ['\\[', '\\]']]) {
+  test(`multiline ${opening} formulas stay in one section and are never demoted`, () => {
+    const formula = [opening, '\\begin{aligned}', '## literal TeX argument', '```', 'x &= y + 1', '\\end{aligned}', closing].join('\r\n')
+    const md = ['## 甲', '', formula, '', '  ## 乙', '', '乙正文'].join('\r\n')
+    const { sections } = splitNoteSections(md)
+    assert.deepEqual(sections.map(section => section.heading), ['甲', '乙'])
+    assert.equal(sections[0].body, formula)
+    for (const section of sections) assert.equal(md.slice(section.start, section.end), section.text)
+    const demoted = demoteSectionHeadings(md, 2)
+    assert.ok(demoted.includes(formula), 'formula bytes and delimiters must remain intact')
+    assert.match(demoted, /^### 甲\r\n/)
+    assert.match(demoted, /\r\n {2}### 乙/)
+    const out = applySectionPatch(md, sections[1], `说明\n\n${formula}`)
+    assert.equal(splitNoteSections(out).sections.length, 2)
+    assert.ok(out.endsWith(formula))
+  })
+}
+
+test('math examples inside a code fence do not open math; short fences cannot close longer fences', () => {
+  const md = ['## 甲', '````markdown', '$$', '```', '## still code', '\\[', '````', '## 乙', '$$ x + 1 $$', '\\[ y + 2 \\]', '## 丙'].join('\n')
+  assert.deepEqual(scanHeadings(md).map(heading => heading.heading), ['甲', '乙', '丙'])
+})
+
+test('unclosed display math remains ordinary text and cannot swallow later section headings', () => {
+  for (const opening of ['$$', '\\[']) {
+    const md = ['## 甲', opening, 'x = 1', '## 乙'].join('\n')
+    assert.deepEqual(scanHeadings(md).map(heading => heading.heading), ['甲', '乙'])
+  }
+})
+
 test('without any ## it falls back to the shallowest repeated level', () => {
   const md = ['# 标题', '', '### 一', '甲', '', '### 二', '乙', ''].join('\n')
   const { level, sections } = splitNoteSections(md)

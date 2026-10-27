@@ -166,9 +166,10 @@ public class RetrievalContextService {
             if (body.isBlank()) continue;
             // Graph windows retain every supporting quote or are omitted whole.
             if (body.length() > cfg.passageChars() && hit.graphRelations().isEmpty()) {
-                body = QueryAwareExcerpt.excerpt(question, body, cfg.passageChars());
+                body = StructureAwareExcerpt.excerpt(question, body, cfg.passageChars());
             }
-            var passage = new PreparedPassage(hit, "", List.of(new PassageMember(hit, body)));
+            if (body.isBlank()) continue;
+            var passage = new PreparedPassage(hit, "", "", List.of(new PassageMember(hit, body)));
             String entry = renderPassage(passage, prepared.size() + 1);
             if (renderedChars + entry.length() > passageBudget) continue;
             prepared.add(passage);
@@ -195,6 +196,7 @@ public class RetrievalContextService {
             item.put("chars", entry.length());
             if (passage.expanded()) {
                 item.put("sectionHeading", passage.heading());
+                if (!passage.parentHeading().isBlank()) item.put("parentSectionHeading", passage.parentHeading());
                 item.put("originalPassageKeys", passage.members().stream().map(m -> m.hit().key()).toList());
                 item.put("expandedSeqs", passage.members().stream().map(m -> m.hit().seq()).toList());
                 item.put("memberExcerpts", passage.members().stream().map(m -> Map.<String, Object>of(
@@ -234,7 +236,8 @@ public class RetrievalContextService {
         List<RetrievalHit> seeds = prepared.stream().map(PreparedPassage::seed).toList();
         Map<String, KnowledgeRetrievalService.SectionNeighbors> related;
         try {
-            related = retrievalService.relatedSections(seeds, cfg.neighborCount());
+            // Inspect both directions even when the caller permits only one added neighbor.
+            related = retrievalService.relatedSections(seeds, 2);
         } catch (Exception error) {
             log.warn("同小节原文扩展不可用，保留已命中片段：{}", error.toString());
             return;
@@ -242,19 +245,73 @@ public class RetrievalContextService {
         if (related == null || related.isEmpty()) return;
         var usedKeys = new LinkedHashSet<String>();
         seeds.forEach(hit -> usedKeys.add(hit.key()));
+        // At most one verified parent opening per answer, before spending the remainder on
+        // adjacent blocks. It uses an existing entry and never evicts a reserved seed.
+        for (int i = 0; i < prepared.size(); i++) {
+            PreparedPassage original = prepared.get(i);
+            var section = related.get(original.seed().key());
+            var parent = section == null ? null : section.parent();
+            if (parent == null || original.seed().seq() == null || original.seed().seq() < 0
+                    || !original.seed().graphRelations().isEmpty()) continue;
+            RetrievalHit opening = parent.passage();
+            if (opening == null || usedKeys.contains(opening.key()) || !sameSource(original.seed(), opening)
+                    || !"file".equals(opening.sourceType()) || opening.seq() == null || opening.seq() < 0
+                    || opening.seq() >= original.seed().seq() || !opening.graphRelations().isEmpty()
+                    || !opening.channels().contains("section-parent") || value(parent.heading()).isBlank()) continue;
+            String body = value(opening.text()).strip();
+            // Parent context is optional: omit an oversize opening whole rather than clip
+            // away its qualification while presenting it as a complete chapter introduction.
+            if (body.isBlank() || body.length() > cfg.passageChars()
+                    || QueryAwareExcerpt.relevance(question, parent.heading() + "\n" + body, "").total() == 0) continue;
+            PreparedPassage expanded = original.withParent(parent.heading(), opening, body);
+            int oldChars = renderPassage(original, i + 1).length();
+            int newChars = renderPassage(expanded, i + 1).length();
+            if (renderedChars - oldChars + newChars > budget) continue;
+            prepared.set(i, expanded);
+            usedKeys.add(opening.key());
+            renderedChars += newChars - oldChars;
+            break;
+        }
+        Map<String, List<NeighborCandidate>> ordered = new LinkedHashMap<>();
+        for (PreparedPassage passage : prepared) {
+            RetrievalHit seed = passage.seed();
+            if (!seed.graphRelations().isEmpty() || seed.seq() == null || seed.seq() < 0) continue;
+            var section = related.get(seed.key());
+            if (section == null) continue;
+            List<NeighborCandidate> candidates = new ArrayList<>();
+            for (RetrievalHit neighbor : section.passages()) {
+                if (usedKeys.contains(neighbor.key()) || !sameSource(seed, neighbor)
+                        || neighbor.seq() == null || neighbor.seq() < 0
+                        || Math.abs((long) neighbor.seq() - seed.seq()) != 1
+                        || !neighbor.graphRelations().isEmpty()) continue;
+                String body = value(neighbor.text()).strip();
+                if (body.length() > cfg.passageChars())
+                    body = StructureAwareExcerpt.excerpt(question, body, cfg.passageChars());
+                if (body.isBlank()) continue;
+                String covered = String.join("\n", passage.members().stream().map(PassageMember::body).toList());
+                var relevance = QueryAwareExcerpt.relevance(question, body, covered);
+                // An empty heading is no topic boundary: adjacency alone cannot justify
+                // spending context on a different chapter in an unstructured export.
+                if (value(section.heading()).isBlank() && relevance.total() == 0) continue;
+                candidates.add(new NeighborCandidate(neighbor, body, relevance));
+            }
+            // Stable ties retain the lookup's existing next/previous order.
+            candidates.sort(Comparator.comparingDouble((NeighborCandidate n) -> n.relevance().additional()).reversed()
+                    .thenComparing(Comparator.comparingDouble((NeighborCandidate n) -> n.relevance().total()).reversed()));
+            ordered.put(seed.key(), candidates.stream().limit(cfg.neighborCount()).toList());
+        }
         for (int round = 0; round < cfg.neighborCount(); round++) {
             for (int i = 0; i < prepared.size(); i++) {
                 PreparedPassage original = prepared.get(i);
                 if (!original.seed().graphRelations().isEmpty() || original.seed().seq() == null
-                        || original.seed().seq() < 0) continue;
+                        || original.seed().seq() < 0 || original.members().size() - 1 >= cfg.neighborCount()) continue;
                 var section = related.get(original.seed().key());
-                if (section == null || section.passages().size() <= round) continue;
-                RetrievalHit neighbor = section.passages().get(round);
+                var candidates = ordered.getOrDefault(original.seed().key(), List.of());
+                if (section == null || candidates.size() <= round) continue;
+                NeighborCandidate candidate = candidates.get(round);
+                RetrievalHit neighbor = candidate.hit();
                 if (usedKeys.contains(neighbor.key()) || !sameSource(original.seed(), neighbor)) continue;
-                String body = value(neighbor.text()).strip();
-                if (body.isBlank() || neighbor.seq() == null || neighbor.seq() < 0
-                        || !neighbor.graphRelations().isEmpty()) continue;
-                if (body.length() > cfg.passageChars()) body = QueryAwareExcerpt.excerpt(question, body, cfg.passageChars());
+                String body = candidate.body();
                 int oldChars = renderPassage(original, i + 1).length();
                 PreparedPassage expanded = original.withNeighbor(section.heading(), neighbor, body);
                 int newChars = renderPassage(expanded, i + 1).length();
@@ -263,7 +320,8 @@ public class RetrievalContextService {
                     // chunk. Labels and every separator are included in this exact allowance.
                     int allowance = budget - (renderedChars - oldChars) - (newChars - body.length());
                     if (allowance < Math.min(body.length(), MIN_NEIGHBOR_EXCERPT_CHARS)) continue;
-                    body = QueryAwareExcerpt.excerpt(question, body, Math.min(cfg.passageChars(), allowance));
+                    body = StructureAwareExcerpt.excerpt(question, body, Math.min(cfg.passageChars(), allowance));
+                    if (body.isBlank()) continue;
                     expanded = original.withNeighbor(section.heading(), neighbor, body);
                     newChars = renderPassage(expanded, i + 1).length();
                     if (renderedChars - oldChars + newChars > budget) continue;
@@ -275,25 +333,35 @@ public class RetrievalContextService {
         }
     }
 
+    private record NeighborCandidate(RetrievalHit hit, String body, QueryAwareExcerpt.Relevance relevance) { }
+
     private static boolean sameSource(RetrievalHit one, RetrievalHit two) {
         return one.sourceRef().equals(two.sourceRef());
     }
 
     private record PassageMember(RetrievalHit hit, String body) {}
 
-    private record PreparedPassage(RetrievalHit seed, String heading, List<PassageMember> members) {
+    private record PreparedPassage(RetrievalHit seed, String heading, String parentHeading, List<PassageMember> members) {
         boolean expanded() { return members.size() > 1; }
+
+        PreparedPassage withParent(String parentHeading, RetrievalHit parent, String body) {
+            List<PassageMember> next = new ArrayList<>(members);
+            next.add(new PassageMember(parent, body));
+            next.sort(Comparator.comparingInt(m -> m.hit().seq()));
+            return new PreparedPassage(seed, heading, parentHeading, List.copyOf(next));
+        }
 
         PreparedPassage withNeighbor(String heading, RetrievalHit neighbor, String body) {
             List<PassageMember> next = new ArrayList<>(members);
             next.add(new PassageMember(neighbor, body));
             next.sort(Comparator.comparingInt(m -> m.hit().seq()));
-            return new PreparedPassage(seed, heading, List.copyOf(next));
+            return new PreparedPassage(seed, heading, parentHeading, List.copyOf(next));
         }
 
         String body() {
             if (!expanded()) return members.getFirst().body();
-            return String.join("\n\n", members.stream().map(m -> "【同小节片段 seq=" + m.hit().seq()
+            return String.join("\n\n", members.stream().map(m -> (m.hit().channels().contains("section-parent")
+                    ? "【父小节片段 seq=" : "【同小节片段 seq=") + m.hit().seq()
                     + "】\n" + m.body()).toList());
         }
 
@@ -318,7 +386,11 @@ public class RetrievalContextService {
                 .append(passage.expanded() ? passage.members().stream().map(m -> m.hit().seq()).toList()
                         : hit.seq() == null ? "source" : hit.seq()).append("] ").append(value(hit.title()));
         if (!value(hit.category()).isBlank()) out.append("（分类：").append(hit.category()).append("）");
-        if (passage.expanded()) out.append("\n同小节窗口：").append(value(passage.heading()));
+        if (passage.expanded()) {
+            if (!passage.parentHeading().isBlank()) out.append("\n上级小节：").append(passage.parentHeading());
+            if (passage.parentHeading().isBlank() || !value(passage.heading()).isBlank())
+                out.append("\n同小节窗口：").append(value(passage.heading()));
+        }
         out.append("\n渠道：").append(String.join(" / ", hit.channels()));
         if (!hit.graphRelations().isEmpty()) {
             out.append("\n图谱关联路径：").append(String.join("；", hit.graphRelations()));

@@ -144,7 +144,7 @@ REM ---------- rebuild and restart ----------
 :step_build
 if "%DO_BUILD%"=="0" goto :done_ok
 echo ==^> rebuilding images and restarting containers (1-3 min on first run or changes)
-call "%~dp0start-all.bat" build nobrowser nopause
+docker compose --project-directory "%~dp0deploy" -f "%~dp0deploy\docker-compose.yml" up -d --build --wait --wait-timeout 240
 if errorlevel 1 goto :build_fail
 
 echo.
@@ -260,7 +260,7 @@ echo   then re-run this script after push / rebase / discard.
 goto :fail
 
 :build_fail
-echo   [ERROR] image rebuild failed, see start-all.bat output
+echo   [ERROR] image rebuild or health check failed, see Docker Compose output above
 goto :fail
 
 :web_down

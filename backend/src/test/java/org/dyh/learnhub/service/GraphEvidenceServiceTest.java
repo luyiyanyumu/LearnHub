@@ -59,6 +59,56 @@ class GraphEvidenceServiceTest {
     }
 
     @Test
+    void freshSemanticBoundariesKeepGraphKeysAndEvidenceAlignedWithVectorPassages() {
+        String evidence = "A 依赖 B 才能启动。";
+        // File content arrives as summary + a real LF + extracted document text.
+        String content = "Synthetic summary.\nSynthetic introduction.\n\n" + evidence + "\n\nSynthetic appendix.";
+        rows(relation("a", "prerequisite", "b", evidence, "资料#7"));
+        docs("file", source(7, "Synthetic source", content));
+        VectorIndexService index = mock(VectorIndexService.class);
+        service.setVectorIndex(index);
+        List<TextChunker.Chunk> stored = List.of(new TextChunker.Chunk("Intro", "Synthetic summary.\nSynthetic introduction."),
+                new TextChunker.Chunk("Startup", evidence), new TextChunker.Chunk("Appendix", "Synthetic appendix."));
+        KnowledgeBaseSettings.Config cfg = KnowledgeBaseSettings.defaults();
+        when(index.persistedChunks(anyList(), same(cfg))).thenReturn(Map.of("file:7", stored));
+
+        RetrievalHit hit = service.search("A 怎么启动", 6, cfg).getFirst();
+
+        assertEquals("file:7:1", hit.key());
+        assertEquals(stored.get(1).text(), hit.text());
+        assertEquals(List.of("a —前置知识→ b"), hit.graphRelations());
+        assertNotEquals(TextChunker.splitWithHeadings(content).getFirst().text(), hit.text());
+        verify(index).persistedChunks(argThat(documents -> documents.size() == 1
+                && "file".equals(documents.getFirst().get("source_type"))
+                && Long.valueOf(7).equals(documents.getFirst().get("source_id"))
+                && content.equals(documents.getFirst().get("content"))
+                && "Synthetic source".equals(documents.getFirst().get("title"))
+                && "测试分类".equals(documents.getFirst().get("category"))), same(cfg));
+        verifyNoMoreInteractions(index);
+    }
+
+    @Test
+    void staleOrUnavailableIndexFallsBackToVerifiedCurrentStructuralPassages() {
+        String evidence = "A 依赖 B 才能启动。";
+        String content = "# Startup\n" + evidence;
+        rows(relation("a", "prerequisite", "b", evidence, "资料#7"));
+        docs("file", source(7, "Synthetic source", content));
+        VectorIndexService index = mock(VectorIndexService.class);
+        service.setVectorIndex(index);
+        when(index.persistedChunks(anyList(), any())).thenReturn(Map.of())
+                .thenThrow(new IllegalStateException("index offline"));
+
+        for (int attempt = 0; attempt < 2; attempt++) {
+            RetrievalHit hit = service.search("A 怎么启动", 6).getFirst();
+            assertEquals("file:7:0", hit.key());
+            assertEquals(TextChunker.splitWithHeadings(content).getFirst().text(), hit.text());
+            assertFalse(hit.graphRelations().isEmpty());
+        }
+        verify(index, times(2)).persistedChunks(anyList(), any());
+        verifyNoMoreInteractions(index);
+    }
+
+    @Test
     void noRecognizedConceptDoesNotReadRelationsOrSources() {
         when(graph.recognize(anyString(), anyInt())).thenReturn(List.of());
         assertTrue(service.search("没见过的问题", 6).isEmpty());
@@ -227,7 +277,7 @@ class GraphEvidenceServiceTest {
     }
 
     @Test
-    void actualEvidenceInsideLaterCodeChunkStillUsesItsMatchingSequence() {
+    void evidenceInsideOversizedCodeReturnsTheCompleteAtomicCodeBlockAtSequenceZero() {
         String evidence = "List<String> values = new ArrayList<>();";
         String content = "```java\n" + "filler; ".repeat(160) + evidence + "\n"
                 + "ending; ".repeat(160) + "\n```";
@@ -236,12 +286,13 @@ class GraphEvidenceServiceTest {
 
         List<RetrievalHit> hits = service.search("A B", 6);
 
-        assertFalse(hits.isEmpty());
-        for (RetrievalHit hit : hits) {
-            assertTrue(hit.seq() > 0);
-            assertEquals(TextChunker.splitWithHeadings(content).get(hit.seq()).text(), hit.text());
-            assertTrue(hit.text().contains(evidence));
-        }
+        assertEquals(1, hits.size());
+        RetrievalHit hit = hits.getFirst();
+        assertEquals(0, hit.seq());
+        assertTrue(content.length() > TextChunker.MAX);
+        assertEquals(content, hit.text());
+        assertTrue(hit.text().startsWith("```java\n"));
+        assertTrue(hit.text().endsWith("\n```"));
     }
 
     @Test
@@ -355,6 +406,17 @@ class GraphEvidenceServiceTest {
                 assertTrue(sql.getSql().contains("f.text_status = 'ok'"));
             }
         }
+    }
+
+    @Test
+    void nonemptyFileSummaryUsesAnUnambiguousLineFeedBeforeExtractedText() throws Exception {
+        String script = String.join("", GraphEvidenceSourceMapper.class.getMethod("currentSources", String.class,
+                List.class).getAnnotation(Select.class).value());
+        BoundSql sql = new XMLLanguageDriver().createSqlSource(new Configuration(), script, Map.class)
+                .getBoundSql(Map.of("type", "file", "ids", List.of(7L)));
+        assertTrue(sql.getSql().contains("CASE WHEN IFNULL(f.summary,'') = '' THEN '' ELSE CHAR(10) END"));
+        assertFalse(sql.getSql().contains("'\\n'"), "a backslash+n literal depends on MySQL escape mode");
+        assertTrue(sql.getSql().contains("IFNULL(f.text_content, '')"));
     }
 
     @SafeVarargs

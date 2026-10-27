@@ -3,6 +3,7 @@ package org.dyh.learnhub.service;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.dyh.learnhub.ai.AgentProgressDetails;
 import org.dyh.learnhub.entity.AgentEvent;
 import org.dyh.learnhub.entity.AgentPendingAction;
 import org.dyh.learnhub.entity.AgentSession;
@@ -17,6 +18,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -62,6 +64,7 @@ public class AgentSessionService {
     public static final int MAX_TASK_MEMORY_CHARS = 40_000;
     /** Factual UI process snapshots, kept out of the user/assistant model projection. */
     public static final String ROLE_PROGRESS = "progress";
+    public static final String ROLE_REPLY_ACTIONS = "reply_actions";
     private static final com.fasterxml.jackson.databind.ObjectMapper DISPLAY_JSON = new com.fasterxml.jackson.databind.ObjectMapper();
     /**
      * 思考过程（thinking 模型返回的 reasoning_content）。
@@ -367,6 +370,7 @@ public class AgentSessionService {
         List<String> pendingTools = new ArrayList<>();
         String pendingReasoning = "";
         Map<String, Object> pendingProgress = Map.of();
+        List<Map<String, Object>> pendingReplyActions = List.of();
         for (AgentEvent e : allEvents(sessionId)) {
             switch (e.getRole()) {
                 case ROLE_USER -> {
@@ -379,6 +383,7 @@ public class AgentSessionService {
                     pendingTools.clear();
                     pendingReasoning = "";
                     pendingProgress = Map.of();
+                    pendingReplyActions = List.of();
                     out.add(bubble(ROLE_USER, e.getContent(), List.of(), ""));
                 }
                 case ROLE_TOOL -> {
@@ -393,6 +398,17 @@ public class AgentSessionService {
                     }
                 }
                 case ROLE_REASONING -> pendingReasoning = nullTo(e.getContent());
+                case ROLE_REPLY_ACTIONS -> {
+                    try {
+                        if (e.getContent() == null || e.getContent().length() > 10_000) break;
+                        var data = DISPLAY_JSON.readTree(e.getContent());
+                        Long boundNote = data.path("noteId").isIntegralNumber() && data.path("noteId").asLong() > 0
+                                ? data.path("noteId").asLong() : null;
+                        var actions = ReplyActions.sanitize(data.path("actions"), boundNote, data.path("truncated").asBoolean());
+                        if (!out.isEmpty() && ROLE_ASSISTANT.equals(out.getLast().get("role"))) out.getLast().put("replyActions", actions);
+                        else pendingReplyActions = actions;
+                    } catch (Exception ignored) { /* Invalid suggestions cannot break history. */ }
+                }
                 case ROLE_PROGRESS -> {
                     Map<String, Object> parsed = displayProgress(e.getContent());
                     if (!parsed.isEmpty()) {
@@ -403,10 +419,12 @@ public class AgentSessionService {
                 case ROLE_ASSISTANT -> {
                     Map<String, Object> answer = bubble(ROLE_ASSISTANT, e.getContent(), new ArrayList<>(pendingTools), pendingReasoning);
                     answer.putAll(pendingProgress);
+                    answer.put("replyActions", pendingReplyActions);
                     out.add(answer);
                     pendingTools.clear();
                     pendingReasoning = "";
                     pendingProgress = Map.of();
+                    pendingReplyActions = List.of();
                 }
                 default -> {
                     // summary 是给模型用的内部事件，不在界面出现
@@ -470,12 +488,14 @@ public class AgentSessionService {
         m.put("reasoning", reasoning == null ? "" : reasoning);
         m.put("toolUsed", !events.isEmpty());
         m.put("progress", List.of());
+        m.put("replyActions", List.of());
         return m;
     }
 
     /** A corrupt/old snapshot must not hide the rest of the conversation. */
     private static Map<String, Object> displayProgress(String raw) {
-        if (raw == null || raw.length() > 200_000) return Map.of();
+        // Bounded operation previews and source lists also belong to the saved display snapshot.
+        if (raw == null || raw.length() > 3_000_000) return Map.of();
         try {
             var node = DISPLAY_JSON.readTree(raw);
             if (node == null || !node.path("progress").isArray()) return Map.of();
@@ -495,6 +515,7 @@ public class AgentSessionService {
                 if (item.path("elapsedMs").canConvertToLong()) row.put("elapsedMs", Math.max(0, item.path("elapsedMs").asLong()));
                 if (item.path("actionId").canConvertToLong() && item.path("actionId").asLong() > 0)
                     row.put("actionId", item.path("actionId").asLong());
+                row.putAll(AgentProgressDetails.displayDetails(item));
                 rows.add(row);
             }
             Map<String, Object> result = new LinkedHashMap<>();
@@ -629,9 +650,12 @@ public class AgentSessionService {
         m.put("status", a.getStatus());
         m.put("toolName", a.getToolName());
         m.put("summary", a.getSummary());
-        if ("edit_note".equals(a.getToolName())) {
+        if (a.getToolName() != null && Set.of("edit_note", "update_note", "append_to_note").contains(a.getToolName())) {
             try {
-                var preview = new com.fasterxml.jackson.databind.ObjectMapper().readTree(a.getArgsJson()).get("_edit_preview");
+                var args = DISPLAY_JSON.readTree(a.getArgsJson());
+                long noteId = args.path("note_id").asLong();
+                if (noteId > 0) m.put("noteId", noteId);
+                var preview = args.get("_edit_preview");
                 if (preview != null) m.put("preview", preview);
             } catch (Exception ignored) { /* 旧操作或不完整参数仍可取消 */ }
         }

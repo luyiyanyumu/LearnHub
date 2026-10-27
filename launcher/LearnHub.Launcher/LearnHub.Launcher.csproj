@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>LearnHub</AssemblyName>
+    <RootNamespace>LearnHub.Launcher</RootNamespace>
+    <Version>1.1.0</Version>
+    <Product>LearnHub 服务管理器</Product>
+    <Description>LearnHub Windows service launcher</Description>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>../Assets/launcher.ico</ApplicationIcon>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4258.31" />
+    <ProjectReference Include="../LearnHub.Launcher.Core/LearnHub.Launcher.Core.csproj" />
+    <ProjectReference Include="../LearnHub.Launcher.Updating/LearnHub.Launcher.Updating.csproj" />
+    <EmbeddedResource Include="../ui/dist/**/*">
+      <LogicalName>LauncherUi/%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+  <Target Name="VerifyLauncherUi" BeforeTargets="PrepareForBuild">
+    <Error Condition="!Exists('../ui/dist/index.html')" Text="Build the launcher UI first: npm run build --prefix launcher/ui" />
+  </Target>
+</Project>

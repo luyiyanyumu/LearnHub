@@ -212,8 +212,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="page">
-    <div class="toolbar">
+  <div class="page quickrefs-page">
+    <div class="toolbar ref-toolbar">
       <h2 class="page-h2">速查卡</h2>
       <span class="tip">短平快的命令 / API 签名 / 易错点随手记</span>
       <div class="spacer"></div>
@@ -360,6 +360,13 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.quickrefs-page { min-width: 0; }
+.ref-toolbar > * { max-width: 100%; }
+.ref-toolbar .tip { flex: 1 1 240px; }
+.ref-toolbar .spacer { display: none; }
+.ref-toolbar :deep(.el-input) { flex: 1 1 200px; min-width: 0; max-width: 320px; }
+.ref-toolbar :deep(.el-select) { flex: 0 1 130px; min-width: 0; }
+.ref-toolbar :deep(.el-button + .el-button) { margin-left: 0; }
 .tip {
   font-size: 12px;
   color: var(--app-text-3);
@@ -367,11 +374,12 @@ onBeforeUnmount(() => {
 
 .ref-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
   gap: 14px;
 }
 
 .ref-card {
+  min-width: 0;
   cursor: pointer;
   transition: box-shadow var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
 }
@@ -478,6 +486,8 @@ onBeforeUnmount(() => {
 
 .ref-foot {
   display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
   align-items: center;
   justify-content: space-between;
 }
@@ -486,6 +496,8 @@ onBeforeUnmount(() => {
   font-size: 11px;
   color: var(--app-text-3);
 }
+.ref-foot :deep(.el-tag) { max-width: 100%; height: auto; min-height: 24px; white-space: normal; }
+.ref-foot :deep(.el-tag__content) { min-width: 0; overflow-wrap: anywhere; white-space: normal; }
 
 /* ---- 放大预览 ---- */
 .view-meta {
@@ -509,8 +521,11 @@ onBeforeUnmount(() => {
 
 .dlg-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
 }
+.dlg-row > .el-input { flex: 1 1 240px; min-width: 0; }
+.dlg-row > .el-select { flex: 1 1 150px; min-width: 0; max-width: 100%; }
 
 .dlg-preview {
   border: 1px solid var(--app-border);

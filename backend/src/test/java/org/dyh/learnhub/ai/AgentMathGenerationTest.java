@@ -183,7 +183,49 @@ class AgentMathGenerationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"create_note", "update_note", "write_long_note", "append_to_note", "edit_note"})
+    @ValueSource(strings = {"format", "polish"})
+    void laterChunkTruncationDoesNotReturnTheEarlierSuccessfulChunks(String mode) throws Exception {
+        configured();
+        String skill = "format".equals(mode) ? SkillService.SKILL_BEAUTIFY : SkillService.SKILL_POLISH;
+        when(skills.prompt(skill)).thenReturn("合成分块技能");
+        String first = "第一段合成说明。".repeat(300), second = "第二段合成说明。".repeat(300);
+        String original = first + "\n\n" + second;
+        when(client.chatFull(anyList(), nullable(List.class), anyString(), anyString(), anyString(),
+                anyInt(), anyDouble(), nullable(String.class), nullable(String.class), any(Duration.class)))
+                .thenReturn(new DeepSeekClient.ChatResult(JSON.createObjectNode().put("content", first), "stop", 12, 15, 0),
+                        new DeepSeekClient.ChatResult(JSON.createObjectNode().put("content", second), "length", 12, 15, 0));
+        IllegalStateException failure = assertThrows(IllegalStateException.class, () -> agent.polish(original, mode));
+        assertTrue(failure.getMessage().contains("原文保留"));
+        verify(client, times(2)).chatFull(anyList(), nullable(List.class), anyString(), anyString(), anyString(),
+                anyInt(), anyDouble(), nullable(String.class), nullable(String.class), any(Duration.class));
+        verifyNoInteractions(sessions);
+    }
+
+    @Test void openMathBlockInAReportedCompleteFormatResponseIsNotApplied() throws Exception {
+        configured();
+        when(skills.prompt(SkillService.SKILL_BEAUTIFY)).thenReturn("合成格式技能");
+        answer("合成说明。\n\n$$\nx^2 + y^2");
+        assertTrue(assertThrows(IllegalStateException.class, () -> agent.polish("合成数学说明。", "format"))
+                .getMessage().contains("未完整闭合"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"whole", "section"})
+    void truncatedMergeNeverReturnsItsPartialReplacement(String scope) throws Exception {
+        configured();
+        String skill = "whole".equals(scope) ? SkillService.SKILL_NOTE_MERGE : SkillService.SKILL_NOTE_MERGE_SECTION;
+        when(skills.prompt(skill)).thenReturn("合成融入技能");
+        when(client.chatFull(anyList(), nullable(List.class), anyString(), anyString(), anyString(),
+                anyInt(), anyDouble(), nullable(String.class), nullable(String.class), any(Duration.class)))
+                .thenReturn(new DeepSeekClient.ChatResult(JSON.createObjectNode().put("content", BODY), "length", 12, 15, 0));
+        assertThrows(IllegalStateException.class, () -> {
+            if ("whole".equals(scope)) agent.mergeIntoNote("合成标题", BODY, "合成问题", ADDITION);
+            else agent.mergeIntoSection("合成标题", "## 合成", "合成", BODY, "合成问题", ADDITION, "rewrite");
+        });
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"create_note", "update_note", "write_long_note", "write_note_sections", "append_to_note", "edit_note"})
     void everyNoteWritingToolCarriesFormulaPriorityAndRealCodeException(String name) {
         List<?> definitions = ReflectionTestUtils.invokeMethod(agent, "toolDefinitions");
         JsonNode tool = JSON.valueToTree(definitions);

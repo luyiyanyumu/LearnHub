@@ -28,7 +28,8 @@ class KnowledgeRetrievalTraceTest {
         assertEquals(1, result.passages().size());
         assertEquals("degraded", trace.stages().stream().filter(stage -> "rerank".equals(stage.get("id"))).findFirst().orElseThrow().get("status"));
         verify(reranker, never()).rerank(anyString(), anyList());
-        verifyNoInteractions(vectors, graph, wiki, routing, client);
+        verify(vectors, never()).search(anyString(), anyInt(), any(), anySet());
+        verifyNoInteractions(graph, wiki, routing, client);
     }
 
     @Test
@@ -50,7 +51,8 @@ class KnowledgeRetrievalTraceTest {
         assertEquals(List.of("note:2:0", "note:1:0"), trace.afterRerank().stream().map(RetrievalHit::key).toList());
         assertEquals("topK", trace.stages().getLast().get("id"));
         assertTrue(trace.stages().stream().allMatch(stage -> ((Number) stage.get("elapsedMs")).longValue() >= 0));
-        verifyNoInteractions(client, routing, vectors, graph, wiki);
+        verify(vectors, never()).search(anyString(), anyInt(), any(), anySet());
+        verifyNoInteractions(client, routing, graph, wiki);
     }
 
     @Test

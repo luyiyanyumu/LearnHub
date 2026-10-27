@@ -116,9 +116,9 @@ public class KnowledgeRetrievalService {
             throw new IllegalArgumentException("检索模式必须是 fused、keyword 或 vector");
         }
         int take = Math.min(cfg.candidates(), limit);
-        // The same splitter and source SQL as indexing: seq represents the same passage
-        // on every route, even before embeddings exist. Loading text does not call a model.
-        Passages passages = currentPassages(cfg, documents, trace);
+        // Reuse committed boundaries while fresh. Unindexed/edited sources use structural
+        // fallback; normal requests never call a model to calculate chunk boundaries.
+        Passages passages = currentPassages(cfg, documents, trace, false);
         // The question framing is not a subject. Otherwise asking how ReAct relates to
         // Planning also recalls every Java paragraph containing the generic word 关系.
         List<String> terms = AgentService.retrievalTerms(RELATION_QUESTION.matcher(query).replaceAll(" "));
@@ -129,7 +129,7 @@ public class KnowledgeRetrievalService {
         boolean rewriteEnabled = knowledgeSettings == null ? settings.queryRewriteEnabled() : cfg.queryRewrite();
         List<RetrievalHit> vector = "keyword".equals(selectedMode) || !vectorsEnabled
                 ? skipped(trace, "vector", "向量召回", "keyword".equals(selectedMode) ? "关键词基线不执行向量召回" : "向量检索开关已关闭")
-                : observed(trace, "vector", "向量召回", () -> vector(query, passages.hits(), cfg, documents));
+                : observed(trace, "vector", "向量召回", () -> vector(query, passages, cfg, documents));
         List<RetrievalHit> graph = !builtin && "fused".equals(selectedMode) && includeGraph
                 ? observed(trace, "graph", "图谱原文证据", () -> knowledgeSettings == null
                     ? graphEvidence.search(query, cfg.candidates()) : graphEvidence.search(query, cfg.candidates(), cfg))
@@ -229,11 +229,15 @@ public class KnowledgeRetrievalService {
         return List.copyOf(out);
     }
 
-    private record Passages(Map<String, RetrievalHit> hits, Map<String, String> headings) {}
+    private record Passages(Map<String, RetrievalHit> hits, Map<String, String> headings,
+                            Set<String> vectorKeys, Map<String, SectionParent> parents) {}
 
-    /** The heading and fresh adjacent blocks for a selected source section. Seed is not included. */
-    public record SectionNeighbors(String heading, List<RetrievalHit> passages) {
+    public record SectionParent(String heading, RetrievalHit passage) { }
+
+    /** Fresh adjacent blocks and an optional verified parent opening; seed is not included. */
+    public record SectionNeighbors(String heading, List<RetrievalHit> passages, SectionParent parent) {
         public SectionNeighbors { passages = List.copyOf(passages); }
+        public SectionNeighbors(String heading, List<RetrievalHit> passages) { this(heading, passages, null); }
     }
 
     public SectionNeighbors relatedSection(RetrievalHit hit, int maxNeighbors) {
@@ -241,10 +245,10 @@ public class KnowledgeRetrievalService {
         return relatedSections(List.of(hit), maxNeighbors).getOrDefault(hit.key(), new SectionNeighbors("", List.of()));
     }
 
-    /** One current-source read for all seeds; never cross a heading or inherit graph claims. */
+    /** One current-source read for all seeds; parent openings retain their own explicit identity. */
     public Map<String, SectionNeighbors> relatedSections(List<RetrievalHit> hits, int maxNeighbors) {
         if (hits == null || hits.isEmpty()) return Map.of();
-        Passages current = currentPassages(config(), null, null);
+        Passages current = currentPassages(config(), null, null, true);
         Set<String> seedKeys = new LinkedHashSet<>();
         for (RetrievalHit hit : hits) if (hit != null) seedKeys.add(hit.key());
         Map<String, SectionNeighbors> out = new LinkedHashMap<>();
@@ -268,37 +272,61 @@ public class KnowledgeRetrievalService {
                         || !heading.equals(current.headings().getOrDefault(key, ""))) continue;
                 neighbors.add(copy(neighbor, hit.score(), List.of("section-neighbor"), List.of()));
             }
-            out.put(hit.key(), new SectionNeighbors(heading, neighbors));
+            SectionParent parent = take == 0 ? null : current.parents().get(seed.key());
+            if (parent != null) {
+                RetrievalHit opening = parent.passage();
+                parent = seedKeys.contains(opening.key()) ? null : new SectionParent(parent.heading(),
+                        copy(opening, hit.score(), List.of("section-parent"), List.of()));
+            }
+            out.put(hit.key(), new SectionNeighbors(heading, neighbors, parent));
         }
         return Map.copyOf(out);
     }
 
-    private Passages currentPassages(KnowledgeBaseSettings.Config cfg, List<Map<String, Object>> documents, Trace trace) {
+    private Passages currentPassages(KnowledgeBaseSettings.Config cfg, List<Map<String, Object>> documents,
+                                     Trace trace, boolean includeParents) {
         Map<String, RetrievalHit> out = new LinkedHashMap<>();
         Map<String, String> headings = new LinkedHashMap<>();
+        Map<String, SectionParent> parents = new LinkedHashMap<>();
         long started = System.nanoTime();
-        if (documents != null) {
-            for (String type : List.of("note", "quick_ref", "file")) {
-                List<Map<String, Object>> rows = documents.stream().filter(row -> type.equals(text(row.get("source_type")))).map(row -> {
-                    Map<String, Object> copy = new LinkedHashMap<>(row);
-                    copy.put("id", row.get("source_id"));
-                    return copy;
-                }).toList();
-                addSources(out, headings, type, rows, cfg);
-            }
-        } else {
-            addSources(out, headings, "note", observed(trace, "sourceNotes", "读取当前笔记", sources::allNotes), cfg);
-            addSources(out, headings, "quick_ref", observed(trace, "sourceRefs", "读取当前速查卡", sources::allRefs), cfg);
-            addSources(out, headings, "file", observed(trace, "sourceFiles", "读取当前资料正文", sources::allFiles), cfg);
+        List<Map<String, Object>> currentDocuments = new ArrayList<>();
+        if (documents != null) currentDocuments.addAll(documents);
+        else {
+            Map<String, List<Map<String, Object>>> sourceRows = new LinkedHashMap<>();
+            sourceRows.put("note", observed(trace, "sourceNotes", "读取当前笔记", sources::allNotes));
+            sourceRows.put("quick_ref", observed(trace, "sourceRefs", "读取当前速查卡", sources::allRefs));
+            sourceRows.put("file", observed(trace, "sourceFiles", "读取当前资料正文", sources::allFiles));
+            sourceRows.forEach((type, rows) -> rows.forEach(row -> {
+                Map<String, Object> document = new LinkedHashMap<>(row);
+                document.put("source_type", type);
+                document.put("source_id", row.get("id"));
+                currentDocuments.add(document);
+            }));
         }
-        if (trace != null) trace.stage("chunks", "正文分块", started, out.size(), "completed", documents == null ? "读取当前资料并按本轮配置分块" : "仅在内存分块合成资料；未读取或写入当前资料");
-        return new Passages(out, headings);
+        Map<String, List<TextChunker.Chunk>> persisted = Map.of();
+        if (documents == null) {
+            try { persisted = vectors.persistedChunks(currentDocuments, cfg); }
+            catch (Exception unavailable) { log.warn("已存分块暂不可读，回退当前正文结构切块：{}", unavailable.getClass().getSimpleName()); }
+        }
+        for (Map<String, Object> row : currentDocuments)
+            addSource(out, headings, parents, row, cfg, persisted, documents != null, includeParents);
+        if (trace != null) trace.stage("chunks", "正文分块", started, out.size(), "completed", documents == null ? "复用校验有效的已存分块；变更来源使用结构切块，无边界模型调用" : "仅在内存分块合成资料；未读取或写入当前资料");
+        Set<String> vectorKeys = new LinkedHashSet<>();
+        for (RetrievalHit hit : out.values())
+            if (documents != null || persisted.containsKey(hit.sourceRef())) vectorKeys.add(hit.key());
+        return new Passages(out, headings, Set.copyOf(vectorKeys), Map.copyOf(parents));
     }
 
-    private static void addSources(Map<String, RetrievalHit> out, Map<String, String> headings, String type, List<Map<String, Object>> rows, KnowledgeBaseSettings.Config cfg) {
-        for (Map<String, Object> row : rows) {
-            if (!(row.get("id") instanceof Number id)) continue;
-            List<TextChunker.Chunk> chunks = TextChunker.splitWithHeadings(text(row.get("content")), cfg.chunkOptions());
+    private void addSource(Map<String, RetrievalHit> out, Map<String, String> headings,
+                           Map<String, SectionParent> parents, Map<String, Object> row,
+                           KnowledgeBaseSettings.Config cfg, Map<String, List<TextChunker.Chunk>> persisted,
+                           boolean synthetic, boolean includeParents) {
+            if (!(row.get("source_id") instanceof Number id)) return;
+            String type = text(row.get("source_type"));
+            List<TextChunker.Chunk> chunks = persisted.get(type + ":" + id.longValue());
+            if (chunks == null) chunks = synthetic && "semantic_long".equals(cfg.chunkStrategy())
+                    ? vectors.syntheticChunks(type, text(row.get("title")), text(row.get("content")), cfg)
+                    : TextChunker.splitWithHeadings(text(row.get("content")), cfg.chunkOptions());
             for (int seq = 0; seq < chunks.size(); seq++) {
                 TextChunker.Chunk chunk = chunks.get(seq);
                 RetrievalHit hit = new RetrievalHit(type, id.longValue(), text(row.get("title")),
@@ -306,7 +334,13 @@ public class KnowledgeRetrievalService {
                 out.put(hit.key(), hit);
                 headings.put(hit.key(), chunk.heading());
             }
-        }
+            if (includeParents && "file".equals(type)) {
+                String sourceRef = type + ":" + id.longValue();
+                SourceSectionOutline.parents(chunks).forEach((seq, parent) -> {
+                    RetrievalHit opening = out.get(sourceRef + ":" + parent.seq());
+                    if (opening != null) parents.put(sourceRef + ":" + seq, new SectionParent(parent.heading(), opening));
+                });
+            }
     }
 
     private static List<RetrievalHit> keyword(Passages passages, List<String> terms, KnowledgeBaseSettings.Config cfg) {
@@ -324,17 +358,17 @@ public class KnowledgeRetrievalService {
         return diversify(ranked, cfg.candidates(), cfg.sourcePriority());
     }
 
-    private List<RetrievalHit> vector(String query, Map<String, RetrievalHit> passages, KnowledgeBaseSettings.Config cfg, List<Map<String, Object>> documents) {
+    private List<RetrievalHit> vector(String query, Passages passages, KnowledgeBaseSettings.Config cfg, List<Map<String, Object>> documents) {
         List<RetrievalHit> out = new ArrayList<>();
         List<VectorIndexService.Hit> matches = documents == null
-                ? knowledgeSettings == null ? vectors.search(query, cfg.candidates()) : vectors.search(query, cfg.candidates(), cfg)
+                ? vectors.search(query, cfg.candidates(), cfg, passages.vectorKeys())
                 : vectors.searchEphemeral(query, documents, cfg);
         for (VectorIndexService.Hit hit : matches == null ? List.<VectorIndexService.Hit>of() : matches) {
             String key = hit.sourceType() + ":" + hit.sourceId() + ":" + hit.seq();
-            RetrievalHit current = passages.get(key);
+            RetrievalHit current = passages.hits().get(key);
             // Do not fuse an old vector block with a different current block just because
             // their seq is equal after an edit. Deleted/changed passages fall back to keywords.
-            if (current == null || !current.text().equals(hit.text())) continue;
+            if (current == null || !passages.vectorKeys().contains(key) || !current.text().equals(hit.text())) continue;
             out.add(copy(current, hit.score(), List.of("vector"), List.of()));
         }
         return out;
@@ -527,7 +561,7 @@ public class KnowledgeRetrievalService {
         for (String extra : queries) {
             List<RetrievalHit> extraKeyword = keyword(passages, AgentService.retrievalTerms(extra), cfg);
             boolean vectorEnabled = knowledgeSettings == null ? settings.vectorEnabled() : cfg.vectorEnabled();
-            List<RetrievalHit> extraVector = vectorEnabled ? safely("补充向量", () -> vector(extra, passages.hits(), cfg, documents)) : List.of();
+            List<RetrievalHit> extraVector = vectorEnabled ? safely("补充向量", () -> vector(extra, passages, cfg, documents)) : List.of();
             routes.add(fuse(List.of(extraKeyword, extraVector), cfg));
         }
         Map<String, RetrievalHit> out = new LinkedHashMap<>();

@@ -18,6 +18,9 @@ public class AiChatVO {
     /** 助手最终文本回复（Markdown） */
     private String reply;
 
+    /** Task-specific model suggestions, validated against a small UI action allowlist. */
+    private List<Map<String, Object>> replyActions = new ArrayList<>();
+
     /**
      * 本轮的**思考过程**（thinking 模型返回的 reasoning_content；模型不支持思考或思考关闭时为空）。
      * <p>

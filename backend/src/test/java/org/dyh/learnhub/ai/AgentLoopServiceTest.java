@@ -73,6 +73,45 @@ class AgentLoopServiceTest {
         verify(sessions).append(eq(SESSION), eq("assistant"), eq("合成直接回答"), isNull(), isNull(), anyInt(), eq("stop"));
     }
 
+    @Test void modelOptionsAreFilteredSavedAndReturnedWithoutExtraActionGenerationRound() throws Exception {
+        script(tools(call("options", "set_reply_actions", Map.of("actions", List.of(
+                        Map.of("kind", "follow_up", "label", "查看合成示例", "prompt", "给出一个完整合成示例", "url", "https://unused.invalid"),
+                        Map.of("kind", "copy", "label", "复制解释"),
+                        Map.of("kind", "merge_note", "label", "错误目标", "noteId", 999),
+                        Map.of("kind", "javascript", "label", "非法执行", "script", "alert(1)"))))),
+                answer("合成解释正文。"));
+        AiChatVO result = chat();
+        assertEquals(2, result.getReplyActions().size());
+        assertEquals(List.of("follow_up", "copy"), result.getReplyActions().stream().map(a -> a.get("kind")).toList());
+        assertFalse(result.getReplyActions().toString().contains("url="));
+        assertEquals(2, requestSnapshots.size());
+        verify(sessions).append(eq(SESSION), eq(AgentSessionService.ROLE_REPLY_ACTIONS), contains("查看合成示例"), isNull(), isNull());
+    }
+
+    @Test void readonlyOptionsCanFollowPendingWriteInTheSameBatch() throws Exception {
+        stubPending();
+        script(tools(call("write", "create_note", Map.of("title", "合成稿", "content", "合成正文")),
+                        call("options", "set_reply_actions", Map.of("actions", List.of(
+                                Map.of("kind", "follow_up", "label", "补充示例", "prompt", "请再补充一个合成示例"),
+                                Map.of("kind", "copy", "label", "复制说明"))))),
+                answer("请确认合成预览。"));
+        AiChatVO result = chat();
+        assertEquals(1, result.getPendingActions().size());
+        assertEquals(2, result.getReplyActions().size());
+        assertEquals(2, requestSnapshots.size());
+        assertEquals(2, toolResults(requestSnapshots.getLast()).get("options").path("count").asInt());
+    }
+
+    @Test void finalEnvelopeCarriesTaskSpecificOptionsWithoutAnotherModelRequest() throws Exception {
+        script(answer(json.writeValueAsString(Map.of("reply", "合成最终正文。", "replyActions", List.of(
+                Map.of("kind", "follow_up", "label", "比较方案", "prompt", "比较合成的两个方案"),
+                Map.of("kind", "copy", "label", "复制方案"))))));
+        AiChatVO result = chat();
+        assertEquals("合成最终正文。", result.getReply());
+        assertEquals(2, result.getReplyActions().size());
+        assertEquals(1, requestSnapshots.size());
+    }
+
     @Test void unfinishedPlanMakesPrematureAnswerContinueWithExistingResults() throws Exception {
         source(21, "合成首份原文"); source(22, "合成补充原文");
         script(

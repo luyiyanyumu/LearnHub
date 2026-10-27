@@ -14,7 +14,10 @@ class KnowledgeBaseSettingsTest {
 
     @Test void defaultsAreTypedAndEveryFieldHasOneRegisteredStorageKey() {
         var config = service.snapshot();
+        assertEquals("structure", config.chunkStrategy());
         assertEquals(800, config.chunkTarget());
+        assertEquals(4000, config.semanticMinChars());
+        assertEquals(85, config.semanticBreakpointPercentile());
         assertEquals(24, config.candidates());
         assertEquals(20, config.fusedWindow());
         assertEquals(.45, config.vectorMinScore());
@@ -65,6 +68,47 @@ class KnowledgeBaseSettingsTest {
         Map<String, String> expected = new LinkedHashMap<>();
         expected.put("kb.chunk_target", null);
         verify(store).updateAll(expected);
+    }
+
+    @Test void semanticChunkingSettingsPersistTogetherAndInvalidateTheIndex() {
+        var result = service.update(Map.of("chunkStrategy", "semantic_long", "semanticMinChars", 6000,
+                "semanticBreakpointPercentile", 90));
+        var values = (Map<?, ?>) result.get("values");
+        assertEquals("semantic_long", values.get("chunkStrategy"));
+        assertEquals(6000, values.get("semanticMinChars"));
+        assertEquals(90, values.get("semanticBreakpointPercentile"));
+        assertEquals(true, result.get("needsRebuild"));
+        assertTrue(((java.util.List<?>) result.get("rebuildFields")).containsAll(
+                java.util.List.of("chunkStrategy", "semanticMinChars", "semanticBreakpointPercentile")));
+        verify(store).updateAll(Map.of("kb.chunk_strategy", "semantic_long", "kb.semantic_min_chars", "6000",
+                "kb.semantic_breakpoint_percentile", "90"));
+
+        var defaults = KnowledgeBaseSettings.defaults();
+        for (var field : java.util.List.of("chunkStrategy", "semanticMinChars", "semanticBreakpointPercentile")) {
+            assertTrue(KnowledgeBaseSettings.fields().stream().filter(f -> f.key().equals(field)).findFirst().orElseThrow().requiresRebuild());
+            assertNotEquals(defaults.indexingFingerprint(), KnowledgeBaseSettings.validatePatch(defaults,
+                    Map.of(field, values.get(field))).indexingFingerprint());
+        }
+    }
+
+    @Test void invalidSemanticChunkingOptionsAreRejectedAtomically() {
+        for (Map<String, ?> patch : java.util.List.of(Map.of("chunkStrategy", "sentences"),
+                Map.of("semanticMinChars", 1999), Map.of("semanticMinChars", 100001),
+                Map.of("semanticBreakpointPercentile", 49), Map.of("semanticBreakpointPercentile", 100),
+                Map.of("semanticBreakpointPercentile", 85.5))) {
+            assertThrows(IllegalArgumentException.class, () -> service.update(patch));
+        }
+        verify(store, never()).updateAll(anyMap());
+    }
+
+    @Test void preSemanticConfigMapsRetainStructureDefaults() {
+        var legacy = new LinkedHashMap<>(KnowledgeBaseSettings.defaults().values());
+        legacy.keySet().removeAll(java.util.List.of("chunkStrategy", "semanticMinChars", "semanticBreakpointPercentile"));
+        var config = new KnowledgeBaseSettings.Config(legacy);
+        assertEquals("structure", config.chunkStrategy());
+        assertEquals(4000, config.semanticMinChars());
+        assertEquals(85, config.semanticBreakpointPercentile());
+        assertEquals(KnowledgeBaseSettings.defaults().indexingFingerprint(), config.indexingFingerprint());
     }
 
     @Test void controllerReturnsReadableValidationFailureAndAcceptsTypedEnvelope() {

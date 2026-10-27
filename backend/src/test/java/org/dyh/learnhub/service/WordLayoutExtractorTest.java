@@ -93,6 +93,49 @@ class WordLayoutExtractorTest {
         var block = extractor.extract(path).pages().getFirst().blocks().getFirst();
         assertEquals("table", block.type());
         assertEquals("包装单元格", block.text());
+        assertEquals("| 包装单元格 |\n| --- |", extractor.plainText(path));
+    }
+
+    @Test void searchTextRetainsHeadingLevelsAndBlankParagraphBoundariesWithoutChangingReaderBlocks() throws Exception {
+        String body = "<w:p><w:pPr><w:outlineLvl w:val=\"0\"/></w:pPr><w:r><w:t>一级标题</w:t></w:r></w:p>"
+                + "<w:p><w:r><w:t>第一段正文</w:t></w:r></w:p>"
+                + "<w:p><w:r><w:t>第二段正文</w:t></w:r></w:p>"
+                + "<w:p><w:pPr><w:pStyle w:val=\"Heading6\"/></w:pPr><w:r><w:t>六级标题</w:t></w:r></w:p>"
+                + "<w:p><m:oMathPara><m:oMath>" + fraction() + "</m:oMath></m:oMathPara></w:p>";
+        Path path = zip("search-headings.docx", xml(body));
+        var blocks = extractor.extract(path).pages().getFirst().blocks();
+        assertEquals("一级标题", blocks.getFirst().text());
+        assertEquals(1, blocks.getFirst().level());
+        assertEquals("六级标题", blocks.get(3).text());
+        assertEquals(6, blocks.get(3).level());
+        assertEquals("# 一级标题\n\n第一段正文\n\n第二段正文\n\n###### 六级标题\n\n$$\\frac{a}{b}$$", extractor.plainText(path));
+    }
+
+    @Test void searchableTablesEscapeCellBoundariesPreserveMultilineContentsAndPadRaggedRows() throws Exception {
+        String body = "<w:tbl><w:tr>" + cell("名称") + cell("值") + "</w:tr>"
+                + "<w:tr>" + cell("A|B")
+                + "<w:tc><w:p><w:r><w:t>第一行</w:t><w:br/><w:t>第二行</w:t></w:r></w:p>"
+                + "<w:p><w:r><w:t>第三段 &lt;script&gt; &amp; \\|</w:t></w:r></w:p></w:tc></w:tr>"
+                + "<w:tr>" + cell("保留") + cell("末行") + cell("额外单元格") + "</w:tr></w:tbl>";
+        Path path = zip("search-table.docx", xml(body));
+        var block = extractor.extract(path).pages().getFirst().blocks().getFirst();
+        assertEquals("table", block.type());
+        assertTrue(block.text().contains("A|B\t第一行\n第二行\n第三段 <script> & \\|"));
+        assertFalse(block.text().contains("&#124;"));
+        assertEquals("| 名称 | 值 |  |\n| --- | --- | --- |\n"
+                + "| A&#124;B | 第一行<br>第二行<br>第三段 &lt;script&gt; &amp; \\&#124; |  |\n"
+                + "| 保留 | 末行 | 额外单元格 |", extractor.plainText(path));
+    }
+
+    @Test void searchableTableMathRetainsLatexAndPartialWarningsDoNotBreakTheTableRow() throws Exception {
+        String body = "<w:tbl><w:tr><w:tc><w:p><m:oMath>" + fraction() + "</m:oMath></w:p></w:tc></w:tr>"
+                + "<w:tr><w:tc><w:p><m:oMath><m:mystery>" + OmmlLatexConverterTest.run("x")
+                + "</m:mystery></m:oMath></w:p></w:tc></w:tr></w:tbl>";
+        Path path = zip("search-table-formula.docx", xml(body));
+        String text = extractor.plainText(path);
+        assertTrue(text.startsWith("| \\(\\frac{a}{b}\\) |\n| --- |\n| \\(x\\) |\n\n"), text);
+        assertTrue(text.contains("公式未完整还原"), text);
+        assertEquals("partial", extractor.extract(path).pages().getFirst().blocks().getFirst().latexStatus());
     }
 
     @Test void inlineNumericEquationIsExplicitSoItCannotBeMistakenForCurrency() throws Exception {
@@ -139,6 +182,7 @@ class WordLayoutExtractorTest {
     }
 
     private static String fraction() { return "<m:f><m:num>" + OmmlLatexConverterTest.run("a") + "</m:num><m:den>" + OmmlLatexConverterTest.run("b") + "</m:den></m:f>"; }
+    private static String cell(String text) { return "<w:tc><w:p><w:r><w:t>" + text + "</w:t></w:r></w:p></w:tc>"; }
     private static String xml(String body) { return "<w:document xmlns:w=\"" + OmmlLatexConverter.W + "\" xmlns:m=\"" + OmmlLatexConverter.M + "\"><w:body>" + body + "</w:body></w:document>"; }
     private void addXml(XWPFDocument document, String contents) throws Exception {
         document.getDocument().getBody().addNewP().set(CTP.Factory.parse("<xml-fragment xmlns:w=\"" + OmmlLatexConverter.W + "\" xmlns:m=\"" + OmmlLatexConverter.M + "\">" + contents + "</xml-fragment>"));

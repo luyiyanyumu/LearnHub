@@ -177,7 +177,7 @@ CREATE TABLE IF NOT EXISTS kb_chunk (
     title       VARCHAR(255) NULL COMMENT '来源标题（冗余，检索展示用）',
     heading     VARCHAR(255) NULL COMMENT '该块所属小节标题（上下文化嵌入用：检索时与标题一起拼进嵌入输入）',
     category    VARCHAR(255) NULL COMMENT '来源分类名（冗余）',
-    chunk_text  TEXT         NOT NULL COMMENT '块正文',
+    chunk_text  MEDIUMTEXT   NOT NULL COMMENT '块正文',
     char_len    INT          NOT NULL DEFAULT 0,
     vec         BLOB         NULL COMMENT '向量：dim × float32 小端',
     dim         INT          NOT NULL DEFAULT 0,

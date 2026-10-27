@@ -722,18 +722,25 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .page.code-page {
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
 .head {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
 }
+.head > div:first-child { flex: 1 1 300px; min-width: 0; }
+.head .page-h2 { overflow-wrap: anywhere; }
+.head-sub { overflow-wrap: anywhere; }
 .head-actions {
   display: flex;
+  flex-wrap: wrap;
+  max-width: 100%;
   gap: 8px;
   flex-shrink: 0;
   align-items: center;
@@ -748,6 +755,7 @@ onBeforeUnmount(() => {
 /* 项目网格：像文件夹一样铺开 */
 .section-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   margin-bottom: 8px;
@@ -759,10 +767,11 @@ onBeforeUnmount(() => {
 }
 .repo-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
   gap: 10px;
 }
 .repo-card {
+  min-width: 0;
   border: 1px solid var(--app-border-weak);
   border-radius: var(--radius);
   padding: 12px;
@@ -793,6 +802,7 @@ onBeforeUnmount(() => {
 }
 .repo-card-foot {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   margin-top: 8px;
@@ -811,6 +821,9 @@ onBeforeUnmount(() => {
   flex: 1 1 280px;
   min-width: 0;
 }
+.search-bar > * { max-width: 100%; }
+.search-bar :deep(.el-radio-group) { display: flex; flex-wrap: wrap; gap: 4px 0; }
+.head-actions :deep(.el-button + .el-button), .search-bar :deep(.el-button + .el-button) { margin-left: 0; }
 .agentic-summary {
   padding: 14px 16px;
   border: 1px solid var(--app-border);
@@ -894,10 +907,13 @@ onBeforeUnmount(() => {
 }
 .crumb {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
 }
 .crumb-path {
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: 13px;
   font-weight: 600;
   color: var(--app-text-1);
@@ -910,9 +926,10 @@ onBeforeUnmount(() => {
   gap: 12px;
 }
 .code-body:has(.detail) {
-  grid-template-columns: minmax(0, 1fr) minmax(360px, 46%);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
 }
 .result-list {
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -937,11 +954,15 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
 }
 .card-title {
+  overflow-wrap: anywhere;
   font-size: 13.5px;
   font-weight: 600;
   color: var(--app-text-1);
 }
 .tag {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   font-size: 11px;
   padding: 1px 6px;
   border-radius: 5px;
@@ -991,9 +1012,12 @@ onBeforeUnmount(() => {
 }
 .detail-head {
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   align-items: center;
   justify-content: space-between;
 }
+.detail-head b, .detail-links > *, .repo-card-name, .repo-card-note, .card-foot > .hint { min-width: 0; overflow-wrap: anywhere; }
 .detail-explain {
   margin: 6px 0;
   font-size: 12.5px;
@@ -1043,6 +1067,7 @@ onBeforeUnmount(() => {
   color: var(--app-text-2);
   text-align: right;
 }
+.form-grid > * { min-width: 0; max-width: 100%; }
 .code-input :deep(textarea) {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12.5px;
@@ -1053,7 +1078,7 @@ onBeforeUnmount(() => {
   .detail { max-height: 70vh; }
 }
 @media (max-width: 600px) {
-  .head { flex-direction: column; }
+  .head { align-items: stretch; }
   .head-actions { flex-wrap: wrap; }
   .section-head, .crumb { flex-wrap: wrap; }
   .repo-grid { grid-template-columns: minmax(0, 1fr); }
@@ -1064,5 +1089,7 @@ onBeforeUnmount(() => {
   .card-title, .detail-head b, .repo-card-name { overflow-wrap: anywhere; }
   .card-foot > .hint { overflow-wrap: anywhere; min-width: 0; }
   .agentic-summary { padding: 12px; }
+  .form-grid { grid-template-columns: minmax(0, 1fr); }
+  .form-grid .fl { text-align: left; }
 }
 </style>

@@ -22,7 +22,7 @@ public interface GraphEvidenceSourceMapper {
             + "<foreach collection='ids' item='id' open='(' separator=',' close=')'>#{id}</foreach>"
             + "</when><when test='type == \"file\"'>"
             + "SELECT f.id, f.origin_name AS title, "
-            + "CONCAT(IFNULL(f.summary, ''), CASE WHEN IFNULL(f.summary,'') = '' THEN '' ELSE '\\n' END, "
+            + "CONCAT(IFNULL(f.summary, ''), CASE WHEN IFNULL(f.summary,'') = '' THEN '' ELSE CHAR(10) END, "
             + "IFNULL(f.text_content, '')) AS content, "
             + "c.name AS category FROM file_info f LEFT JOIN category c ON c.id = f.category_id "
             + "WHERE f.text_status = 'ok' AND f.text_content IS NOT NULL AND f.id IN "

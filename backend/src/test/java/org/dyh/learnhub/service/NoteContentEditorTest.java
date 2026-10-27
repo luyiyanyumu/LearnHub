@@ -21,6 +21,25 @@ class NoteContentEditorTest {
         return editor.apply(source, request(source, operations)).content();
     }
 
+    @Test void preciseCharacterInsertionInsideHeadingDoesNotBecomeABlockEdit() throws Exception {
+        assertEquals("## 合成新标题\n\n原正文。", edit("## 合成标题\n\n原正文。", """
+                [{"action":"insert_before","text":"标题","value":"新"}]
+                """));
+        assertEquals("## 合成新标题\n\n原正文。", edit("## 合成标题\n\n原正文。", """
+                [{"action":"insert_after","text":"合成","value":"新"}]
+                """));
+    }
+
+    @Test void generatedBlockAfterLastHeadingWorksWithoutATrailingSourceNewline() throws Exception {
+        String source = "## 合成标题";
+        var operation = json.readValue("""
+                {"action":"insert_after","text":"合成标题","value":"新增正文。"}
+                """, NoteEditRequest.Operation.class);
+        var normalized = editor.blockInsertion(source, operation);
+        assertEquals("## 合成标题\n\n新增正文。", editor.apply(source,
+                new NoteEditRequest(NoteContentEditor.hash(source), List.of(normalized))).content());
+    }
+
     @Test void deleteSingleChineseCharacterKeepsAllOtherBytes() throws Exception {
         String source = "# 原文\r\n\r\n这是我的知识笔记。\r\n\r\n```java\r\nint x = 1;\r\n```\r\n";
         assertEquals(source.replace("我的", "我"), edit(source, """

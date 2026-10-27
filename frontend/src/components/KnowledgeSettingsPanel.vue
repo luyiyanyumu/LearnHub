@@ -5,7 +5,7 @@ import { kbApi } from '../api'
 import { knowledgeMaintenanceApi } from '../api/knowledgeMaintenance.js'
 import { createKnowledgeMaintenanceLoader, knowledgeIndexView, maintenanceUpdateHint } from '../utils/knowledgeIndexView'
 import { MODEL_CONFIGURATION_CHANGED_EVENT, profileTargetsForTask, routingTargetLabel } from '../utils/modelProfileView'
-import { KNOWLEDGE_GROUP_LABELS, knowledgeChanges, knowledgeValues, validateKnowledgeValues } from '../utils/knowledgeSettings'
+import { KNOWLEDGE_GROUP_LABELS, knowledgeChanges, knowledgeChunkingHint, knowledgeValues, validateKnowledgeValues } from '../utils/knowledgeSettings'
 
 const DiagnosticPanel = defineAsyncComponent(() => import('./KnowledgeDiagnosticPanel.vue'))
 const props = defineProps({ active: Boolean, profiles: { type: Array, default: () => [] }, routing: { type: Array, default: () => [] }, routingBusy: Boolean })
@@ -31,7 +31,7 @@ const view = ref('parameters')
 const diagnosticMounted = ref(false)
 const filter = ref('')
 const category = ref('common')
-const commonKeys = ['chunkTarget', 'chunkOverlap', 'chunkMax', 'vectorEnabled', 'candidates', 'rerankEnabled', 'maxPassages', 'totalChars']
+const commonKeys = ['chunkStrategy', 'chunkTarget', 'chunkOverlap', 'chunkMax', 'vectorEnabled', 'candidates', 'rerankEnabled', 'maxPassages', 'totalChars']
 const rebuilding = ref(false)
 const syncing = ref(false)
 const needsSync = ref(false)
@@ -46,6 +46,7 @@ const changes = computed(() => knowledgeChanges(values.value, baseline.value, fi
 const dirty = computed(() => Object.keys(changes.value).length > 0)
 const rebuildChanges = computed(() => fields.value.filter(f => f.requiresRebuild && f.key in changes.value))
 const validation = computed(() => validateKnowledgeValues(values.value, defaults.value, fields.value))
+const chunkingHint = computed(() => knowledgeChunkingHint(values.value))
 const routes = computed(() => props.routing.filter(row => ['embed', 'rerank', 'rewrite', 'grounding'].includes(row.task)))
 const groups = computed(() => {
   const groups = new Map()
@@ -250,8 +251,9 @@ defineExpose({ save, resetDefaults, dirty, saving })
           <el-button v-if="category !== 'common' && !filter.trim()" text size="small" :disabled="saving || rebuilding || syncing" @click="resetDefaults(category)">本组恢复默认</el-button>
         </div>
         <p class="kb-hint kb-category-hint">{{ filter.trim() ? '搜索覆盖全部参数。清除搜索后回到当前分类。' : categoryHints[category] }}</p>
+        <p v-if="!filter.trim() && ['common', 'index'].includes(category)" class="kb-chunking-hint">{{ chunkingHint }}</p>
         <div class="kb-fields">
-          <div v-for="field in visibleFields" :key="field.key" class="kb-field" :class="{ 'is-modified': field.key in changes, 'is-wide': field.type === 'text' }">
+          <div v-for="field in visibleFields" :key="field.key" class="kb-field" :class="{ 'is-modified': field.key in changes, 'is-wide': field.type === 'text', 'is-long-select': field.key === 'chunkStrategy' }">
             <div class="kb-field-label">
               <label :for="'kb-' + field.key">{{ field.label }}</label>
               <span v-if="field.requiresRebuild" class="kb-rebuild-mark" title="保存后需要重建已有向量索引">重建</span>
@@ -330,6 +332,7 @@ defineExpose({ save, resetDefaults, dirty, saving })
 .kb-section-title h4 { margin: 0; font-size: var(--font-body); font-weight: 600; }
 .kb-section-title h4 > span { margin-left: 8px; font-size: var(--font-caption); color: var(--app-text-3); font-weight: 400; }
 .kb-category-hint { margin: 4px 0 12px; }
+.kb-chunking-hint { margin: 0 0 12px; color: var(--app-text-2); font-size: var(--font-caption); line-height: 1.7; overflow-wrap: anywhere; }
 .kb-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 32px; }
 .kb-field { display: grid; grid-template-columns: minmax(0, 1fr) 144px; align-items: center; gap: 4px 12px; min-width: 0; padding: 12px 0; border-bottom: 1px solid var(--app-border-weak); }
 .kb-field.is-wide { grid-column: 1 / -1; }
@@ -374,6 +377,7 @@ defineExpose({ save, resetDefaults, dirty, saving })
   .kb-field-meta { grid-column: 1 / -1; margin: 0; min-height: 18px; }
   .kb-field.is-wide { grid-template-columns: minmax(0, 1fr) 132px; }
   .kb-field.is-wide .kb-field-control { grid-column: 1 / -1; }
+  .kb-field.is-long-select { grid-template-columns: minmax(0, 1fr); }
   .kb-field-control { min-height: 32px; }
   .kb-routes { grid-template-columns: 1fr; }
   .kb-view :deep(.el-radio-button__inner) { padding: 9px 12px; }

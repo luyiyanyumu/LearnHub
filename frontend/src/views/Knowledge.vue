@@ -1696,29 +1696,30 @@ onBeforeUnmount(() => {
 .knowledge-header { flex-shrink: 0; margin-bottom: 12px; }
 .knowledge-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; }
 .knowledge-heading h1 { margin: 0; font-size: 22px; line-height: 32px; letter-spacing: -.4px; font-weight: 700; }
-.knowledge-header-actions { display: flex; align-items: center; gap: 12px; flex-shrink: 0; margin-left: auto; }
+.knowledge-header-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; max-width: 100%; margin-left: auto; }
 .index-indicator { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--app-text-2); }
 .index-indicator i { width: 6px; height: 6px; border-radius: 50%; background: var(--app-brand); }
 .index-indicator.stale i { background: #c58519; }
 .index-indicator.unavailable i { background: var(--app-text-3); }
 .maintenance-running { margin-left: 8px; font-size: 12px; color: var(--app-brand-deep); }
-.knowledge-navigation { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; margin-top: 8px; border-bottom: 1px solid var(--app-border); }
+.knowledge-navigation { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; container: knowledge-navigation / inline-size; gap: 8px 16px; margin-top: 8px; border-bottom: 1px solid var(--app-border); }
 .knowledge-summary { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 0; padding: 0 0 4px; }
-.knowledge-summary > div { display: flex; align-items: baseline; gap: 5px; white-space: nowrap; }
+.knowledge-summary > div { display: flex; align-items: baseline; flex-wrap: wrap; min-width: 0; gap: 5px; }
 .knowledge-summary dt { color: var(--app-text-3); font-size: 12px; }
 .knowledge-summary dd { margin: 0; font-size: 14px; font-weight: 650; line-height: 1.5; font-variant-numeric: tabular-nums; color: var(--app-text-1); }
 .knowledge-summary small { margin-left: 4px; font-weight: 400; color: var(--app-text-3); font-size: 12px; }
 .summary-stale { font-size: 11px; font-weight: 400; color: var(--app-text-3); margin-left: 6px; }
-.workspace-tabs { display: flex; align-items: stretch; gap: 4px; flex-shrink: 0; }
+.workspace-tabs { display: flex; align-items: stretch; gap: 4px; min-width: 0; max-width: 100%; overflow-x: auto; }
 .workspace-tabs button { position: relative; display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 8px 14px; border: 0; border-radius: 6px 6px 0 0; background: transparent; text-align: left; color: var(--app-text-2); font: inherit; cursor: pointer; transition: background var(--dur-fast); }
 .workspace-tabs button:hover { background: var(--app-card); }
 .workspace-tabs button.active { color: var(--app-brand-deep); background: color-mix(in srgb, var(--app-brand-soft) 55%, transparent); }
 .workspace-tabs button.active::after { content: ''; position: absolute; bottom: -1px; left: 12px; right: 12px; height: 2px; border-radius: 2px 2px 0 0; background: var(--app-brand); }
 .workspace-tabs .el-icon { font-size: 17px; }
 .workspace-tabs b { font-size: 13px; font-weight: 600; white-space: nowrap; }
-.workspace-content { min-width: 0; }
+/* Keep containment below the page: drawers/dialogs remain viewport-positioned siblings. */
+.workspace-content { min-width: 0; container: knowledge-workspace / inline-size; }
 .knowledge-page-graph .workspace-content { display: flex; flex-direction: column; flex: 1; min-height: 0; }
-.wiki-view-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.wiki-view-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; margin-bottom: 16px; }
 .wiki-view-header h2 { margin: 0; font-size: 20px; }
 .wiki-view-header p { margin: 4px 0 0; font-size: 12px; color: var(--app-text-3); }
 .wiki-view-header > span { color: var(--app-text-3); font-size: 12px; }
@@ -1775,6 +1776,8 @@ onBeforeUnmount(() => {
    让"我现在看的是哪一层"一眼可见 */
 .layer {
   display: inline-flex;
+  flex-wrap: wrap;
+  max-width: 100%;
   padding: 2px;
   border-radius: 8px;
   background: var(--app-bg);
@@ -2284,9 +2287,11 @@ onBeforeUnmount(() => {
 .page-acts {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  max-width: 100%;
   gap: 8px;
-  flex-shrink: 0;
 }
+.page-acts .el-button + .el-button { margin-left: 0; }
 .wiki-body {
   padding-top: 4px;
 }
@@ -2361,7 +2366,7 @@ onBeforeUnmount(() => {
 }
 .probe-result {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
   padding: 12px 14px;
   margin-bottom: 12px;
@@ -2389,13 +2394,15 @@ onBeforeUnmount(() => {
 .head { flex-shrink: 0; }
 .graph-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex-shrink: 0; }
 .graph-description { font-size: 12px; color: var(--app-text-3); }
-.graph-actions { display: flex; gap: 8px; margin-left: auto; }
+.graph-actions { display: flex; flex-wrap: wrap; gap: 8px; max-width: 100%; margin-left: auto; }
+.graph-actions .el-button + .el-button { margin-left: 0; }
 .graph-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 6px 10px; border: 1px solid var(--app-border-weak); border-radius: 8px; background: var(--app-card); flex-shrink: 0; }
 .graph-fill > .kb-progress { flex-shrink: 0; }
 .graph-select-label { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--app-text-3); min-width: 0; }
 .graph-select-label select { max-width: 235px; }
 .graph-filters select, .graph-probe-form select { height: 28px; padding: 2px 24px 2px 8px; color: var(--app-text-1); border: 1px solid var(--app-border); border-radius: 6px; background: var(--app-card); font-size: 12px; }
 .graph-relation-filter { width: 164px; }
+.graph-filters > *, .graph-select-label :deep(.el-select), .graph-select-label :deep(.el-select-v2) { max-width: 100%; min-width: 0; }
 .graph-checkbox { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--app-text-2); cursor: pointer; }
 .graph-checkbox input { accent-color: var(--app-brand); }
 .text-action { border: 0; padding: 2px 0; background: none; color: var(--app-brand-deep); font-size: 12px; cursor: pointer; }
@@ -2403,7 +2410,7 @@ onBeforeUnmount(() => {
 .graph-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 12px; flex: 1; min-height: 410px; }
 .graph-stage { display: flex; flex-direction: column; min-width: 0; min-height: 0; border: 1px solid var(--app-border-weak); border-radius: 12px; background: var(--app-card); overflow: hidden; }
 .graph-stage-head { padding: 8px 12px; border-bottom: 1px solid var(--app-border-weak); display: flex; align-items: center; gap: 6px; justify-content: space-between; flex-wrap: wrap; flex-shrink: 0; }
-.graph-stage-head > div { display: flex; gap: 12px; align-items: center; }
+.graph-stage-head > div { display: flex; flex-wrap: wrap; min-width: 0; gap: 4px 12px; align-items: center; }
 .graph-stage-head b { font-size: 13px; color: var(--app-text-1); }
 .graph-stage .kg-box { border: 0; border-radius: 0; min-height: 320px; flex: 1 1 0; }
 .graph-stage-foot { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; border-top: 1px solid var(--app-border-weak); padding: 6px 12px; flex-shrink: 0; }
@@ -2451,8 +2458,9 @@ onBeforeUnmount(() => {
 .probe-heading { font-size: 15px; margin: 0 0 8px; color: var(--app-text-1); }
 .probe-heading + p { line-height: 1.7; margin-bottom: 14px; }
 .graph-probe-form textarea { width: 100%; box-sizing: border-box; resize: vertical; min-height: 82px; padding: 9px; border: 1px solid var(--app-border); border-radius: 8px; color: var(--app-text-1); background: var(--app-bg); font: inherit; font-size: 12px; line-height: 1.6; }
-.graph-probe-form > div { display: flex; justify-content: space-between; gap: 10px; margin-top: 8px; }
-.probe-examples { display: flex; gap: 8px; margin: 10px 0; }
+.graph-probe-form > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; margin-top: 8px; }
+.graph-probe-form :deep(.el-select) { max-width: 100%; }
+.probe-examples { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
 .probe-examples button, .probe-concepts button { font-size: 11px; padding: 4px 8px; border: 1px solid var(--app-border); border-radius: 5px; background: transparent; color: var(--app-text-2); cursor: pointer; }
 .probe-examples button:hover, .probe-concepts button:hover { border-color: var(--app-brand); color: var(--app-brand-deep); }
 .probe-concepts { display: flex; gap: 5px; flex-wrap: wrap; margin: 10px 0; }
@@ -2500,7 +2508,7 @@ onBeforeUnmount(() => {
 @media (max-width: 560px) {
   .knowledge-page { padding: 12px 14px; }
   .knowledge-heading h1 { font-size: 20px; }
-  .knowledge-summary { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; }
+  .knowledge-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 12px; }
   .knowledge-summary dt, .knowledge-summary small { font-size: 11px; }
   .workspace-tabs { gap: 0; width: 100%; }
   .workspace-tabs button { flex: 1; justify-content: center; padding: 8px 6px; gap: 5px; }
@@ -2516,6 +2524,34 @@ onBeforeUnmount(() => {
   .page-acts .el-button + .el-button { margin-left: 0; }
   .page-title { overflow-wrap: anywhere; }
   .maintenance-section > summary small { display: none; }
+}
+/* Navigation width and browser zoom both reduce the workspace, independently of viewport breakpoints. */
+@container knowledge-workspace (max-width: 920px) {
+  .graph-description { display: none; }
+  .graph-workspace { grid-template-columns: minmax(0, 1fr); flex: none; }
+  .graph-stage { height: 500px; }
+  .graph-inspector, .graph-workspace-overview .graph-inspector { height: 460px; }
+  .graph-stage-overview { height: auto; min-height: 680px; }
+  .graph-stage-overview .kg-box { min-height: 580px; }
+  .wiki { grid-template-columns: minmax(0, 1fr); }
+  .wiki > .wiki-navigator { position: static; height: auto; max-height: 520px; }
+  .wiki > .wiki-navigator :deep(.navigator-list) { max-height: 300px; }
+  .page-head { grid-template-columns: minmax(0, 1fr); }
+}
+@container knowledge-workspace (max-width: 440px) {
+  .graph-filters .graph-select-label { flex: 1 1 100%; flex-wrap: wrap; }
+  .graph-filters .graph-select-label :deep(.el-select),
+  .graph-filters .graph-select-label :deep(.el-select-v2) { flex: 1 1 160px; }
+  .graph-relation-filter { flex: 1 1 100%; width: auto; }
+  .graph-actions { margin-left: 0; }
+  .graph-stage { height: 440px; }
+  .graph-stage-overview { height: auto; }
+  .wiki-main { padding: 16px; }
+  .probe-result { grid-template-columns: minmax(0, 1fr); }
+}
+@container knowledge-navigation (max-width: 300px) {
+  .workspace-tabs .el-icon { display: none; }
+  .workspace-tabs button { min-width: 0; gap: 0; }
 }
 
 </style>

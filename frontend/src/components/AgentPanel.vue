@@ -11,12 +11,13 @@ import {
   AGENT_NOTE_MERGE_RESULT_EVENT,
 } from '../utils/agentNoteMerge'
 import { isDark } from '../composables/useTheme'
-import { AGENT_NOTE_UPDATED_EVENT, matchesOpenNote, parseActionResult } from '../utils/agentNoteEdit'
+import { AGENT_NOTE_UPDATED_EVENT, matchesOpenNote, parseActionResult, prepareAgentNote, insertAgentNote } from '../utils/agentNoteEdit'
 import { retrievalChannels, retrievalGroups, retrievalKey, retrievalSourcePath, retrievalTitle, retrievalTooltip } from '../utils/retrievalDisplay'
 import { groundingDisplay } from '../utils/groundingDisplay'
 import { MODEL_CONFIGURATION_CHANGED_EVENT, chatProfiles, chatProfileSelection } from '../utils/modelProfileView'
 import AgentRunTrace from './AgentRunTrace.vue'
 import { createChatRunGate, interruptProgress, restoredProgress, upsertProgress } from '../utils/agentProgress.js'
+import { normalizeReplyActions, followUpMessage, pendingNoteId } from '../utils/replyActions.js'
 
 /**
  * Markdown 预览（md-editor-v3）体积很大：整包 + 样式约 310 KB，
@@ -101,12 +102,22 @@ const followingLatest = ref(true)
 const runGate = createChatRunGate()
 let viewRevision = 0
 let sessionLoadVersion = 0
+let mergeTimer = null
+let mergeController = null
+const localActionControllers = new Set()
 
 function detachRun() {
   viewRevision++
   sessionLoadVersion++
   runGate.invalidate()
+  for (const controller of localActionControllers) controller.abort()
+  localActionControllers.clear()
+  mergeController = null
   busy.value = false
+  if (mergeTarget.value) mergeTarget.value.mergePending = false
+  mergeTarget.value = null
+  mergeRequest.value = null
+  clearTimeout(mergeTimer)
 }
 
 /**
@@ -118,11 +129,26 @@ function detachRun() {
  */
 const activeNote = ref(null)
 
-/** 弹窗/按钮上显示的短标题 */
-const activeNoteLabel = computed(() => {
-  const t = activeNote.value?.title || ''
-  return t.length > 14 ? t.slice(0, 14) + '…' : t
-})
+function sameActiveNote(captured, prepared) {
+  const current = activeNote.value
+  if (!captured || !current) return false
+  if (captured.editorKey && current.editorKey) {
+    if (captured.editorKey !== current.editorKey) return false
+    return captured.isNew || matchesOpenNote(captured.noteId, current.noteId)
+  }
+  return captured.noteId != null
+    ? matchesOpenNote(captured.noteId, current.noteId)
+    : current === captured || (!!prepared?.noteId && matchesOpenNote(prepared.noteId, current.noteId))
+}
+
+async function prepareCapturedNote(note, isCurrent, signal) {
+  const prepared = await prepareAgentNote({ noteId: note.noteId, editorKey: note.editorKey, allowNew: !!note.isNew, signal })
+  if (!isCurrent() || !sameActiveNote(note, prepared)) {
+    throw new Error('笔记或会话已切换，本次操作已停止；请在目标笔记中重新发起。')
+  }
+  if (!prepared?.noteId || prepared.dirty) throw new Error('当前笔记未能完成自动保存，请重试；草稿仍保留在编辑器中。')
+  return prepared
+}
 
 /**
  * 会话 id：存 localStorage，刷新后接着聊。
@@ -256,6 +282,8 @@ async function loadSession() {
       // 思考过程（thinking 模型才有）：刷新后由事件流还原，和当轮显示同一套渲染
       reasoning: m.reasoning || '',
       toolUsed: !!m.toolUsed,
+      replyActions: normalizeReplyActions(m.replyActions),
+      noteId: m.noteId ?? s.noteId ?? null,
     }))
     pending.value = s.pendingActions || []
     scrollBottom(true)
@@ -374,14 +402,25 @@ async function checkActionState(a, context = actionContext(a)) {
 
 async function resolveAction(a, approve) {
   if (actionLocked(a)) return
-  if (approve && a.toolName === 'edit_note' && activeNote.value?.dirty
-      && matchesOpenNote(activeNote.value.noteId, a.preview?.noteId)) {
-    ElMessage.warning('当前笔记有未保存改动，请先保存，再重新生成定向编辑预览')
-    return
-  }
   const context = actionContext(a)
+  const note = activeNote.value
+  const targetId = pendingNoteId(a)
   sessionLoadVersion++
   resolvingActions.value.add(a.id)
+  // Saving is local preparation, not an approval request: a failed save must never
+  // enter ambiguous-network recovery or execute a stored write.
+  if (approve && note && matchesOpenNote(note.noteId, targetId)) {
+    const controller = new AbortController()
+    localActionControllers.add(controller)
+    try {
+      await prepareCapturedNote(note, context.isCurrent, controller.signal)
+    } catch (error) {
+      if (context.isCurrent()) ElMessage.error(error.message || '自动保存失败，未执行笔记改动；草稿已保留。')
+      resolvingActions.value.delete(a.id)
+      return
+    } finally { localActionControllers.delete(controller) }
+  }
+  if (!context.isCurrent()) { resolvingActions.value.delete(a.id); return }
   try {
     let hint
     let succeeded = true
@@ -397,6 +436,7 @@ async function resolveAction(a, approve) {
         if (edit?.changed) window.dispatchEvent(new CustomEvent(AGENT_NOTE_UPDATED_EVENT, { detail: edit }))
       } else {
         hint = r?.error || result.error || r?.hint || '执行失败，未修改笔记'
+        if (/版本|hash|过期|冲突/i.test(hint)) hint += '。自动保存后预览可能已过期，请重新生成修改预览再确认。'
         ElMessage.error(hint)
       }
     } else {
@@ -480,6 +520,10 @@ async function loadStatus() {
 async function send(text, ctx) {
   const msg = (text ?? input.value).trim()
   if (!msg || busy.value) return
+  const capturedNote = activeNote.value
+  const capturedSession = sessionId.value
+  const explicitContext = ctx && (ctx.noteId != null || ctx.noteTitle != null || ctx.noteContext != null)
+  const usesActiveNote = capturedNote && (!explicitContext || matchesOpenNote(ctx.noteId, capturedNote.noteId))
   input.value = ''
   sessionLoadVersion++
   const run = runGate.begin()
@@ -506,6 +550,17 @@ async function send(text, ctx) {
     }
   }
   try {
+    let noteContext = explicitContext ? {
+      noteId: ctx.noteId, title: ctx.noteTitle, context: ctx.noteContext, dirty: false,
+    } : null
+    if (usesActiveNote) {
+      holder.progress = upsertProgress(holder.progress, { id: 'save-note', kind: 'phase', status: 'running', title: '正在自动保存当前笔记' })
+      noteContext = await prepareCapturedNote(capturedNote,
+        () => runGate.isCurrent(run) && capturedSession === sessionId.value, run.controller.signal)
+      holder.progress = upsertProgress(holder.progress, { id: 'save-note', kind: 'phase', status: 'completed', title: '当前笔记已自动保存' })
+    }
+    if (!runGate.isCurrent(run)) return
+    holder.noteId = noteContext?.noteId ?? null
     // 上下文交给后端会话维护：只带 sessionId（首次为空，响应里会把新 id 带回来）
     const request = {
       message: msg,
@@ -514,10 +569,10 @@ async function send(text, ctx) {
       modelProfileId: chatProfile.value || undefined,
       // 笔记页里打开的面板：把「当前笔记」当背景一起发（后端只截前 1500 字注入，
       // 并明确告知模型"仅供理解背景"）。显式传来的 ctx（知识图谱/wiki 的「问智能体」）优先。
-      noteId: ctx?.noteId ?? activeNote.value?.noteId ?? undefined,
-      noteTitle: ctx?.noteTitle ?? activeNote.value?.title ?? undefined,
-      noteContext: ctx?.noteContext ?? activeNote.value?.context ?? undefined,
-      noteDirty: (!ctx?.noteId || matchesOpenNote(ctx.noteId, activeNote.value?.noteId)) && !!activeNote.value?.dirty,
+      noteId: noteContext?.noteId ?? undefined,
+      noteTitle: noteContext?.title ?? undefined,
+      noteContext: noteContext?.context ?? undefined,
+      noteDirty: !!noteContext?.dirty,
     }
     let res
     try {
@@ -541,6 +596,7 @@ async function send(text, ctx) {
     // 思考过程：thinking 模型才会返回；不拼进正文（正文要能原样存成笔记）
     holder.reasoning = res.reasoning || ''
     holder.toolUsed = res.toolUsed
+    holder.replyActions = normalizeReplyActions(res.replyActions)
     // 本轮若发起了写操作，它们是"待确认"状态，攒到下面的确认卡片里
     if (res.pendingActions?.length) {
       const merged = new Map(pending.value.map(action => [action.id, action]))
@@ -573,15 +629,24 @@ function onComposerKeydown(event) {
   void send()
 }
 
-/**
- * 笔记编辑页广播「我现在开着哪篇笔记」时记下来；广播 detail 为空 = 离开了笔记页，
- * 主操作随之回退成「保存为笔记」。
- */
+/** Only the active editor supplies context and accepts note actions. */
 function noteContextFromEvent(e) {
   const d = e?.detail
+  const previous = activeNote.value
   activeNote.value = d && (d.noteId || d.title || d.isNew)
-    ? { noteId: d.noteId || null, title: d.title || '', isNew: !!d.isNew, context: d.context || '', dirty: !!d.dirty }
+    ? { noteId: d.noteId || null, editorKey: d.editorKey, title: d.title || '', isNew: !!d.isNew, context: d.context || '', dirty: !!d.dirty }
     : null
+  if (previous && !sameActiveNote(previous)) {
+    for (const controller of localActionControllers) controller.abort()
+    if (mergeTarget.value) {
+      mergeTarget.value.mergePending = false
+      mergeTarget.value = null
+      mergeRequest.value = null
+      localActionControllers.delete(mergeController)
+      mergeController = null
+      clearTimeout(mergeTimer)
+    }
+  }
 }
 
 /** 取这条回答对应的提问（往前找最近一条用户消息）——它要当插入小节里的标题 */
@@ -594,6 +659,68 @@ function questionBefore(index) {
 
 /** 正在等融入结果的那条回答（面板 + 笔记页是"发请求 → 收结果"的两段式，要记住收件人） */
 const mergeTarget = ref(null)
+const mergeRequest = ref(null)
+
+function replyActionUnavailable(holder, action) {
+  if (busy.value || holder.actionPending || holder.mergePending || saveBusy.value || resolvingActions.value.size) return '正在处理，请稍候'
+  if (['merge_note', 'insert_at_cursor'].includes(action.kind)) {
+    if (!activeNote.value) return '请先打开要编辑的笔记'
+    const target = action.noteId ?? holder.noteId
+    if (target != null && !matchesOpenNote(target, activeNote.value.noteId)) return '请切回这条回答对应的笔记后操作'
+    if (mergeTarget.value) return '另一条回答正在融入，请稍候'
+  }
+  return ''
+}
+
+function replyNoteHint(holder) {
+  const noteActions = (holder.replyActions || []).filter(action => ['merge_note', 'insert_at_cursor'].includes(action.kind))
+  if (!noteActions.length) return ''
+  if (!activeNote.value) return '打开目标笔记后，可使用插入或融入操作。'
+  return noteActions.some(action => (action.noteId ?? holder.noteId) != null && !matchesOpenNote(action.noteId ?? holder.noteId, activeNote.value.noteId))
+    ? '部分操作对应另一篇笔记，请切回该笔记后使用。' : ''
+}
+
+async function runReplyAction(holder, rawAction, index) {
+  const action = normalizeReplyActions(holder?.replyActions).find(item => item.id === rawAction?.id && item.kind === rawAction?.kind)
+  if (!action || !holder?.content || !messages.value.includes(holder)) return
+  const reason = replyActionUnavailable(holder, action)
+  if (reason) { ElMessage.info(reason); return }
+  const ownerSession = sessionId.value, ownerRevision = viewRevision
+  const isCurrent = () => ownerSession === sessionId.value && ownerRevision === viewRevision && messages.value.includes(holder)
+  const controller = new AbortController()
+  localActionControllers.add(controller)
+  holder.actionPending = action.id
+  holder.actionError = ''
+  holder.actionStatus = ''
+  try {
+    if (action.kind === 'follow_up') {
+      const target = action.noteId ?? holder.noteId
+      await send(followUpMessage(action, questionBefore(index), holder.content), target != null ? { noteId: target } : undefined)
+    } else if (action.kind === 'save_note') {
+      await askSave(holder)
+    } else if (action.kind === 'merge_note') {
+      mergeController = controller
+      await mergeIntoNote(holder, index, controller.signal)
+    } else if (action.kind === 'insert_at_cursor') {
+      const note = activeNote.value
+      holder.actionStatus = '正在自动保存当前笔记…'
+      const prepared = await prepareCapturedNote(note, isCurrent, controller.signal)
+      if (!isCurrent()) return
+      holder.actionStatus = '正在插入…'
+      await insertAgentNote({ noteId: prepared.noteId, editorKey: note.editorKey, answer: holder.content, question: questionBefore(index), signal: controller.signal })
+      if (isCurrent()) { holder.actionStatus = '已插入当前笔记，可撤销或继续编辑'; ElMessage.success('已在当前光标处插入') }
+    }
+  } catch (error) {
+    if (isCurrent()) {
+      holder.actionStatus = ''
+      holder.actionError = error.message || '操作未完成，请重试；笔记草稿已保留。'
+      ElMessage.error(holder.actionError)
+    }
+  } finally {
+    if (mergeTarget.value !== holder) localActionControllers.delete(controller)
+    holder.actionPending = null
+  }
+}
 
 /**
  * 把这条回答**融入**当前笔记。
@@ -602,7 +729,7 @@ const mergeTarget = ref(null)
  * 还要用它的进度弹窗和预览按钮走"确认后替换"。所以这里派发事件后进入"融入中"状态，
  * 等笔记页回报结果（见 mergeResultFromEvent）再决定打勾还是恢复按钮。
  */
-function mergeIntoNote(holder, index) {
+async function mergeIntoNote(holder, index, signal) {
   const note = activeNote.value
   if (!note || !holder?.content) return
   if (mergeTarget.value) {
@@ -611,14 +738,31 @@ function mergeIntoNote(holder, index) {
   }
   mergeTarget.value = holder
   holder.mergePending = true
+  const ownerSession = sessionId.value, ownerRevision = viewRevision
+  const request = { requestId: `merge-${Date.now()}-${Math.random().toString(36).slice(2)}`, noteId: note.noteId, editorKey: note.editorKey }
+  mergeRequest.value = request
+  try {
+    const prepared = await prepareCapturedNote(note,
+      () => ownerSession === sessionId.value && ownerRevision === viewRevision && messages.value.includes(holder), signal)
+    request.noteId = prepared.noteId
+  } catch (error) {
+    if (mergeTarget.value === holder) { mergeTarget.value = null; mergeRequest.value = null; holder.mergePending = false; mergeController = null }
+    throw error
+  }
   window.dispatchEvent(new CustomEvent(AGENT_NOTE_MERGE_EVENT, {
-    detail: { noteId: note.noteId, question: questionBefore(index), answer: holder.content },
+    detail: { ...request, question: questionBefore(index), answer: holder.content, signal },
   }))
+  if (mergeTarget.value !== holder) return
   // 兜底：万一笔记页没接住（比如刚好被卸载），别让按钮永远停在"融入中"
-  setTimeout(() => {
+  clearTimeout(mergeTimer)
+  mergeTimer = setTimeout(() => {
     if (mergeTarget.value === holder) {
       holder.mergePending = false
       mergeTarget.value = null
+      mergeRequest.value = null
+      mergeController?.abort()
+      localActionControllers.delete(mergeController)
+      mergeController = null
       ElMessage.warning('没收到笔记页的回应，已取消本次融入（正文未改动）')
     }
   }, 6 * 60 * 1000)
@@ -641,7 +785,12 @@ function mergeResultFromEvent(e) {
   const d = e?.detail || {}
   const holder = mergeTarget.value
   if (!holder) return
+  if (d.requestId ? d.requestId !== mergeRequest.value?.requestId : !matchesOpenNote(d.noteId, mergeRequest.value?.noteId)) return
   mergeTarget.value = null
+  mergeRequest.value = null
+  localActionControllers.delete(mergeController)
+  mergeController = null
+  clearTimeout(mergeTimer)
   holder.mergePending = false
   if (d.ok) {
     holder.merged = true
@@ -657,7 +806,9 @@ const categories = ref([])
 
 async function askSave(holder) {
   if (!holder || !holder.content) return
+  const ownerSession = sessionId.value, ownerRevision = viewRevision
   categories.value = await loadCategories()
+  if (ownerSession !== sessionId.value || ownerRevision !== viewRevision || !messages.value.includes(holder)) return
   saveForm.value = {
     title: guessTitle(holder.content),
     categoryId: undefined,
@@ -976,7 +1127,7 @@ function askFromEvent(e) {
         <div ref="listRef" class="msg-list" @scroll.passive="onMessageScroll">
           <div v-if="!messages.length" class="welcome">
             <p class="welcome-t">你好，我是你的代码学习搭子</p>
-            <p class="welcome-s">可以问我任何编程/IT 问题；讲到值得沉淀的知识点，点「保存为笔记」就能存进工作台。</p>
+            <p class="welcome-s">可以问我编程和学习问题，回答后会根据这次任务给出后续操作建议。</p>
             <div class="chips">
               <button v-for="s in SUGGESTIONS" :key="s" type="button" class="chip" @click="send(s)">{{ s }}</button>
             </div>
@@ -987,7 +1138,8 @@ function askFromEvent(e) {
               <div class="avatar av-ai">A</div>
               <div class="bubble assistant">
                 <AgentRunTrace v-if="m.loading || m.progress?.length" :entries="m.progress || []"
-                  :running="!!m.loading" :started-at="m.startedAt || 0" :elapsed-ms="m.elapsedMs || 0" :failed="!!m.error" />
+                  :running="!!m.loading" :started-at="m.startedAt || 0" :elapsed-ms="m.elapsedMs || 0" :failed="!!m.error"
+                  @open-source="openRetrievedSource" @inspect="followingLatest = false" />
                 <div v-if="m.error" class="err" role="alert">
                   <span>{{ m.error }}</span>
                   <button v-if="sessionId" type="button" class="act-btn" @click="loadSession">重新读取会话</button>
@@ -1000,7 +1152,7 @@ function askFromEvent(e) {
                     </summary>
                     <div class="think-body">{{ m.reasoning }}</div>
                   </details>
-                  <!-- 自动检索透明度：这轮回答参考了你自己的哪些记录（事件里不存它，刷新后不显示） -->
+                  <!-- 回答末尾汇总来源；各步骤的来源明细随进度保存，可在处理过程中或历史会话里查看。 -->
                   <div v-for="group in retrievalGroups(m.retrieved)" :key="group.key" class="ref-line" :class="'ref-' + group.key">
                     <span class="ref-label">{{ group.label }}</span>
                     <component v-for="h in group.items" :key="retrievalKey(h)" :is="retrievalSourcePath(h) ? 'button' : 'span'"
@@ -1020,30 +1172,23 @@ function askFromEvent(e) {
                     </details>
                     <span v-else>{{ m.groundingStatus.label }}</span>
                   </div>
-                  <!--
-                    每次回答后：询问是否沉淀。
-                    在笔记页里打开的面板，主操作是「融入当前笔记」——问的问题本来就是关于这篇的，
-                    另存成新笔记只会攒出一堆零碎小笔记；不在笔记页时维持「保存为笔记」。
-                  -->
-                  <div v-if="m.content && !m.saved && !m.merged" class="msg-actions">
-                    <button
-                      v-if="activeNote"
-                      type="button"
-                      class="act-btn primary"
-                      :disabled="m.mergePending"
-                      @click="mergeIntoNote(m, i)"
-                    >
-                      <span class="btn-ico"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg></span>
-                      <template v-if="m.mergePending">正在融入…</template>
-                      <template v-else>融入当前笔记<template v-if="activeNoteLabel"> · {{ activeNoteLabel }}</template></template>
-                    </button>
-                    <button v-else type="button" class="act-btn primary" @click="askSave(m)">
-                      <span class="btn-ico"><svg viewBox="0 0 24 24"><path d="M6.5 3.5h11v17l-5.5-4-5.5 4z" /></svg></span>保存为笔记
+                  <div v-if="m.content" class="msg-actions" role="group" aria-label="这条回答的后续操作">
+                    <button v-for="(action, actionIndex) in m.replyActions || []" :key="action.id"
+                      type="button" class="act-btn" :class="{ primary: actionIndex === 0 }"
+                      :disabled="!!replyActionUnavailable(m, action)"
+                      :title="replyActionUnavailable(m, action) || action.label"
+                      :aria-label="replyActionUnavailable(m, action) ? `${action.label}：${replyActionUnavailable(m, action)}` : action.label"
+                      :aria-busy="m.actionPending === action.id || (action.kind === 'merge_note' && m.mergePending)"
+                      @click="runReplyAction(m, action, i)">
+                      {{ m.actionPending === action.id ? '正在处理…' : action.kind === 'merge_note' && m.mergePending ? '正在融入…' : action.label }}
                     </button>
                     <button type="button" class="act-btn" @click="copyText(m.content)">复制</button>
                   </div>
-                  <div v-else-if="m.merged" class="saved-tag">✓ 融入预览已在笔记页打开（点「替换正文」后保存生效）</div>
-                  <div v-else-if="m.saved" class="saved-tag">✓ 已保存为笔记</div>
+                  <p v-if="m.actionError" class="reply-action-error" role="alert">{{ m.actionError }}</p>
+                  <p v-else-if="m.actionStatus" class="reply-action-status" role="status">{{ m.actionStatus }}</p>
+                  <p v-if="replyNoteHint(m)" class="reply-action-status">{{ replyNoteHint(m) }}</p>
+                  <div v-if="m.merged" class="saved-tag">✓ 融入预览已在笔记页打开（确认应用后保存生效）</div>
+                  <div v-if="m.saved" class="saved-tag">✓ 已保存为笔记</div>
                 </template>
               </div>
             </template>
@@ -1241,12 +1386,16 @@ function askFromEvent(e) {
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  min-width: 0;
+  overflow: auto;
 }
 /* 会话版块：新开/切换/删除 + 本会话的模型选择 */
 .session-bar {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
   padding: 6px 12px;
   border-bottom: 1px solid var(--app-border-weak);
   background: var(--app-bg);
@@ -1273,6 +1422,8 @@ function askFromEvent(e) {
 }
 .session-list {
   max-height: 220px;
+  max-height: min(220px, 25dvh);
+  min-height: 0;
   overflow-y: auto;
   padding: 6px 8px;
   border-bottom: 1px solid var(--app-border-weak);
@@ -1336,6 +1487,8 @@ function askFromEvent(e) {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
   padding: 14px 16px;
   border-bottom: 1px solid var(--app-border);
 }
@@ -1343,10 +1496,14 @@ function askFromEvent(e) {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex: 1 1 auto;
+  min-width: 0;
 }
+.head-left > div { min-width: 0; }
 .head-avatar {
   width: 34px;
   height: 34px;
+  flex-shrink: 0;
   border-radius: 10px;
   background: linear-gradient(135deg, var(--app-brand), var(--app-brand-2, var(--app-brand)));
   color: #fff;
@@ -1365,6 +1522,8 @@ function askFromEvent(e) {
   display: flex;
   align-items: center;
   gap: 5px;
+  flex-wrap: wrap;
+  overflow-wrap: anywhere;
 }
 .dot {
   width: 7px;
@@ -1386,6 +1545,7 @@ function askFromEvent(e) {
   font-size: 14px;
   width: 28px;
   height: 28px;
+  flex-shrink: 0;
   border-radius: 7px;
 }
 .icon-btn:hover {
@@ -1786,6 +1946,8 @@ function askFromEvent(e) {
 
 .msg-actions {
   display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
   gap: 8px;
   margin-top: 10px;
   padding-top: 8px;
@@ -1794,6 +1956,13 @@ function askFromEvent(e) {
 .act-btn {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+  text-align: left;
   border: 1px solid var(--app-border);
   background: var(--app-card);
   color: var(--app-text-2);
@@ -1807,11 +1976,20 @@ function askFromEvent(e) {
 .act-btn:hover {
   border-color: var(--app-brand);
 }
+.act-btn:disabled { opacity: .6; cursor: not-allowed; }
+.reply-action-status, .reply-action-error { margin: 7px 0 0; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.reply-action-status { color: var(--app-text-2); }
+.reply-action-error { color: var(--el-color-danger); }
 .act-btn.primary {
   background: var(--app-brand);
   border-color: var(--app-brand);
   color: #fff;
   font-weight: 500;
+}
+.msg-actions .act-btn.primary {
+  background: var(--app-brand-deep);
+  border-color: var(--app-brand-deep);
+  color: var(--app-card);
 }
 .saved-tag {
   margin-top: 8px;
@@ -1893,6 +2071,7 @@ function askFromEvent(e) {
 }
 .input-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   align-items: center;
 }
@@ -1926,11 +2105,11 @@ function askFromEvent(e) {
   font-weight: 600;
 }
 .chat-input {
-  flex: 1;
+  flex: 1 1 180px;
   min-width: 0;
   height: 64px;
   min-height: 38px;
-  max-height: 180px;
+  max-height: min(180px, 30dvh);
   resize: vertical;
   line-height: 1.55;
   border: 1px solid var(--app-border);
@@ -1970,6 +2149,13 @@ function askFromEvent(e) {
 .send-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+@media (max-width: 480px), (max-height: 600px) {
+  .panel-head { padding: 10px; }
+  .msg-list { padding: 10px; }
+  .panel-foot { padding: 8px 10px; }
+  .agent-root:not(.agent-embedded) { right: 12px; bottom: 12px; }
 }
 .foot-hint {
   margin-top: 8px;

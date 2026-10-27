@@ -7,6 +7,7 @@ import MarkdownIt from 'markdown-it'
 import { EditorState } from '@codemirror/state'
 import { history, undo } from '@codemirror/commands'
 import * as tabUtils from './useNoteTabs.js'
+import { prepareAgentNote, insertAgentNote } from '../utils/agentNoteEdit.js'
 
 const source = readFileSync(new URL('../views/NoteEdit.vue', import.meta.url), 'utf8')
 const compiled = compileScript(parse(source).descriptor, { id: 'note-edit-tab-script-test' }).content
@@ -71,12 +72,13 @@ async function harness(options = {}) {
     'md-editor-v3': {}, '../composables/useTheme': { isDark: vue.ref(false) }, '../composables/useViewMode': { focusMode: vue.ref(false) },
     '../composables/useNoteTabs.js': { ...tabUtils, ...manager },
     '../api': {
+      aiApi: options.aiApi || {},
       categoryApi: { tree: options.categoryTree || (async () => []) },
       tagApi: { list: options.tagList || (async () => []) },
       folderApi: { list: options.folderList || (async () => [{ id: 3, name: '测试资料夹' }]) },
       noteApi: {
         async detail(id) { reads.push(id); return options.detail ? options.detail(id) : { id, title: `笔记 ${id}`, content: `body ${id}`, folderId: 3, tags: [] } },
-        async update(id, payload) { writes.push({ id, payload }) },
+        async update(id, payload) { writes.push({ id, payload }); return options.update?.(id, payload) },
         add(payload) { writes.push({ create: true, payload }); return creation?.promise || Promise.resolve({ id: 55 }) },
       },
     },
@@ -100,6 +102,181 @@ async function harness(options = {}) {
     async cleanup() { for (const entry of mounts) entry.app.unmount(); await flush(); browser.restore() },
   }
 }
+
+test('agent preparation saves only the active matching editor and preserves background drafts', async () => {
+  const h = await harness()
+  try {
+    const a = await h.mount({ noteId: 1, tabKey: 'note:1', active: true })
+    const b = await h.mount({ noteId: 2, tabKey: 'note:2', active: false })
+    a.state.form.content = '需要自动保存的草稿'
+    b.state.form.content = '后台未保存草稿'
+    const context = await prepareAgentNote({ noteId: 1, editorKey: 'note:1' })
+    assert.equal(context.dirty, false)
+    assert.equal(context.noteId, 1)
+    assert.equal(context.editorKey, 'note:1')
+    assert.equal(context.context, '需要自动保存的草稿')
+    assert.deepEqual(h.writes.map(write => write.id), [1])
+    assert.equal(b.state.form.content, '后台未保存草稿')
+    assert.equal(b.state.dirty, true)
+    await assert.rejects(prepareAgentNote({ noteId: 2, editorKey: 'note:2' }), /已切换|尚未就绪/)
+    assert.equal(h.writes.length, 1)
+  } finally { await h.cleanup() }
+})
+
+test('agent preparation awaits an in-flight save and then saves typing added during that request', async () => {
+  const pending = defer()
+  let writes = 0
+  const h = await harness({ update: () => ++writes === 1 ? pending.promise : undefined })
+  try {
+    const a = await h.mount({ noteId: 1, tabKey: 'note:1', active: true })
+    a.state.form.content = '首次草稿'
+    const saving = a.state.save()
+    a.state.form.content = '保存期间继续输入'
+    const preparing = prepareAgentNote({ noteId: 1, editorKey: 'note:1' })
+    pending.resolve()
+    await saving
+    const result = await preparing
+    assert.deepEqual(h.writes.map(write => write.payload.content), ['首次草稿', '保存期间继续输入'])
+    assert.equal(result.dirty, false)
+    assert.equal(a.state.form.content, '保存期间继续输入')
+  } finally { await h.cleanup() }
+})
+
+test('failed automatic saves retain the draft and reject preparation without pretending it is saved', async () => {
+  const h = await harness({ update: () => { throw new Error('合成保存失败') } })
+  try {
+    const a = await h.mount({ noteId: 1, tabKey: 'note:1', active: true })
+    a.state.form.content = '必须保留的草稿'
+    await assert.rejects(prepareAgentNote({ noteId: 1, editorKey: 'note:1' }), /合成保存失败/)
+    assert.equal(a.state.form.content, '必须保留的草稿')
+    assert.equal(a.state.dirty, true)
+    assert.equal(a.state.saveError, '合成保存失败')
+  } finally { await h.cleanup() }
+})
+
+test('switching notes while automatic save runs cancels the following edit and never saves the new tab', async () => {
+  const pending = defer()
+  const h = await harness({ update: () => pending.promise })
+  try {
+    const a = await h.mount({ noteId: 1, tabKey: 'note:1', active: true })
+    const b = await h.mount({ noteId: 2, tabKey: 'note:2', active: false })
+    a.state.form.content = 'A 草稿'
+    b.state.form.content = 'B 草稿'
+    const preparing = prepareAgentNote({ noteId: 1, editorKey: 'note:1' })
+    const rejected = assert.rejects(preparing, /已切换/)
+    a.props.active = false
+    b.props.active = true
+    await flush()
+    pending.resolve()
+    await rejected
+    assert.deepEqual(h.writes.map(write => write.id), [1])
+    assert.equal(b.state.form.content, 'B 草稿')
+  } finally { await h.cleanup() }
+})
+
+test('a new draft is created once and preparation returns its promoted ID with the same editor key', async () => {
+  const h = await harness()
+  try {
+    const a = await h.mount({ noteId: null, tabKey: 'draft:demo', active: true })
+    a.state.form.title = '合成新笔记'
+    a.state.form.content = '新笔记正文'
+    const context = await prepareAgentNote({ noteId: null, editorKey: 'draft:demo', allowNew: true })
+    assert.equal(context.noteId, 55)
+    assert.equal(context.editorKey, 'draft:demo')
+    assert.equal(context.isNew, false)
+    assert.equal(context.dirty, false)
+    assert.equal(h.writes.filter(write => write.create).length, 1)
+  } finally { await h.cleanup() }
+})
+
+test('multi-section merge generates one batch preview and applies all changes after saving the original draft', async () => {
+  const calls = []
+  const h = await harness({ aiApi: {
+    async status() { return { mergeMaxChars: 1 } },
+    async mergeLocate() { return { action: 'merge', targets: [{ action: 'merge', index: 1 }, { action: 'merge', index: 2 }] } },
+    async mergeSectionStream(request) { calls.push(request); return { content: request.section + '\n\n新增内容' } },
+  } })
+  try {
+    const a = await h.mount({ noteId: 1, tabKey: 'note:1', active: true })
+    const original = '## A\n\n原文甲\n\n## B\n\n原文乙\n\n## C\n\n保持原样\n'
+    a.state.form.content = original
+    await a.state.onAgentMerge({ detail: { noteId: 1, editorKey: 'note:1', requestId: 'merge-demo', question: '分别补充两节', answer: '合成回答' } })
+    assert.equal(calls.length, 2)
+    assert.equal(a.state.mergePatch.kind, 'batch-sections')
+    assert.equal(a.state.form.content, original)
+    assert.equal(h.writes[0].payload.content, original)
+    await a.state.aiApply()
+    assert.ok(a.state.form.content.includes('原文甲\n\n新增内容'))
+    assert.ok(a.state.form.content.includes('原文乙\n\n新增内容'))
+    assert.ok(a.state.form.content.includes('## C\n\n保持原样\n'))
+    assert.equal(a.state.dirty, true)
+    assert.equal(a.state.aiDialog, false)
+  } finally { await h.cleanup() }
+})
+
+test('the focused source editor receives cursor insertion after automatic save, with a separate undo step', async () => {
+  const h = await harness()
+  try {
+    const a = await h.mount({ noteId: 1, tabKey: 'note:1', active: true })
+    const view = vue.markRaw({ state: EditorState.create({ doc: '合成原文', selection: { anchor: 2 }, extensions: [history()] }),
+      dispatch(spec) { this.state = this.state.update(spec).state; a.state.form.content = this.state.doc.toString() } })
+    a.state.editorRef = vue.markRaw({ getEditorView: () => view })
+    a.state.form.content = '合成原文'
+    a.state.onSourceFocusIn()
+    const result = await insertAgentNote({ noteId: 1, editorKey: 'note:1', answer: '新增' })
+    assert.equal(result.ok, true)
+    assert.equal(h.writes[0].payload.content, '合成原文')
+    assert.equal(view.state.doc.toString(), '合成新增原文')
+    assert.equal(undo({ state: view.state, dispatch: transaction => { view.state = transaction.state } }), true)
+    assert.equal(view.state.doc.toString(), '合成原文')
+  } finally { await h.cleanup() }
+})
+
+test('a newly created draft can finish merge generation with its promoted note ID', async () => {
+  const h = await harness({ aiApi: {
+    async status() { return { mergeMaxChars: 10000 } },
+    async mergeNoteStream(request) { assert.equal(request.noteId, 55); return '已经融入的合成正文' },
+  } })
+  try {
+    const a = await h.mount({ noteId: null, tabKey: 'draft:merge', active: true })
+    a.state.form.title = '新建融入示例'
+    a.state.form.content = '原始合成正文'
+    await a.state.onAgentMerge({ detail: { editorKey: 'draft:merge', answer: '补充内容' } })
+    assert.equal(a.state.aiResult, '已经融入的合成正文')
+    assert.equal(a.state.aiDialog, true)
+    assert.equal(h.writes.filter(write => write.create).length, 1)
+  } finally { await h.cleanup() }
+})
+
+test('a cancelled section-location response cannot start jobs or clear a newer merge run', async () => {
+  const oldLocate = defer(), nextLocate = defer()
+  let locations = 0, generations = 0
+  const h = await harness({ aiApi: {
+    async status() { return { mergeMaxChars: 1 } },
+    mergeLocate() { return ++locations === 1 ? oldLocate.promise : nextLocate.promise },
+    async mergeSectionStream() { generations++; return { content: '新一轮正确正文' } },
+  } })
+  try {
+    const a = await h.mount({ noteId: 1, tabKey: 'note:1', active: true })
+    a.state.form.content = '## A\n\n合成原文'
+    const old = a.state.onAgentMerge({ detail: { noteId: 1, editorKey: 'note:1', answer: '旧任务' } })
+    await flush()
+    assert.equal(locations, 1)
+    a.state.cancelAiProcess()
+    const current = a.state.onAgentMerge({ detail: { noteId: 1, editorKey: 'note:1', answer: '新任务' } })
+    await flush()
+    assert.equal(locations, 2)
+    oldLocate.resolve({ action: 'merge', index: 1 })
+    await old
+    assert.equal(generations, 0)
+    assert.equal(a.state.aiBusy, true)
+    nextLocate.resolve({ action: 'merge', index: 1 })
+    await current
+    assert.equal(generations, 1)
+    assert.equal(a.state.mergePatch.after, '新一轮正确正文')
+    assert.equal(a.state.aiBusy, false)
+  } finally { await h.cleanup() }
+})
 
 test('actual NoteEdit scripts keep A/B IDs and body drafts independent, ignore inactive Ctrl+S and do not reload on route changes', async () => {
   const h = await harness()
@@ -404,6 +581,125 @@ function previewScroller(headings = []) {
   }
 }
 
+function measureEditorWidth(state, width) {
+  state.editorWrapRef = {
+    clientWidth: width, addEventListener() {}, removeEventListener() {},
+    querySelector: () => null,
+    getBoundingClientRect: () => ({ left: 0, width }),
+  }
+  state.measureLayout()
+}
+
+test('the outline docks by actual editor width, including a 743px editor inside a wider window', async () => {
+  const h = await harness()
+  try {
+    const a = await h.mount({ noteId: 1, tabKey: 'note:1', active: true })
+    assert.equal(h.windowMock.innerWidth, 1400)
+    measureEditorWidth(a.state, 743)
+    await flush()
+    assert.equal(a.state.layoutWidth, 743)
+    assert.equal(a.state.layoutMode, 'tab', 'source tabs and outline docking use independent width requirements')
+    assert.equal(a.state.outlineOpen, true)
+    assert.equal(a.state.outlineDrawer, false)
+    assert.equal(a.state.outlineInlineVisible, true)
+    assert.equal(a.state.outlineShown, true)
+    assert.equal(a.state.outlineRailWidth, 180)
+  } finally { await h.cleanup() }
+})
+
+test('resizing preserves the chosen outline state and transfers an open drawer back to the dock', async () => {
+  const h = await harness()
+  try {
+    const a = await h.mount({ noteId: 1, tabKey: 'note:1', active: true })
+    measureEditorWidth(a.state, 743)
+    measureEditorWidth(a.state, 500)
+    await flush()
+    assert.equal(a.state.outlineOpen, true, 'narrowing does not overwrite the dock preference')
+    assert.equal(a.state.outlineShown, false)
+    a.state.toggleOutline()
+    await flush()
+    assert.equal(a.state.outlineDrawer, true)
+    assert.equal(a.state.outlineShown, true)
+    measureEditorWidth(a.state, 743)
+    await flush()
+    assert.equal(a.state.outlineInlineVisible, true)
+    assert.equal(a.state.outlineDrawer, false, 'the dock and drawer cannot remain open together')
+    a.state.toggleOutline()
+    assert.equal(a.state.outlineOpen, false)
+    measureEditorWidth(a.state, 500)
+    measureEditorWidth(a.state, 1400)
+    await flush()
+    assert.equal(a.state.outlineOpen, false, 'widening does not undo an explicit close')
+    assert.equal(a.state.outlineShown, false)
+    a.state.toggleOutline()
+    a.state.toggleFocus()
+    assert.equal(a.state.outlineOpen, true, 'focus mode only hides the chosen outline temporarily')
+    assert.equal(a.state.outlineShown, false)
+    a.state.toggleFocus()
+    assert.equal(a.state.outlineShown, true)
+  } finally { await h.cleanup() }
+})
+
+test('opening the outline from focus mode measures restored navigation before choosing a drawer', async () => {
+  const h = await harness()
+  let stopResize
+  try {
+    const a = await h.mount({ noteId: 1, tabKey: 'note:1', active: true })
+    const draft = '# 合成焦点标题\n\n焦点切换不丢失当前草稿'
+    a.state.form.content = draft
+    measureEditorWidth(a.state, 743)
+    a.state.toggleFocus()
+    assert.equal(a.state.focusMode, true)
+    assert.equal(a.state.canDockOutline, true)
+    assert.equal(a.state.outlineShown, false)
+    // Restoring the navigation consumes width before the next layout measurement.
+    stopResize = vue.watch(() => a.state.focusMode, focused => {
+      if (!focused) a.state.editorWrapRef.clientWidth = 680
+    }, { flush: 'sync' })
+    await a.state.toggleOutline()
+    await flush()
+    assert.equal(a.state.layoutWidth, 680)
+    assert.equal(a.state.focusMode, false)
+    assert.equal(a.state.outlineDrawer, true)
+    assert.equal(a.state.outlineShown, true)
+    assert.equal(a.state.outlineInlineVisible, false)
+    assert.equal(a.state.outlineOpen, true)
+    assert.equal(a.state.form.content, draft)
+    assert.equal(a.state.dirty, true)
+    a.props.active = false
+    await flush()
+    await a.state.toggleOutline()
+    assert.equal(a.state.outlineDrawer, false, 'an inactive editor cannot reopen an outline overlay')
+    assert.equal(a.state.form.content, draft)
+    assert.equal(h.writes.length, 0)
+  } finally { stopResize?.(); await h.cleanup() }
+})
+
+test('source widths and divider drags reserve the real outline rail and a usable preview', async () => {
+  const h = await harness()
+  try {
+    const a = await h.mount({ noteId: 1, tabKey: 'note:1', active: true })
+    a.state.readingMode = false
+    for (const [width, rail] of [[860, 189], [1000, 220], [1280, 232]]) {
+      measureEditorWidth(a.state, width)
+      assert.equal(a.state.outlineInlineVisible, true)
+      assert.equal(a.state.outlineRailWidth, rail)
+      const assertUsablePanes = () => {
+        const sourceWidth = Number.parseFloat(a.state.editorStyle.flex.split(' ')[2])
+        assert.ok(sourceWidth >= 300, `source remains at least 300px at editor width ${width}`)
+        assert.ok(width - rail - 9 - sourceWidth >= 320 - 0.001, `preview remains at least 320px at editor width ${width}`)
+      }
+      for (const preference of [24, 90]) { a.state.editorPct = preference; assertUsablePanes() }
+      a.state.startDrag({ preventDefault() {} })
+      for (const clientX of [0, width]) {
+        h.windowMock.dispatchEvent(Object.assign(new Event('mousemove'), { clientX }))
+        assertUsablePanes()
+      }
+      h.windowMock.dispatchEvent(new Event('mouseup'))
+    }
+  } finally { await h.cleanup() }
+})
+
 test('reading scroll measures only visible outline headings and catches up immediately when reopened', async () => {
   const h = await harness()
   try {
@@ -443,18 +739,20 @@ test('reading scroll measures only visible outline headings and catches up immed
     a.state.outlineOpen = false
     await flush()
     assert.equal(measured, 3, 'a queued frame cannot measure an outline hidden before it runs')
-    a.state.layoutMode = 'tab'
+    measureEditorWidth(a.state, 500)
     await flush()
     a.state.openOutlineDrawer()
     await flush()
     assert.equal(a.state.activeIdx, 2)
     assert.equal(measured, 6, 'opening the narrow-screen drawer rebuilds invalidated headings')
-    a.state.layoutMode = 'wide'
+    measureEditorWidth(a.state, 1400)
+    await flush()
     scroller.scrollTop = 610
     a.state.onPreviewScroll()
     await flush()
-    assert.equal(a.state.outlineOpen, false)
-    assert.equal(a.state.activeIdx, 1, 'a drawer kept open across a breakpoint still tracks scrolling')
+    assert.equal(a.state.outlineOpen, true)
+    assert.equal(a.state.outlineDrawer, false)
+    assert.equal(a.state.activeIdx, 1, 'an open drawer transferred to the dock still tracks scrolling')
     a.props.active = false
     await flush()
     a.state.onPreviewScroll()
@@ -606,27 +904,38 @@ test('a narrow source outline jump displays and flushes the latest preview befor
   try {
     const a = await h.mount({ noteId: 1, noteQuery: {}, tabKey: 'note:1', active: true })
     a.state.readingMode = false
-    a.state.layoutMode = 'tab'
+    measureEditorWidth(a.state, 500)
     a.state.editorTab = 'edit'
     a.state.form.content = '# 最新合成标题\n\n合成正文'
     const headings = [], calls = [], scroller = previewScroller(headings)
     scroller.scrollTo = options => { calls.push(options); scroller.scrollTop = options.top }
     a.state.pvScrollRef = scroller
-    a.state.blockPreviewRef = { flushContent(content) {
+    const previewEditor = vue.markRaw({ flushContent(content) {
       assert.equal(a.state.showPreviewPane, true)
       assert.equal(content, '# 最新合成标题\n\n合成正文')
       headings.splice(0, headings.length, { getBoundingClientRect: () => ({ top: 500 - scroller.scrollTop }) })
-    } }
+    } })
+    a.state.blockPreviewRef = previewEditor
     await flush()
     assert.equal(a.state.showPreviewPane, false)
-    await a.state.scrollToHeading(0)
+    a.state.outlineDrawer = true
+    a.state.jumpFromDrawer(0)
+    await flush()
     assert.equal(a.state.editorTab, 'preview')
     assert.equal(scroller.scrollTop, 376)
     assert.equal(calls.length, 1)
+    assert.equal(a.state.outlineDrawer, false)
+    assert.equal(a.state.form.content, '# 最新合成标题\n\n合成正文')
+    assert.equal(a.state.dirty, true)
+    assert.equal(a.state.blockPreviewRef, previewEditor, 'an outline jump retains the current editor instance')
     // A late jump must not act on a different note after this tab deactivates.
     a.props.active = false
     await flush()
-    await a.state.scrollToHeading(0)
+    a.state.outlineDrawer = true
+    a.state.jumpFromDrawer(0)
+    await flush()
     assert.equal(calls.length, 1)
+    assert.equal(a.state.form.content, '# 最新合成标题\n\n合成正文')
+    assert.equal(a.state.dirty, true)
   } finally { await h.cleanup() }
 })

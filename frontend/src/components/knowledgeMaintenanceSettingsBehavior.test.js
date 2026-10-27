@@ -16,15 +16,22 @@ function mountPanel(enabled) {
   const previousWindow = globalThis.window
   globalThis.window = new EventTarget()
   const calls = [], messages = []
-  const fields = [{ key: 'chunkTarget', label: '示例目标长度', type: 'number', min: 200, max: 4000, default: 800, requiresRebuild: true }]
+  const fields = [
+    { key: 'chunkTarget', label: '示例目标长度', type: 'number', min: 200, max: 4000, default: 800, requiresRebuild: true, group: 'index' },
+    { key: 'chunkStrategy', label: '切割方式', type: 'select', default: 'structure', options: [{ value: 'structure' }, { value: 'semantic_long' }], requiresRebuild: true, group: 'index' },
+    { key: 'semanticMinChars', label: '语义切割起始长度', type: 'number', min: 2000, max: 100000, default: 4000, requiresRebuild: true, group: 'index' },
+    { key: 'semanticBreakpointPercentile', label: '语义边界百分位', type: 'number', min: 50, max: 99, default: 85, requiresRebuild: true, group: 'index' },
+  ]
   let saved = false
-  const snapshot = () => ({ fields, values: { chunkTarget: saved ? 900 : 800 }, defaults: { chunkTarget: 800 }, needsRebuild: saved })
+  const defaults = Object.fromEntries(fields.map(field => [field.key, field.default]))
+  let savedValues = { ...defaults }
+  const snapshot = () => ({ fields, values: { ...savedValues }, defaults, needsRebuild: saved })
   const modules = {
     vue,
     'element-plus': { ElMessage: { success: value => messages.push(value), info: value => messages.push(value) } },
     '../api': { kbApi: {
       async settings() { return snapshot() }, async status() { return { configured: true, enabled: true, stale: saved } },
-      async saveSettings(changes) { calls.push(changes); saved = true; return snapshot() },
+      async saveSettings(changes) { calls.push(changes); savedValues = { ...savedValues, ...changes }; saved = true; return snapshot() },
       rebuild() { throw new Error('saving must not rebuild in the browser') },
     } },
     '../api/knowledgeMaintenance.js': { knowledgeMaintenanceApi: { async status() { return { enabled, pending: saved, message: enabled ? '配置变更待后台维护，尚未更新完成' : '自动维护已关闭' } } } },
@@ -63,5 +70,27 @@ test('saved settings honor disabled automatic maintenance and retain a visible m
     assert.match(h.messages.at(-1), /自动维护已关闭/)
     assert.match(h.state.maintenanceHint, /立即维护/)
     assert.doesNotMatch(h.messages.at(-1), /后台将自动/)
+  } finally { h.cleanup() }
+})
+
+test('the existing settings panel exposes optional semantic chunking and saves its rebuild-sensitive parameters together', async () => {
+  const h = mountPanel(false)
+  try {
+    await h.state.load()
+    assert.ok(h.state.visibleFields.some(field => field.key === 'chunkStrategy'))
+    h.state.category = 'index'
+    assert.ok(h.state.visibleFields.some(field => field.key === 'semanticMinChars'))
+    assert.ok(h.state.visibleFields.some(field => field.key === 'semanticBreakpointPercentile'))
+    h.state.values.chunkStrategy = 'semantic_long'
+    h.state.values.semanticMinChars = 6000
+    h.state.values.semanticBreakpointPercentile = 90
+    assert.equal(h.state.rebuildChanges.length, 3)
+    assert.match(h.state.chunkingHint, /笔记、速查卡和短资料保留结构切割/)
+    assert.match(h.state.chunkingHint, /增加重建耗时/)
+    assert.equal(await h.state.save(), true)
+    assert.deepEqual(h.calls, [{ chunkStrategy: 'semantic_long', semanticMinChars: 6000, semanticBreakpointPercentile: 90 }])
+    assert.equal(h.state.values.chunkStrategy, 'semantic_long')
+    assert.equal(h.state.dirty, false)
+    assert.equal(h.state.needsRebuild, true)
   } finally { h.cleanup() }
 })

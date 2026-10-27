@@ -1,0 +1,2224 @@
+[
+  {
+    "id": "q01",
+    "category": "长文主题",
+    "doc_id": "A",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.30790000005254115,
+    "selected": [
+      {
+        "doc_id": "A",
+        "chunk": 0,
+        "score": 0.5965815782546997,
+        "chars": 679
+      },
+      {
+        "doc_id": "A",
+        "chunk": 1,
+        "score": 0.4505404829978943,
+        "chars": 662
+      },
+      {
+        "doc_id": "A",
+        "chunk": 4,
+        "score": 0.4496728777885437,
+        "chars": 672
+      },
+      {
+        "doc_id": "C",
+        "chunk": 3,
+        "score": 0.41938868165016174,
+        "chars": 78
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "chars": 632
+      },
+      {
+        "doc_id": "F",
+        "chunk": 1,
+        "chars": 663
+      },
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "chars": 612
+      },
+      {
+        "doc_id": "E",
+        "chunk": 0,
+        "chars": 531
+      },
+      {
+        "doc_id": "A",
+        "chunk": 3,
+        "chars": 634
+      },
+      {
+        "doc_id": "B",
+        "chunk": 1,
+        "chars": 655
+      }
+    ],
+    "context_chars": 2091
+  },
+  {
+    "id": "q02",
+    "category": "长文主题",
+    "doc_id": "A",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.27210000007471535,
+    "selected": [
+      {
+        "doc_id": "A",
+        "chunk": 1,
+        "score": 0.6363263130187988,
+        "chars": 662
+      },
+      {
+        "doc_id": "A",
+        "chunk": 4,
+        "score": 0.46109887957572937,
+        "chars": 672
+      },
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "score": 0.45731809735298157,
+        "chars": 632
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "D",
+        "chunk": 1,
+        "chars": 1080
+      },
+      {
+        "doc_id": "B",
+        "chunk": 1,
+        "chars": 655
+      },
+      {
+        "doc_id": "A",
+        "chunk": 2,
+        "chars": 512
+      },
+      {
+        "doc_id": "D",
+        "chunk": 0,
+        "chars": 450
+      },
+      {
+        "doc_id": "B",
+        "chunk": 7,
+        "chars": 644
+      },
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "chars": 612
+      },
+      {
+        "doc_id": "A",
+        "chunk": 3,
+        "chars": 634
+      }
+    ],
+    "context_chars": 1966
+  },
+  {
+    "id": "q03",
+    "category": "长文主题",
+    "doc_id": "A",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.2594000000044616,
+    "selected": [
+      {
+        "doc_id": "A",
+        "chunk": 3,
+        "score": 0.6492752432823181,
+        "chars": 634
+      },
+      {
+        "doc_id": "A",
+        "chunk": 4,
+        "score": 0.4904462695121765,
+        "chars": 672
+      },
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "score": 0.44216853380203247,
+        "chars": 612
+      },
+      {
+        "doc_id": "A",
+        "chunk": 8,
+        "score": 0.42746293544769287,
+        "chars": 190
+      },
+      {
+        "doc_id": "J",
+        "chunk": 0,
+        "score": 0.41453754901885986,
+        "chars": 99
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "A",
+        "chunk": 1,
+        "chars": 662
+      },
+      {
+        "doc_id": "B",
+        "chunk": 3,
+        "chars": 682
+      },
+      {
+        "doc_id": "F",
+        "chunk": 4,
+        "chars": 633
+      },
+      {
+        "doc_id": "B",
+        "chunk": 6,
+        "chars": 665
+      },
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "chars": 632
+      }
+    ],
+    "context_chars": 2207
+  },
+  {
+    "id": "q04",
+    "category": "长文主题",
+    "doc_id": "A",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.25279999999838765,
+    "selected": [
+      {
+        "doc_id": "A",
+        "chunk": 4,
+        "score": 0.6302134990692139,
+        "chars": 672
+      },
+      {
+        "doc_id": "D",
+        "chunk": 1,
+        "score": 0.49312523007392883,
+        "chars": 1080
+      },
+      {
+        "doc_id": "D",
+        "chunk": 0,
+        "score": 0.48870033025741577,
+        "chars": 450
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "A",
+        "chunk": 5,
+        "chars": 716
+      },
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "chars": 612
+      },
+      {
+        "doc_id": "E",
+        "chunk": 0,
+        "chars": 531
+      },
+      {
+        "doc_id": "A",
+        "chunk": 1,
+        "chars": 662
+      },
+      {
+        "doc_id": "B",
+        "chunk": 1,
+        "chars": 655
+      },
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "chars": 632
+      },
+      {
+        "doc_id": "E",
+        "chunk": 1,
+        "chars": 863
+      }
+    ],
+    "context_chars": 2202
+  },
+  {
+    "id": "q05",
+    "category": "长文主题",
+    "doc_id": "A",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.2514999998766143,
+    "selected": [
+      {
+        "doc_id": "A",
+        "chunk": 5,
+        "score": 0.5020570158958435,
+        "chars": 716
+      },
+      {
+        "doc_id": "A",
+        "chunk": 1,
+        "score": 0.41982007026672363,
+        "chars": 662
+      },
+      {
+        "doc_id": "A",
+        "chunk": 6,
+        "score": 0.40286529064178467,
+        "chars": 503
+      },
+      {
+        "doc_id": "J",
+        "chunk": 0,
+        "score": 0.38586604595184326,
+        "chars": 99
+      },
+      {
+        "doc_id": "E",
+        "chunk": 2,
+        "score": 0.37885820865631104,
+        "chars": 76
+      },
+      {
+        "doc_id": "G",
+        "chunk": 0,
+        "score": 0.36964938044548035,
+        "chars": 92
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "chars": 632
+      },
+      {
+        "doc_id": "E",
+        "chunk": 0,
+        "chars": 531
+      },
+      {
+        "doc_id": "A",
+        "chunk": 0,
+        "chars": 679
+      },
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "chars": 612
+      }
+    ],
+    "context_chars": 2148
+  },
+  {
+    "id": "q06",
+    "category": "长文主题",
+    "doc_id": "A",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.25009999990288634,
+    "selected": [
+      {
+        "doc_id": "A",
+        "chunk": 7,
+        "score": 0.6772276163101196,
+        "chars": 648
+      },
+      {
+        "doc_id": "A",
+        "chunk": 8,
+        "score": 0.5951735973358154,
+        "chars": 190
+      },
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "score": 0.41019755601882935,
+        "chars": 612
+      },
+      {
+        "doc_id": "E",
+        "chunk": 0,
+        "score": 0.40577083826065063,
+        "chars": 531
+      },
+      {
+        "doc_id": "J",
+        "chunk": 0,
+        "score": 0.3712013065814972,
+        "chars": 99
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "A",
+        "chunk": 1,
+        "chars": 662
+      },
+      {
+        "doc_id": "E",
+        "chunk": 1,
+        "chars": 863
+      },
+      {
+        "doc_id": "F",
+        "chunk": 6,
+        "chars": 499
+      },
+      {
+        "doc_id": "B",
+        "chunk": 7,
+        "chars": 644
+      },
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "chars": 632
+      }
+    ],
+    "context_chars": 2080
+  },
+  {
+    "id": "q07",
+    "category": "长文主题",
+    "doc_id": "B",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.2555999999458436,
+    "selected": [
+      {
+        "doc_id": "B",
+        "chunk": 0,
+        "score": 0.651682436466217,
+        "chars": 742
+      },
+      {
+        "doc_id": "B",
+        "chunk": 1,
+        "score": 0.49264857172966003,
+        "chars": 655
+      },
+      {
+        "doc_id": "B",
+        "chunk": 3,
+        "score": 0.43940412998199463,
+        "chars": 682
+      },
+      {
+        "doc_id": "G",
+        "chunk": 0,
+        "score": 0.4053630828857422,
+        "chars": 92
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "C",
+        "chunk": 0,
+        "chars": 514
+      },
+      {
+        "doc_id": "C",
+        "chunk": 1,
+        "chars": 918
+      },
+      {
+        "doc_id": "B",
+        "chunk": 7,
+        "chars": 644
+      },
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "chars": 632
+      },
+      {
+        "doc_id": "E",
+        "chunk": 0,
+        "chars": 531
+      },
+      {
+        "doc_id": "F",
+        "chunk": 0,
+        "chars": 661
+      }
+    ],
+    "context_chars": 2171
+  },
+  {
+    "id": "q08",
+    "category": "长文主题",
+    "doc_id": "B",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.2504999999928259,
+    "selected": [
+      {
+        "doc_id": "B",
+        "chunk": 1,
+        "score": 0.645673930644989,
+        "chars": 655
+      },
+      {
+        "doc_id": "B",
+        "chunk": 7,
+        "score": 0.516954243183136,
+        "chars": 644
+      },
+      {
+        "doc_id": "B",
+        "chunk": 2,
+        "score": 0.4731026291847229,
+        "chars": 506
+      },
+      {
+        "doc_id": "D",
+        "chunk": 2,
+        "score": 0.45602405071258545,
+        "chars": 114
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "B",
+        "chunk": 0,
+        "chars": 742
+      },
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "chars": 632
+      },
+      {
+        "doc_id": "A",
+        "chunk": 1,
+        "chars": 662
+      },
+      {
+        "doc_id": "B",
+        "chunk": 3,
+        "chars": 682
+      },
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "chars": 612
+      },
+      {
+        "doc_id": "D",
+        "chunk": 1,
+        "chars": 1080
+      }
+    ],
+    "context_chars": 1919
+  },
+  {
+    "id": "q09",
+    "category": "长文主题",
+    "doc_id": "B",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.2509000000827655,
+    "selected": [
+      {
+        "doc_id": "B",
+        "chunk": 3,
+        "score": 0.5457953214645386,
+        "chars": 682
+      },
+      {
+        "doc_id": "B",
+        "chunk": 7,
+        "score": 0.46057188510894775,
+        "chars": 644
+      },
+      {
+        "doc_id": "B",
+        "chunk": 0,
+        "score": 0.4516284465789795,
+        "chars": 742
+      },
+      {
+        "doc_id": "G",
+        "chunk": 0,
+        "score": 0.4090937077999115,
+        "chars": 92
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "chars": 632
+      },
+      {
+        "doc_id": "B",
+        "chunk": 1,
+        "chars": 655
+      },
+      {
+        "doc_id": "C",
+        "chunk": 1,
+        "chars": 918
+      },
+      {
+        "doc_id": "C",
+        "chunk": 0,
+        "chars": 514
+      },
+      {
+        "doc_id": "D",
+        "chunk": 0,
+        "chars": 450
+      },
+      {
+        "doc_id": "E",
+        "chunk": 0,
+        "chars": 531
+      }
+    ],
+    "context_chars": 2160
+  },
+  {
+    "id": "q10",
+    "category": "长文主题",
+    "doc_id": "B",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.2930999999080086,
+    "selected": [
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "score": 0.6235719919204712,
+        "chars": 632
+      },
+      {
+        "doc_id": "B",
+        "chunk": 7,
+        "score": 0.529427707195282,
+        "chars": 644
+      },
+      {
+        "doc_id": "B",
+        "chunk": 5,
+        "score": 0.5220723152160645,
+        "chars": 505
+      },
+      {
+        "doc_id": "J",
+        "chunk": 0,
+        "score": 0.46221935749053955,
+        "chars": 99
+      },
+      {
+        "doc_id": "D",
+        "chunk": 2,
+        "score": 0.43321695923805237,
+        "chars": 114
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "B",
+        "chunk": 1,
+        "chars": 655
+      },
+      {
+        "doc_id": "B",
+        "chunk": 3,
+        "chars": 682
+      },
+      {
+        "doc_id": "B",
+        "chunk": 6,
+        "chars": 665
+      },
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "chars": 612
+      },
+      {
+        "doc_id": "B",
+        "chunk": 0,
+        "chars": 742
+      }
+    ],
+    "context_chars": 1994
+  },
+  {
+    "id": "q11",
+    "category": "长文主题",
+    "doc_id": "B",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.36090000003241585,
+    "selected": [
+      {
+        "doc_id": "B",
+        "chunk": 6,
+        "score": 0.6767182350158691,
+        "chars": 665
+      },
+      {
+        "doc_id": "B",
+        "chunk": 7,
+        "score": 0.5403268337249756,
+        "chars": 644
+      },
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "score": 0.5206035375595093,
+        "chars": 612
+      },
+      {
+        "doc_id": "E",
+        "chunk": 2,
+        "score": 0.4697972536087036,
+        "chars": 76
+      },
+      {
+        "doc_id": "D",
+        "chunk": 2,
+        "score": 0.44492852687835693,
+        "chars": 114
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "B",
+        "chunk": 1,
+        "chars": 655
+      },
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "chars": 632
+      },
+      {
+        "doc_id": "A",
+        "chunk": 1,
+        "chars": 662
+      },
+      {
+        "doc_id": "B",
+        "chunk": 3,
+        "chars": 682
+      },
+      {
+        "doc_id": "D",
+        "chunk": 1,
+        "chars": 1080
+      }
+    ],
+    "context_chars": 2111
+  },
+  {
+    "id": "q12",
+    "category": "长文主题",
+    "doc_id": "B",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.2775000000383443,
+    "selected": [
+      {
+        "doc_id": "B",
+        "chunk": 7,
+        "score": 0.6623794436454773,
+        "chars": 644
+      },
+      {
+        "doc_id": "B",
+        "chunk": 1,
+        "score": 0.5593971014022827,
+        "chars": 655
+      },
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "score": 0.532781720161438,
+        "chars": 632
+      },
+      {
+        "doc_id": "B",
+        "chunk": 8,
+        "score": 0.47672948241233826,
+        "chars": 385
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "A",
+        "chunk": 1,
+        "chars": 662
+      },
+      {
+        "doc_id": "D",
+        "chunk": 0,
+        "chars": 450
+      },
+      {
+        "doc_id": "B",
+        "chunk": 3,
+        "chars": 682
+      },
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "chars": 612
+      },
+      {
+        "doc_id": "B",
+        "chunk": 6,
+        "chars": 665
+      },
+      {
+        "doc_id": "D",
+        "chunk": 1,
+        "chars": 1080
+      }
+    ],
+    "context_chars": 2316
+  },
+  {
+    "id": "q13",
+    "category": "公式",
+    "doc_id": "C",
+    "hit1": false,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 0.5,
+    "rank_ms": 0.28350000002319575,
+    "selected": [
+      {
+        "doc_id": "C",
+        "chunk": 2,
+        "score": 0.7898163795471191,
+        "chars": 143
+      },
+      {
+        "doc_id": "C",
+        "chunk": 1,
+        "score": 0.5364997386932373,
+        "chars": 918
+      },
+      {
+        "doc_id": "C",
+        "chunk": 0,
+        "score": 0.4828406572341919,
+        "chars": 514
+      },
+      {
+        "doc_id": "C",
+        "chunk": 3,
+        "score": 0.4148600697517395,
+        "chars": 78
+      },
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "score": 0.40195226669311523,
+        "chars": 612
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "F",
+        "chunk": 4,
+        "chars": 633
+      },
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "chars": 632
+      },
+      {
+        "doc_id": "B",
+        "chunk": 3,
+        "chars": 682
+      },
+      {
+        "doc_id": "B",
+        "chunk": 1,
+        "chars": 655
+      },
+      {
+        "doc_id": "D",
+        "chunk": 0,
+        "chars": 450
+      }
+    ],
+    "context_chars": 2265
+  },
+  {
+    "id": "q14",
+    "category": "公式",
+    "doc_id": "C",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.2021000000240747,
+    "selected": [
+      {
+        "doc_id": "C",
+        "chunk": 2,
+        "score": 0.6259616613388062,
+        "chars": 143
+      },
+      {
+        "doc_id": "C",
+        "chunk": 1,
+        "score": 0.432558536529541,
+        "chars": 918
+      },
+      {
+        "doc_id": "C",
+        "chunk": 0,
+        "score": 0.39065802097320557,
+        "chars": 514
+      },
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "score": 0.38399985432624817,
+        "chars": 612
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "B",
+        "chunk": 3,
+        "chars": 682
+      },
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "chars": 632
+      },
+      {
+        "doc_id": "F",
+        "chunk": 3,
+        "chars": 735
+      },
+      {
+        "doc_id": "B",
+        "chunk": 1,
+        "chars": 655
+      },
+      {
+        "doc_id": "B",
+        "chunk": 7,
+        "chars": 644
+      },
+      {
+        "doc_id": "D",
+        "chunk": 0,
+        "chars": 450
+      }
+    ],
+    "context_chars": 2187
+  },
+  {
+    "id": "q15",
+    "category": "多证据",
+    "doc_id": "C",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.3208000000540778,
+    "selected": [
+      {
+        "doc_id": "C",
+        "chunk": 3,
+        "score": 0.886839747428894,
+        "chars": 78
+      },
+      {
+        "doc_id": "C",
+        "chunk": 1,
+        "score": 0.6212152242660522,
+        "chars": 918
+      },
+      {
+        "doc_id": "C",
+        "chunk": 0,
+        "score": 0.48119521141052246,
+        "chars": 514
+      },
+      {
+        "doc_id": "E",
+        "chunk": 0,
+        "score": 0.4380504786968231,
+        "chars": 531
+      },
+      {
+        "doc_id": "C",
+        "chunk": 2,
+        "score": 0.4361714720726013,
+        "chars": 143
+      },
+      {
+        "doc_id": "E",
+        "chunk": 2,
+        "score": 0.4200279414653778,
+        "chars": 76
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "chars": 612
+      },
+      {
+        "doc_id": "B",
+        "chunk": 3,
+        "chars": 682
+      },
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "chars": 632
+      },
+      {
+        "doc_id": "B",
+        "chunk": 7,
+        "chars": 644
+      }
+    ],
+    "context_chars": 2260
+  },
+  {
+    "id": "q16",
+    "category": "代码",
+    "doc_id": "D",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.26669999988371274,
+    "selected": [
+      {
+        "doc_id": "D",
+        "chunk": 2,
+        "score": 0.7683656215667725,
+        "chars": 114
+      },
+      {
+        "doc_id": "D",
+        "chunk": 1,
+        "score": 0.6461188793182373,
+        "chars": 1080
+      },
+      {
+        "doc_id": "D",
+        "chunk": 0,
+        "score": 0.5628656148910522,
+        "chars": 450
+      },
+      {
+        "doc_id": "B",
+        "chunk": 1,
+        "score": 0.5028805732727051,
+        "chars": 655
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "A",
+        "chunk": 1,
+        "chars": 662
+      },
+      {
+        "doc_id": "B",
+        "chunk": 7,
+        "chars": 644
+      },
+      {
+        "doc_id": "B",
+        "chunk": 3,
+        "chars": 682
+      },
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "chars": 612
+      },
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "chars": 632
+      },
+      {
+        "doc_id": "A",
+        "chunk": 4,
+        "chars": 672
+      }
+    ],
+    "context_chars": 2299
+  },
+  {
+    "id": "q17",
+    "category": "代码",
+    "doc_id": "D",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.2821999999014224,
+    "selected": [
+      {
+        "doc_id": "D",
+        "chunk": 2,
+        "score": 0.6248460412025452,
+        "chars": 114
+      },
+      {
+        "doc_id": "D",
+        "chunk": 1,
+        "score": 0.5789258480072021,
+        "chars": 1080
+      },
+      {
+        "doc_id": "D",
+        "chunk": 0,
+        "score": 0.565940797328949,
+        "chars": 450
+      },
+      {
+        "doc_id": "E",
+        "chunk": 0,
+        "score": 0.4040638506412506,
+        "chars": 531
+      },
+      {
+        "doc_id": "G",
+        "chunk": 0,
+        "score": 0.3508380949497223,
+        "chars": 92
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "chars": 612
+      },
+      {
+        "doc_id": "B",
+        "chunk": 1,
+        "chars": 655
+      },
+      {
+        "doc_id": "C",
+        "chunk": 0,
+        "chars": 514
+      },
+      {
+        "doc_id": "F",
+        "chunk": 4,
+        "chars": 633
+      },
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "chars": 632
+      }
+    ],
+    "context_chars": 2267
+  },
+  {
+    "id": "q18",
+    "category": "代码",
+    "doc_id": "D",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.33129999997072446,
+    "selected": [
+      {
+        "doc_id": "D",
+        "chunk": 3,
+        "score": 0.6727815866470337,
+        "chars": 353
+      },
+      {
+        "doc_id": "F",
+        "chunk": 0,
+        "score": 0.49584248661994934,
+        "chars": 661
+      },
+      {
+        "doc_id": "F",
+        "chunk": 3,
+        "score": 0.44853919744491577,
+        "chars": 735
+      },
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "score": 0.41215628385543823,
+        "chars": 612
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "F",
+        "chunk": 1,
+        "chars": 663
+      },
+      {
+        "doc_id": "F",
+        "chunk": 2,
+        "chars": 701
+      },
+      {
+        "doc_id": "B",
+        "chunk": 7,
+        "chars": 644
+      },
+      {
+        "doc_id": "J",
+        "chunk": 0,
+        "chars": 99
+      },
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "chars": 632
+      },
+      {
+        "doc_id": "E",
+        "chunk": 0,
+        "chars": 531
+      }
+    ],
+    "context_chars": 2361
+  },
+  {
+    "id": "q19",
+    "category": "表格",
+    "doc_id": "E",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.28449999990698416,
+    "selected": [
+      {
+        "doc_id": "E",
+        "chunk": 1,
+        "score": 0.5187546014785767,
+        "chars": 863
+      },
+      {
+        "doc_id": "D",
+        "chunk": 0,
+        "score": 0.48744601011276245,
+        "chars": 450
+      },
+      {
+        "doc_id": "E",
+        "chunk": 2,
+        "score": 0.4789448380470276,
+        "chars": 76
+      },
+      {
+        "doc_id": "E",
+        "chunk": 0,
+        "score": 0.47109705209732056,
+        "chars": 531
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "A",
+        "chunk": 4,
+        "chars": 672
+      },
+      {
+        "doc_id": "A",
+        "chunk": 5,
+        "chars": 716
+      },
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "chars": 612
+      },
+      {
+        "doc_id": "D",
+        "chunk": 1,
+        "chars": 1080
+      },
+      {
+        "doc_id": "A",
+        "chunk": 1,
+        "chars": 662
+      },
+      {
+        "doc_id": "F",
+        "chunk": 1,
+        "chars": 663
+      }
+    ],
+    "context_chars": 1920
+  },
+  {
+    "id": "q20",
+    "category": "表格",
+    "doc_id": "E",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.2514000000246597,
+    "selected": [
+      {
+        "doc_id": "E",
+        "chunk": 1,
+        "score": 0.5843795537948608,
+        "chars": 863
+      },
+      {
+        "doc_id": "E",
+        "chunk": 0,
+        "score": 0.5561144351959229,
+        "chars": 531
+      },
+      {
+        "doc_id": "E",
+        "chunk": 2,
+        "score": 0.5463668704032898,
+        "chars": 76
+      },
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "score": 0.4514794945716858,
+        "chars": 612
+      },
+      {
+        "doc_id": "C",
+        "chunk": 3,
+        "score": 0.4022814631462097,
+        "chars": 78
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "F",
+        "chunk": 1,
+        "chars": 663
+      },
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "chars": 632
+      },
+      {
+        "doc_id": "D",
+        "chunk": 0,
+        "chars": 450
+      },
+      {
+        "doc_id": "A",
+        "chunk": 4,
+        "chars": 672
+      },
+      {
+        "doc_id": "A",
+        "chunk": 1,
+        "chars": 662
+      }
+    ],
+    "context_chars": 2160
+  },
+  {
+    "id": "q21",
+    "category": "表格",
+    "doc_id": "E",
+    "hit1": false,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 0.3333333333333333,
+    "rank_ms": 0.27480000017021666,
+    "selected": [
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "score": 0.5860445499420166,
+        "chars": 612
+      },
+      {
+        "doc_id": "E",
+        "chunk": 0,
+        "score": 0.5565544962882996,
+        "chars": 531
+      },
+      {
+        "doc_id": "E",
+        "chunk": 2,
+        "score": 0.5554131269454956,
+        "chars": 76
+      },
+      {
+        "doc_id": "E",
+        "chunk": 1,
+        "score": 0.5045791864395142,
+        "chars": 863
+      },
+      {
+        "doc_id": "J",
+        "chunk": 0,
+        "score": 0.4794420599937439,
+        "chars": 99
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "B",
+        "chunk": 7,
+        "chars": 644
+      },
+      {
+        "doc_id": "F",
+        "chunk": 6,
+        "chars": 499
+      },
+      {
+        "doc_id": "B",
+        "chunk": 6,
+        "chars": 665
+      },
+      {
+        "doc_id": "B",
+        "chunk": 3,
+        "chars": 682
+      },
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "chars": 632
+      }
+    ],
+    "context_chars": 2181
+  },
+  {
+    "id": "q22",
+    "category": "表格",
+    "doc_id": "E",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.2729000000272208,
+    "selected": [
+      {
+        "doc_id": "E",
+        "chunk": 1,
+        "score": 0.6472010612487793,
+        "chars": 863
+      },
+      {
+        "doc_id": "E",
+        "chunk": 0,
+        "score": 0.6060789823532104,
+        "chars": 531
+      },
+      {
+        "doc_id": "E",
+        "chunk": 2,
+        "score": 0.5490471124649048,
+        "chars": 76
+      },
+      {
+        "doc_id": "F",
+        "chunk": 1,
+        "score": 0.4840434193611145,
+        "chars": 663
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "chars": 612
+      },
+      {
+        "doc_id": "F",
+        "chunk": 0,
+        "chars": 661
+      },
+      {
+        "doc_id": "F",
+        "chunk": 2,
+        "chars": 701
+      },
+      {
+        "doc_id": "F",
+        "chunk": 6,
+        "chars": 499
+      },
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "chars": 632
+      },
+      {
+        "doc_id": "D",
+        "chunk": 0,
+        "chars": 450
+      }
+    ],
+    "context_chars": 2133
+  },
+  {
+    "id": "q23",
+    "category": "长文主题",
+    "doc_id": "F",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.2692000000479311,
+    "selected": [
+      {
+        "doc_id": "F",
+        "chunk": 0,
+        "score": 0.6384570598602295,
+        "chars": 661
+      },
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "score": 0.5211485028266907,
+        "chars": 612
+      },
+      {
+        "doc_id": "E",
+        "chunk": 0,
+        "score": 0.5200067758560181,
+        "chars": 531
+      },
+      {
+        "doc_id": "F",
+        "chunk": 6,
+        "score": 0.44280770421028137,
+        "chars": 499
+      },
+      {
+        "doc_id": "E",
+        "chunk": 2,
+        "score": 0.42880088090896606,
+        "chars": 76
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "F",
+        "chunk": 1,
+        "chars": 663
+      },
+      {
+        "doc_id": "B",
+        "chunk": 7,
+        "chars": 644
+      },
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "chars": 632
+      },
+      {
+        "doc_id": "E",
+        "chunk": 1,
+        "chars": 863
+      },
+      {
+        "doc_id": "B",
+        "chunk": 1,
+        "chars": 655
+      }
+    ],
+    "context_chars": 2379
+  },
+  {
+    "id": "q24",
+    "category": "长文主题",
+    "doc_id": "F",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.285200000007535,
+    "selected": [
+      {
+        "doc_id": "F",
+        "chunk": 1,
+        "score": 0.619635283946991,
+        "chars": 663
+      },
+      {
+        "doc_id": "F",
+        "chunk": 2,
+        "score": 0.44735532999038696,
+        "chars": 701
+      },
+      {
+        "doc_id": "E",
+        "chunk": 0,
+        "score": 0.4343361258506775,
+        "chars": 531
+      },
+      {
+        "doc_id": "J",
+        "chunk": 0,
+        "score": 0.33660322427749634,
+        "chars": 99
+      },
+      {
+        "doc_id": "E",
+        "chunk": 2,
+        "score": 0.3272324204444885,
+        "chars": 76
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "chars": 612
+      },
+      {
+        "doc_id": "F",
+        "chunk": 0,
+        "chars": 661
+      },
+      {
+        "doc_id": "E",
+        "chunk": 1,
+        "chars": 863
+      },
+      {
+        "doc_id": "B",
+        "chunk": 7,
+        "chars": 644
+      },
+      {
+        "doc_id": "A",
+        "chunk": 4,
+        "chars": 672
+      }
+    ],
+    "context_chars": 2070
+  },
+  {
+    "id": "q25",
+    "category": "长文主题",
+    "doc_id": "F",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.3019999999196443,
+    "selected": [
+      {
+        "doc_id": "F",
+        "chunk": 3,
+        "score": 0.6900651454925537,
+        "chars": 735
+      },
+      {
+        "doc_id": "F",
+        "chunk": 2,
+        "score": 0.4760109782218933,
+        "chars": 701
+      },
+      {
+        "doc_id": "D",
+        "chunk": 0,
+        "score": 0.4650794267654419,
+        "chars": 450
+      },
+      {
+        "doc_id": "C",
+        "chunk": 3,
+        "score": 0.4001046121120453,
+        "chars": 78
+      },
+      {
+        "doc_id": "D",
+        "chunk": 3,
+        "score": 0.39956510066986084,
+        "chars": 353
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "A",
+        "chunk": 4,
+        "chars": 672
+      },
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "chars": 612
+      },
+      {
+        "doc_id": "B",
+        "chunk": 3,
+        "chars": 682
+      },
+      {
+        "doc_id": "F",
+        "chunk": 0,
+        "chars": 661
+      },
+      {
+        "doc_id": "E",
+        "chunk": 0,
+        "chars": 531
+      }
+    ],
+    "context_chars": 2317
+  },
+  {
+    "id": "q26",
+    "category": "长文主题",
+    "doc_id": "F",
+    "hit1": false,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 0.5,
+    "rank_ms": 0.2853999999388179,
+    "selected": [
+      {
+        "doc_id": "E",
+        "chunk": 0,
+        "score": 0.5810104012489319,
+        "chars": 531
+      },
+      {
+        "doc_id": "F",
+        "chunk": 4,
+        "score": 0.563523530960083,
+        "chars": 633
+      },
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "score": 0.5156797170639038,
+        "chars": 612
+      },
+      {
+        "doc_id": "A",
+        "chunk": 8,
+        "score": 0.4130231738090515,
+        "chars": 190
+      },
+      {
+        "doc_id": "E",
+        "chunk": 2,
+        "score": 0.4051262140274048,
+        "chars": 76
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "E",
+        "chunk": 1,
+        "chars": 863
+      },
+      {
+        "doc_id": "A",
+        "chunk": 4,
+        "chars": 672
+      },
+      {
+        "doc_id": "F",
+        "chunk": 1,
+        "chars": 663
+      },
+      {
+        "doc_id": "A",
+        "chunk": 1,
+        "chars": 662
+      },
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "chars": 632
+      }
+    ],
+    "context_chars": 2042
+  },
+  {
+    "id": "q27",
+    "category": "长文主题",
+    "doc_id": "F",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.23160000000643777,
+    "selected": [
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "score": 0.6208332777023315,
+        "chars": 612
+      },
+      {
+        "doc_id": "E",
+        "chunk": 0,
+        "score": 0.5798791646957397,
+        "chars": 531
+      },
+      {
+        "doc_id": "F",
+        "chunk": 6,
+        "score": 0.5715070962905884,
+        "chars": 499
+      },
+      {
+        "doc_id": "E",
+        "chunk": 2,
+        "score": 0.5343225598335266,
+        "chars": 76
+      },
+      {
+        "doc_id": "J",
+        "chunk": 0,
+        "score": 0.5097307562828064,
+        "chars": 99
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "E",
+        "chunk": 1,
+        "chars": 863
+      },
+      {
+        "doc_id": "F",
+        "chunk": 0,
+        "chars": 661
+      },
+      {
+        "doc_id": "B",
+        "chunk": 7,
+        "chars": 644
+      },
+      {
+        "doc_id": "F",
+        "chunk": 1,
+        "chars": 663
+      },
+      {
+        "doc_id": "B",
+        "chunk": 3,
+        "chars": 682
+      }
+    ],
+    "context_chars": 1817
+  },
+  {
+    "id": "q28",
+    "category": "短速查",
+    "doc_id": "G",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.22280000007413037,
+    "selected": [
+      {
+        "doc_id": "G",
+        "chunk": 0,
+        "score": 0.8334373235702515,
+        "chars": 92
+      },
+      {
+        "doc_id": "B",
+        "chunk": 3,
+        "score": 0.4930787682533264,
+        "chars": 682
+      },
+      {
+        "doc_id": "D",
+        "chunk": 0,
+        "score": 0.48215973377227783,
+        "chars": 450
+      },
+      {
+        "doc_id": "B",
+        "chunk": 1,
+        "score": 0.47118231654167175,
+        "chars": 655
+      },
+      {
+        "doc_id": "J",
+        "chunk": 0,
+        "score": 0.4500841796398163,
+        "chars": 99
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "D",
+        "chunk": 1,
+        "chars": 1080
+      },
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "chars": 632
+      },
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "chars": 612
+      },
+      {
+        "doc_id": "A",
+        "chunk": 1,
+        "chars": 662
+      },
+      {
+        "doc_id": "A",
+        "chunk": 4,
+        "chars": 672
+      }
+    ],
+    "context_chars": 1978
+  },
+  {
+    "id": "q29",
+    "category": "短速查",
+    "doc_id": "H",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.22429999989981297,
+    "selected": [
+      {
+        "doc_id": "H",
+        "chunk": 0,
+        "score": 0.6427261829376221,
+        "chars": 102
+      },
+      {
+        "doc_id": "G",
+        "chunk": 0,
+        "score": 0.3992483615875244,
+        "chars": 92
+      },
+      {
+        "doc_id": "D",
+        "chunk": 0,
+        "score": 0.38730311393737793,
+        "chars": 450
+      },
+      {
+        "doc_id": "B",
+        "chunk": 3,
+        "score": 0.3854353427886963,
+        "chars": 682
+      },
+      {
+        "doc_id": "E",
+        "chunk": 0,
+        "score": 0.3779570758342743,
+        "chars": 531
+      },
+      {
+        "doc_id": "C",
+        "chunk": 0,
+        "score": 0.370624303817749,
+        "chars": 514
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "C",
+        "chunk": 1,
+        "chars": 918
+      },
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "chars": 612
+      },
+      {
+        "doc_id": "C",
+        "chunk": 3,
+        "chars": 78
+      },
+      {
+        "doc_id": "A",
+        "chunk": 1,
+        "chars": 662
+      }
+    ],
+    "context_chars": 2371
+  },
+  {
+    "id": "q30",
+    "category": "短速查",
+    "doc_id": "I",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.22209999997357954,
+    "selected": [
+      {
+        "doc_id": "I",
+        "chunk": 0,
+        "score": 0.860335111618042,
+        "chars": 113
+      },
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "score": 0.46151724457740784,
+        "chars": 612
+      },
+      {
+        "doc_id": "B",
+        "chunk": 1,
+        "score": 0.426730215549469,
+        "chars": 655
+      },
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "score": 0.4257729947566986,
+        "chars": 632
+      },
+      {
+        "doc_id": "A",
+        "chunk": 8,
+        "score": 0.41503167152404785,
+        "chars": 190
+      },
+      {
+        "doc_id": "C",
+        "chunk": 3,
+        "score": 0.3756624460220337,
+        "chars": 78
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "B",
+        "chunk": 7,
+        "chars": 644
+      },
+      {
+        "doc_id": "A",
+        "chunk": 1,
+        "chars": 662
+      },
+      {
+        "doc_id": "F",
+        "chunk": 1,
+        "chars": 663
+      },
+      {
+        "doc_id": "A",
+        "chunk": 4,
+        "chars": 672
+      }
+    ],
+    "context_chars": 2280
+  },
+  {
+    "id": "q31",
+    "category": "短速查",
+    "doc_id": "J",
+    "hit1": true,
+    "hit3": true,
+    "hit_budget": true,
+    "complete": true,
+    "coverage": 1.0,
+    "rr": 1.0,
+    "rank_ms": 0.2248999999210355,
+    "selected": [
+      {
+        "doc_id": "J",
+        "chunk": 0,
+        "score": 0.6887730956077576,
+        "chars": 99
+      },
+      {
+        "doc_id": "B",
+        "chunk": 4,
+        "score": 0.6403764486312866,
+        "chars": 632
+      },
+      {
+        "doc_id": "B",
+        "chunk": 5,
+        "score": 0.5515788197517395,
+        "chars": 505
+      },
+      {
+        "doc_id": "F",
+        "chunk": 0,
+        "score": 0.4936395287513733,
+        "chars": 661
+      },
+      {
+        "doc_id": "F",
+        "chunk": 6,
+        "score": 0.4542614817619324,
+        "chars": 499
+      }
+    ],
+    "blocked": [
+      {
+        "doc_id": "F",
+        "chunk": 5,
+        "chars": 612
+      },
+      {
+        "doc_id": "B",
+        "chunk": 7,
+        "chars": 644
+      },
+      {
+        "doc_id": "A",
+        "chunk": 1,
+        "chars": 662
+      },
+      {
+        "doc_id": "F",
+        "chunk": 3,
+        "chars": 735
+      },
+      {
+        "doc_id": "B",
+        "chunk": 3,
+        "chars": 682
+      }
+    ],
+    "context_chars": 2396
+  }
+]
