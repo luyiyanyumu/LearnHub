@@ -1222,6 +1222,10 @@ function askFromEvent(e) {
                   </div>
                 </div>
               </details>
+              <details v-else-if="a.toolName === 'run_app_command' && a.preview" class="edit-preview" open>
+                <summary>查看应用命令与参数</summary>
+                <pre class="command-preview" tabindex="0" aria-label="待确认的应用命令参数">{{ JSON.stringify(a.preview, null, 2) }}</pre>
+              </details>
               <p v-if="uncertainActions.has(a.id) || a.status === 'executing'" class="pending-state" role="status">{{ uncertainActions.has(a.id) ? '结果暂未确认，请先查看执行状态。' : '操作正在后台执行，可稍后查看状态。' }}</p>
             </div>
             <span class="pending-btns">
@@ -2030,6 +2034,17 @@ function askFromEvent(e) {
 .pending-state { margin: 6px 0 0; color: var(--app-text-2); font-size: var(--font-caption); line-height: 1.6; }
 .edit-preview { margin-top: 6px; font-size: 12px; color: var(--app-text-2); }
 .edit-preview summary { cursor: pointer; color: var(--app-brand-deep); }
+.command-preview {
+  max-height: 14rem;
+  overflow: auto;
+  margin: var(--space-sm) 0 0;
+  padding: var(--space-sm);
+  border: 1px solid var(--app-border-weak);
+  border-radius: var(--radius);
+  background: var(--app-code-bg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .edit-preview-list { margin-top: 6px; }
 .edit-preview-change + .edit-preview-change { margin-top: 10px; }
 .edit-preview-label { font-weight: 600; color: var(--app-text-1); }

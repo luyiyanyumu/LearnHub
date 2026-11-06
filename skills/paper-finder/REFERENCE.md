@@ -104,13 +104,12 @@
 
 ### 直接把论文存进资料库（已验证可用）
 
-**应用内智能体**（悬浮对话）已经有 `add_file_from_url` / `list_files` 两个工具，用户说"帮我放进资料库"
-时直接调用即可（写操作会挂成待确认卡片）；learn-hub 的 MCP server 另有同一套资料库工具，
-DeepSeek Harness 侧也能用：
+应用内智能体用 `run_app_command` 调用 `file.page`，在 `query.kw` 中填文件名查重。用户要求入库时，用
+`add_file_from_url` 生成待确认卡片。外部客户端通过 LearnHub MCP 的资料库工具完成相应操作。
 
 | 工具 | 用途 |
 | --- | --- |
-| `list_files` | 看资料库里已有什么（文件名 / 类型 / 大小 / **抽取状态与字数**），先查重再入库 |
+| `file.page`（应用内命令）/ `list_files`（MCP） | 查资料名称、类型、大小和抽取状态 `textStatus`、正文长度 `textChars`，先查重再入库 |
 | `upload_file_from_url`（MCP）/ `add_file_from_url`（应用内智能体） | 给一个**全文直链**，下载并入库 |
 | `upload_file`（MCP） | 把**本机已下载**的文件按路径入库（终端里 `curl` 下来的 PDF 用这个） |
 | `get_file_text`（MCP）/ `get_file`（应用内智能体） | 读入库后抽出来的正文（前者默认 2000 字可翻页，后者 8000 字并支持 `query` 全文定位） |

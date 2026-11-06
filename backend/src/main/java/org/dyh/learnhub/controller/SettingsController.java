@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -28,6 +29,10 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api/settings")
 public class SettingsController {
+
+    private static final List<String> DIAGNOSTIC_KEYS = List.of(
+            SettingsService.KEY_EMBED_BASE_URL, SettingsService.KEY_EMBED_MODEL, "kb.vector_enabled",
+            SettingsService.KEY_MODEL, SettingsService.KEY_BASE_URL, "kb.vector_backend");
 
     private final SettingsService settingsService;
     private final ModelProfileService profiles;
@@ -53,23 +58,21 @@ public class SettingsController {
      * <p>为什么需要它：容器部署时"嵌入服务地址"只能靠启动参数给，而设置面板里没有这个入口 ——
      * 一旦没生效，从界面上完全看不出是"没传进来"还是"传了但被数据库盖住"。
      * 这个只读接口把判断依据一次说清：数据库里有没有该键、Spring 能不能解析到外部值、
-     * 以及最终生效值。排错时先看它，不用再猜。
+     * 以及最终生效值。只接受用于此诊断的非密钥设置项。
      */
     @GetMapping("/effective")
     public Result<List<Map<String, Object>>> effective(@RequestParam(required = false) String keys) {
         List<String> wanted = (keys == null || keys.isBlank())
-                ? List.of("ai.embed_base_url", "ai.embed_model", "kb.vector_enabled",
-                          "ai.model", "ai.base_url", "kb.vector_backend")
-                : List.of(keys.split(","));
+                ? DIAGNOSTIC_KEYS
+                : Arrays.stream(keys.split(",")).map(String::trim).filter(key -> !key.isEmpty()).toList();
+        if (!DIAGNOSTIC_KEYS.containsAll(wanted)) {
+            return Result.error(400, "配置来源诊断仅支持以下设置项: " + String.join(", ", DIAGNOSTIC_KEYS));
+        }
         List<Map<String, Object>> out = new ArrayList<>();
-        for (String rawKey : wanted) {
-            String key = rawKey.trim();
-            if (key.isEmpty()) {
-                continue;
-            }
+        for (String key : wanted) {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("key", key);
-            m.put("envName", key.replace('.', '_').replace('_', '_').toUpperCase(Locale.ROOT));
+            m.put("envName", key.replace('.', '_').toUpperCase(Locale.ROOT));
             m.put("canonical", key.replace('_', '-'));
             m.put("fromDb", settingsService.raw(key));
             m.put("fromExternal", settingsService.externalValue(key));

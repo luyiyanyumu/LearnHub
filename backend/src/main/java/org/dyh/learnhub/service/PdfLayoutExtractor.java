@@ -14,6 +14,10 @@ import org.apache.pdfbox.pdmodel.font.encoding.GlyphList;
 import org.apache.pdfbox.pdmodel.font.PDSimpleFont;
 import org.apache.pdfbox.pdmodel.graphics.PDXObject;
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
+import org.apache.pdfbox.pdmodel.interactive.annotation.PDAnnotationLink;
+import org.apache.pdfbox.pdmodel.interactive.action.PDActionURI;
+import org.apache.pdfbox.pdmodel.interactive.action.PDActionGoTo;
+import org.apache.pdfbox.pdmodel.interactive.documentnavigation.destination.PDPageDestination;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.apache.pdfbox.text.TextPosition;
 import org.apache.pdfbox.util.Matrix;
@@ -269,7 +273,11 @@ public class PdfLayoutExtractor {
      */
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record Block(String type, String text, int level, String src, Integer page, double[] rect,
-                        String latex, String latexStatus, String latexMessage) {
+                        String latex, String latexStatus, String latexMessage, String markdown) {
+        public Block(String type, String text, int level, String src, Integer page, double[] rect,
+                     String latex, String latexStatus, String latexMessage) {
+            this(type,text,level,src,page,rect,latex,latexStatus,latexMessage,null);
+        }
         public Block(String type, String text, int level, String src, Integer page, double[] rect) {
             this(type, text, level, src, page, rect, null, null, null);
         }
@@ -422,6 +430,12 @@ public class PdfLayoutExtractor {
     // 单页
     // ------------------------------------------------------------------
 
+    /** Reuse the reader's structure for one ingestion page without parsing the entire document. */
+    PageLayout extractPage(PDDocument doc, int pageNo) throws IOException {
+        if (pageNo < 1 || pageNo > doc.getNumberOfPages()) throw new IllegalArgumentException("页码超出范围");
+        return layoutPage(doc, doc.getPage(pageNo - 1), pageNo);
+    }
+
     private PageLayout layoutPage(PDDocument doc, PDPage page, int pageNo) throws IOException {
         PDRectangle box = page.getCropBox() != null ? page.getCropBox()
                 : (page.getMediaBox() != null ? page.getMediaBox() : PDRectangle.A4);
@@ -511,7 +525,7 @@ public class PdfLayoutExtractor {
             List<Block> blocks = new ArrayList<>(
                     headBlocks(head, bodySize, pageNo, width, height, bodyBottomOf(head, bodySize, height)));
             blocks.addAll(mergeFormulaRuns(columnPlaced(columnOf(body), bodySize, pageNo, height, figures, fractionBars), pageNo));
-            return new PageLayout(pageNo, 1, restoreFormulaLatex(blocks, collector.glyphs, fractionBars, rotation));
+            return new PageLayout(pageNo, 1, annotationLinks(doc, page, restoreFormulaLatex(blocks, collector.glyphs, fractionBars, rotation), collector.glyphs, rotation));
         }
 
         List<Figure> leftFigures = pickFigures(figures, f -> centerX(f) < gutter && !spansGutter(f, gutter));
@@ -542,7 +556,7 @@ public class PdfLayoutExtractor {
                 headBlocks(head, bodySize, pageNo, width, height, bodyBottomOf(head, bodySize, height)));
         blocks.addAll(mergeFormulaRuns(interleave(leftBlocks, spanning), pageNo));
         blocks.addAll(mergeFormulaRuns(rightBlocks, pageNo));
-        return new PageLayout(pageNo, 2, restoreFormulaLatex(blocks, collector.glyphs, fractionBars, rotation));
+        return new PageLayout(pageNo, 2, annotationLinks(doc, page, restoreFormulaLatex(blocks, collector.glyphs, fractionBars, rotation), collector.glyphs, rotation));
     }
 
     /** 只处理最终公式块，不把正文里的上标脚注或数学词语改写为公式。 */
@@ -1552,7 +1566,93 @@ public class PdfLayoutExtractor {
     }
 
     private static Block figureBlock(int pageNo, Figure f) {
-        return new Block("figure", "", 0, pageNo + "-" + f.idx());
+        return new Block("figure", "", 0, pageNo + "-" + f.idx(), pageNo, new double[]{f.x0(),f.y0(),f.x1(),f.y1()});
+    }
+
+    private record LinkRange(int start, int end, String destination) { }
+
+    /** Only links with a unique glyph-backed label on an unrotated page become Markdown links. */
+    private List<Block> annotationLinks(PDDocument document, PDPage page, List<Block> blocks,
+                                       List<PdfMathLatex.Glyph> glyphs, int rotation) {
+        if (rotation != 0) return blocks;
+        Map<Integer, List<LinkRange>> links = new HashMap<>();
+        try {
+            var crop = page.getCropBox();
+            int count = 0;
+            for (var annotation : page.getAnnotations()) {
+                if (++count > 2000) break;
+                if (!(annotation instanceof PDAnnotationLink link) || link.getRectangle() == null) continue;
+                String destination = linkDestination(document, link); if (destination.isEmpty()) continue;
+                var box = link.getRectangle();
+                double[] rect = {box.getLowerLeftX()-crop.getLowerLeftX(), crop.getUpperRightY()-box.getUpperRightY(),
+                        box.getUpperRightX()-crop.getLowerLeftX(), crop.getUpperRightY()-box.getLowerLeftY()};
+                List<PdfMathLatex.Glyph> selected = glyphs.stream().filter(glyph ->
+                        (glyph.x0()+glyph.x1())/2 >= rect[0]-.2 && (glyph.x0()+glyph.x1())/2 <= rect[2]+.2
+                        && (glyph.top()+glyph.bottom())/2 >= rect[1]-.2 && (glyph.top()+glyph.bottom())/2 <= rect[3]+.2)
+                        .sorted(Comparator.comparingDouble(PdfMathLatex.Glyph::x0)).toList();
+                if (selected.isEmpty() || selected.size()>1000) continue;
+                double low = selected.stream().mapToDouble(PdfMathLatex.Glyph::y).min().orElse(0);
+                double high = selected.stream().mapToDouble(PdfMathLatex.Glyph::y).max().orElse(0);
+                double size = selected.stream().mapToDouble(PdfMathLatex.Glyph::size).max().orElse(1);
+                if (high-low > size*.6) continue;
+                StringBuilder label = new StringBuilder(); PdfMathLatex.Glyph previous = null;
+                for (var glyph : selected) {
+                    if (previous != null && glyph.x0()-previous.x1() > Math.min(glyph.size(),previous.size())*.2
+                            && needsSpace(previous.text(),glyph.text())) label.append(' ');
+                    label.append(glyph.text()); previous = glyph;
+                }
+                String visible = tidyInline(label.toString()); if (visible.isBlank()) continue;
+                List<Integer> matches = new ArrayList<>(), geometric = new ArrayList<>();
+                for (int i=0;i<blocks.size();i++) {
+                    var block=blocks.get(i);
+                    if (!List.of("para","heading","title","authors","meta","note","bullet").contains(block.type())) continue;
+                    int at=block.text().indexOf(visible);
+                    if(at<0 || block.text().indexOf(visible,at+visible.length())>=0) continue;
+                    matches.add(i);
+                    if(block.rect()!=null && overlaps(block.rect(),rect)) geometric.add(i);
+                }
+                int index=geometric.size()==1?geometric.getFirst():matches.size()==1?matches.getFirst():-1;
+                if(index<0) continue;
+                int at=blocks.get(index).text().indexOf(visible);
+                links.computeIfAbsent(index,unused->new ArrayList<>()).add(new LinkRange(at,at+visible.length(),destination));
+            }
+        } catch (IOException ignored) { return blocks; }
+        List<Block> output=new ArrayList<>(blocks);
+        for(var entry:links.entrySet()) {
+            Block block=blocks.get(entry.getKey()); StringBuilder markdown=new StringBuilder(); int from=0;
+            for(var range:entry.getValue().stream().sorted(Comparator.comparingInt(LinkRange::start)).toList()) {
+                if(range.start()<from) continue;
+                markdown.append(DocumentMarkdownWriter.inlineText(block.text().substring(from,range.start())))
+                        .append('[').append(DocumentMarkdownWriter.inlineText(block.text().substring(range.start(),range.end())))
+                        .append("](").append(range.destination()).append(')');
+                from=range.end();
+            }
+            markdown.append(DocumentMarkdownWriter.inlineText(block.text().substring(from)));
+            String prefix=block.type().equals("heading")?"#".repeat(Math.max(1,Math.min(6,block.level())))+" ":block.type().equals("bullet")?"- ":"";
+            output.set(entry.getKey(),new Block(block.type(),block.text(),block.level(),block.src(),block.page(),block.rect(),
+                    block.latex(),block.latexStatus(),block.latexMessage(),prefix+markdown));
+        }
+        return output;
+    }
+
+    private static boolean overlaps(double[] first,double[] second) {
+        return first.length==4 && first[0]<second[2] && first[2]>second[0] && first[1]<second[3] && first[3]>second[1];
+    }
+    private static String linkDestination(PDDocument document,PDAnnotationLink link) throws IOException {
+        if(link.getAction() instanceof PDActionURI action) {
+            try {
+                String raw=action.getURI(); if(raw==null || raw.length()>2048 || raw.matches("(?s).*[\\r\\n<>\"\\\\].*")) return "";
+                var uri=java.net.URI.create(raw);
+                return List.of("http","https").contains(String.valueOf(uri.getScheme()).toLowerCase(Locale.ROOT)) && uri.getHost()!=null && uri.getUserInfo()==null
+                        ?raw.replace("(","%28").replace(")","%29"):"";
+            } catch(IllegalArgumentException invalid) { return ""; }
+        }
+        var destination=link.getAction() instanceof PDActionGoTo action?action.getDestination():link.getDestination();
+        if(destination instanceof PDPageDestination local) {
+            int number=local.retrievePageNumber();
+            return number>=0 && number<document.getNumberOfPages()?"#source-page-"+(number+1):"";
+        }
+        return "";
     }
 
     private static List<Figure> pickFigures(List<Figure> all, java.util.function.Predicate<Figure> p) {

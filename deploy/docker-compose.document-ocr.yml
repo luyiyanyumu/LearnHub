@@ -1,0 +1,44 @@
+# Optional CPU-only offline OCR. Default Compose stacks do not use this service.
+# docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.document-ocr.yml up -d --build document-ocr backend
+services:
+  backend:
+    environment:
+      LEARNHUB_DOCUMENT_OCR_URL: http://document-ocr:8083
+    depends_on:
+      document-ocr:
+        condition: service_healthy
+    networks: [document-ocr-private]
+
+  document-ocr:
+    build:
+      context: ..
+      dockerfile: tools/document-ocr/Dockerfile
+    image: learn-hub-document-ocr:local
+    restart: unless-stopped
+    init: true
+    user: "10001:10001"
+    expose: ["8083"]
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777,noexec,nosuid,nodev
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 1g
+    cpus: 2
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8083/health',timeout=3))['ready']"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks: [document-ocr-private]
+
+networks:
+  document-ocr-private:
+    internal: true

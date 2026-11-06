@@ -15,6 +15,7 @@ import org.apache.poi.ss.usermodel.Sheet;
 import org.apache.poi.ss.usermodel.Workbook;
 import org.apache.poi.xslf.usermodel.XMLSlideShow;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
@@ -40,9 +41,10 @@ import java.util.Set;
  * <h3>抽取策略</h3>
  * <ul>
  *   <li>纯文本类（md/txt/log/json/yml/sql/各种源码）：直接按编码读，零依赖；</li>
- *   <li>PDF：PDFBox 逐页取文（扫描版 PDF 是图片，本来就抽不出字，这里如实标注为空）；</li>
+ *   <li>PDF 与扫描图片：通过版面抽取和可选 OCR 取得带质量与原文位置的结构块；</li>
  *   <li>Office：POI 覆盖 docx/doc、xlsx/xls、pptx/ppt；</li>
- *   <li>其它二进制（图片、压缩包…）：标记 unsupported —— 仍可**按文件名与手填说明**参与检索。</li>
+ *   <li>Office、文本、代码：保留标题、表格、公式等结构，统一转换为 Markdown；</li>
+ *   <li>其它二进制（压缩包等）：标记 unsupported，仍可按文件名与手填说明参与检索。</li>
  * </ul>
  *
  * <p><b>失败绝不外抛</b>：抽取是"锦上添花"，上传本身必须成功。
@@ -51,12 +53,17 @@ import java.util.Set;
 @Slf4j
 @Service
 public class DocumentTextService {
+    private DocumentIngestionService ingestion;
+
+    /** Retains the no-argument constructor used by standalone parsers and older callers. */
+    @Autowired(required = false)
+    public void setDocumentIngestionService(DocumentIngestionService ingestion) { this.ingestion = ingestion; }
 
     /** 存库正文上限（字符）。再长对检索与模型都没意义，只会拖慢一切 */
     public static final int MAX_TEXT_CHARS = 400_000;
 
     /** PDF 页数上限：几百页的文档抽完对知识库也无用 */
-    private static final int MAX_PDF_PAGES = 300;
+    static final int MAX_PDF_PAGES = 300;
 
     public static final String STATUS_OK = "ok";
     public static final String STATUS_EMPTY = "empty";
@@ -84,6 +91,28 @@ public class DocumentTextService {
      * @param size 文件大小，保留调用兼容；不再作为是否抽取的条件
      */
     public Extracted extract(Path path, String ext, long size) {
+        if (ingestion != null && ingestion.supports(ext)) {
+            var result = ingestion.extract(path, ext);
+            return new Extracted(result.status(), result.text().isEmpty() ? null : result.text(), result.error(), result.chars());
+        }
+        return extractLegacy(path, ext, size);
+    }
+
+    public DocumentIngestionService.Extraction extractDetailed(Path path, String ext, long size) {
+        if (ingestion != null && ingestion.supports(ext)) return ingestion.extract(path, ext);
+        String format = ext == null ? "" : ext.toLowerCase(Locale.ROOT);
+        try {
+            if (DocumentFormatAdapter.structured(format)) return DocumentFormatAdapter.extract(path, format);
+            if (TEXT_EXTS.contains(format)) return DocumentFormatAdapter.fromText(path, format, readPlainText(path),
+                    Files.size(path) > 4L * 1024 * 1024);
+            return DocumentFormatAdapter.fromLegacy(path, format, extractLegacy(path, ext, size));
+        } catch (Exception failed) {
+            log.warn("文档 Markdown 转换失败: {} ({}) - {}", path.getFileName(), format, failed.getClass().getSimpleName());
+            return DocumentFormatAdapter.failed(path, failed);
+        }
+    }
+
+    private Extracted extractLegacy(Path path, String ext, long size) {
         String e = ext == null ? "" : ext.toLowerCase(Locale.ROOT);
         if (e.isEmpty()) {
             return new Extracted(STATUS_UNSUPPORTED, null, "没有扩展名，无法判断类型", 0);

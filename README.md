@@ -4,7 +4,7 @@ LearnHub 是一个可自托管的学习与知识工作台，将笔记、速查�
 
 ![License](https://img.shields.io/badge/license-PolyForm_NC_1.0.0-orange)
 
-当前版本：[LearnHub 0.1.6](docs/release-notes/0.1.6.md) · [Windows 启动器 1.1.0](launcher/README.md)。
+当前版本：[LearnHub 0.1.7](docs/release-notes/0.1.7.md) · [Windows 启动器 1.1.0](launcher/README.md)。
 
 [界面预览](#界面预览) · [快速安装](#快速安装) · [配置模型](#配置模型) · [源码部署](#从源码部署) · [开发环境](#开发环境) · [更多文档](#更多文档)
 
@@ -277,6 +277,7 @@ tools/         开发与维护工具
 - [学习活动记录](docs/learning-activity.md)
 - [PDF 正文排版](docs/pdf-layout-design.md)
 - [技能目录与提示词](skills/README.md)
+- [应用命令与内置智能体](cli/README.md#应用操作与内置智能体)
 - [MCP 接入](mcp/README.md)
 - [前端开发](frontend/README.md)
 - [固定知识库评测工具](tools/README.md)

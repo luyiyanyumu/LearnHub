@@ -650,12 +650,13 @@ public class AgentSessionService {
         m.put("status", a.getStatus());
         m.put("toolName", a.getToolName());
         m.put("summary", a.getSummary());
-        if (a.getToolName() != null && Set.of("edit_note", "update_note", "append_to_note").contains(a.getToolName())) {
+        boolean appCommand = "run_app_command".equals(a.getToolName());
+        if (appCommand || (a.getToolName() != null && Set.of("edit_note", "update_note", "append_to_note").contains(a.getToolName()))) {
             try {
                 var args = DISPLAY_JSON.readTree(a.getArgsJson());
-                long noteId = args.path("note_id").asLong();
+                long noteId = args.path(appCommand ? "_note_id" : "note_id").asLong();
                 if (noteId > 0) m.put("noteId", noteId);
-                var preview = args.get("_edit_preview");
+                var preview = args.get(appCommand ? "_app_preview" : "_edit_preview");
                 if (preview != null) m.put("preview", preview);
             } catch (Exception ignored) { /* 旧操作或不完整参数仍可取消 */ }
         }

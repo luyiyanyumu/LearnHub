@@ -10,10 +10,22 @@ import java.util.List;
 /** A source passage shared by keyword, vector and graph retrieval. Score is a ranking score, not confidence. */
 public record RetrievalHit(String sourceType, Long sourceId, String title, String category,
                            String text, double score, Integer seq,
-                           List<String> channels, List<String> graphRelations) {
+                           List<String> channels, List<String> graphRelations,
+                           @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_EMPTY)
+                           List<DocumentExtractionStore.SourceLocation> sourceLocations) {
     public RetrievalHit {
         channels = channels == null ? List.of() : List.copyOf(channels);
         graphRelations = graphRelations == null ? List.of() : List.copyOf(graphRelations);
+        sourceLocations = sourceLocations == null ? List.of() : List.copyOf(sourceLocations);
+    }
+
+    public RetrievalHit(String sourceType, Long sourceId, String title, String category, String text, double score,
+                        Integer seq, List<String> channels, List<String> graphRelations) {
+        this(sourceType, sourceId, title, category, text, score, seq, channels, graphRelations, List.of());
+    }
+
+    public RetrievalHit withSourceLocations(List<DocumentExtractionStore.SourceLocation> locations) {
+        return new RetrievalHit(sourceType, sourceId, title, category, text, score, seq, channels, graphRelations, locations);
     }
 
     @JsonProperty("passageKey")

@@ -68,5 +68,5 @@ applies_to: 文档交付
 ## 六、生成之后
 
 1. 文档已进资料库，**能被检索命中**（正文会被抽取）。用户之后问"我上次导出的那份文档讲了啥"时，用 `search_knowledge` 找得到。
-2. 用户说"再改改那份文档"时：先 `search_knowledge` 或 `list_files` 找到它、`get_file` 读出内容，改完**重新生成一份**（不要试图原地编辑 —— 工具只负责生成）。
+2. 用户说「再改改那份文档」时，用 `search_knowledge` 找到它，也可通过 `run_app_command` 调用 `file.page` 按文件名查询。用 `get_file` 读出内容，修改后**重新生成一份**。
 3. 用户要 Excel / PPT 时如实说明目前只支持 Word，可以用 Markdown 表格给出数据，或在 Word 里用表格承载。

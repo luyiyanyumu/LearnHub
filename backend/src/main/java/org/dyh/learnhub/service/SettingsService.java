@@ -410,7 +410,8 @@ public class SettingsService {
         // wiki 生成模型（可选覆写；留空 = 跟随主模型，例如本机 Ollama 的 qwen3:8b）
         m.put("wikiBaseUrl", effective(KEY_WIKI_BASE_URL));
         m.put("wikiModel", effective(KEY_WIKI_MODEL));
-        m.put("wikiApiKey", effective(KEY_WIKI_API_KEY));
+        m.put("wikiApiKey", "");
+        m.put("hasWikiApiKey", StringUtils.hasText(raw(KEY_WIKI_API_KEY)));
         m.put("wikiBaseUrlOverridden", StringUtils.hasText(raw(KEY_WIKI_BASE_URL)));
         m.put("wikiModelOverridden", StringUtils.hasText(raw(KEY_WIKI_MODEL)));
         m.put("modelOverridden", StringUtils.hasText(raw(KEY_MODEL)));

@@ -76,6 +76,15 @@ public class FileStorageService {
     /** 改名时要同步 kb_chunk 里的冗余标题（检索结果展示用） */
     private final org.dyh.learnhub.mapper.KbChunkMapper kbChunkMapper;
     private final FolderService folderService;
+    private DocumentExtractionStore extractionStore = new DocumentExtractionStore();
+    private DocumentMediaProcessor mediaProcessor;
+    private final java.util.concurrent.ConcurrentHashMap<Long, java.util.concurrent.locks.ReentrantLock> extractionLocks = new java.util.concurrent.ConcurrentHashMap<>();
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setExtractionStore(DocumentExtractionStore extractionStore) { this.extractionStore = extractionStore; }
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setMediaProcessor(DocumentMediaProcessor mediaProcessor) { this.mediaProcessor = mediaProcessor; }
 
     /** 文件存放目录：后端工作目录下的 uploads/ */
     private Path storageDir() {
@@ -128,7 +137,7 @@ public class FileStorageService {
     /** 列表与分页共用的过滤条件（两处必须一致，否则"翻页后条数对不上"这类 bug 极难查） */
     private LambdaQueryWrapper<FileInfo> listWrapper(Long categoryId, String kw, Long folderId) {
         LambdaQueryWrapper<FileInfo> wrapper = Wrappers.<FileInfo>lambdaQuery()
-                .orderByDesc(FileInfo::getCreatedAt);
+                .orderByDesc(FileInfo::getCreatedAt).orderByDesc(FileInfo::getId);
         folderService.validateFilter("file", folderId);
         if (folderId != null) {
             if (folderId == 0) wrapper.isNull(FileInfo::getFolderId);
@@ -307,29 +316,263 @@ public class FileStorageService {
     }
 
     private String extractInto(FileInfo info, Path path, boolean trainEligible) {
-        DocumentTextService.Extracted r = documentTextService.extract(path, info.getExt(), info.getSize());
+        return extractInto(info, path, trainEligible, true);
+    }
+
+    private String extractInto(FileInfo info, Path path, boolean trainEligible, boolean processMedia) {
+        DocumentIngestionService.Extraction detailed = documentTextService.extractDetailed(path, info.getExt(), info.getSize());
+        if (detailed != null) detailed = withConfirmedFormulaCache(info, detailed);
+        if (detailed != null && mediaProcessor != null)
+            detailed = mediaProcessor.process(info.getId(), path, info.getExt(), detailed, false,processMedia);
+        if (detailed != null && !processMedia) detailed=restoreRetainedVisualText(info,detailed);
+        if (detailed != null) detailed = DocumentMarkdownWriter.render(detailed);
+        // Preserve compatibility with lightweight callers/mocks that only implement the old text extractor.
+        DocumentTextService.Extracted r = detailed == null ? documentTextService.extract(path, info.getExt(), info.getSize())
+                : new DocumentTextService.Extracted(detailed.status(), detailed.text(), detailed.error(), detailed.chars());
+        return persistExtraction(info, path, detailed, r, trainEligible);
+    }
+
+    /** Cache-only layout migration also retains previously accepted local OCR tied to identical image bytes. */
+    private DocumentIngestionService.Extraction restoreRetainedVisualText(FileInfo info,DocumentIngestionService.Extraction next) {
+        var previous=currentExtraction(info);
+        if(previous.isEmpty() || !java.util.Objects.equals(previous.get().sourceSha256(),next.sourceSha256())) return next;
+        Map<String,DocumentIngestionService.Block> retained=new LinkedHashMap<>();
+        for(var page:previous.get().pages()) for(var block:page.blocks())
+            if(block.indexed() && "recognized".equals(block.quality()) && block.src()!=null
+                    && block.src().matches("assets/[a-f0-9]{64}\\.png") && !block.id().contains("-vision-formula-"))
+                retained.putIfAbsent(block.src(),block);
+        if(retained.isEmpty()) return next;
+        List<DocumentIngestionService.Page> pages=new ArrayList<>();
+        boolean restored=false;
+        for(var page:next.pages()) {
+            List<DocumentIngestionService.Block> blocks=new ArrayList<>();
+            for(var block:page.blocks()) {
+                var old=retained.get(block.src());
+                if(!block.indexed() && old!=null && Set.of("figure","image","formula").contains(block.type())) {
+                    blocks.add(new DocumentIngestionService.Block(block.id(),old.type(),block.rawText(),old.cleanText(),block.page(),
+                            block.rect(),block.width(),block.height(),old.confidence(),old.quality(),true,-1,-1,block.level(),block.src(),
+                            old.latex(),old.latexStatus(),old.latexMessage(),null,-1,-1,block.presentation()));
+                    restored=true;
+                } else blocks.add(block);
+            }
+            pages.add(new DocumentIngestionService.Page(page.page(),page.width(),page.height(),page.coordinateUnit(),page.method(),List.copyOf(blocks),page.label()));
+        }
+        if(!restored) return next;
+        return new DocumentIngestionService.Extraction("ok",next.text(),next.chars(),null,next.sourceSha256(),next.pipelineVersion(),
+                List.copyOf(pages),next.report());
+    }
+
+    private String persistExtraction(FileInfo info, Path path, DocumentIngestionService.Extraction detailed,
+                                     DocumentTextService.Extracted r, boolean trainEligible) {
+        boolean hadReliableVersion = "ok".equals(info.getTextStatus()) && StringUtils.hasText(info.getTextContent());
+        if (hadReliableVersion && detailed != null && "ok".equals(r.status()) && losesReliableEvidence(info,detailed)) {
+            FileInfo failure=new FileInfo(); failure.setId(info.getId());
+            failure.setTextError("本次处理未覆盖上次可靠原文，已保留上次正文和定位；请检查抽取报告或重试");
+            fileInfoMapper.updateById(failure);
+            return "preserved";
+        }
+        if (detailed != null && detailed.sourceSha256() != null && !detailed.sourceSha256().isBlank()) {
+            try { extractionStore.save(info.getId(), path, detailed); }
+            catch (IOException error) {
+                log.warn("抽取定位报告保存失败：资料 {}", info.getId());
+                r = new DocumentTextService.Extracted(DocumentTextService.STATUS_FAILED, null,
+                        "抽取定位报告保存失败，请重新抽取；原文件已保留", 0);
+            }
+        }
+        if (hadReliableVersion && !"ok".equals(r.status())) {
+            FileInfo failure = new FileInfo(); failure.setId(info.getId());
+            failure.setTextError("本次处理未产生可靠正文，已保留上次可用版本：" + String.valueOf(r.error()));
+            fileInfoMapper.updateById(failure);
+            return "preserved";
+        }
         info.setTextStatus(r.status());
         info.setTextContent(r.text());
         info.setTextChars(r.chars());
         info.setTextError(r.error());
         info.setExtractedAt(LocalDateTime.now());
-        fileInfoMapper.updateById(info);
+        // Background conversion must not overwrite a concurrent rename/category/summary edit.
+        FileInfo patch = new FileInfo(); patch.setId(info.getId()); patch.setTextStatus(info.getTextStatus());
+        patch.setTextContent(info.getTextContent()); patch.setTextChars(info.getTextChars());
+        patch.setTextError(info.getTextError()); patch.setExtractedAt(info.getExtractedAt());
+        fileInfoMapper.updateById(patch);
         if (trainEligible && "ok".equals(r.status()) && StringUtils.hasText(r.text())) {
             events.publishEvent(new FileTextExtractedEvent(info.getId(), info.getOriginName(), r.text()));
         }
         return r.status();
     }
 
+    /** Partial parser/model failures must not silently remove previously verified source evidence. */
+    private boolean losesReliableEvidence(FileInfo info,DocumentIngestionService.Extraction next) {
+        if (!next.report().partial() && !next.report().truncated()) return false;
+        var previous=currentExtraction(info);
+        if (previous.isEmpty()) {
+            if (!next.report().truncated() && next.report().processedPages()>=next.report().totalPages()) return false;
+            if (sameLegacyPdfCoverage(info,next)) return false;
+            String before=DocumentExtractionStore.visibleText(info.getTextContent()).replaceAll("\\s+","");
+            String after=DocumentExtractionStore.visibleText(next.text()).replaceAll("\\s+","");
+            return !before.isBlank() && !after.contains(before);
+        }
+        for (var oldPage:previous.get().pages()) {
+            var newPage=next.pages().stream().filter(page -> page.page()==oldPage.page()).findFirst().orElse(null);
+            String after=newPage==null?"":newPage.blocks().stream().filter(DocumentIngestionService.Block::indexed)
+                    .map(value -> normalizeEvidence(value.cleanText())).collect(java.util.stream.Collectors.joining());
+            for (var block:oldPage.blocks()) {
+                if (!block.indexed()) continue;
+                if (newPage==null) return true;
+                if (Set.of("formula","figure","image").contains(String.valueOf(block.type()))
+                        && newPage.blocks().stream().anyMatch(value -> value.id().equals(block.id()) && value.indexed())) continue;
+                if (newPage.blocks().stream().anyMatch(value -> value.id().equals(block.id()) && "superseded_by_formula".equals(value.quality()))
+                        && newPage.blocks().stream().anyMatch(value -> value.indexed() && "formula".equals(value.type()))) continue;
+                String before=normalizeEvidence(block.cleanText());
+                if (!before.isBlank() && !after.contains(before)) {
+                    log.warn("资料布局覆盖校验未通过：id={} page={} block={} type={} quality={} priorChars={} pageChars={}",
+                            info.getId(),oldPage.page(),block.id(),block.type(),block.quality(),before.length(),after.length());
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static String normalizeEvidence(String text) {
+        if(text==null) return "";
+        String references=text.replaceAll("\\[\\^fn-([A-Za-z0-9_-]+)]","脚注$1")
+                .replaceAll("\\[\\^en-([A-Za-z0-9_-]+)]","尾注$1")
+                .replaceAll("\\[(脚注|尾注)([^]\\r\\n]+)]","$1$2");
+        return DocumentExtractionStore.visibleText(references).replaceAll("\\s+","");
+    }
+
+    /** A legacy PDF body may already cover only its first 300 pages; MD can legitimately change reading order. */
+    private boolean sameLegacyPdfCoverage(FileInfo info,DocumentIngestionService.Extraction next) {
+        if (!"pdf".equalsIgnoreCase(info.getExt()) || next.report().totalPages()<1) return false;
+        int expected=Math.min(next.report().totalPages(),DocumentTextService.MAX_PDF_PAGES);
+        if (next.report().processedPages()<expected || next.report().warnings().size()>=200
+                || next.report().truncated() && next.report().warnings().stream()
+                        .noneMatch(warning -> warning.equals("PDF 超过 300 页，仅处理前 300 页") || warning.equals("PDF 超过 "
+                                +DocumentIngestionService.MAX_PDF_PAGES+" 页，仅处理前 "+DocumentIngestionService.MAX_PDF_PAGES+" 页"))
+                || next.report().warnings().stream().anyMatch(warning -> warning.matches("第\\s+\\d+\\s+页未进入索引：.*")
+                        || warning.contains("40 万") || warning.contains("20000 块") || warning.contains("120 秒任务预算")
+                        || warning.contains("文档抽取被中断") || warning.contains("20 页 OCR 上限") || warning.contains("8000 万像素预算"))) return false;
+        var pages=next.pages().stream().map(DocumentIngestionService.Page::page).collect(java.util.stream.Collectors.toSet());
+        if (!java.util.stream.IntStream.rangeClosed(1,expected).allMatch(pages::contains)) return false;
+        Path source=storageDir().resolve(info.getStoreName());
+        var legacy=new DocumentTextService().extract(source,info.getExt(),info.getSize());
+        if (!"ok".equals(legacy.status()) || !java.util.Objects.equals(info.getTextContent(),legacy.text())) return false;
+        var empty=next.pages().stream().filter(page -> page.page()<=expected
+                && page.blocks().stream().noneMatch(DocumentIngestionService.Block::indexed)).toList();
+        if (!empty.isEmpty()) try(var pdf=org.apache.pdfbox.Loader.loadPDF(source.toFile())) {
+            var stripper=new org.apache.pdfbox.text.PDFTextStripper();
+            for(var page:empty) {
+                stripper.setStartPage(page.page()); stripper.setEndPage(page.page());
+                if (!DocumentTextService.tidy(stripper.getText(pdf)).isBlank()) return false;
+            }
+        } catch(IOException failed) { return false; }
+        return true;
+    }
+
+    public int pendingMediaRegions(Long id) {
+        return currentExtraction(require(id)).map(value -> (int)value.pages().stream().flatMap(page -> page.blocks().stream())
+                .filter(block -> "pending".equals(block.quality())).count()).orElse(0);
+    }
+
     /** 手动重新抽取正文 */
     public Map<String, Object> reextract(Long id) {
+        return reextract(id, true);
+    }
+
+    public Map<String, Object> reextract(Long id, boolean processMedia) {
+        var lock = extractionLocks.computeIfAbsent(id, unused -> new java.util.concurrent.locks.ReentrantLock());
+        if (!lock.tryLock()) throw new IllegalStateException("该资料正在处理，请等待当前任务完成");
+        try {
         FileInfo info = require(id);
         Path path = storageDir().resolve(info.getStoreName());
         if (!Files.exists(path)) {
             throw new IllegalStateException("文件已丢失: " + info.getStoreName());
         }
-        extractInto(info, path);
+        if ("preserved".equals(extractInto(info, path, false, processMedia)))
+            throw new IllegalStateException("本次抽取未通过或无法保存，已保留上次可用正文和定位");
         publishChanged(info.getCategoryId());
         return detailMap(id);
+        } finally { lock.unlock(); }
+    }
+
+    /** Reprocess retained regions without rerunning all Office/PDF/OCR parsers. */
+    public Map<String, Object> processMedia(Long id, boolean force) {
+        var lock = extractionLocks.computeIfAbsent(id, unused -> new java.util.concurrent.locks.ReentrantLock());
+        if (!lock.tryLock()) throw new IllegalStateException("该资料正在处理，请等待当前任务完成");
+        try {
+            FileInfo info = require(id);
+            var current = currentExtraction(info);
+            if (current.isEmpty() || !DocumentIngestionService.PIPELINE_VERSION.equals(current.get().pipelineVersion()))
+                return reextract(id, true); // Reentrant lock retains the same file boundary.
+            if (mediaProcessor == null) throw new IllegalStateException("图片处理服务尚未启用");
+            Path path = storageDir().resolve(info.getStoreName());
+            var result = DocumentMarkdownWriter.render(mediaProcessor.process(id, path, info.getExt(), withConfirmedFormulaCache(info, current.get()), force));
+            var extracted = new DocumentTextService.Extracted(result.status(), result.text(), result.error(), result.chars());
+            if ("preserved".equals(persistExtraction(info, path, result, extracted, false)))
+                throw new IllegalStateException("本次处理未通过，已保留上次可用正文和定位");
+            publishChanged(info.getCategoryId());
+            return detailMap(id);
+        } finally { lock.unlock(); }
+    }
+
+    public List<Long> markdownCandidates(boolean force, boolean processMedia) {
+        return fileInfoMapper.selectList(Wrappers.<FileInfo>lambdaQuery().orderByAsc(FileInfo::getId)).stream()
+                .filter(info -> !Set.of("unsupported", "skipped").contains(String.valueOf(info.getTextStatus()))
+                        || Set.of("pdf", "png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif", "webp").contains(String.valueOf(info.getExt())))
+                .filter(info -> force || currentExtraction(info).map(extraction -> !"markdown".equals(extraction.format())
+                        || !DocumentIngestionService.PIPELINE_VERSION.equals(extraction.pipelineVersion())
+                        || processMedia && extraction.pages().stream().flatMap(page -> page.blocks().stream())
+                                .anyMatch(block -> block.quality() != null && (block.quality().startsWith("vision_")
+                                        || Set.of("pending","failed","media_pending","ocr_required","uncertain_formula")
+                                                .contains(block.quality())))).orElse(true))
+                .map(FileInfo::getId).toList();
+    }
+
+    /** A render-validated reader candidate can update the canonical MD without another model request. */
+    public void refreshConfirmedFormulas(Long id) {
+        var lock = extractionLocks.computeIfAbsent(id, unused -> new java.util.concurrent.locks.ReentrantLock());
+        if (!lock.tryLock()) throw new IllegalStateException("该资料正在处理，公式候选已缓存，请完成后再次确认");
+        try {
+            FileInfo info = require(id);
+            var current = currentExtraction(info);
+            if (current.isEmpty()) { reextract(id, false); return; }
+            var result = DocumentMarkdownWriter.render(withConfirmedFormulaCache(info, current.get()));
+            var extracted = new DocumentTextService.Extracted(result.status(), result.text(), result.error(), result.chars());
+            if ("preserved".equals(persistExtraction(info, storageDir().resolve(info.getStoreName()), result, extracted, false)))
+                throw new IllegalStateException("Markdown 保存失败，已保留原正文和公式候选");
+            publishChanged(info.getCategoryId());
+        } finally { lock.unlock(); }
+    }
+
+    private DocumentIngestionService.Extraction withConfirmedFormulaCache(FileInfo info, DocumentIngestionService.Extraction extraction) {
+        Map<String, PdfLayoutExtractor.Block> confirmed = readingFormulaCandidates(info, extraction);
+        if (confirmed.isEmpty()) return extraction;
+        List<DocumentIngestionService.Page> pages = new ArrayList<>();
+        boolean changed = false;
+        for (var page : extraction.pages()) {
+            List<DocumentIngestionService.Block> blocks = new ArrayList<>();
+            for (var block : page.blocks()) {
+                var candidate = confirmed.get(page.page() + ":" + java.util.Arrays.toString(block.rect()));
+                if ("formula".equals(block.type()) && candidate != null && "recognized".equals(candidate.latexStatus())
+                        && candidate.latex() != null && !candidate.latex().isBlank()) {
+                    blocks.add(new DocumentIngestionService.Block(block.id(), block.type(), block.rawText(), candidate.latex(),
+                            block.page(), block.rect(), block.width(), block.height(), block.confidence(), "accepted", true,
+                            -1,-1,block.level(),block.src(),candidate.latex(),"recognized",candidate.latexMessage(),null,-1,-1,block.presentation()));
+                    changed = true;
+                } else blocks.add(block);
+            }
+            pages.add(new DocumentIngestionService.Page(page.page(),page.width(),page.height(),page.coordinateUnit(),page.method(),List.copyOf(blocks),page.label()));
+        }
+        if (!changed) return extraction;
+        var report = extraction.report();
+        boolean pending = pages.stream().flatMap(page -> page.blocks().stream()).anyMatch(block -> !block.indexed()
+                && !Set.of("empty","non_text","page_furniture","superseded_by_formula").contains(block.quality()));
+        int rejected = (int) pages.stream().filter(page -> page.blocks().stream().noneMatch(DocumentIngestionService.Block::indexed)).count();
+        var updatedReport = new DocumentIngestionService.QualityReport(report.totalPages(),report.processedPages(),report.ocrPages(),
+                rejected,report.meanConfidence(),report.warnings(),report.truncated(),pending || report.truncated() || report.processedPages()<report.totalPages());
+        return new DocumentIngestionService.Extraction("ok",extraction.text(),extraction.chars(),null,extraction.sourceSha256(),
+                DocumentIngestionService.PIPELINE_VERSION,List.copyOf(pages),updatedReport);
     }
 
     /** 更新手填说明（抽不出正文的资料靠它进检索） */
@@ -433,6 +676,7 @@ public class FileStorageService {
         Map<String, Object> m = new LinkedHashMap<>(toMap(info));
         m.put("categoryName", categoryNameOf(info.getCategoryId()));
         m.put("hasText", StringUtils.hasText(info.getTextContent()));
+        m.put("extraction", extractionSummary(info));
         return m;
     }
 
@@ -451,7 +695,124 @@ public class FileStorageService {
         m.put("chars", info.getTextContent() == null ? 0 : info.getTextContent().length());
         m.put("textStatus", info.getTextStatus());
         m.put("textError", info.getTextError());
+        m.put("extraction", extractionSummary(info));
         return m;
+    }
+
+    private java.util.Optional<DocumentIngestionService.Extraction> currentExtraction(FileInfo info) {
+        if (info.getId() == null || !StringUtils.hasText(info.getStoreName())) return java.util.Optional.empty();
+        return extractionStore.read(info.getId(), storageDir().resolve(info.getStoreName()), info.getTextContent());
+    }
+
+    private Map<String, Object> extractionSummary(FileInfo info) {
+        return currentExtraction(info).map(DocumentExtractionStore::summary).orElseGet(DocumentExtractionStore::notProcessed);
+    }
+
+    /** The complete report includes rejected candidates for review, while text_content contains accepted evidence only. */
+    public Object extractionOf(Long id) {
+        return currentExtraction(require(id)).<Object>map(value -> value).orElseGet(DocumentExtractionStore::notProcessed);
+    }
+
+    public boolean isCurrentMarkdown(Long id) {
+        return currentExtraction(require(id)).filter(value -> "markdown".equals(value.format())
+                && DocumentIngestionService.PIPELINE_VERSION.equals(value.pipelineVersion())).isPresent();
+    }
+
+    public Map<String,Object> markdownOf(Long id) {
+        FileInfo info=require(id);
+        var current=currentExtraction(info).filter(value -> "markdown".equals(value.format()));
+        if (current.isEmpty()) return DocumentExtractionStore.notProcessed();
+        var value=current.get();
+        Map<String,Object> result=new LinkedHashMap<>(DocumentExtractionStore.summary(value));
+        result.put("status","ok"); result.put("extractionStatus",value.status()); result.put("markdown",value.markdown());
+        result.put("indexedMarkdown",value.text());
+        result.put("assets",extractionStore.assets(id,storageDir().resolve(info.getStoreName()),value));
+        return result;
+    }
+
+    private DocumentIngestionService.Extraction requireMarkdown(FileInfo info) {
+        return currentExtraction(info).filter(value -> "markdown".equals(value.format()))
+                .orElseThrow(() -> new IllegalArgumentException("尚无当前版本的结构化 Markdown，请先重新抽取"));
+    }
+
+    public byte[] markdownBytes(Long id) {
+        return requireMarkdown(require(id)).markdown().getBytes(StandardCharsets.UTF_8);
+    }
+
+    public byte[] markdownAsset(Long id,String hash,String sourceRevision) {
+        FileInfo info=require(id); var extraction=requireMarkdown(info);
+        if (sourceRevision==null || !extraction.sourceSha256().equals(sourceRevision))
+            throw new IllegalArgumentException("来源版本已变化，请重新加载 Markdown");
+        try { return extractionStore.asset(id,storageDir().resolve(info.getStoreName()),extraction,hash); }
+        catch(IOException missing) { throw new IllegalArgumentException("原图资产无法读取，请重新处理该资料"); }
+    }
+
+    /** Portable export: relative image references resolve inside the ZIP without external requests. */
+    public byte[] markdownBundle(Long id) {
+        FileInfo info=require(id); var extraction=requireMarkdown(info);
+        Path source=storageDir().resolve(info.getStoreName());
+        try {
+            var assets=extractionStore.exportAssets(id,source,extraction);
+            if (assets.stream().mapToLong(DocumentExtractionStore.Asset::bytes).sum()>64L*1024*1024)
+                throw new IllegalArgumentException("图片资产超过 64 MiB 打包上限，请分别下载");
+            ByteArrayOutputStream bytes=new ByteArrayOutputStream();
+            try(var zip=new java.util.zip.ZipOutputStream(bytes,StandardCharsets.UTF_8)) {
+                zip.putNextEntry(new java.util.zip.ZipEntry("document.md")); zip.write(extraction.markdown().getBytes(StandardCharsets.UTF_8)); zip.closeEntry();
+                zip.putNextEntry(new java.util.zip.ZipEntry("locations.json"));
+                zip.write(new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsBytes(extraction)); zip.closeEntry();
+                for(var asset:assets) {
+                    zip.putNextEntry(new java.util.zip.ZipEntry(asset.name()));
+                    zip.write(extractionStore.asset(id,source,extraction,asset.sha256())); zip.closeEntry();
+                }
+            }
+            return bytes.toByteArray();
+        } catch(IOException failed) { throw new IllegalStateException("Markdown 打包失败：图片资产可能缺失或损坏，请重新处理该资料"); }
+    }
+
+    public List<DocumentExtractionStore.SourceLocation> sourceLocations(Long id, String text) {
+        return sourceLocations(id, text, "");
+    }
+
+    public List<DocumentExtractionStore.SourceLocation> sourceLocations(Long id, String text, String question) {
+        if (text == null || text.isBlank()) return List.of();
+        FileInfo info = fileInfoMapper.selectById(id);
+        if (info == null) return List.of();
+        return currentExtraction(info).map(value -> DocumentExtractionStore.locate(value, text, question)).orElseGet(List::of);
+    }
+
+    /** Decode the exact raster frame used by OCR; browser GIF animation/EXIF rotation must not move its coordinates. */
+    public byte[] extractionPageImage(Long id, int page) {
+        return extractionPageImage(id, page, null);
+    }
+
+    public byte[] extractionPageImage(Long id, int page, String sourceRevision) {
+        FileInfo info = require(id);
+        if (sourceRevision != null && (!sourceRevision.matches("[a-fA-F0-9]{64}") || currentExtraction(info)
+                .filter(value -> value.sourceSha256().equalsIgnoreCase(sourceRevision)).isEmpty()))
+            throw new IllegalArgumentException("来源版本已变化，请重新加载抽取报告");
+        if (!Set.of("png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif", "webp")
+                .contains(String.valueOf(info.getExt()).toLowerCase(Locale.ROOT)) || page < 1 || page > 300)
+            throw new IllegalArgumentException("仅可查看栅格图片的有效原文页");
+        Path source = storageDir().resolve(info.getStoreName());
+        try (var input = ImageIO.createImageInputStream(source.toFile())) {
+            if (input == null || Files.size(source) > 64L * 1024 * 1024) throw new IllegalArgumentException("图片缺失或超出处理范围");
+            var decoders = ImageIO.getImageReaders(input);
+            if (!decoders.hasNext()) throw new IllegalArgumentException("当前图像格式不能生成原文预览");
+            var decoder = decoders.next();
+            try {
+                decoder.setInput(input, false, true);
+                if (page > decoder.getNumImages(true)) throw new IllegalArgumentException("图片页码超出范围");
+                int width = decoder.getWidth(page - 1), height = decoder.getHeight(page - 1);
+                if (width < 1 || height < 1 || (long) width * height > 12_000_000)
+                    throw new IllegalArgumentException("原图页超过 1200 万像素预览上限");
+                BufferedImage bitmap = decoder.read(page - 1);
+                try {
+                    ByteArrayOutputStream output = new ByteArrayOutputStream();
+                    if (!ImageIO.write(bitmap, "png", output)) throw new IOException("原图编码失败");
+                    return output.toByteArray();
+                } finally { bitmap.flush(); }
+            } finally { decoder.dispose(); }
+        } catch (IOException invalid) { throw new IllegalArgumentException("无法读取原图页，请下载原文件核对"); }
     }
 
     /**
@@ -467,6 +828,41 @@ public class FileStorageService {
         m.put("id", info.getId());
         m.put("ext", info.getExt() == null ? "" : info.getExt());
         m.put("textStatus", info.getTextStatus() == null ? "" : info.getTextStatus());
+        var extraction = currentExtraction(info);
+        if (extraction.isPresent()) {
+            var value = extraction.get();
+            Map<String, PdfLayoutExtractor.Block> recognized = readingFormulaCandidates(info, value);
+            m.put("extraction", DocumentExtractionStore.summary(value));
+            m.put("status", value.pages().isEmpty() ? value.status() : "ok");
+            m.put("error", value.error());
+            m.put("chars", value.chars());
+            m.put("pageCount", value.report().totalPages());
+            m.put("pages", value.pages().stream().map(page -> {
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("page", page.page()); item.put("columns", 1); item.put("label",page.label());
+                item.put("width", page.width()); item.put("height", page.height()); item.put("method", page.method());
+                item.put("blocks", page.blocks().stream().filter(block -> block.indexed() || Set.of("figure","formula").contains(block.type())
+                        || Set.of("non_text", "uncertain_formula").contains(block.quality())).map(block -> {
+                    Map<String, Object> b = new LinkedHashMap<>();
+                    b.put("id", block.id()); b.put("type", block.type());
+                    b.put("text", block.cleanText()); b.put("rawText", block.rawText()); b.put("cleanText", block.cleanText());
+                    b.put("page", block.page()); b.put("rect", block.rect());
+                    b.put("width", block.width()); b.put("height", block.height());
+                    b.put("level", block.level()); b.put("src", block.src());
+                    b.put("presentation",block.presentation());
+                    b.put("confidence", block.confidence()); b.put("quality", block.quality()); b.put("indexed", block.indexed());
+                    b.put("start", block.start()); b.put("end", block.end());
+                    b.put("markdown", block.markdown()); b.put("markdownStart", block.markdownStart()); b.put("markdownEnd", block.markdownEnd());
+                    var formula = recognized.get(page.page() + ":" + java.util.Arrays.toString(block.rect()));
+                    b.put("latex", formula == null ? block.latex() : formula.latex());
+                    b.put("latexStatus", formula == null ? block.latexStatus() : formula.latexStatus());
+                    b.put("latexMessage", formula == null ? block.latexMessage() : formula.latexMessage());
+                    return b;
+                }).toList());
+                return item;
+            }).toList());
+            return m;
+        }
         String ext = info.getExt() == null ? "" : info.getExt().toLowerCase(Locale.ROOT);
         if (!Set.of("pdf", "docx", "docm", "md", "markdown").contains(ext)) {
             m.put("status", "unsupported");
@@ -519,6 +915,21 @@ public class FileStorageService {
         m.put("pageCount", layout.pageCount());
         writeLayoutCache(id, path, m);
         return m;
+    }
+
+    /** Reader-only formula confirmations remain visible after ingestion, without rewriting indexed evidence. */
+    private Map<String, PdfLayoutExtractor.Block> readingFormulaCandidates(FileInfo info, DocumentIngestionService.Extraction extraction) {
+        if (!"pdf".equalsIgnoreCase(info.getExt())) return Map.of();
+        List<PdfLayoutExtractor.PageLayout> pages = extraction.pages().stream().map(page ->
+                new PdfLayoutExtractor.PageLayout(page.page(), 1, page.blocks().stream().filter(block -> "formula".equals(block.type()))
+                        .map(block -> new PdfLayoutExtractor.Block(block.type(), block.rawText(), block.level(), block.src(),
+                                block.page(), block.rect(), block.latex(), block.latexStatus(), block.latexMessage())).toList())).toList();
+        var shown = withRecognizedFormulas(info.getId(), storageDir().resolve(info.getStoreName()),
+                new PdfLayoutExtractor.Layout("ok", null, pages, extraction.chars(), extraction.report().totalPages()));
+        Map<String, PdfLayoutExtractor.Block> result = new LinkedHashMap<>();
+        for (var page : shown.pages()) for (var block : page.blocks())
+            result.put(page.page() + ":" + java.util.Arrays.toString(block.rect()), block);
+        return result;
     }
 
     /**

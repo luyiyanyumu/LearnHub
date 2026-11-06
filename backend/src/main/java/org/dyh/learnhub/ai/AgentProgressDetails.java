@@ -21,6 +21,9 @@ public final class AgentProgressDetails {
     private static final Pattern INLINE_SECRET = Pattern.compile("(?i)((?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|authorization|secret|token)\\s*[=:]\\s*[\\\"']?)[^\\s\\\"'&,;}]+|(?i)(Bearer\\s+)[A-Za-z0-9._~+/=-]+|\\bsk-[A-Za-z0-9_-]{12,}");
     private static final Pattern URL_IN_TEXT = Pattern.compile("(?i)https?://[^\\s<>\\\"']+");
     private static final String HIDDEN = "[已隐藏]";
+    private static final String APP_PIPELINE = "run_app_pipeline";
+    private static final Set<String> PRIVATE_ARGUMENT_TOOLS = Set.of("run_app_command", APP_PIPELINE);
+    private static final int MAX_SOURCES = 32;
 
     private AgentProgressDetails() { }
 
@@ -40,7 +43,9 @@ public final class AgentProgressDetails {
             item.put("name", name);
             String title = text(tool.path("title"), 100, budget);
             if (!title.isBlank()) item.put("title", title);
-            if (tool.path("arguments").isObject()) item.put("arguments", value(tool.path("arguments"), 0, new Budget(Math.min(2400, budget.remaining))));
+            if (!PRIVATE_ARGUMENT_TOOLS.contains(name) && tool.path("arguments").isObject()) {
+                item.put("arguments", value(tool.path("arguments"), 0, new Budget(Math.min(2400, budget.remaining))));
+            }
             // Account for nested parameters as part of the row's shared storage budget.
             if (item.containsKey("arguments")) budget.remaining = Math.max(0, budget.remaining - item.get("arguments").toString().length());
             tools.add(Map.copyOf(item));
@@ -83,9 +88,11 @@ public final class AgentProgressDetails {
     static Map<String, Object> tool(String name, String argsRaw) {
         Map<String, Object> details = new LinkedHashMap<>();
         details.put("tools", List.of(toolRecord(name, argsRaw)));
-        JsonNode args = parse(argsRaw);
-        String url = safeUrl(args.path("url").asText(""));
-        if (!url.isBlank()) details.put("websites", List.of(Map.of("title", "请求读取的网址", "url", url)));
+        if (!PRIVATE_ARGUMENT_TOOLS.contains(name)) {
+            JsonNode args = parse(argsRaw);
+            String url = safeUrl(args.path("url").asText(""));
+            if (!url.isBlank()) details.put("websites", List.of(Map.of("title", "请求读取的网址", "url", url)));
+        }
         return displayDetails(JSON.valueToTree(details));
     }
 
@@ -96,7 +103,11 @@ public final class AgentProgressDetails {
     static Map<String, Object> result(String name, JsonNode result) {
         if (result == null || result.isNull()) return Map.of();
         Map<String, Object> details = new LinkedHashMap<>();
-        if (result.isObject()) {
+        if (APP_PIPELINE.equals(name)) {
+            // Only execution facts reach history and SSE. A read result can contain private documents.
+            if (!result.path("error").asText("").isBlank()) details.put("error", result.path("error").asText());
+            details.put("result", pipelineProgress(result).toPrettyString());
+        } else if (result.isObject()) {
             if (!result.path("error").asText("").isBlank()) details.put("error", result.path("error").asText());
             List<JsonNode> websites = new ArrayList<>();
             if ("web_search".equals(name)) result.path("sources").forEach(websites::add);
@@ -107,6 +118,7 @@ public final class AgentProgressDetails {
                 case "search_knowledge" -> result.path("items").forEach(item -> sources.add(source(item, item.path("type").asText(), "id", "title", "snippet")));
                 case "query_notes" -> result.path("notes").forEach(item -> sources.add(source(item, "note", "note_id", "title", "summary")));
                 case "list_files" -> result.path("files").forEach(item -> sources.add(source(item, "file", "file_id", "name", "summary")));
+                case "run_app_command" -> addAppPageSources(result, sources);
                 case "get_note" -> sources.add(source(result, "note", "note_id", "title", "content"));
                 case "get_quick_ref" -> sources.add(source(result, "quick_ref", "quick_ref_id", "title", "content"));
                 case "get_file" -> sources.add(source(result, "file", "file_id", "name", result.path("content").asText("").isBlank() ? "summary" : "content"));
@@ -129,6 +141,48 @@ public final class AgentProgressDetails {
         return displayDetails(JSON.valueToTree(details));
     }
 
+    private static JsonNode pipelineProgress(JsonNode result) {
+        var preview = JSON.createObjectNode().put("ok", result.path("ok").asBoolean());
+        if (result.path("staged").asBoolean()) preview.put("staged", true);
+        if (result.path("action_id").isIntegralNumber()) preview.set("action_id", result.path("action_id"));
+        var steps = preview.putArray("steps");
+        for (JsonNode step : result.path("steps")) {
+            if (!step.isObject() || steps.size() == 8) break;
+            var item = steps.addObject();
+            for (String key : List.of("id", "command", "status")) {
+                if (step.path(key).isTextual()) item.put(key, text(step.path(key), 80, new Budget(80)));
+            }
+            for (String key : List.of("resultCount", "total", "pageCount", "startPage", "iterationCount")) {
+                if (step.path(key).isIntegralNumber()) item.set(key, step.path(key));
+            }
+            if (step.path("partial").asBoolean()) item.put("partial", true);
+        }
+        return preview;
+    }
+
+    private static void addAppPageSources(JsonNode result, List<Map<String, Object>> sources) {
+        if (!result.path("ok").booleanValue()) return;
+        String type = switch (result.path("command").asText()) {
+            case "note.page" -> "note";
+            case "file.page" -> "file";
+            default -> "";
+        };
+        JsonNode rows = result.path("result").path("list");
+        if (type.isEmpty() || !rows.isArray()) return;
+        String titleField = "note".equals(type) ? "title" : "originName";
+        for (JsonNode row : rows) {
+            if (sources.size() >= MAX_SOURCES) break;
+            JsonNode id = row.path("id");
+            if (!id.isIntegralNumber() || !id.canConvertToLong() || id.longValue() <= 0) continue;
+            Map<String, Object> source = new LinkedHashMap<>();
+            source.put("type", type);
+            source.put("id", id.longValue());
+            if (row.path(titleField).isTextual()) source.put("title", row.path(titleField).asText());
+            if (row.path("summary").isTextual()) source.put("snippet", row.path("summary").asText());
+            sources.add(source);
+        }
+    }
+
     private static Map<String, Object> source(JsonNode item, String type, String idField, String titleField, String snippetField) {
         Map<String, Object> ref = new LinkedHashMap<>();
         if (!SOURCE_TYPES.contains(type)) return ref;
@@ -146,7 +200,7 @@ public final class AgentProgressDetails {
         List<Map<String, Object>> out = new ArrayList<>();
         for (JsonNode source : input) {
             String type = source.path("type").asText("");
-            if (out.size() >= 32 || !SOURCE_TYPES.contains(type) || source.path("id").asLong() <= 0) continue;
+            if (out.size() >= MAX_SOURCES || !SOURCE_TYPES.contains(type) || source.path("id").asLong() <= 0) continue;
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("type", type);
             for (String key : SOURCE_NUMBERS) if (source.path(key).isIntegralNumber()) item.put(key, source.path(key).longValue());
@@ -173,7 +227,10 @@ public final class AgentProgressDetails {
 
     private static Map<String, Object> toolRecord(String name, String argsRaw) {
         Map<String, Object> item = new LinkedHashMap<>();
-        item.put("name", name); item.put("title", AgentChatProgress.toolTitle(name));
+        item.put("name", name);
+        item.put("title", APP_PIPELINE.equals(name) ? "执行应用命令管道" : AgentChatProgress.toolTitle(name));
+        // App input is unvalidated here. The confirmation card displays the gateway's safe preview.
+        if (PRIVATE_ARGUMENT_TOOLS.contains(name)) return item;
         JsonNode args = parse(argsRaw);
         if (args.isObject()) item.put("arguments", args);
         return item;

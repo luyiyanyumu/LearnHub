@@ -2,7 +2,7 @@
 
 LearnHub 的 npm 包是 Docker Compose 启动器。Java 后端、前端 nginx 和 MySQL 在 Docker 中运行，用户电脑需要 Node.js 22.14 以上与 Docker Compose 2.20 以上。`npx` 下载的是启动器；它随后拉取对应版本的前后端镜像。
 
-当前发布版本为 `@luyiyanyumu/learnhub@0.1.6`，版本说明见 [0.1.6](release-notes/0.1.6.md)。GitHub Actions 使用 OIDC 自动发布。GitHub 版本标签固定已发布的代码；后续普通代码提交不会改变现有 npm 包，准备好新的版本号并推送对应标签后才发布新版本。
+当前发布版本为 `@luyiyanyumu/learnhub@0.1.7`，版本说明见 [0.1.7](release-notes/0.1.7.md)。GitHub Actions 使用 OIDC 自动发布。GitHub 版本标签固定已发布的代码；后续普通代码提交不会改变现有 npm 包，准备好新的版本号并推送对应标签后才发布新版本。
 
 ## 用户安装与更新
 
@@ -74,9 +74,9 @@ git push origin v0.1.7
 发布结果使用明确版本：
 
 ```text
-@luyiyanyumu/learnhub@0.1.6
-ghcr.io/luyiyanyumu/learnhub-backend:0.1.6
-ghcr.io/luyiyanyumu/learnhub-frontend:0.1.6
+@luyiyanyumu/learnhub@0.1.7
+ghcr.io/luyiyanyumu/learnhub-backend:0.1.7
+ghcr.io/luyiyanyumu/learnhub-frontend:0.1.7
 ```
 
 工作流不发布 `latest` 镜像；npm 的 `latest` dist-tag 指向最近的稳定启动器版本。不要移动既有版本 tag 或重用已发布的版本；每次更新提高 `cli/package.json` 的版本，并新增数据库迁移文件，已发布迁移不得编辑。

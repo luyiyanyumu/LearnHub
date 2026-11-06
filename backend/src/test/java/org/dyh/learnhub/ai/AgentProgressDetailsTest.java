@@ -75,6 +75,31 @@ class AgentProgressDetailsTest {
         assertEquals(List.of("note:751:0"), source.get("sourceRefs"));
     }
 
+    @Test void successfulNoteAndFileCommandsKeepSafeClickableSources() {
+        var notes = json.createObjectNode().put("ok", true).put("command", "note.page");
+        var rows = notes.putObject("result").putArray("list");
+        rows.addObject().put("id", 0).put("title", "无效笔记");
+        for (int id = 1; id <= 40; id++) {
+            rows.addObject().put("id", id).put("title", "合成笔记").put("summary", "合成摘要");
+        }
+        var noteDetails = AgentProgressDetails.result("run_app_command", notes);
+        assertEquals(32, ((List<?>) noteDetails.get("sources")).size());
+        assertEquals(Map.of("type", "note", "id", 1L, "title", "合成笔记", "snippet", "合成摘要"),
+                ((List<?>) noteDetails.get("sources")).getFirst());
+
+        var files = json.createObjectNode().put("ok", true).put("command", "file.page");
+        files.putObject("result").putArray("list").addObject()
+                .put("id", 731).put("originName", "合成资料.pdf").put("summary", "token=synthetic-secret")
+                .put("content", "合成正文").put("factVerified", true);
+        var fileDetails = AgentProgressDetails.result("run_app_command", files);
+        assertEquals(List.of(Map.of("type", "file", "id", 731L, "title", "合成资料.pdf", "snippet", "token=[已隐藏]")),
+                fileDetails.get("sources"));
+
+        var failed = files.deepCopy().put("ok", false);
+        assertFalse(AgentProgressDetails.result("run_app_command", failed).containsKey("sources"));
+        assertFalse(AgentProgressDetails.result("run_app_command", files.put("command", "file.detail")).containsKey("sources"));
+    }
+
     @Test @SuppressWarnings("unchecked") void historyUsesWhitelistBoundsAndPreservesRetrievalChannels() throws Exception {
         var entry = json.valueToTree(Map.of("rawReasoning", "hidden-synthetic-reasoning", "prompt", "hidden-synthetic-prompt",
                 "tools", List.of(Map.of("name", "search_knowledge", "arguments", Map.of("query", "x".repeat(100_000)))),

@@ -17,7 +17,7 @@ final class AgentToolEvidence {
     private static final Set<String> SOURCE_TYPES = Set.of("note", "quick_ref", "file");
     private static final Set<String> OTHER_READS = Set.of("query_notes", "list_files", "list_categories",
             "graph_neighbors", "graph_query", "web_search", "web_fetch", "search_code", "get_code",
-            "search_wiki", "read_wiki");
+            "search_wiki", "read_wiki", "run_app_command", "run_app_pipeline");
     private final ObjectMapper json;
     private final int totalChars;
     private final List<String> blocks = new ArrayList<>();

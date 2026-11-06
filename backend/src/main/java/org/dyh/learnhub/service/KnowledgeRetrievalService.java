@@ -46,6 +46,10 @@ public class KnowledgeRetrievalService {
     private final DeepSeekClient client;
     private final WikiRetrievalService wikiRetrieval;
     private KnowledgeBaseSettings knowledgeSettings;
+    private FileStorageService fileStorage;
+
+    @Autowired(required = false)
+    public void setFileStorage(FileStorageService fileStorage) { this.fileStorage = fileStorage; }
 
     @Autowired(required = false)
     public void setKnowledgeSettings(KnowledgeBaseSettings knowledgeSettings) { this.knowledgeSettings = knowledgeSettings; }
@@ -214,6 +218,11 @@ public class KnowledgeRetrievalService {
         if (trace != null) trace.stage("topK", "最终片段", topStarted, result.size(), "completed", "按本轮 topK 截取实际命中");
         log.info("统一检索：mode={} keyword={} vector={} graph={} wikiSections={} wikiSources={} supplemental={} returned={}",
                 selectedMode, keyword.size(), vector.size(), graph.size(), wiki.size(), wikiSources.size(), supplemental.size(), result.size());
+        if (documents == null && fileStorage != null) result = result.stream().map(hit -> {
+            if (!"file".equals(hit.sourceType())) return hit;
+            try { return hit.withSourceLocations(fileStorage.sourceLocations(hit.sourceId(), hit.text(), query)); }
+            catch (RuntimeException unavailable) { return hit; }
+        }).toList();
         return new SearchResult(result, wiki);
     }
 

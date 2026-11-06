@@ -110,7 +110,7 @@ public class NoteService {
             String like = kw.trim();
             wrapper.and(w -> w.like(Note::getTitle, like).or().like(Note::getContent, like));
         }
-        wrapper.orderByDesc(Note::getUpdatedAt);
+        wrapper.orderByDesc(Note::getUpdatedAt).orderByDesc(Note::getId);
 
         Page<Note> page = noteMapper.selectPage(new Page<>(current, size), wrapper);
         Map<Long, String> categoryNames = loadCategoryNames(

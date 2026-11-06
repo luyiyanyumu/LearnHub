@@ -2,6 +2,7 @@
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { createManager } from '../src/manager.mjs';
+import { runAppCli } from '../src/app.mjs';
 
 const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
 const HELP = `LearnHub ${pkg.version}
@@ -15,6 +16,8 @@ const HELP = `LearnHub ${pkg.version}
   backup              暂停写入，备份数据库、资料与技能，然后恢复服务
   adopt --from <目录>  接管现有 Docker Compose 部署（原 deploy 目录）
   doctor              检查 Docker / Compose
+  app --help          查看、描述或执行应用操作
+  shell               进入应用交互终端
 
   --home <目录>       固定配置、版本记录和备份目录（默认 ~/.learnhub）
   --project <名称>    首次安装/接管的 Compose 实例名（默认 learn-hub）
@@ -60,6 +63,8 @@ export function parseArgs(argv) {
 }
 
 export async function runCli(argv, dependencies = {}) {
+  if (argv[0] === 'app') return runAppCli(argv.slice(1), dependencies);
+  if (argv[0] === 'shell') return runAppCli(argv, dependencies);
   const { command, options } = parseArgs(argv);
   if (command === 'help') { console.log(HELP); return; }
   if (command === 'version') { console.log(pkg.version); return; }
@@ -69,5 +74,9 @@ export async function runCli(argv, dependencies = {}) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try { await runCli(process.argv.slice(2)); }
-  catch (error) { console.error(`LearnHub：${error.message}`); process.exitCode = 1; }
+  catch (error) {
+    const isApp = ['app', 'shell'].includes(process.argv[2]);
+    console.error(isApp ? JSON.stringify({ error: error.message }) : `LearnHub：${error.message}`);
+    process.exitCode = 1;
+  }
 }

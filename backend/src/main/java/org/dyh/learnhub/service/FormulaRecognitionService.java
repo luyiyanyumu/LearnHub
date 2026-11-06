@@ -185,6 +185,7 @@ public class FormulaRecognitionService {
         } catch (IOException writeFailed) {
             throw new IllegalStateException("公式识别缓存无法保存，请检查资料目录是否可写");
         }
+        storage.refreshConfirmedFormulas(fileId);
         return candidate;
     }
 

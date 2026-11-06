@@ -144,6 +144,8 @@ public class KnowledgeService {
             item.put("ext", str(f.get("ext")));
             item.put("textChars", f.get("textChars") == null ? 0 : f.get("textChars"));
             item.put("textStatus", str(f.get("textStatus")));
+            item.put("sourceLocations", fileStorageService.sourceLocations(((Number) f.get("id")).longValue(),
+                    String.valueOf(item.get("snippet")), keyword));
             Object createdAt = f.get("createdAt");
             item.put("updatedAt", createdAt == null ? null : String.valueOf(createdAt).replace('T', ' '));
             out.add(item);

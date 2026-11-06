@@ -1,0 +1,7 @@
+# Deliberately narrow build context: no user documents, keys, databases or app tree.
+**
+!tools
+!tools/document-ocr
+!tools/document-ocr/**
+**/__pycache__
+**/*.pyc
