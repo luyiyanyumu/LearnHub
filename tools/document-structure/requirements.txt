@@ -1,0 +1,5 @@
+paddleocr[doc-parser]==3.7.0
+paddlex==3.7.2
+paddlepaddle==3.3.0
+numpy==2.3.5
+Pillow==13.0.0

@@ -36,19 +36,30 @@ export function expandGraphIds(id, edges, hops = 1) {
   return result
 }
 
-export function findGraphNodes(nodes, query, limit = 12) {
-  const q = String(query || '').trim().toLocaleLowerCase()
-  const score = n => {
-    const name = String(n.label || n.name || '').toLocaleLowerCase()
-    const aliases = (n.aliases || []).map(a => String(a).toLocaleLowerCase())
-    if (!q) return 1
-    if (name === q || aliases.includes(q)) return 4
-    if (name.startsWith(q) || aliases.some(a => a.startsWith(q))) return 3
-    return name.includes(q) || aliases.some(a => a.includes(q)) ? 2 : 0
+export function createGraphSearchIndex(nodes) {
+  const entries = nodes.map(node => ({
+    node,
+    terms: [node.label || node.name || '', ...(node.aliases || [])].map(term => String(term).toLocaleLowerCase()),
+  })).sort((a, b) => (b.node.degree || 0) - (a.node.degree || 0) || String(a.node.id).localeCompare(String(b.node.id)))
+
+  return (query, limit = 12) => {
+    const q = String(query || '').trim().toLocaleLowerCase()
+    if (!q) return entries.slice(0, limit).map(entry => entry.node)
+
+    const exact = []
+    const prefix = []
+    const partial = []
+    for (const { node, terms } of entries) {
+      if (terms.includes(q)) exact.push(node)
+      else if (terms.some(term => term.startsWith(q))) prefix.push(node)
+      else if (terms.some(term => term.includes(q))) partial.push(node)
+    }
+    return exact.concat(prefix, partial).slice(0, limit)
   }
-  return nodes.map(n => ({ n, score: score(n) })).filter(x => x.score > 0)
-    .sort((a, b) => b.score - a.score || (b.n.degree || 0) - (a.n.degree || 0) || String(a.n.id).localeCompare(String(b.n.id)))
-    .slice(0, limit).map(x => x.n)
+}
+
+export function findGraphNodes(nodes, query, limit = 12) {
+  return createGraphSearchIndex(nodes)(query, limit)
 }
 
 export function graphSource(source) {

@@ -1,0 +1,11 @@
+# Build the current CPU/HQ image first; both variants share the same verified weights.
+ARG CPU_IMAGE=learn-hub-document-structure:local
+FROM ${CPU_IMAGE}
+USER root
+RUN pip uninstall -y paddlepaddle \
+    && pip install --no-cache-dir paddlepaddle-gpu==3.3.0 \
+        --index-url https://www.paddlepaddle.org.cn/packages/stable/cu126/ \
+        --extra-index-url https://pypi.org/simple
+ENV LEARNHUB_STRUCTURE_DEVICE=gpu:0 \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+USER 10001:10001

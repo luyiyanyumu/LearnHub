@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus'
 import { fileApi } from '../api'
 import ExtractedFormula from './ExtractedFormula.vue'
 import { exportExtractedText, renderExtractedText } from '../utils/extractedMath'
+import { extractedBlockAssetUrl, extractedImageDimensions, renderExtractedMarkdown } from '../utils/extractedMarkdown.js'
 
 /**
  * 抽取正文的**文档视图**（不是"一段一段往下堆"）。
@@ -40,15 +41,18 @@ const props = defineProps({
   maxChars: { type: Number, default: 4000 },
   /** 宿主提供右侧译文栏时，段落按钮将原文交给宿主。 */
   externalTranslation: { type: Boolean, default: false },
+  artifact: { type: Object, default: () => ({}) },
+  allowRegionRecognition: { type: Boolean, default: true },
 })
-const emit = defineEmits(['open-original', 'translate'])
+const emit = defineEmits(['open-original', 'open-region', 'translate', 'persisted'])
+const documentRoot = ref(null)
 const formulaCorrections = ref({})
 const formulaCapabilities = ref(null)
 let requestedFormulaCapabilities = false
 let mounted = true
 
 // One capability lookup per reader, never one request per formula or per page.
-watch(() => props.pages.some(pg => (pg.blocks || []).some(block => block.type === 'formula' && block.rect)), async hasFormulaImage => {
+watch(() => props.allowRegionRecognition && props.pages.some(pg => (pg.blocks || []).some(block => block.type === 'formula' && block.rect)), async hasFormulaImage => {
   if (!hasFormulaImage || requestedFormulaCapabilities) return
   requestedFormulaCapabilities = true
   try {
@@ -72,15 +76,36 @@ const blockCount = computed(() =>
 
 /** 插图数（工具条上提示"图是按原位贴出来的"，顺带告诉读者这页有几张图） */
 const figureCount = computed(() =>
-  props.pages.reduce((n, p) => n + (p.blocks || []).filter((b) => b.type === 'figure').length, 0))
+  props.pages.reduce((n, p) => n + (p.blocks || []).filter((b) => ['figure', 'image'].includes(b.type)).length, 0))
+const hasPhysicalPages = computed(() => props.pages.some(page => ['pt', 'px'].includes(page.coordinateUnit)
+  || !page.coordinateUnit && props.allowRegionRecognition))
+
+function pageDescription(page) {
+  const physical = ['pt', 'px'].includes(page.coordinateUnit) || !page.coordinateUnit && props.allowRegionRecognition
+  return physical ? `原件第 ${page.page} 页${page.label ? `（原印刷页码：${page.label}）` : ''}` : `内容分组 ${page.page}`
+}
+function presentationStyle(block) {
+  const { width } = extractedImageDimensions(block.presentation || {})
+  const align = block.presentation?.align
+  return { ...(width ? { '--source-media-width': `${width}px` } : {}),
+    ...(['left', 'center', 'right'].includes(align) ? { textAlign: align } : {}) }
+}
+function hiddenPresentation(block) { return ['resolver_only', 'annotation'].includes(block.presentation?.placement) }
+function originalMedia(block) {
+  return ['figure', 'image'].includes(block.type) || block.type === 'formula' && !!block.src
+    && /^(?:word:|pdf-figure:)/.test(block.presentation?.sourceRef || '')
+}
 
 const renderedBlocks = computed(() => {
   const result = new Map()
   for (const page of props.pages) {
     for (const [index, block] of (page.blocks || []).entries()) {
-      if (['formula', 'code', 'figure'].includes(block.type)) continue
-      const inline = ['title', 'authors', 'meta', 'heading', 'note', 'table'].includes(block.type)
-      result.set(keyOf(page.page, index), renderExtractedText(block.text, { inline }))
+      if (['formula', 'code', 'figure', 'image'].includes(block.type)) continue
+      const inline = ['title', 'authors', 'meta', 'heading', 'note'].includes(block.type) || block.presentation?.placement === 'inline'
+      const source = ['title', 'authors', 'meta', 'heading', 'note'].includes(block.type) ? block.text : block.markdown ?? block.text
+      result.set(keyOf(page.page, index), source !== undefined ? renderExtractedMarkdown(source, {
+        ...props.artifact, fileId: props.fileId, renderScope: `file-${props.fileId}-page-${page.page}-block-${index}`,
+      }, globalThis.document, { inline }) : renderExtractedText(block.text, { inline }))
     }
   }
   return result
@@ -105,12 +130,12 @@ function keyOf(page, index) {
 
 function contentBlocks(page) {
   return (page.blocks || []).map((block, index) => ({ block, index }))
-    .filter(({ block }) => block.type !== 'note')
+    .filter(({ block }) => block.type !== 'note' && !hiddenPresentation(block))
 }
 
 function pageNotes(page) {
   return (page.blocks || []).map((block, index) => ({ block, index }))
-    .filter(({ block }) => block.type === 'note')
+    .filter(({ block }) => block.type === 'note' && block.presentation?.placement !== 'resolver_only')
 }
 
 function tooLong(block) {
@@ -122,6 +147,9 @@ function tooLong(block) {
  * 这里补上 fileId 拼成真实地址。图在服务端按需裁剪并缓存，重复滚动不会重复渲染。
  */
 function figureUrl(block) {
+  const asset = extractedBlockAssetUrl(block, { ...props.artifact, fileId: props.fileId })
+  if (asset) return asset
+  if (!/^\d+-\d+$/.test(String(block.src || ''))) return ''
   const [page, idx] = String(block.src || '').split('-')
   return `/api/files/${props.fileId}/page-image?page=${page}&idx=${idx}`
 }
@@ -197,13 +225,34 @@ watch([() => props.fileId, () => props.pages], () => {
   formulaCorrections.value = {}
   translations.value = {}
 })
+function focusBlock(blockId, page) {
+  const nodes = Array.from(documentRoot.value?.querySelectorAll('[data-block-id]') || [])
+  const all = props.pages.flatMap(group => group.blocks || [])
+  let block = all.find(item => String(item.id) === String(blockId))
+  let target = nodes.find(node => node.dataset.blockId === String(blockId))
+  const seen = new Set()
+  while (!target && block && !seen.has(block.id)) {
+    seen.add(block.id)
+    const group = block.presentation?.groupId
+    const parent = all.find(item => String(item.id) === String(group) && item.id !== block.id)
+      || all.filter(item => item.id && String(block.id).startsWith(`${item.id}-vision-`)).sort((a, b) => String(b.id).length - String(a.id).length)[0]
+      || all.find(item => item.id !== block.id && group && item.presentation?.groupId === group && !hiddenPresentation(item) && originalMedia(item))
+      || all.find(item => item.id !== block.id && group && item.presentation?.groupId === group && !hiddenPresentation(item))
+    block = parent
+    if (block) target = nodes.find(node => node.dataset.blockId === String(block.id))
+  }
+  target ||= Array.from(documentRoot.value?.querySelectorAll('[data-page]') || []).find(node => node.dataset.page === String(page))
+  target?.scrollIntoView({ block: 'center', inline: 'nearest' })
+  target?.focus({ preventScroll: true })
+}
+defineExpose({ focusBlock })
 </script>
 
 <template>
-  <div class="doc-view">
+  <div ref="documentRoot" class="doc-view">
     <div class="reader-toolbar doc-tools">
       <span class="reader-hint">
-        按原文档排版还原 · {{ pages.length }} / {{ pageCount || pages.length }} 页 · {{ chars || blockCount }} 字<template
+        按结构核对 · {{ pages.length }} / {{ pageCount || pages.length }} {{ hasPhysicalPages ? '页' : '组' }} · {{ chars || blockCount }} 字<template
           v-if="figureCount"
         > · 含 {{ figureCount }} 张插图</template>
       </span>
@@ -224,9 +273,9 @@ watch([() => props.fileId, () => props.pages], () => {
     <p v-if="translateError" class="doc-error">翻译失败：{{ translateError }}</p>
 
     <div class="doc-scroll">
-      <article v-for="pg in pages" :key="pg.page" class="doc-page">
+      <article v-for="pg in pages" :key="pg.page" class="doc-page" :data-page="pg.page" tabindex="-1">
         <div class="doc-page-sep">
-          <span>第 {{ pg.page }} 页<template v-if="pg.columns > 1"> · {{ pg.columns }} 栏</template></span>
+          <span>{{ pageDescription(pg) }}<template v-if="pg.columns > 1"> · {{ pg.columns }} 栏</template></span>
         </div>
         <template v-for="{ block: b, index: i } in contentBlocks(pg)" :key="i">
           <h2 v-if="b.type === 'title'" class="doc-title" v-html="renderedText(pg.page, i).html" />
@@ -235,23 +284,32 @@ watch([() => props.fileId, () => props.pages], () => {
           <h3 v-else-if="b.type === 'heading'" class="doc-heading" :class="'doc-lv' + (b.level || 1)" v-html="renderedText(pg.page, i).html" />
           <!-- 代码 / 表格：按"一行一行"原样渲染，不参与翻译（翻代码没有意义，还会把缩进搅乱） -->
           <pre v-else-if="b.type === 'code'" class="doc-code">{{ b.text }}</pre>
-          <pre v-else-if="b.type === 'table'" class="doc-table" v-html="renderedText(pg.page, i).html" />
+          <div v-else-if="b.type === 'table'" class="doc-table" :data-block-id="b.id" tabindex="-1" v-html="renderedText(pg.page, i).html" />
           <!-- 不确定的 PDF 几何结果优先保留原图，由用户按需发起视觉识别。 -->
           <ExtractedFormula
-            v-else-if="b.type === 'formula'"
+            v-else-if="b.type === 'formula' && !originalMedia(b)"
             :block="b"
             :file-id="fileId"
             :page="pg.page"
             :recognition-capabilities="formulaCapabilities"
+            :image-src="extractedBlockAssetUrl(b, { ...artifact, fileId })"
+            :allow-region-recognition="allowRegionRecognition"
+            :data-block-id="b.id"
+            :style="presentationStyle(b)"
+            tabindex="-1"
             @open-original="emit('open-original', $event)"
+            @open-region="emit('open-region', $event)"
+            @persisted="emit('persisted', $event)"
             @update-latex="correctFormula(pg.page, i, $event)"
           />
           <!-- 插图：直接把原 PDF 的那块图裁出来贴在这里。**不识别**图里的文字 ——
                图表里的刻度/流程框抽成文字只会变成一堆散落的碎片，看图反而准 -->
-          <figure v-else-if="b.type === 'figure' && b.src" class="doc-figure">
-            <img :src="figureUrl(b)" alt="" loading="lazy" decoding="async" />
+          <figure v-else-if="originalMedia(b)" class="doc-figure" :class="{ 'doc-inline-media': b.presentation?.placement === 'inline' }" :style="presentationStyle(b)" :data-source-group="b.presentation?.groupId" :data-block-id="b.id" :tabindex="b.presentation?.placement === 'inline' ? 0 : -1">
+            <img v-if="figureUrl(b)" :src="figureUrl(b)" :width="extractedImageDimensions(b.presentation || {}).width || undefined" :height="extractedImageDimensions(b.presentation || {}).height || undefined" :alt="`${pageDescription(pg)}原文插图`" loading="lazy" decoding="async" />
+            <p v-else class="reader-hint">原图可在对应页面查看。</p>
+            <figcaption><button type="button" class="reader-btn" @click="emit('open-region', { ...b, page: pg.page })">查看原图区域</button></figcaption>
           </figure>
-          <div v-else class="doc-block">
+          <div v-else class="doc-block" :class="{ 'doc-inline-part': b.presentation?.placement === 'inline' }" :data-source-group="b.presentation?.groupId" :data-block-id="b.id" tabindex="-1">
             <button
               type="button"
               class="reader-btn doc-translate"
@@ -454,6 +512,7 @@ watch([() => props.fileId, () => props.pages], () => {
 
 .doc-text :deep(p) { margin: 0 0 8px; }
 .doc-text :deep(p:last-child) { margin-bottom: 0; }
+.doc-text :deep(img), .doc-table :deep(img), .doc-note :deep(img) { max-width: 100%; height: auto; vertical-align: middle; }
 .doc-text :deep(pre) { white-space: pre-wrap; text-indent: 0; font-size: 12px; }
 .doc-text :deep(code) { text-indent: 0; }
 .doc-view :deep(.extracted-math-block),
@@ -521,6 +580,16 @@ watch([() => props.fileId, () => props.pages], () => {
   border-radius: 8px;
   background: #fff;
 }
+.doc-inline-media { display: inline-block; position: relative; vertical-align: middle; margin: 0; }
+.doc-inline-media img { border: 0; border-radius: 0; background: transparent; }
+.doc-inline-media figcaption { position: absolute; top: 100%; left: 0; z-index: 3; visibility: hidden; background: var(--app-card); white-space: nowrap; }
+.doc-inline-media:hover figcaption, .doc-inline-media:focus figcaption, .doc-inline-media:focus-within figcaption { visibility: visible; }
+.doc-inline-media:focus-visible { outline: 2px solid var(--app-brand); outline-offset: 2px; }
+.doc-inline-part, .doc-inline-part > .doc-text { display: inline; text-indent: 0; text-align: inherit; }
+.doc-view :deep(.formula-original img) { width: var(--source-media-width, auto); max-width: 100%; height: auto; }
+.doc-view :deep(blockquote) { margin: 1em 0; padding: .2em 1em; border-left: 3px solid var(--app-border); color: var(--app-text-2); text-indent: 0; }
+.doc-table :deep(table) { white-space: normal; border-collapse: collapse; font-family: inherit; font-size: 14px; line-height: 1.7; }
+.doc-table :deep(td), .doc-table :deep(th) { border: 1px solid var(--app-border); padding: 6px 10px; }
 
 .doc-trans-tag {
   font-size: 11px;

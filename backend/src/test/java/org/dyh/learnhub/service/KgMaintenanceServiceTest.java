@@ -1,6 +1,7 @@
 package org.dyh.learnhub.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.dyh.learnhub.entity.AppSetting;
 import org.dyh.learnhub.entity.KgRelation;
 import org.dyh.learnhub.mapper.AppSettingMapper;
@@ -271,6 +272,28 @@ class KgMaintenanceServiceTest {
         service = createService(); clearInvocations(extractor);
         assertEquals(true, service.maintain(1).get("complete"));
         verify(extractor).extractSourceStrict(eq("笔记#1"), anyString(), eq("修改后的短合成内容。"), anyList());
+    }
+
+    @Test void oldBatchBoundariesRestartOnlyTheUnfinishedSource() throws Exception {
+        add(2);
+        assertEquals(true, service.maintain(1).get("complete"));
+        var completed = checkpoints().get("笔记#2");
+
+        String first = "甲".repeat(3999) + "\n";
+        notes.put(1L, note(1, first + ("乙".repeat(3999) + "\n").repeat(3)));
+        assertEquals(false, service.maintain(1).get("complete"));
+        AppSetting row = stored.get(KgMaintenanceService.extractionKey("笔记#1"));
+        ObjectNode legacy = (ObjectNode) json.readTree(row.getSettingValue());
+        legacy.put("fingerprint", legacy.path("fingerprint").asText().split("\n", 2)[0]);
+        row.setSettingValue(legacy.toString());
+
+        service = createService();
+        clearInvocations(extractor, graph);
+        assertEquals(false, service.maintain(1).get("complete"));
+        verify(extractor).extractSourceStrict(eq("笔记#1"), anyString(), eq(first), anyList());
+        verify(extractor, never()).extractSourceStrict(eq("笔记#2"), anyString(), anyString(), anyList());
+        verify(graph, never()).replaceSourceSupport(anyString(), anyList(), anyMap(), nullable(String.class));
+        assertEquals(completed, checkpoints().get("笔记#2"));
     }
 
     @Test void deletingAPartiallyReadSourceCleansItsSavedBatchesWithoutCallingTheModel() {

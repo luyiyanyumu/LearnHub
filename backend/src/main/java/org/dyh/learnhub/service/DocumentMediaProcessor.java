@@ -29,12 +29,18 @@ import static org.dyh.learnhub.service.DocumentIngestionService.*;
 @Service
 public class DocumentMediaProcessor {
     private static final int MAX_REGIONS = 12;
+    private static final int LOCAL_CACHE_BYTES = 512_000;
     private static final long TIMEOUT_MS = 180000;
     private static final Set<String> IMAGES = Set.of("png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif", "webp");
     private static final Pattern WORD_IMAGE = Pattern.compile("!\\[([^]]*)]\\((?:word|ppt|xlsx):[^)\\r\\n]+\\)");
+    private static final String LOCAL_SCAN_NOTICE="本次要求 Office 图片使用高精度扫描：";
+    private static final Pattern LOCAL_ATTEMPTS=Pattern.compile("；尝试次数：([0-9]{1,9})$");
+    private static final Pattern LOCAL_TASK_ATTEMPTS=Pattern.compile("；本任务尝试次数：([0-2])(?:；|$)");
+    private static final Pattern LOCAL_OUTCOME=Pattern.compile("；结果：(accepted|empty|needs_review|request_failed|batch_limit)(?:；|$)");
     private final PdfLayoutExtractor layout;
     private final DocumentOcrClient ocr;
     private final DocumentVisionClient vision;
+    private DocumentStructureClient structure;
     private final ObjectMapper json = new ObjectMapper();
     private final Semaphore slots = new Semaphore(2);
     private final ExecutorService workers = Executors.newFixedThreadPool(2, task -> {
@@ -45,14 +51,49 @@ public class DocumentMediaProcessor {
         this.layout = layout; this.ocr = ocr; this.vision = vision;
     }
 
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setStructureClient(DocumentStructureClient structure) { this.structure = structure; }
+
     public Extraction process(Long fileId, Path source, String ext, Extraction input, boolean force) {
         return process(fileId,source,ext,input,force,true);
     }
 
     /** Structural refresh may reuse retained visual results without issuing any new OCR/model request. */
     public Extraction process(Long fileId, Path source, String ext, Extraction input, boolean force, boolean allowVision) {
+        return process(fileId, source, ext, input, force, allowVision, false, null, new LocalScanSession());
+    }
+
+    /** Local image transcription has its own generation cache and never changes external-model force semantics. */
+    public Extraction process(Long fileId, Path source, String ext, Extraction input, boolean force, boolean allowVision,
+                              boolean forceLocalScan) {
+        return process(fileId,source,ext,input,force,allowVision,forceLocalScan,new LocalScanSession());
+    }
+
+    /** One explicit task shares this budget across all bounded media rounds. */
+    public static final class LocalScanSession {
+        private final Map<String,Integer> calls=new java.util.concurrent.ConcurrentHashMap<>();
+        int attempts(String image) { return calls.getOrDefault(image,0); }
+        void attempted(String image) { calls.merge(image,1,Integer::sum); }
+        int totalCalls() { return calls.values().stream().mapToInt(Integer::intValue).sum(); }
+    }
+
+    public Extraction process(Long fileId,Path source,String ext,Extraction input,boolean force,boolean allowVision,
+                              boolean forceLocalScan,LocalScanSession session) {
+        return process(fileId,source,ext,input,force,allowVision,forceLocalScan,null,session);
+    }
+
+    Extraction processResumedPages(Long fileId, Path source, String ext, Extraction input, Set<Integer> pageNumbers) {
+        if (pageNumbers.isEmpty()) return input;
+        return process(fileId, source, ext, input, false, false, false, Set.copyOf(pageNumbers),new LocalScanSession());
+    }
+
+    private Extraction process(Long fileId, Path source, String ext, Extraction input, boolean force, boolean allowVision,
+                               boolean forceLocalScan, Set<Integer> pageNumbers,LocalScanSession session) {
         if (input == null) throw new IllegalArgumentException("缺少抽取结果");
-        Context context = new Context(input,allowVision);
+        boolean localScan=allowVision && structure!=null && structure.configured()
+                && DocumentFormatAdapter.structured(ext==null?"":ext.toLowerCase(java.util.Locale.ROOT))
+                && (forceLocalScan || pendingLocalScans(input)>0);
+        Context context = new Context(input, allowVision, pageNumbers, localScan,session);
         if (!slots.tryAcquire()) { context.warn("图片处理繁忙，原图及未处理范围已保留，请稍后重试", true); return context.result(); }
         Future<Extraction> future;
         try {
@@ -79,17 +120,18 @@ public class DocumentMediaProcessor {
     private void run(Long id, Path source, String ext, Extraction input, boolean force, Context context) throws Exception {
         check(context);
         DocumentMediaAssets assets = new DocumentMediaAssets(id, source);
+        List<Page> selected = input.pages().stream().filter(context::selected).toList();
         if ("pdf".equals(ext)) {
             try (PDDocument document = Loader.loadPDF(source.toFile())) {
-                for (Page page : input.pages()) { check(context); processPage(source, ext, page, document, assets, force, context); }
-                if (context.allowVision && !force && context.calls == 0 && context.skippedFailures) {
+                for (Page page : selected) { check(context); processPage(source, ext, page, document, assets, force, context); }
+                if (context.allowVision && !context.localScan && !force && context.calls == 0 && context.skippedFailures) {
                     context.beginFailureRetry();
                     for (Page page : context.snapshotPages()) { check(context); processPage(source, ext, page, document, assets, false, context); }
                 }
             }
         } else {
-            for (Page page : input.pages()) { check(context); processPage(source, ext, page, null, assets, force, context); }
-            if (context.allowVision && !force && context.calls == 0 && context.skippedFailures) {
+            for (Page page : selected) { check(context); processPage(source, ext, page, null, assets, force, context); }
+            if (context.allowVision && !context.localScan && !force && context.calls == 0 && context.skippedFailures) {
                 context.beginFailureRetry();
                 for (Page page : context.snapshotPages()) { check(context); processPage(source, ext, page, null, assets, false, context); }
             }
@@ -100,16 +142,26 @@ public class DocumentMediaProcessor {
     private void processPage(Path source, String ext, Page page, PDDocument document, DocumentMediaAssets assets,
                              boolean force, Context context) throws Exception {
         List<Block> result = new ArrayList<>();
+        Set<String> existingIds=page.blocks().stream().map(Block::id).collect(java.util.stream.Collectors.toSet());
+        // Legacy successful annotations are separate reliable evidence, not proof of the new review outcome.
+        if (context.localScan) for (Block old:page.blocks()) if (localScanBlock(old) && reliable(old)
+                && "unknown".equals(localOutcome(old)) && !existingIds.contains(old.id()+"-retained"))
+            result.add(new Block(old.id()+"-retained",old.type(),old.rawText(),old.cleanText(),old.page(),old.rect(),old.width(),old.height(),
+                    old.confidence(),old.quality(),old.indexed(),old.start(),old.end(),old.level(),old.src(),old.latex(),old.latexStatus(),
+                    "已保留旧版合格本地文字；当前图片扫描状态由新记录单独判定",old.markdown(),old.markdownStart(),old.markdownEnd(),old.presentation()));
         String wholeId = "p" + page.page() + "-media";
-        boolean rotatedImageFallback = document != null && Math.floorMod(document.getPage(page.page() - 1).getRotation(), 360) != 0
+        boolean structuredPage = context.structured && "ocr".equals(page.method())
+                && page.blocks().stream().noneMatch(block -> wholeId.equals(block.id()));
+        boolean rotatedImageFallback = !structuredPage && document != null && Math.floorMod(document.getPage(page.page() - 1).getRotation(), 360) != 0
                 && page.blocks().stream().noneMatch(block -> "figure".equals(block.type()) && !block.id().equals(wholeId))
                 && hasRasterImage(document, page.page());
-        boolean whole = IMAGES.contains(ext) || (document != null && ("ocr".equals(page.method())
-                || rotatedImageFallback || page.blocks().isEmpty() || page.blocks().stream().anyMatch(block -> "ocr_required".equals(block.quality()))));
-        if (rotatedImageFallback) context.info("第 " + page.page() + " 页包含旋转插图，已保留整页原图并使用整页定位；未声明精确插图坐标");
+        boolean whole = !structuredPage && (IMAGES.contains(ext) || (document != null && ("ocr".equals(page.method())
+                || rotatedImageFallback || page.blocks().isEmpty() || page.blocks().stream().anyMatch(block -> "ocr_required".equals(block.quality())))));
+        if (rotatedImageFallback && whole) context.info("第 " + page.page() + " 页包含旋转插图，已保留整页原图并使用整页定位；未声明精确插图坐标");
         List<Block> previousWholeFormulas = page.blocks().stream().filter(block -> block.id().startsWith(wholeId + "-vision-formula-")).toList();
         for (Block block : page.blocks()) {
             check(context);
+            if (context.localScan && localScanBlock(block) && context.locallyProcessed.contains(localScanParent(block))) continue;
             if (block.id().equals(wholeId)) continue;
             if (whole && block.id().startsWith(wholeId + "-vision-formula-")) continue;
             if (block.id().contains("-vision-formula-")) {
@@ -127,7 +179,8 @@ public class DocumentMediaProcessor {
                 if (officeSource(block.src()) && !processed.isEmpty())
                     context.reference(block.src(), processed.getFirst().src());
                 List<Block> checkpoint = new ArrayList<>(result);
-                checkpoint.addAll(page.blocks().subList(page.blocks().indexOf(block) + 1, page.blocks().size()));
+                checkpoint.addAll(page.blocks().subList(page.blocks().indexOf(block) + 1, page.blocks().size()).stream()
+                        .filter(value -> !context.localScan || !localScanBlock(value) || !context.locallyProcessed.contains(localScanParent(value))).toList());
                 context.page(new Page(page.page(), page.width(), page.height(), page.coordinateUnit(), page.method(), List.copyOf(checkpoint),page.label()));
             } catch (Stopped stopped) { throw stopped; }
             catch (Exception failed) {
@@ -190,6 +243,10 @@ public class DocumentMediaProcessor {
             return new Region(assets.presentation(source, block.src()), null, 0, 0, false);
         if (block.src() != null && block.src().startsWith("xlsx:"))
             return new Region(assets.spreadsheet(source, block.src()), null, 0, 0, false);
+        if (document == null && context.structured && "px".equals(page.coordinateUnit())) {
+            if (block.rect() == null) throw new IllegalArgumentException();
+            return new Region(assets.raster(source, page.page() - 1, block.rect()), block.rect(), page.width(), page.height(), false);
+        }
         if (document == null) throw new IllegalArgumentException();
         double[] rect = block.rect();
         double[] cropRect=rect;
@@ -216,6 +273,33 @@ public class DocumentMediaProcessor {
 
     private List<Block> processRegion(Region region, Block original, DocumentMediaAssets assets, boolean force,
                                       Context context, boolean localOcr) throws Exception {
+        LocalScan scanned=context.localScan && localOcr ? scanOfficeImage(region,assets,context) : null;
+        List<Block> result;
+        try { result=processRegionVisual(region,original,assets,force,context,localOcr && scanned==null); }
+        catch (Stopped stopped) { throw stopped; }
+        catch (Exception failed) {
+            if (scanned==null) throw failed;
+            context.warn("图片视觉处理未完成，本地扫描结果和原图已保留",false);
+            result=List.of(copy(original,region.asset().src(),original.quality(),original.indexed(),original.cleanText(),
+                    original.latex(),original.latexStatus(),original.latexMessage(),"![原图]("+region.asset().src()+")"));
+        }
+        if (scanned==null) return result;
+        context.locallyProcessed.add(original.id());
+        var output=new ArrayList<>(result);
+        String quality=!scanned.text().isBlank()?"accepted":scanned.complete()?"empty"
+                : "needs_review".equals(scanned.outcome())?"local_scan_review"
+                : "request_failed".equals(scanned.outcome())?"local_scan_failed":"pending";
+        output.add(new Block(original.id()+"-local-scan","para",scanned.text(),scanned.text(),original.page(),region.rect(),
+                region.width(),region.height(),scanned.confidence(),quality,"accepted".equals(quality),-1,-1,0,
+                region.asset().src(),null,null,"本地高精度扫描："+DocumentStructureClient.PROFILE+"；结果："+scanned.outcome()
+                        +"；合格块："+scanned.acceptedBlocks()+"；待核对块："+scanned.rejectedBlocks()
+                        +"；本任务尝试次数："+context.localSession.attempts(region.asset().src())+"；尝试次数："+scanned.attempts(),null,-1,-1,
+                new Presentation(null,"annotation",null,null,null,"local-scan:"+DocumentStructureClient.PROFILE+":"+region.asset().src())));
+        return List.copyOf(output);
+    }
+
+    private List<Block> processRegionVisual(Region region, Block original, DocumentMediaAssets assets, boolean force,
+                                            Context context, boolean localOcr) throws Exception {
         check(context);
         Presentation presentation=original.presentation();
         if(presentation==null && "figure".equals(original.type())) presentation=new Presentation(null,"block",null,null,null,
@@ -225,11 +309,14 @@ public class DocumentMediaProcessor {
                 original.start(), original.end(), original.level(), region.asset().src(), original.latex(), original.latexStatus(),
                 original.latexMessage(), original.markdown(), -1, -1,presentation);
         String image = "![原图](" + region.asset().src() + ")";
+        if (context.structured && (!context.allowVision || "formula".equals(original.type()))) return List.of(located);
         if ("formula".equals(original.type()) && original.latex() != null && "restored".equals(original.latexStatus()))
             return List.of(copy(located, region.asset().src(), original.quality(), original.indexed(), original.cleanText(),
                     original.latex(), original.latexStatus(), original.latexMessage(), image + "\n\n$$\n" + original.latex() + "\n$$"));
-        if (!force && reliable(original) && original.markdown() != null
-                && ("recognized".equals(original.latexStatus()) || "recognized".equals(original.quality())
+        // The local scanner adds its own evidence above; a visual cache must not erase the retained native baseline.
+        if (context.localScan && !force && reliable(original)) return List.of(located);
+        if (!force && reliable(original)
+                && ("recognized".equals(original.latexStatus()) || "recognized".equals(original.quality()) && original.markdown() != null
                 && (original.latexMessage() == null || !original.latexMessage().startsWith("视觉识别未完成"))))
             return List.of(located);
         String purpose = "formula".equals(original.type()) ? "formula" : "image";
@@ -310,8 +397,19 @@ public class DocumentMediaProcessor {
     }
 
     private String localText(byte[] png, Context context) {
-        if (!ocr.configured()) return "";
+        boolean scan = structure != null && structure.configured();
+        if (!scan && !ocr.configured()) return "";
         try {
+            if (scan) {
+                var result = structure.recognize(png, remaining(context)); check(context);
+                var accepted = result.blocks().stream().filter(block -> !Set.of("formula", "figure").contains(block.type())
+                        && block.confidence() != null && block.confidence() >= .65)
+                        .map(block -> "table".equals(block.type()) ? block.rows().stream().map(row -> String.join("\t",row))
+                                .collect(java.util.stream.Collectors.joining("\n")) : block.text())
+                        .map(DocumentTextService::tidy).filter(text -> "accepted".equals(DocumentIngestionService.quality(text, .65))).toList();
+                if (!accepted.isEmpty()) context.info("图片可见文字由本地高精度扫描模型提取；公式仍需核对");
+                return String.join("\n\n", accepted);
+            }
             var result = ocr.recognize(png, remaining(context)); check(context);
             List<String> text = new ArrayList<>();
             for (var block : result.blocks()) if (block.confidence() >= .65
@@ -320,6 +418,161 @@ public class DocumentMediaProcessor {
             return String.join("\n\n", text);
         } catch (Stopped stopped) { throw stopped; }
         catch (Exception failed) { context.warn("图片本地 OCR 未成功，已保留原图", false); return ""; }
+    }
+
+    private record LocalScan(String profile,String image,String text,Double confidence,boolean complete,String outcome,int attempts,
+                             int acceptedBlocks,int rejectedBlocks) { }
+
+    private LocalScan scanOfficeImage(Region region,DocumentMediaAssets assets,Context context) throws Exception {
+        String image=region.asset().src();
+        if (context.localResults.containsKey(image)) return context.localResults.get(image);
+        Path directory=assets.root.resolve("local-scan");
+        if (Files.isSymbolicLink(directory)) throw new IllegalStateException("本地扫描缓存目录无效");
+        Files.createDirectories(directory);
+        Path cache=directory.resolve(DocumentVisionClient.hash(image+"\n"+DocumentStructureClient.PROFILE+"\n"+STRUCTURED_PIPELINE_VERSION)+".json");
+        LocalScan result=null;
+        try {
+            if (!Files.isSymbolicLink(cache) && Files.isRegularFile(cache,LinkOption.NOFOLLOW_LINKS) && Files.size(cache)<=LOCAL_CACHE_BYTES) {
+                var saved=json.readValue(Files.readAllBytes(cache),LocalScan.class);
+                if (DocumentStructureClient.PROFILE.equals(saved.profile()) && image.equals(saved.image())
+                        && (saved.complete() && Set.of("accepted","empty").contains(String.valueOf(saved.outcome()))
+                            || !saved.complete() && Set.of("request_failed","needs_review").contains(String.valueOf(saved.outcome())))
+                        && saved.attempts()>0 && saved.attempts()<999_999_999
+                        && saved.text()!=null && saved.text().length()<=60_000
+                        && (saved.confidence()==null || Double.isFinite(saved.confidence()) && saved.confidence()>=.65 && saved.confidence()<=1))
+                    result=new LocalScan(saved.profile(),saved.image(),saved.text(),saved.confidence(),saved.complete(),
+                            saved.complete()?saved.text().isBlank()?"empty":"accepted":saved.outcome(),Math.max(1,saved.attempts()),
+                            saved.acceptedBlocks(),saved.rejectedBlocks());
+            }
+        } catch (Exception invalid) { /* Invalid or older generations never suppress a fresh local scan. */ }
+        boolean retry=result!=null && !result.complete() && "request_failed".equals(result.outcome())
+                && context.localSession.attempts(image)<2 && !context.hasFreshLocalWork;
+        if (result==null || retry) {
+            if (context.localCalls>=MAX_REGIONS) context.warn("图片本地扫描达到本批 12 个区域上限，剩余图片可继续扫描",true);
+            else try {
+                Duration allowed=remaining(context);
+                context.localCalls++;
+                context.localSession.attempted(image);
+                int attempts=result==null?1:result.attempts()+1;
+                // Record the request before entering the client, so exceptions are an attempted failure, not a batch skip.
+                result=new LocalScan(DocumentStructureClient.PROFILE,image,"",null,false,"request_failed",attempts,0,0);
+                var response=structure.recognize(region.asset().png(),allowed); check(context);
+                List<String> text=new ArrayList<>(); List<Double> scores=new ArrayList<>(); int rejected=0;
+                for (var block:response.blocks()) {
+                    if ("formula".equals(block.type())) { rejected++; continue; }
+                    if ("figure".equals(block.type())) continue;
+                    String raw="table".equals(block.type())?block.rows().stream().map(row -> String.join("\t",row))
+                            .collect(java.util.stream.Collectors.joining("\n")):block.text();
+                    String clean=DocumentTextService.tidy(raw);
+                    if (clean.isBlank()) continue;
+                    if (block.confidence()!=null && block.confidence()>=.65 && "accepted".equals(quality(clean,block.confidence()))) {
+                        text.add(clean); scores.add(block.confidence());
+                    } else rejected++;
+                }
+                String joined=String.join("\n\n",text);
+                Double confidence=scores.stream().mapToDouble(Double::doubleValue).average().stream().boxed().findFirst().orElse(null);
+                if (rejected==0 && joined.length()<=60_000) {
+                    result=new LocalScan(DocumentStructureClient.PROFILE,image,joined,confidence,true,joined.isBlank()?"empty":"accepted",attempts,scores.size(),0);
+                    context.info("Office 图片文字已通过本地高精度扫描，视觉缓存未替代本轮扫描");
+                } else {
+                    boolean fits=joined.length()<=60_000;
+                    result=new LocalScan(DocumentStructureClient.PROFILE,image,fits?joined:"",fits?confidence:null,false,"needs_review",attempts,
+                            fits?scores.size():0,rejected+(fits?0:scores.size()));
+                    context.warn("图片本地扫描含未通过质量检查的文字，旧正文和原图保留",false);
+                }
+            } catch (Stopped stopped) { throw stopped; }
+            catch (Exception failed) { context.warn("图片本地高精度扫描未完成，旧正文和原图保留",false); }
+            finally {
+                if (result!=null && result.attempts()>0) writeLocalScan(cache,directory,result);
+            }
+        }
+        if (result==null) result=new LocalScan(DocumentStructureClient.PROFILE,image,"",null,false,"batch_limit",0,0,0);
+        if ("needs_review".equals(result.outcome()) || "request_failed".equals(result.outcome()))
+            context.warn("本地图片扫描仍有需核对或请求失败区域，已保留合格文字与原图",false);
+        context.localResults.put(image,result);
+        return result;
+    }
+
+    private void writeLocalScan(Path cache,Path directory,LocalScan result) throws Exception {
+        byte[] bytes=json.writeValueAsBytes(result);
+        if (bytes.length>LOCAL_CACHE_BYTES || Files.isSymbolicLink(cache)) throw new IllegalStateException("本地扫描缓存无法安全保存");
+        Path temporary=Files.createTempFile(directory,"scan-",".tmp");
+        try {
+            Files.write(temporary,bytes);
+            try { Files.move(temporary,cache,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING); }
+            catch (java.nio.file.AtomicMoveNotSupportedException unsupported) { Files.move(temporary,cache,StandardCopyOption.REPLACE_EXISTING); }
+        } finally { Files.deleteIfExists(temporary); }
+    }
+
+    private static boolean localScanBlock(Block block) {
+        return block.id()!=null && block.id().endsWith("-local-scan") && block.presentation()!=null && block.presentation().sourceRef()!=null
+                && block.presentation().sourceRef().startsWith("local-scan:");
+    }
+
+    private static String localScanParent(Block block) { return block.id().substring(0,block.id().length()-"-local-scan".length()); }
+
+    public record LocalScanProgress(boolean requested,int regions,int completed,int actualAttempted,int unattempted,
+                                    int needsReview,int failed,int retryableFailures,int acceptedTextRegions,int acceptedTextChars) {
+        public LocalScanProgress(boolean requested,int regions,int completed,int actualAttempted,int unattempted,
+                                 int needsReview,int failed,int retryableFailures) {
+            this(requested,regions,completed,actualAttempted,unattempted,needsReview,failed,retryableFailures,0,0);
+        }
+    }
+
+    private static int localAttempts(Block block) {
+        var matcher=LOCAL_ATTEMPTS.matcher(block.latexMessage()==null?"":block.latexMessage());
+        return matcher.find()?Integer.parseInt(matcher.group(1)):0;
+    }
+
+    private static int localTaskAttempts(Block block) {
+        var matcher=LOCAL_TASK_ATTEMPTS.matcher(block.latexMessage()==null?"":block.latexMessage());
+        return matcher.find()?Integer.parseInt(matcher.group(1)):Math.min(2,localAttempts(block));
+    }
+
+    private static String localOutcome(Block block) {
+        var matcher=LOCAL_OUTCOME.matcher(block.latexMessage()==null?"":block.latexMessage());
+        if (matcher.find()) return matcher.group(1);
+        // Earlier successful markers predate block-level formula/review accounting and need one verification.
+        return "unknown";
+    }
+
+    static LocalScanProgress localScanProgress(Extraction extraction) {
+        boolean requested=extraction.report().warnings().contains(LOCAL_SCAN_NOTICE+DocumentStructureClient.PROFILE);
+        int regions=0,completed=0,attempted=0,unattempted=0,review=0,failed=0,retryable=0,textRegions=0,textChars=0;
+        for (var page:extraction.pages()) {
+            Map<String,Block> markers=new java.util.HashMap<>();
+            for (var block:page.blocks()) if (localScanBlock(block)
+                    && block.presentation().sourceRef().startsWith("local-scan:"+DocumentStructureClient.PROFILE+":")) {
+                // Older reports could fill the warning budget before saving the request notice.
+                requested=true;
+                markers.put(localScanParent(block),block);
+            }
+            for (var block:page.blocks()) {
+                if (!Set.of("figure","image","formula").contains(String.valueOf(block.type())) || block.id()==null || block.id().contains("-vision-formula-")
+                        || !(officeSource(block.src()) || block.src()!=null && block.src().startsWith("assets/"))) continue;
+                regions++;
+                Block marker=markers.get(block.id());
+                if (marker==null || !java.util.Objects.equals(block.src(),marker.src())
+                        || !marker.presentation().sourceRef().equals("local-scan:"+DocumentStructureClient.PROFILE+":"+block.src())) {
+                    unattempted++; continue;
+                }
+                String outcome=localOutcome(marker);
+                if (marker.indexed() && "accepted".equals(marker.quality()) && !marker.cleanText().isBlank()) {
+                    textRegions++; textChars+=marker.cleanText().length();
+                }
+                if (Set.of("accepted","empty").contains(outcome) && localAttempts(marker)>0) { completed++; attempted++; }
+                else if ("needs_review".equals(outcome) && localAttempts(marker)>0) { review++; attempted++; }
+                else if ("request_failed".equals(outcome) && localAttempts(marker)>0) {
+                    failed++; attempted++; if(localTaskAttempts(marker)<2) retryable++;
+                } else unattempted++;
+            }
+        }
+        return new LocalScanProgress(requested,regions,completed,attempted,unattempted,review,failed,retryable,textRegions,textChars);
+    }
+
+    static int pendingLocalScans(Extraction extraction) {
+        var progress=localScanProgress(extraction);
+        return progress.requested()?progress.regions()-progress.completed():0;
     }
 
     private Path cachePath(DocumentMediaAssets assets, String image, String purpose, String identity) throws Exception {
@@ -380,30 +633,55 @@ public class DocumentMediaProcessor {
     private static final class Context {
         final Extraction input;
         final boolean allowVision;
+        final boolean localScan;
+        final Set<Integer> pageNumbers;
         final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(TIMEOUT_MS);
         final List<Page> pages;
         final List<String> warnings;
         final List<String> baselineWarnings;
         final Map<String, String> wordReferences = new LinkedHashMap<>();
         final Set<String> refreshed = new java.util.HashSet<>();
+        final Set<String> locallyProcessed=new java.util.HashSet<>();
+        final Map<String,LocalScan> localResults=new LinkedHashMap<>();
+        final boolean hasFreshLocalWork;
+        final LocalScanSession localSession;
         volatile boolean stopped;
         boolean partial, truncated;
         boolean skippedFailures, retryFailures;
-        int calls;
-        Context(Extraction input,boolean allowVision) {
+        int calls,localCalls;
+        final boolean structured;
+        Context(Extraction input, boolean allowVision, Set<Integer> pageNumbers, boolean localScan,LocalScanSession session) {
             this.allowVision=allowVision;
+            this.localScan=localScan;
+            this.localSession=session;
+            hasFreshLocalWork=localScan && localScanProgress(input).unattempted()>0;
+            this.pageNumbers = pageNumbers;
+            structured = isStructuredPipeline(input.pipelineVersion());
             this.input = input; pages = new ArrayList<>(input.pages()); warnings = new ArrayList<>(input.report().warnings());
             baselineWarnings = List.copyOf(input.report().warnings());
+            retainLocalScanNotice();
             // Historical media-only failures can be repaired by this run; assess remaining blocks again below.
-            partial = false; truncated = input.report().truncated();
+            partial = (structured || pageNumbers != null) && input.report().partial(); truncated = input.report().truncated();
+        }
+        boolean selected(Page page) {
+            return !"blank".equals(page.method()) && (pageNumbers == null || pageNumbers.contains(page.page()));
         }
         synchronized void warn(String value, boolean limited) { info(value); partial = true; }
         synchronized void truncate(String value) { warn(value, true); truncated = true; }
-        synchronized void info(String value) { if (warnings.size() < 200 && !warnings.contains(value)) warnings.add(value); }
+        synchronized void info(String value) {
+            int ordinary=warnings.size()-(warnings.contains(LOCAL_SCAN_NOTICE+DocumentStructureClient.PROFILE)?1:0);
+            if (ordinary<200 && !warnings.contains(value)) warnings.add(value);
+        }
+        // Reserve one control notice alongside the 200 ordinary warnings; never evict capacity/failure evidence.
+        private synchronized void retainLocalScanNotice() {
+            String notice=LOCAL_SCAN_NOTICE+DocumentStructureClient.PROFILE;
+            if (localScan && !warnings.contains(notice)) warnings.addFirst(notice);
+        }
         synchronized List<Page> snapshotPages() { return List.copyOf(pages); }
         synchronized void beginFailureRetry() {
-            retryFailures = true; skippedFailures = false; partial = false; refreshed.clear();
+            retryFailures = true; skippedFailures = false; partial = structured && input.report().partial(); refreshed.clear();
             warnings.clear(); warnings.addAll(baselineWarnings);
+            retainLocalScanNotice();
             info("未发现新的未尝试区域；复用可靠结果后重试此前失败或不确定的图片区域");
         }
         synchronized boolean hasIndexedPage(int page) {
@@ -419,6 +697,7 @@ public class DocumentMediaProcessor {
         synchronized void rewriteWordReferences() {
             for (int p = 0; p < pages.size(); p++) {
                 Page page = pages.get(p); List<Block> blocks = new ArrayList<>();
+                if (!selected(page)) continue;
                 for (Block block : page.blocks()) {
                     String markdown = block.markdown();
                     String src = block.src();
@@ -451,19 +730,28 @@ public class DocumentMediaProcessor {
             for (Page page : pages) {
                 List<Block> blocks = new ArrayList<>();
                 for (Block block : page.blocks()) {
+                    if (localScan && localScanBlock(block) && "request_failed".equals(localOutcome(block))
+                            && block.presentation().sourceRef().equals("local-scan:"+DocumentStructureClient.PROFILE+":"+block.src())) {
+                        // A new explicit task grants failed requests a new budget, including untouched checkpoint tails.
+                        String message=LOCAL_TASK_ATTEMPTS.matcher(block.latexMessage()).replaceAll("；");
+                        message=message.replace("；尝试次数：","；本任务尝试次数："+localSession.attempts(block.src())+"；尝试次数：");
+                        block=copy(block,block.src(),block.quality(),block.indexed(),block.cleanText(),block.latex(),block.latexStatus(),message,block.markdown());
+                    }
                     boolean indexed = block.indexed(); int start = -1, end = -1;
-                    if (indexed && text.length() + block.cleanText().length() + 2 > DocumentTextService.MAX_TEXT_CHARS) { indexed = false; truncate("视觉结果超过 40 万字符上限，剩余块未进入索引"); }
+                    if (indexed && text.length() + block.cleanText().length() + 2 > DocumentTextService.MAX_TEXT_CHARS) { indexed = false; truncate("视觉结果超过 80 万字符上限，剩余块未进入索引"); }
                     if (indexed && !block.cleanText().isBlank()) { if (!text.isEmpty()) text.append("\n\n"); start = text.length(); text.append(block.cleanText()); end = text.length(); }
                     if (!indexed && !Set.of("empty", "non_text", "page_furniture", "superseded_by_formula").contains(block.quality())) incomplete = true;
+                    if (localScanBlock(block) && Set.of("needs_review","request_failed").contains(localOutcome(block))) incomplete=true;
                     blocks.add(new Block(block.id(), block.type(), block.rawText(), block.cleanText(), block.page(), block.rect(), block.width(), block.height(),
                             block.confidence(), block.quality(), indexed, start, end, block.level(), block.src(), block.latex(), block.latexStatus(), block.latexMessage(), block.markdown(), -1, -1,block.presentation()));
                 }
-                if (blocks.stream().noneMatch(Block::indexed)) rejected++;
-                finalPages.add(new Page(page.page(), page.width(), page.height(), page.coordinateUnit(), page.method(), List.copyOf(blocks),page.label()));
+                var updated = new Page(page.page(), page.width(), page.height(), page.coordinateUnit(), page.method(), List.copyOf(blocks), page.label());
+                if (!isCompletedPage(updated)) rejected++;
+                finalPages.add(updated);
             }
             String status = text.isEmpty() ? input.status().equals("failed") ? "failed" : "empty" : "ok";
             return new Extraction(status, text.toString(), text.length(), text.isEmpty() ? input.error() : null, input.sourceSha256(),
-                    PIPELINE_VERSION, List.copyOf(finalPages), new QualityReport(input.report().totalPages(), input.report().processedPages(),
+                    input.pipelineVersion(), List.copyOf(finalPages), new QualityReport(input.report().totalPages(), input.report().processedPages(),
                     input.report().ocrPages(), rejected, input.report().meanConfidence(), List.copyOf(warnings), truncated, partial || incomplete));
         }
     }

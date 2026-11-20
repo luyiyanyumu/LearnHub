@@ -15,6 +15,7 @@ import 'element-plus/es/components/message-box/style/css'
 // -------- 以上是 Element Plus；下面才是本项目自己的样式与代码 --------
 import { createApp } from 'vue'
 import './style.css'
+import './styles/firefly-skin.css'
 import App from './App.vue'
 import router from './router'
 import { initTheme } from './composables/useTheme'

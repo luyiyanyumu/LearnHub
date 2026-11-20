@@ -57,6 +57,57 @@ class DocumentMarkdownPersistenceTest {
         exerciseFailure(false,true);
     }
 
+    @Test void backgroundContinuationSavesNewLocationsAndKeepsTheLastBatchWhenNoPageIsAdded() throws Exception {
+        String originalDir = System.getProperty("user.dir");
+        try {
+            System.setProperty("user.dir", directory.toString());
+            Path source = directory.resolve("uploads/continuation.pdf");
+            Files.createDirectories(source.getParent());
+            Files.writeString(source, "synthetic original");
+            String sha = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(source)));
+            String first = "Cedar first synthetic paragraph.";
+            String second = "Maple second synthetic paragraph.";
+            var firstPage = extraction(sha, first, 1);
+            var old = DocumentMarkdownWriter.render(new DocumentIngestionService.Extraction("ok", first, first.length(),
+                    null, sha, firstPage.pipelineVersion(), firstPage.pages(),
+                    new DocumentIngestionService.QualityReport(3, 1, 0, 0, null, List.of(), true, true)));
+            var store = new DocumentExtractionStore();
+            store.save(71L, source, old);
+            var info = new FileInfo();
+            info.setId(71L);
+            info.setExt("pdf");
+            info.setStoreName("continuation.pdf");
+            info.setSize(Files.size(source));
+            info.setTextStatus("ok");
+            info.setTextContent(old.text());
+            var mapper = mock(FileInfoMapper.class);
+            when(mapper.selectById(71L)).thenReturn(info);
+            var parser = mock(DocumentTextService.class);
+            when(parser.supportsPageExtraction("pdf")).thenReturn(true);
+            var storage = new FileStorageService(mapper, null, parser, null, null, null,
+                    mock(ApplicationEventPublisher.class), null, null, null);
+            var next = new DocumentIngestionService.Extraction("ok", "", 0, null, sha, old.pipelineVersion(),
+                    List.of(old.pages().getFirst(), extraction(sha, second, 2).pages().getFirst()),
+                    new DocumentIngestionService.QualityReport(3, 2, 0, 0, null, List.of(), false, true));
+            when(parser.extractForJob(eq(source), eq("pdf"), anyLong(), eq(false), any(), any())).thenReturn(next);
+            var progress = new java.util.ArrayList<DocumentIngestionService.Progress>();
+            storage.extractInBackground(71L, false, true, progress::add);
+            assertEquals(2, progress.getLast().completedPages());
+            assertEquals("saving", progress.getLast().stage());
+            assertEquals(1, storage.sourceLocations(71L, first).getFirst().page());
+            assertEquals(2, storage.sourceLocations(71L, second).getFirst().page());
+            assertEquals(old.sourceSha256(), storage.sourceLocations(71L, first).getFirst().sourceRevision());
+            var saved = store.read(71L, source, info.getTextContent()).orElseThrow();
+            assertEquals(2, saved.completedPages());
+
+            assertEquals(true, storage.extractInBackground(71L, false, true, ignored -> {}).get("noProgress"));
+            verify(mapper, times(1)).updateById(any(FileInfo.class));
+            assertEquals(saved.text(), info.getTextContent());
+        } finally {
+            System.setProperty("user.dir", originalDir);
+        }
+    }
+
     @Test void currentMarkdownWithPendingMediaIsSelectedForContinuationWithoutReparsingCompleteDocuments() throws Exception {
         String prior=System.getProperty("user.dir"); System.setProperty("user.dir",directory.toString());
         try {

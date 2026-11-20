@@ -12,8 +12,10 @@ const props = defineProps({
   fileId: { type: [Number, String], required: true },
   page: { type: Number, default: 1 },
   recognitionCapabilities: { type: Object, default: null },
+  imageSrc: { type: String, default: '' },
+  allowRegionRecognition: { type: Boolean, default: true },
 })
-const emit = defineEmits(['open-original', 'update-latex'])
+const emit = defineEmits(['open-original', 'open-region', 'update-latex', 'persisted'])
 const source = ref('')
 const baseline = ref('')
 const sourceOpen = ref(false)
@@ -34,6 +36,8 @@ const region = computed(() => {
   return { page: pageNumber.value, x0, y0, x1, y1 }
 })
 const imageUrl = computed(() => {
+  if (props.imageSrc) return props.imageSrc
+  if (!props.allowRegionRecognition) return ''
   if (!region.value) return ''
   return `/api/files/${encodeURIComponent(props.fileId)}/page-image?${new URLSearchParams(region.value)}`
 })
@@ -52,6 +56,7 @@ const status = computed(() => {
   if (state.value.edited && rendered.value.ok) return '当前视图已修正'
   if (!source.value.trim()) return imageUrl.value ? '暂无可靠 LaTeX，保留原图' : '暂无可靠 LaTeX，请查看原文核对'
   if (!rendered.value.ok) return imageUrl.value ? 'LaTeX 暂不能渲染，保留源码与原图' : 'LaTeX 暂不能渲染，保留源码'
+  if (state.value.manual) return 'LaTeX 已人工核对'
   if (state.value.visual) return state.value.status === 'partial' ? '视觉识别结果仍有不确定内容，请核对原图' : '视觉识别结果，请核对'
   if (state.value.status === 'partial') return imageUrl.value ? '几何还原不确定，优先显示原图' : '已部分还原，请与原文核对'
   if (state.value.needsReview) return 'LaTeX 预览，请与原文核对'
@@ -80,7 +85,7 @@ function reset() {
   emit('update-latex', source.value)
 }
 async function recognize() {
-  if (recognizing.value || !region.value) return
+  if (recognizing.value || !region.value || !props.allowRegionRecognition) return
   recognitionError.value = ''
   if (props.recognitionCapabilities?.enabled === false) {
     recognitionError.value = capabilityReason.value || '尚未配置支持图片识别的模型，请在设置中配置公式识别模型。'
@@ -109,6 +114,7 @@ async function recognize() {
     try {
       if (!result.cacheKey) throw new Error('识别响应缺少缓存凭据，请刷新后重试。')
       await fileApi.acceptFormulaRecognition(fileId, { ...payload, cacheKey: result.cacheKey })
+      if (sequence === requestSequence) emit('persisted', { fileId, blockId: props.block.id, page: pageNumber.value })
     } catch (error) {
       if (sequence === requestSequence) {
         const reason = error?.response?.data?.msg || error?.message || '请稍后重试。'
@@ -129,6 +135,10 @@ async function copyLatex() {
     ElMessage.error('复制失败，请在源码中手动选择')
     sourceOpen.value = true
   }
+}
+function viewOriginal() {
+  if (region.value) emit('open-region', { ...props.block, page: pageNumber.value })
+  else emit('open-original', pageNumber.value)
 }
 </script>
 
@@ -156,16 +166,17 @@ async function copyLatex() {
     <p v-if="(recognition?.message || block.latexMessage) && !state.edited" class="formula-message" data-translation-ignore>{{ recognition?.message || block.latexMessage }}</p>
     <p v-if="provider" class="formula-provider" data-translation-ignore>{{ provider }}</p>
     <div class="formula-actions" data-translation-ignore>
-      <button v-if="region" type="button" class="reader-btn formula-recognize" :disabled="recognizing" @click="recognize">
+      <button v-if="region && allowRegionRecognition" type="button" class="reader-btn formula-recognize" :disabled="recognizing" @click="recognize">
         {{ recognizing ? '识别中…' : (state.visual ? '重新识别' : '识别公式') }}
       </button>
       <button type="button" class="reader-btn" :disabled="!rendered.latex" @click="copyLatex">{{ state.candidatePreview ? '复制候选 LaTeX' : '复制 LaTeX' }}</button>
       <button type="button" class="reader-btn" :aria-expanded="sourceOpen" @click="sourceOpen = !sourceOpen">
         {{ sourceOpen ? '收起源码' : '查看 / 修正源码' }}
       </button>
-      <button type="button" class="reader-btn" @click="emit('open-original', pageNumber)">查看原文</button>
+      <button type="button" class="reader-btn" @click="viewOriginal">查看原文</button>
     </div>
     <p v-if="region && capabilityReason && !recognitionError && !state.visual" class="formula-message" data-translation-ignore>{{ capabilityReason }}</p>
+    <p v-if="!allowRegionRecognition" class="formula-message" data-translation-ignore>此格式可使用上方「处理公式与图片」统一识别。</p>
     <p v-if="recognitionError" class="formula-error" role="alert" data-translation-ignore>{{ recognitionError }}</p>
     <div v-if="sourceOpen" class="formula-editor" data-translation-ignore>
       <label>
@@ -186,7 +197,7 @@ async function copyLatex() {
       </div>
     </div>
     <details v-if="state.candidatePreview" class="formula-candidate">
-      <summary data-translation-ignore>{{ state.visual ? '查看视觉识别候选' : '查看几何还原候选' }}</summary>
+      <summary data-translation-ignore>{{ state.status === 'needs_review' ? '查看结构化 OCR 候选' : state.visual ? '查看视觉识别候选' : '查看几何还原候选' }}</summary>
       <p class="formula-message" data-translation-ignore>这是待核对候选，请对照上方原图检查下标、上下结构和符号。</p>
       <div class="formula-preview" v-html="rendered.html" />
     </details>

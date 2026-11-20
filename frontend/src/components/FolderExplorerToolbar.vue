@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { ArrowLeft, ArrowRight, Top, FolderOpened, Plus, MoreFilled } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { folderApi } from '../api/index.js'
@@ -73,6 +73,7 @@ async function manageFolder(action, folder = currentFolder.value) {
   if (action !== 'create' && !target) return
   if (action === 'delete' && target.children.length) return
   const kind = props.kind
+  const returnFocusTarget = globalThis.document?.activeElement
   busy.value = true
   error.value = ''
   try {
@@ -105,6 +106,14 @@ async function manageFolder(action, folder = currentFolder.value) {
     if (!cancelled(reason)) error.value = reason?.message || '文件夹操作失败，请重试'
   } finally {
     busy.value = false
+    // Busy 状态会禁用触发按钮，等它恢复可用后补回弹窗关闭时丢失的焦点。
+    await nextTick()
+    const activeElement = globalThis.document?.activeElement
+    const closingDialog = activeElement?.closest?.('.fade-in-linear-leave-active .el-message-box')
+    if ((activeElement === globalThis.document?.body || closingDialog)
+      && returnFocusTarget?.isConnected && !returnFocusTarget.disabled) {
+      returnFocusTarget.focus?.({ preventScroll: true })
+    }
   }
 }
 defineExpose({ manageFolder })
@@ -127,16 +136,16 @@ defineExpose({ manageFolder })
         </template>
         <template v-if="scope === null"><ArrowRight class="path-separator" aria-hidden="true" /><span class="path-segment current" aria-current="page">全部{{ label }}</span></template>
       </div>
+      <el-dropdown v-if="currentFolder" class="folder-management" trigger="click" :disabled="disabled" @command="manageFolder($event)">
+        <el-button text :icon="MoreFilled" aria-label="管理当前文件夹" title="管理当前文件夹" :disabled="disabled" />
+        <template #dropdown><el-dropdown-menu>
+          <el-dropdown-item command="rename">重命名文件夹</el-dropdown-item>
+          <el-dropdown-item command="delete" divided :disabled="!!currentFolder.children.length">{{ currentFolder.children.length ? '含子文件夹，暂不可删除' : '删除文件夹' }}</el-dropdown-item>
+        </el-dropdown-menu></template>
+      </el-dropdown>
       <div class="explorer-actions">
-        <el-button size="small" :disabled="disabled || scope === null" @click="navigate(null)">全部{{ label }}</el-button>
-        <el-button size="small" type="primary" plain :icon="Plus" :disabled="disabled" @click="manageFolder('create')">新建文件夹</el-button>
-        <el-dropdown v-if="currentFolder" trigger="click" :disabled="disabled" @command="manageFolder($event)">
-          <el-button size="small" text :icon="MoreFilled" aria-label="管理当前文件夹" title="管理当前文件夹" :disabled="disabled" />
-          <template #dropdown><el-dropdown-menu>
-            <el-dropdown-item command="rename">重命名文件夹</el-dropdown-item>
-            <el-dropdown-item command="delete" divided :disabled="!!currentFolder.children.length">{{ currentFolder.children.length ? '含子文件夹，暂不可删除' : '删除文件夹' }}</el-dropdown-item>
-          </el-dropdown-menu></template>
-        </el-dropdown>
+        <el-button :disabled="disabled || scope === null" @click="navigate(null)">全部{{ label }}</el-button>
+        <el-button type="primary" plain :icon="Plus" :disabled="disabled" @click="manageFolder('create')">新建文件夹</el-button>
       </div>
     </nav>
     <p v-if="error" class="explorer-error" role="alert">{{ error }}</p>
@@ -145,16 +154,20 @@ defineExpose({ manageFolder })
 
 <style scoped>
 .folder-explorer { min-width: 0; container: folder-navigation / inline-size; margin-bottom: 12px; }
-.explorer-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; min-width: 0; padding: 8px 10px; background: var(--app-card); border: 1px solid var(--app-border); border-radius: var(--radius-lg); }
-.explorer-history, .explorer-actions { display: flex; align-items: center; gap: 4px; flex: 0 1 auto; max-width: 100%; }
+.explorer-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-sm); min-width: 0; padding: var(--space-sm); background: var(--app-card); border: 1px solid var(--app-border); border-radius: var(--radius-lg); }
+.explorer-history, .explorer-actions { display: flex; align-items: center; gap: var(--space-sm); flex: 0 1 auto; max-width: 100%; }
 .explorer-history { flex-shrink: 0; }
 .explorer-actions { flex-wrap: wrap; min-width: 0; }
+.explorer-toolbar :deep(.el-button) { height: var(--control-h); --el-component-size: var(--control-h); font-size: var(--font-body); border-radius: var(--radius); }
+.explorer-actions > .el-button { width: var(--control-w); max-width: 100%; padding-inline: 12px; }
+.folder-management { display: inline-flex; flex: 0 0 var(--control-h); }
+.folder-management :deep(.el-button) { width: var(--control-h); padding: 0; }
 .explorer-history :deep(.el-button + .el-button), .explorer-actions :deep(.el-button + .el-button) { margin-left: 0; }
-.explorer-history :deep(.el-button) { padding: 6px; width: 30px; height: 30px; }
-.explorer-path { flex: 1 1 160px; min-width: 0; display: flex; align-items: center; gap: 4px; padding: 2px 6px; min-height: 32px; overflow-x: auto; background: var(--app-bg); border-radius: 6px; scrollbar-width: thin; }
+.explorer-history :deep(.el-button) { padding: 0; width: var(--control-h); }
+.explorer-path { flex: 1 1 160px; min-width: 0; display: flex; align-items: center; gap: var(--space-xs); padding: 0 var(--space-sm); height: var(--control-h); overflow-x: auto; background: var(--app-bg); border-radius: var(--radius); scrollbar-width: thin; }
 .path-icon { flex: 0 0 17px; width: 17px; height: 17px; margin: 0 4px; color: var(--app-brand-deep); }
 .path-separator { flex: 0 0 12px; width: 12px; height: 12px; color: var(--app-text-3); }
-.path-segment { flex: 0 0 auto; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; border-radius: 4px; padding: 5px 8px; background: transparent; color: var(--app-text-2); font: inherit; font-size: 13px; cursor: pointer; }
+.path-segment { flex: 0 0 auto; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; border-radius: 4px; padding: var(--space-xs) var(--space-sm); background: transparent; color: var(--app-text-2); font: inherit; font-size: var(--font-body); cursor: pointer; }
 .path-segment[aria-current="page"] { color: var(--app-text-1); font-weight: 600; }
 button.path-segment:hover:not(:disabled) { color: var(--app-brand-deep); background: var(--app-brand-soft); }
 .path-segment:disabled { cursor: default; opacity: .65; }
@@ -162,9 +175,9 @@ button.path-segment:hover:not(:disabled) { color: var(--app-brand-deep); backgro
 .current { cursor: default; }
 .explorer-error { margin: 6px 10px 0; color: var(--el-color-danger); font-size: 13px; overflow-wrap: anywhere; }
 @container folder-navigation (max-width: 680px) {
-  .explorer-toolbar { gap: 6px; flex-wrap: wrap; padding: 8px; }
   .explorer-path { flex-basis: 120px; }
   .explorer-actions { flex-basis: 100%; justify-content: flex-end; }
+  .explorer-actions > .el-button { flex: 1 1 var(--control-w); min-width: min(var(--control-w), 100%); }
   .path-segment { max-width: 180px; }
 }
 </style>

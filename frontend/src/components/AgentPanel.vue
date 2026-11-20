@@ -10,7 +10,8 @@ import {
   AGENT_NOTE_MERGE_EVENT,
   AGENT_NOTE_MERGE_RESULT_EVENT,
 } from '../utils/agentNoteMerge'
-import { isDark } from '../composables/useTheme'
+import { isDark, skin } from '../composables/useTheme'
+import fireflyPet from '../assets/firefly-pet.webp'
 import { AGENT_NOTE_UPDATED_EVENT, matchesOpenNote, parseActionResult, prepareAgentNote, insertAgentNote } from '../utils/agentNoteEdit'
 import { retrievalChannels, retrievalGroups, retrievalKey, retrievalSourcePath, retrievalTitle, retrievalTooltip } from '../utils/retrievalDisplay'
 import { groundingDisplay } from '../utils/groundingDisplay'
@@ -63,6 +64,25 @@ const props = defineProps({
 const open = ref(false)
 /** 真实生效的可见性：嵌入模式永远可见 */
 const visible = computed(() => props.embedded || open.value)
+const isFireflySkin = computed(() => skin.value === 'firefly')
+const launcherRef = ref(null)
+const closePanelRef = ref(null)
+
+async function openPanel() {
+  open.value = true
+  if (isFireflySkin.value) {
+    await nextTick()
+    closePanelRef.value?.focus({ preventScroll: true })
+  }
+}
+
+async function closePanel() {
+  open.value = false
+  if (isFireflySkin.value) {
+    await nextTick()
+    launcherRef.value?.focus({ preventScroll: true })
+  }
+}
 
 /**
  * 嵌入模式（智能体页）下承载容器的形状：普通块级、铺满父容器。
@@ -364,10 +384,15 @@ async function checkActionState(a, context = actionContext(a)) {
   checkingActions.value.add(a.id)
   try {
     const state = await aiApi.actionState(a.id)
-    if (!context.isCurrent()) return
     const status = state?.status
+    const approved = status === 'approved' || status === 'executed'
+    // Status only confirms the write. The editor reads the latest note by the stored target ID.
+    if (approved && (a.toolName !== 'run_app_command' || a.preview?.command === 'note.update')) {
+      const noteId = pendingNoteId(a)
+      if (noteId != null) window.dispatchEvent(new CustomEvent(AGENT_NOTE_UPDATED_EVENT, { detail: { noteId, changed: true } }))
+    }
+    if (!context.isCurrent()) return
     if (['approved', 'executed', 'failed', 'rejected'].includes(status)) {
-      const approved = status === 'approved' || status === 'executed'
       const rejected = status === 'rejected'
       const hint = `${approved ? '已执行' : rejected ? '已取消' : '执行失败'}：${state.summary || a.summary || '本次操作'}`
       if (approved) { notifyLearningActivity(); ElMessage.success(hint) }
@@ -1027,20 +1052,34 @@ function askFromEvent(e) {
   >
     <!-- 悬浮入口（仅抽屉模式；嵌入模式下页面本身就是入口） -->
     <transition v-if="!embedded" name="fab">
-      <button v-if="!open" class="fab" type="button" @click="open = true">
-        <span class="fab-dot"></span>
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="4" y="4" width="16" height="13" rx="3"></rect>
-          <path d="M8 21h8M12 17v4"></path>
-          <path d="M8.5 10.5v3M12 9v4.5M15.5 11.5v2"></path>
-        </svg>
-        <span class="fab-label">智能体</span>
-        <span v-if="!configured" class="fab-warn" title="未配置 API Key">!</span>
+      <button v-if="!open" ref="launcherRef" class="fab" :class="{ 'fab--pet': isFireflySkin }" type="button"
+        :aria-label="isFireflySkin ? (configured ? '打开流萤智能体' : '打开流萤智能体（未配置模型）') : undefined"
+        @click="openPanel">
+        <template v-if="isFireflySkin">
+          <span class="fab-pet-art" aria-hidden="true">
+            <img :src="fireflyPet" alt="" draggable="false" decoding="async" />
+          </span>
+          <span class="fab-pet-label">
+            <span class="fab-pet-name">流萤</span>
+            <span class="fab-pet-role">智能体</span>
+            <span v-if="!configured" class="fab-warn" title="未配置模型">!</span>
+          </span>
+        </template>
+        <template v-else>
+          <span class="fab-dot"></span>
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="4" y="4" width="16" height="13" rx="3"></rect>
+            <path d="M8 21h8M12 17v4"></path>
+            <path d="M8.5 10.5v3M12 9v4.5M15.5 11.5v2"></path>
+          </svg>
+          <span class="fab-label">智能体</span>
+          <span v-if="!configured" class="fab-warn" title="未配置 API Key">!</span>
+        </template>
       </button>
     </transition>
 
     <!-- 抽屉模式的遮罩（嵌入模式没有遮罩：它就是页面本身） -->
-    <div v-if="!embedded && open" class="agent-backdrop" @click="open = false"></div>
+    <div v-if="!embedded && open" class="agent-backdrop" @click="closePanel"></div>
 
     <!--
       两种承载方式共用同一套面板内容：
@@ -1055,6 +1094,7 @@ function askFromEvent(e) {
       class="agent-dock"
       :class="{ open: open, embedded: embedded }"
       :style="embedded ? EMBEDDED_DOCK_STYLE : null"
+      :inert="isFireflySkin && !embedded && !open"
     >
       <div class="panel">
         <!-- 会话版块：新开/切换/删除。会话存在库里，刷新与重启都能接着聊；
@@ -1068,9 +1108,9 @@ function askFromEvent(e) {
           </button>
           <el-select
             v-model="chatProfile"
-            size="small"
             class="sess-model"
             placeholder="默认（当前生效档案）"
+            aria-label="选择当前会话模型"
             @change="onProfileChange"
           >
             <el-option label="默认（当前生效档案）" value="" />
@@ -1103,7 +1143,10 @@ function askFromEvent(e) {
 
         <header class="panel-head">
           <div class="head-left">
-            <span class="head-avatar">A</span>
+            <span class="head-avatar" :class="{ 'firefly-avatar': isFireflySkin }">
+              <img v-if="isFireflySkin" :src="fireflyPet" alt="" draggable="false" decoding="async" />
+              <template v-else>A</template>
+            </span>
             <div>
               <div class="head-title">智能体助手</div>
               <div class="head-sub">
@@ -1115,7 +1158,7 @@ function askFromEvent(e) {
           <button v-if="messages.length" class="icon-btn" type="button" @click="newChat" title="新对话（旧对话仍保留在库里）">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
           </button>
-          <button v-if="!embedded" class="icon-btn" type="button" @click="open = false" title="收起">
+          <button v-if="!embedded" ref="closePanelRef" class="icon-btn" type="button" @click="closePanel" title="收起">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg>
           </button>
         </header>
@@ -1135,7 +1178,10 @@ function askFromEvent(e) {
 
           <div v-for="(m, i) in messages" :key="i" class="msg" :class="m.role">
             <template v-if="m.role === 'assistant'">
-              <div class="avatar av-ai">A</div>
+              <div class="avatar av-ai" :class="{ 'firefly-avatar': isFireflySkin }">
+                <img v-if="isFireflySkin" :src="fireflyPet" alt="" draggable="false" decoding="async" />
+                <template v-else>A</template>
+              </div>
               <div class="bubble assistant">
                 <AgentRunTrace v-if="m.loading || m.progress?.length" :entries="m.progress || []"
                   :running="!!m.loading" :started-at="m.startedAt || 0" :elapsed-ms="m.elapsedMs || 0" :failed="!!m.error"
@@ -1347,6 +1393,77 @@ function askFromEvent(e) {
   place-items: center;
 }
 
+.fab--pet {
+  --pet-size: 100px;
+  flex-direction: column;
+  gap: 1px;
+  height: auto;
+  padding: 0 3px 2px;
+  border-radius: var(--radius-lg);
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+}
+.fab--pet:hover {
+  box-shadow: none;
+  transform: none;
+}
+.fab--pet:focus-visible {
+  outline: 2px solid var(--app-brand-deep);
+  outline-offset: 3px;
+}
+.fab-pet-art {
+  position: relative;
+  display: block;
+  width: var(--pet-size);
+  height: var(--pet-size);
+  pointer-events: none;
+}
+.fab-pet-art::before {
+  position: absolute;
+  content: '';
+  inset: 14% 5% 4%;
+  background: radial-gradient(ellipse, var(--firefly-aurora), transparent 72%);
+}
+.fab-pet-art img {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 4px 4px var(--app-brand-glow));
+  animation: firefly-pet-arrive 0.42s ease-out;
+  transition: transform 0.18s ease;
+}
+@keyframes firefly-pet-arrive {
+  from { opacity: 0.35; transform: translateY(5px); }
+  to { opacity: 1; transform: none; }
+}
+.fab--pet:is(:hover, :focus-visible) .fab-pet-art img {
+  transform: translateY(-3px);
+}
+.fab-pet-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 4px 7px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  background: var(--app-card);
+  color: var(--app-text-1);
+  box-shadow: 0 2px 8px var(--app-brand-glow);
+  font-size: 11px;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+.fab--pet:is(:hover, :focus-visible) .fab-pet-label {
+  border-color: var(--app-brand);
+}
+.fab-pet-name { font-weight: 700; }
+.fab-pet-role { color: var(--app-text-2); }
+.fab-pet-label .fab-warn { width: 13px; height: 13px; font-size: 9px; }
+
 /* 承载容器：抽屉模式固定右侧一列并带遮罩；嵌入模式就是普通块级元素 */
 .agent-dock {
   position: fixed;
@@ -1397,7 +1514,7 @@ function askFromEvent(e) {
 .session-bar {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-sm);
   flex-shrink: 0;
   flex-wrap: wrap;
   padding: 6px 12px;
@@ -1413,7 +1530,8 @@ function askFromEvent(e) {
   color: var(--app-text-2);
   font-size: 12px;
   cursor: pointer;
-  padding: 4px 6px;
+  height: var(--control-h);
+  padding: 0 6px;
   border-radius: 6px;
 }
 .sess-toggle:hover {
@@ -1547,8 +1665,8 @@ function askFromEvent(e) {
   color: var(--app-text-3);
   cursor: pointer;
   font-size: 14px;
-  width: 28px;
-  height: 28px;
+  width: var(--control-h);
+  height: var(--control-h);
   flex-shrink: 0;
   border-radius: 7px;
 }
@@ -1650,6 +1768,21 @@ function askFromEvent(e) {
 }
 .av-ai {
   background: var(--app-brand);
+}
+.firefly-avatar {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--app-border);
+  background: radial-gradient(ellipse at 85% 80%, var(--firefly-aurora), transparent 76%), var(--app-brand-soft);
+}
+.firefly-avatar img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transform: scale(1.9);
+  transform-origin: 50% 12%;
 }
 .bubble {
   max-width: 82%;
@@ -2087,7 +2220,7 @@ function askFromEvent(e) {
 .input-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-sm);
   align-items: center;
 }
 /* 联网开关：小、贴着输入框，一眼看出开/关 */
@@ -2096,7 +2229,7 @@ function askFromEvent(e) {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  height: 38px;
+  height: var(--control-h);
   padding: 0 10px;
   border: 1px solid var(--app-border);
   border-radius: 10px;
@@ -2150,8 +2283,8 @@ function askFromEvent(e) {
 }
 .send-btn {
   flex-shrink: 0;
-  width: 38px;
-  height: 38px;
+  width: var(--control-h);
+  height: var(--control-h);
   border: none;
   border-radius: 10px;
   background: var(--app-brand);
@@ -2171,6 +2304,7 @@ function askFromEvent(e) {
   .msg-list { padding: 10px; }
   .panel-foot { padding: 8px 10px; }
   .agent-root:not(.agent-embedded) { right: 12px; bottom: 12px; }
+  .fab--pet { --pet-size: 69px; }
 }
 .foot-hint {
   margin-top: 8px;
@@ -2203,5 +2337,16 @@ function askFromEvent(e) {
 .fab-leave-to {
   opacity: 0;
   transform: translateY(8px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .fab--pet,
+  .fab-pet-art img {
+    transition: none;
+    animation: none;
+  }
+  .fab--pet:is(:hover, :focus-visible) .fab-pet-art img,
+  .fab--pet:is(.fab-enter-from, .fab-leave-to) {
+    transform: none;
+  }
 }
 </style>

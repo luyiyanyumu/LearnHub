@@ -96,19 +96,19 @@ function resetFilters() {
 .navigator-title h3 { margin: 0; font-size: 16px; font-weight: 650; line-height: 1.5; }
 .total-count { padding: 1px 7px; border-radius: 6px; background: var(--app-bg); color: var(--app-text-2); font-size: 12px; font-variant-numeric: tabular-nums; }
 .navigator-summary { margin: 4px 0 16px; color: var(--app-text-2); font-size: 12px; line-height: 1.6; }
-.navigator-search { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 10px; border: 1px solid var(--app-border); border-radius: var(--radius); background: var(--app-card); }
+.navigator-search { display: flex; align-items: center; width: min(100%, var(--control-search-w)); height: var(--control-h); gap: var(--space-sm); padding: 0 10px; border: 1px solid var(--app-border); border-radius: var(--radius); background: var(--app-card); }
 .navigator-search:focus-within { border-color: var(--app-brand); box-shadow: 0 0 0 3px var(--app-brand-glow); }
 .control-icon { flex: 0 0 16px; width: 16px; height: 16px; color: var(--app-text-3); }
-.navigator-search input { flex: 1; width: 100%; min-width: 0; border: 0; outline: none; padding: 8px 0; color: var(--app-text-1); background: transparent; font: inherit; font-size: 13px; }
+.navigator-search input { flex: 1; width: 100%; height: 100%; min-width: 0; border: 0; outline: none; padding: 0; color: var(--app-text-1); background: transparent; font: inherit; font-size: 13px; }
 .navigator-search input::placeholder { color: var(--app-text-3); }
 .navigator-search input::-webkit-search-cancel-button { display: none; }
 .clear-query { display: grid; place-items: center; flex: 0 0 24px; width: 24px; height: 28px; border: 0; border-radius: 4px; background: transparent; color: var(--app-text-2); cursor: pointer; }
 .clear-query svg { width: 14px; height: 14px; }
 .clear-query:hover { background: var(--app-bg); }
-.navigator-filters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+.navigator-filters { display: grid; grid-template-columns: repeat(2, minmax(0, var(--control-w))); gap: var(--space-sm); margin-top: 12px; }
 .filter-field { min-width: 0; }
 .filter-field label { display: block; margin-bottom: 4px; color: var(--app-text-2); font-size: 12px; }
-.filter-field select { width: 100%; min-width: 0; height: 36px; padding: 0 6px; border: 1px solid var(--app-border); border-radius: var(--radius); background: var(--app-card); color: var(--app-text-1); font: inherit; font-size: 12px; cursor: pointer; }
+.filter-field select { width: 100%; min-width: 0; height: var(--control-h); padding: 0 6px; border: 1px solid var(--app-border); border-radius: var(--radius); background: var(--app-card); color: var(--app-text-1); font: inherit; font-size: 12px; cursor: pointer; }
 .filter-summary { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 12px; font-size: 12px; color: var(--app-text-2); }
 .filter-summary button, .empty-reset { border: 0; padding: 4px 0; color: var(--app-brand-deep); background: transparent; font: inherit; font-size: 12px; cursor: pointer; }
 .filter-summary button:hover, .empty-reset:hover { text-decoration: underline; }

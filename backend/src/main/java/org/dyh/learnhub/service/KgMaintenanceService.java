@@ -128,7 +128,9 @@ public class KgMaintenanceService {
             throw new IllegalStateException(source.cite() + "：" + oversizedBlock.getMessage(), oversizedBlock);
         }
         String expected = source.fingerprint(model);
-        Extraction progress = loadExtraction(source.cite(), expected, parts.size());
+        // Batch indices depend on the splitter. Leave completed source checkpoints intact.
+        String batchFingerprint = expected + "\nkg-batch-layout-v2";
+        Extraction progress = loadExtraction(source.cite(), batchFingerprint, parts.size());
         List<String> known = graph.nodes().stream().map(node -> node.getName()).toList();
         int end = Math.min(parts.size(), progress.nextBatch + MODEL_BATCHES_PER_SOURCE);
         for (int i = progress.nextBatch; i < end; i++) {
@@ -143,7 +145,7 @@ public class KgMaintenanceService {
             progress.model = batch.model();
             progress.nextBatch = i + 1;
             // Keep completed batches across failures/restarts. This is not a successful source watermark.
-            saveExtraction(source.cite(), expected, progress);
+            saveExtraction(source.cite(), batchFingerprint, progress);
         }
         progress.complete = progress.nextBatch == parts.size();
         return progress;

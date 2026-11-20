@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { expandGraphIds, filterConceptGraph, findGraphNodes, graphCommunityOptions, graphSource } from './knowledgeGraphView.js'
+import { createGraphSearchIndex, expandGraphIds, filterConceptGraph, findGraphNodes, graphCommunityOptions, graphSource } from './knowledgeGraphView.js'
 
 const nodes = [{ id: 'a', label: 'ReAct', aliases: ['推理行动'], degree: 2 }, { id: 'b', label: 'Agent', degree: 10 }, { id: 'c', label: 'LLM' }, { id: 'd', label: '孤立点' }]
 const edges = [{ source: 'a', target: 'b', relation: 'is_a', origin: 'llm' }, { source: 'b', target: 'c', relation: 'used_for', origin: 'derived' }]
@@ -36,6 +36,18 @@ test('concept lookup uses aliases, ranks exact names first and keeps determinist
   assert.equal(findGraphNodes(nodes, '推理行动')[0].id, 'a')
   assert.deepEqual(findGraphNodes(nodes, 'agent').map(n => n.id), ['b'])
   assert.equal(findGraphNodes(nodes, '')[0].id, 'b')
+})
+test('the reusable graph lookup keeps match priority, degree and id ordering between queries', () => {
+  const search = createGraphSearchIndex([
+    { id: 'd', label: 'Preflight', degree: 20 },
+    { id: 'c', label: 'Flight deck', degree: 3 },
+    { id: 'b', name: 'Flight computer', degree: 3 },
+    { id: 'a', label: 'Sample', aliases: ['FLIGHT'], degree: 1 },
+  ])
+  assert.deepEqual(search(' Flight ').map(node => node.id), ['a', 'b', 'c', 'd'])
+  assert.deepEqual(search('flight', 2).map(node => node.id), ['a', 'b'])
+  assert.deepEqual(search('deck').map(node => node.id), ['c'])
+  assert.deepEqual(search('').map(node => node.id), ['d', 'b', 'c', 'a'])
 })
 test('only supported source references become internal navigation links', () => {
   assert.equal(graphSource('note-3').path, '/notes/3')

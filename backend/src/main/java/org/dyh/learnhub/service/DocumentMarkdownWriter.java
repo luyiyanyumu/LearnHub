@@ -68,13 +68,15 @@ public final class DocumentMarkdownWriter {
             pages.add(new DocumentIngestionService.Page(page.page(), page.width(), page.height(), page.coordinateUnit(),
                     page.method(), List.copyOf(blocks), page.label()));
         }
-        if (limited && !warnings.contains("Markdown 正文达到 40 万字符上限，未截断代码、公式或表格；剩余块未入索引"))
-            warnings.add("Markdown 正文达到 40 万字符上限，未截断代码、公式或表格；剩余块未入索引");
+        if (limited && !warnings.contains("Markdown 正文达到 80 万字符上限，未截断代码、公式或表格；剩余块未入索引"))
+            warnings.add("Markdown 正文达到 80 万字符上限，未截断代码、公式或表格；剩余块未入索引");
         var old = input.report();
-        int rejectedPages = (int) pages.stream().filter(page -> page.blocks().stream().noneMatch(DocumentIngestionService.Block::indexed)).count();
+        var localScan=DocumentMediaProcessor.localScanProgress(input);
+        boolean localIncomplete=localScan.requested() && localScan.completed()<localScan.regions();
+        int rejectedPages = (int) pages.stream().filter(page -> !DocumentIngestionService.isCompletedPage(page)).count();
         var report = new DocumentIngestionService.QualityReport(old.totalPages(), old.processedPages(), old.ocrPages(),
                 rejectedPages, old.meanConfidence(), List.copyOf(warnings), old.truncated() || limited,
-                old.partial() || limited || rejected || rejectedPages > 0);
+                old.partial() || limited || rejected || rejectedPages > 0 || localIncomplete);
         String status = accepted.isEmpty() ? "ok".equals(input.status()) ? "empty" : input.status() : "ok";
         String error = accepted.isEmpty() ? input.error() == null ? "没有通过质量校验的检索正文" : input.error() : input.error();
         return new DocumentIngestionService.Extraction(status, accepted.toString(), accepted.length(), error,
@@ -106,6 +108,9 @@ public final class DocumentMarkdownWriter {
     private static String displayMarkdown(DocumentIngestionService.Block block, DocumentIngestionService.Page page) {
         if (hidden(block) || INTENTIONAL_EXCLUSIONS.contains(value(block.quality()))) return "";
         if ("page_break".equals(block.type())) return "---";
+        if ("formula".equals(block.type()) && "needs_review".equals(block.latexStatus())) {
+            return ASSET.matcher(value(block.src())).matches() ? image(block, page) + "\n\n[公式待核对]" : "[公式待核对，请查看原文]";
+        }
         boolean picture = Set.of("figure", "image").contains(value(block.type()));
         // Older Office tables already contain this resolver image in its original cell.
         if (picture && block.presentation() == null && "".equals(block.markdown())) return "";

@@ -31,12 +31,10 @@
   --el-border-radius-base: 8px;
   /* 小圆角档已下线，与 base 合并为 8px（P0 收敛：圆角只保留 8 / 12 / 16） */
   --el-border-radius-small: 8px;
-  /* 控件统一 40px 高（P0：原 36px 偏矮，40px 达可点区标准；行内操作另用 32px） */
-  --el-component-size: 40px;
 
   /* --- 应用语义 token ---
      2026-09-11 编辑页 UI 重构对齐 Notion/Linear 系：
-     底色更中性（#F7F8FA）、边框浅灰（#E8EAED）、圆角统一 8px、控件 36px 高 */
+     底色更中性（#F7F8FA）、边框浅灰（#E8EAED）、圆角统一 8px */
   --app-bg: #f7f8fa;          /* 页面底色：中性冷灰白 */
   --app-side: #ffffff;        /* 侧栏 */
   --app-card: #ffffff;
@@ -70,9 +68,11 @@
   --space-xl: 32px;
   --space-2xl: 48px;
 
-  /* --- 控件高度（P0）：表单 40px，行内操作 32px --- */
-  --control-h: 40px;
+  /* --- 控件尺寸：常规控件 35px 高，行内操作 32px 高 --- */
+  --control-h: 35px;
   --control-h-inline: 32px;
+  --control-w: 128px;
+  --control-search-w: 320px;
 
   /* 原生控件（滚动条 / 日期面板 / 自动填充）跟随主题 */
   color-scheme: light;
@@ -93,6 +93,11 @@
   --dur-fast: 0.15s;
   --dur: 0.25s;
   --dur-slow: 0.35s;
+}
+
+/* 组件按需加载时也沿用应用的默认控件高度。 */
+html:root {
+  --el-component-size: var(--control-h);
 }
 
 html.dark {
@@ -236,7 +241,7 @@ body {
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-sm);
   margin-bottom: 16px;
   flex-wrap: wrap;
 }
@@ -245,12 +250,11 @@ body {
   flex: 1;
 }
 
-/* 工具栏里的搜索框要和两侧控件同高。
-   EP 给 .el-input 的高度取 --el-component-size，而按需引入后 EP 的组件 CSS 在 style.css
-   之后注入、会把它重设回自己的默认值：结果 el-select / el-button 是 32px，
-   唯独 el-input 是 40px，在一排控件里单独高出一截（实测 40 vs 32）。 */
-.toolbar .el-input {
-  --el-component-size: var(--control-h-inline);
+/* 页面工具栏统一使用常规高度；表格行内及编辑器工具保持各自的紧凑尺寸。 */
+.toolbar .el-input,
+.toolbar .el-select,
+.toolbar .el-button {
+  --el-component-size: var(--control-h);
 }
 
 .toolbar > .el-input,
@@ -319,6 +323,19 @@ body {
   border-radius: 6px;
 }
 
+/* Element Plus 为默认按钮和下拉框写死了 32px，显式尺寸档继续由组件决定。 */
+.el-button.el-button:not(:where(.el-button--small, .el-button--large, .is-link)) {
+  height: var(--control-h);
+}
+
+.el-button.el-button.is-circle:not(:where(.el-button--small, .el-button--large)) {
+  width: var(--control-h);
+}
+
+.el-select:not(:where(.el-select--small, .el-select--large)) .el-select__wrapper {
+  min-height: var(--control-h);
+}
+
 /* 弹窗：更大圆角 + 长阴影，浮层是"最高一层的表面" */
 .el-dialog.el-dialog {
   --el-dialog-border-radius: var(--radius-lg);
@@ -375,9 +392,78 @@ body {
 }
 
 .el-message-box.el-message-box {
-  max-width: calc(100vw - 24px);
-  max-height: calc(100dvh - 24px);
+  /* EP 用 width:100% + max-width 限宽，视口约束不能覆盖其内容宽度上限。 */
+  --el-messagebox-border-radius: var(--radius-xl);
+  --el-messagebox-box-shadow: var(--shadow-lg);
+  --el-messagebox-title-color: var(--app-text-1);
+  --el-messagebox-content-color: var(--app-text-2);
+  --el-messagebox-font-size: var(--font-heading);
+  --el-messagebox-font-line-height: 1.65;
+  max-width: min(var(--el-messagebox-width, 420px), calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  display: inline-flex;
+  flex-direction: column;
+  padding: var(--space-lg);
+  background: var(--app-card);
+  border: 1px solid var(--app-border);
   overflow: auto;
+}
+
+.el-message-box .el-message-box__header {
+  flex-shrink: 0;
+  padding-bottom: var(--space-md);
+}
+
+.el-message-box .el-message-box__title {
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.el-message-box .el-message-box__headerbtn {
+  top: 14px;
+  right: 14px;
+  border-radius: var(--radius);
+}
+
+.el-message-box .el-message-box__content {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.el-message-box .el-message-box__input {
+  padding-top: var(--space-sm);
+}
+
+.el-message-box .el-message-box__btns {
+  flex-shrink: 0;
+  gap: var(--space-sm);
+  padding-top: var(--space-lg);
+}
+
+.el-message-box__btns > .el-button {
+  min-width: 72px;
+  max-width: 100%;
+  min-height: var(--control-h);
+  height: auto;
+  padding: 8px 16px;
+  white-space: normal;
+  line-height: 1.5;
+}
+
+.el-message-box__btns > .el-button + .el-button {
+  margin-left: 0;
+}
+
+@media (max-width: 480px), (max-height: 480px) {
+  .el-message-box.el-message-box {
+    padding: var(--space-md);
+  }
+
+  .el-message-box .el-message-box__headerbtn {
+    top: 6px;
+    right: 6px;
+  }
 }
 
 .el-drawer.el-drawer {
@@ -993,9 +1079,13 @@ html.dark .md-editor-preview.md-editor-preview .hljs-deletion {
    弹层被 teleport 到 body，所以样式必须写在全局（不能写进组件的 scoped 块）。
    为什么用按钮网格而不是下拉：弹层里放下拉要额外处理响应式更新/焦点，
    按钮一点即定，少一层不确定性（该交互与链接/图片的页内弹层一致）。 */
+.code-lang-box .el-message-box__message {
+  width: 100%;
+}
+
 .code-lang-box .clp {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 76px), 1fr));
   gap: 6px;
   margin: 2px 0 4px;
   max-height: 46vh;

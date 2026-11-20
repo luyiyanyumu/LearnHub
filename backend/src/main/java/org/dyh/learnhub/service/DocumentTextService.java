@@ -60,7 +60,7 @@ public class DocumentTextService {
     public void setDocumentIngestionService(DocumentIngestionService ingestion) { this.ingestion = ingestion; }
 
     /** 存库正文上限（字符）。再长对检索与模型都没意义，只会拖慢一切 */
-    public static final int MAX_TEXT_CHARS = 400_000;
+    public static final int MAX_TEXT_CHARS = 800_000;
 
     /** PDF 页数上限：几百页的文档抽完对知识库也无用 */
     static final int MAX_PDF_PAGES = 300;
@@ -110,6 +110,30 @@ public class DocumentTextService {
             log.warn("文档 Markdown 转换失败: {} ({}) - {}", path.getFileName(), format, failed.getClass().getSimpleName());
             return DocumentFormatAdapter.failed(path, failed);
         }
+    }
+
+    public DocumentIngestionService.Extraction extractStructured(Path path, String ext) {
+        if (ingestion == null || !ingestion.supports(ext)) {
+            throw new IllegalArgumentException("结构化识别仅支持 PDF 和扫描图片");
+        }
+        return ingestion.extractStructured(path, ext);
+    }
+
+    boolean supportsPageExtraction(String ext) {
+        return ingestion != null && ingestion.supports(ext);
+    }
+
+    boolean prefersStructured(String ext) {
+        return ingestion != null && ingestion.prefersStructured(ext);
+    }
+
+    DocumentIngestionService.Extraction extractForJob(Path path, String ext, long size, boolean structured,
+            DocumentIngestionService.Extraction previous,
+            java.util.function.Consumer<DocumentIngestionService.Progress> progress) {
+        if (supportsPageExtraction(ext)) return ingestion.extract(path, ext, structured || prefersStructured(ext), previous, progress);
+        if (structured || previous != null) throw new IllegalArgumentException("按页抽取仅支持 PDF 和扫描图片");
+        progress.accept(new DocumentIngestionService.Progress("extracting", 0, 0, 0));
+        return extractDetailed(path, ext, size);
     }
 
     private Extracted extractLegacy(Path path, String ext, long size) {

@@ -12,6 +12,7 @@ import org.springframework.util.StringUtils;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -236,32 +237,31 @@ public class TripleExtractor {
     /** Lossless splitting: max is a soft target; a protected block gets its own bounded batch. */
     static List<String> splitSource(String text, int max) {
         if (text == null || text.isBlank()) return List.of();
+        String[] lines = text.split("(?<=\n)", -1);
+        int[] bracketEnds = matchedBracketEnds(lines);
         List<String> units = new ArrayList<>();
         StringBuilder atomic = new StringBuilder();
         String fence = null;
         boolean dollars = false;
-        int brackets = 0;
+        int bracketEnd = -1;
         int environments = 0;
-        for (String line : text.split("(?<=\n)", -1)) {
-            String trimmed = line.stripLeading().replaceFirst("^(?:>\\s*)+", "");
-            boolean wasProtected = fence != null || dollars || brackets > 0 || environments > 0;
-            boolean containsMath = false;
-            if (fence != null) {
-                if (trimmed.startsWith(fence)) fence = null;
-            } else if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
-                fence = trimmed.substring(0, 3);
-            } else {
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i];
+            boolean inFence = fence != null;
+            boolean wasProtected = inFence || dollars || i <= bracketEnd || environments > 0;
+            fence = fenceAfter(line, fence);
+            boolean containsMath = bracketEnds[i] >= i;
+            if (!inFence && fence == null) {
                 // Inline code cannot open a display formula.
                 String math = line.replaceAll("`[^`]*`", "");
-                containsMath = math.contains("$$") || math.contains("\\[") || math.contains("\\begin{");
+                containsMath |= math.contains("$$") || math.contains("\\begin{");
+                bracketEnd = Math.max(bracketEnd, bracketEnds[i]);
                 int count = math.split("(?<!\\\\)\\$\\$", -1).length - 1;
                 if (count % 2 == 1) dollars = !dollars;
-                brackets += occurrences(math, "\\[") - occurrences(math, "\\]");
                 environments += occurrences(math, "\\begin{") - occurrences(math, "\\end{");
-                brackets = Math.max(0, brackets);
                 environments = Math.max(0, environments);
             }
-            boolean protectedNow = fence != null || dollars || brackets > 0 || environments > 0;
+            boolean protectedNow = fence != null || dollars || i < bracketEnd || environments > 0;
             if (wasProtected || protectedNow || containsMath) {
                 atomic.append(line);
                 if (atomic.length() > MAX_ATOMIC_CHARS) {
@@ -289,6 +289,44 @@ public class TripleExtractor {
         }
         if (!current.isEmpty()) parts.add(current.toString());
         return parts;
+    }
+
+    /** A literal \[ in prose must not absorb the rest of the source as a display formula. */
+    private static int[] matchedBracketEnds(String[] lines) {
+        int[] ends = new int[lines.length];
+        Arrays.fill(ends, -1);
+        int open = -1;
+        String fence = null;
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i];
+            boolean inFence = fence != null;
+            fence = fenceAfter(line, fence);
+            if (inFence || fence != null) {
+                open = -1;
+                continue;
+            }
+            if (!line.contains("\\[") && !line.contains("\\]")) continue;
+            String math = line.replaceAll("`[^`]*`", "");
+            for (int at = math.indexOf('\\'); at >= 0 && at + 1 < math.length(); at = math.indexOf('\\', at + 1)) {
+                char next = math.charAt(at + 1);
+                if (next == '\\') {
+                    at++;
+                } else if (next == '[') {
+                    // Bracket display delimiters cannot nest. A new opener supersedes a stray one.
+                    open = i;
+                } else if (next == ']' && open >= 0) {
+                    ends[open] = i;
+                    open = -1;
+                }
+            }
+        }
+        return ends;
+    }
+
+    private static String fenceAfter(String line, String fence) {
+        String trimmed = line.stripLeading().replaceFirst("^(?:>\\s*)+", "");
+        if (fence != null) return trimmed.startsWith(fence) ? null : fence;
+        return trimmed.startsWith("```") || trimmed.startsWith("~~~") ? trimmed.substring(0, 3) : null;
     }
 
     private static int occurrences(String text, String literal) {

@@ -186,7 +186,17 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_read_timeout 300s;          # 智能体/翻译是长请求，别用默认 60s
-        client_max_body_size 60m;         # 与后端 multipart 上限一致（单文件 50MB）
+        client_max_body_size 60m;
+    }
+
+    location = /api/files/upload {
+        proxy_pass http://127.0.0.1:18080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 360s;
+        client_max_body_size 1001m;       # 单文件 1000 MiB，另计 multipart 表单开销
+        proxy_request_buffering off;
     }
 }
 ```
@@ -230,7 +240,7 @@ curl http://localhost:18080/api/files?page=1&size=3
 | 后端起来了但前端接口 404 | 前端只托管了静态文件、没配 `/api` 反代（见 5.2 的 nginx 片段） |
 | `npm run dev` 报端口被占 | 5174 被别的项目占了。`strictPort` 故意不自动换端口（静默换端口会让人打开错页面）；先腾出 5174 或改 `vite.config.js` |
 | 智能体/翻译按钮不可用 | 没配 `DEEPSEEK_API_KEY`，或「设置 → 外观与 AI」里选的档案没填 key |
-| 上传大 PDF 失败 | nginx `client_max_body_size` 默认 1MB，调到 60m（后端上限：单文件 50MB、请求 60MB） |
+| 上传大 PDF 返回 413 | 自建代理对 `/api/files/upload` 放行 1001 MiB 请求体。后端单文件上限 1000 MiB |
 | 长回答/翻译中途 502 | nginx `proxy_read_timeout` 默认 60s，长请求会断，调到 300s |
 | 想换 18080 端口 | 后端 `--server.port=`，前端改 `vite.config.js` 的 proxy target（或 nginx `proxy_pass`） |
 | **Windows 图形启动器** | 使用 [LearnHub.exe](../launcher/README.md) 检查 Docker、容器和前后端健康，启动或停止服务、单独重启前后端并查看日志。修改源码后使用构建操作更新镜像。窗口支持系统主题、高 DPI 和屏幕适配；Linux/macOS 使用上面的 Compose 命令。 |

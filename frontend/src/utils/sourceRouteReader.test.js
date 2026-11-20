@@ -129,3 +129,17 @@ test('unmount invalidates in-flight source loads and prevents new requests', asy
   assert.deepEqual(h.opened, [])
   assert.equal(h.requests.length, 1)
 })
+
+test('the latest navigation forwards its own locator even when both links point to the same file', async () => {
+  const requests = [], opened = []
+  const reader = createSourceRouteReader({ load() { const request = deferred(); requests.push(request); return request.promise },
+    onOpen(row, location) { opened.push({ row, location }) } })
+  const old = reader.open('41', { page: 1 })
+  const latestLocation = { page: 3, rect: [1, 2, 20, 30], sourceRevision: 'a'.repeat(64) }
+  const latest = reader.open('41', latestLocation)
+  requests[1].resolve({ id: 41 })
+  await latest
+  requests[0].resolve({ id: 41 })
+  await old
+  assert.deepEqual(opened, [{ row: { id: 41 }, location: latestLocation }])
+})

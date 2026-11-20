@@ -1,3 +1,5 @@
+import { firstSourceLocation, sourceLocationQuery } from './sourceLocation.js'
+
 const CHANNEL_LABELS = { keyword: '关键词', vector: '语义', graph: '图谱', wiki: 'Wiki 定位', tool: '工具读取' }
 
 const BLOCK_TAGS = new Set('address article aside blockquote br caption center dd details div dl dt fieldset figcaption figure footer form h1 h2 h3 h4 h5 h6 header hr legend li main nav ol p pre section summary table tbody td tfoot th thead tr ul'.split(' '))
@@ -73,6 +75,8 @@ function passageSeq(hit) {
 
 /** Index passages are zero-based; evidence windows may span chunks and use a negative seq. */
 export function retrievalPosition(hit) {
+  const location = (hit?.sourceType ?? hit?.type) === 'file' ? firstSourceLocation(hit) : null
+  if (location) return `第 ${location.page} 页${location.method === 'ocr' ? ' · OCR' : location.method === 'vision' ? ' · 视觉识别' : ''}`
   if (Number.isInteger(hit?.seq) && hit.seq < 0) return '证据片段'
   const seq = passageSeq(hit)
   return seq == null ? '' : `第 ${seq + 1} 段`
@@ -110,5 +114,5 @@ export function retrievalSourcePath(hit) {
   if (!/^[1-9]\d*$/.test(id)) return null
   if (type === 'note') return `/notes/${id}`
   if (type === 'quick_ref' || type === 'ref') return `/refs?read=${id}`
-  return type === 'file' ? `/files?read=${id}` : null
+  return type === 'file' ? `/files?read=${id}${sourceLocationQuery(hit)}` : null
 }

@@ -325,9 +325,9 @@ defineExpose({ save, resetDefaults, dirty, saving })
 .kb-status-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--app-brand); }
 .kb-status-link.needs-attention .kb-status-dot { background: var(--el-color-warning); }
 .kb-status-link:hover { color: var(--app-brand-deep); }
-.kb-parameter-tools { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
-.kb-category { flex: 0 0 176px; min-width: 0; }
-.kb-filter { flex: 1; min-width: 0; }
+.kb-parameter-tools { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-sm); margin-bottom: 20px; }
+.kb-category { flex: 0 1 var(--control-w); min-width: 0; }
+.kb-filter { flex: 0 1 var(--control-search-w); min-width: 0; max-width: 100%; }
 .kb-section-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .kb-section-title h4 { margin: 0; font-size: var(--font-body); font-weight: 600; }
 .kb-section-title h4 > span { margin-left: 8px; font-size: var(--font-caption); color: var(--app-text-3); font-weight: 400; }
@@ -368,8 +368,7 @@ defineExpose({ save, resetDefaults, dirty, saving })
   .kb-heading { margin-bottom: 16px; }
   .kb-topline { gap: 10px; padding-bottom: 16px; margin-bottom: 16px; }
   .kb-status-count { display: none; }
-  .kb-parameter-tools { gap: 8px; margin-bottom: 16px; }
-  .kb-category { flex-basis: 132px; }
+  .kb-parameter-tools { margin-bottom: 16px; }
   .kb-fields { grid-template-columns: 1fr; }
   .kb-field { display: grid; grid-template-columns: minmax(0, 1fr) 132px; align-items: center; gap: 4px 12px; padding: 14px 0; }
   .kb-field-label { margin: 0; gap: 5px; font-size: 13px; }
@@ -387,7 +386,6 @@ defineExpose({ save, resetDefaults, dirty, saving })
   .kb-heading { gap: 8px; }
   .kb-topline { gap: 8px; }
   .kb-view :deep(.el-radio-button__inner) { padding: 9px 10px; font-size: var(--font-caption); }
-  .kb-category { flex-basis: 120px; }
   .kb-field { grid-template-columns: minmax(0, 1fr) 112px; gap: 4px 8px; }
   .kb-field-label { flex-wrap: wrap; font-size: var(--font-caption); }
   .kb-index-action { flex-wrap: wrap; }

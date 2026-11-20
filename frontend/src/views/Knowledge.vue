@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { MdPreview } from 'md-editor-v3'
@@ -10,14 +10,15 @@ import { fixHtmlQuotes } from '../utils/htmlQuotes'
 import { isDark } from '../composables/useTheme'
 import { mermaidFrameHtml } from '../utils/mermaidPreview.js'
 import KnowledgeGraph from '../components/KnowledgeGraph.vue'
-import CommunityGalaxy from '../components/CommunityGalaxy.vue'
+import KnowledgeGraph3D from '../components/KnowledgeGraph3D.vue'
 import KnowledgeSearchPanel from '../components/KnowledgeSearchPanel.vue'
 import WikiTopicNavigator from '../components/WikiTopicNavigator.vue'
 import { Search, Share, Reading, Setting, ArrowRight } from '@element-plus/icons-vue'
 import { knowledgeWorkspaceQuery, knowledgeWorkspaceTab } from '../utils/knowledgeWorkspace'
 
-import { expandGraphIds, filterConceptGraph, findGraphNodes, graphCommunityOptions, graphSource } from '../utils/knowledgeGraphView'
+import { createGraphSearchIndex, expandGraphIds, filterConceptGraph, graphCommunityOptions, graphSource } from '../utils/knowledgeGraphView'
 import { buildCommunityGalaxyMap, expandCommunityGraph } from '../utils/knowledgeGraphCommunities.js'
+import { graph3dCommunityColor } from '../utils/knowledgeGraph3dLayout.js'
 import { retrievalSourcePath } from '../utils/retrievalDisplay'
 import { createKnowledgeSearchLoader } from '../utils/knowledgeSearch'
 import { findWikiHeading, wikiHeadingId, wikiRouteTarget } from '../utils/wikiNavigation'
@@ -166,7 +167,12 @@ async function setMaintenanceEnabled(enabled) {
 async function runMaintenance() {
   await maintenanceLoader.submit(() => knowledgeMaintenanceApi.run())
 }
-watch(maintenanceOpen, open => { if (open) maintenanceLoader.refresh() })
+watch(maintenanceOpen, open => {
+  if (!open) return
+  maintenanceLoader.refresh()
+  if (!conceptLoaded || !communitiesLoaded) void loadConcept()
+  void loadCommunitySummaryStatus()
+})
 const kbStatusLoader = createKnowledgeStatusLoader({
   load: () => kbApi.status(),
   onState(state) { kb.value = state.status; kbLoading.value = state.loading },
@@ -288,7 +294,7 @@ async function runProbe() {
 // ------------------------------------------------------------------
 // 二、知识图谱
 // ------------------------------------------------------------------
-const graph = ref({ nodes: [], edges: [], stat: {} })
+const graph = shallowRef({ nodes: [], edges: [], stat: {} })
 const graphLoading = ref(false)
 const selected = ref(null)
 const rebuilding = ref(false)
@@ -297,7 +303,7 @@ const semanticEdges = ref(0)
 
 // 概念层（知识图谱）：与文档层是两套数据、两个选中态，切层时互不干扰
 const layer = ref('concept')
-const concept = ref({ nodes: [], edges: [], ontology: [], stat: null, rule: null })
+const concept = shallowRef({ nodes: [], edges: [], ontology: [], stat: null, rule: null })
 const conceptLoading = ref(false)
 const conceptSelected = ref(null)
 const relationFilter = ref(null)
@@ -307,6 +313,7 @@ const showIsolated = ref(false)
 const graphQuery = ref('')
 const graphRef = ref(null)
 const galaxyRef = ref(null)
+const graphAutoRotate = ref(true)
 const lastCommunityId = ref('')
 const inspectorTab = ref('explore')
 const graphProbeQuestion = ref('')
@@ -338,43 +345,59 @@ const selectedLinks = computed(() => {
     })
 })
 
-async function loadGraph() {
+let graphDisposed = false
+let documentGraphLoaded = false
+let documentGraphRevision = 0
+let graphRequest = null
+
+function loadGraph() {
+  if (graphDisposed) return
+  if (graphRequest) return graphRequest
+  const revision = documentGraphRevision
   graphLoading.value = true
-  try {
-    const res = await kgApi.graph()
-    graph.value = res
-    kgVersion.value = res.version
-    semanticEdges.value = res.stat?.semanticEdges || 0
-    if (selected.value) {
-      // 数据刷新后把选中项换成新对象，避免详情面板还显示旧引用
-      selected.value = res.nodes.find((n) => n.id === selected.value.id) || null
+  graphRequest = (async () => {
+    try {
+      const res = await kgApi.graph()
+      if (graphDisposed || revision !== documentGraphRevision) return
+      documentGraphLoaded = true
+      graph.value = res
+      kgVersion.value = res.version
+      semanticEdges.value = res.stat?.semanticEdges || 0
+      if (selected.value) {
+        // 数据刷新后把选中项换成新对象，避免详情面板还显示旧引用
+        selected.value = res.nodes.find((n) => n.id === selected.value.id) || null
+      }
+    } catch {
+      /* 提示已由拦截器统一弹出 */
     }
-  } catch (e) {
-    /* 提示已由拦截器统一弹出 */
-  } finally {
+  })().finally(() => {
+    graphRequest = null
     graphLoading.value = false
-  }
+  })
+  return graphRequest
 }
 
-/**
- * 实时刷新：每 5 秒问一次版本指纹，变了才重新拉图。
- * 选轮询而不是 SSE：后端那四个 COUNT/MAX 走索引、代价可忽略，
- * 也不必担心代理把长连接掐掉。只在图谱这一屏开着时才轮询。
- */
+const documentGraphActive = () => !graphDisposed && tab.value === 'graph' && layer.value === 'doc'
+// 文档层可见时每 5 秒检查版本指纹，有变化才重新拉图。
 let pollTimer = null
+let versionChecking = false
 async function checkVersion() {
+  if (!documentGraphActive() || graphRequest || versionChecking) return
+  if (!documentGraphLoaded) return loadGraph()
+  versionChecking = true
   try {
     const v = await kgApi.version()
-    if (v.version && v.version !== kgVersion.value) {
+    if (documentGraphActive() && v.version && v.version !== kgVersion.value) {
       await loadGraph()
     }
-  } catch (e) {
+  } catch {
     /* 轮询失败静默：下一轮会再试，不要在界面上刷错误提示 */
+  } finally {
+    versionChecking = false
   }
 }
 function startPoll() {
-  stopPoll()
-  pollTimer = setInterval(checkVersion, 5000)
+  if (!pollTimer) pollTimer = setInterval(checkVersion, 5000)
 }
 function stopPoll() {
   if (pollTimer) {
@@ -388,7 +411,12 @@ async function rebuild() {
   try {
     const r = await kgApi.rebuild()
     ElMessage.success(`已重建：${r.edges} 条关联（参与 ${r.items} 条，丢弃 ${r.rejected} 条）`)
-    await loadGraph()
+    documentGraphLoaded = false
+    documentGraphRevision++
+    if (documentGraphActive()) {
+      await graphRequest
+      if (documentGraphActive()) await loadGraph()
+    }
   } catch (e) {
     /* 拦截器已提示 */
   } finally {
@@ -426,7 +454,6 @@ const resolvedCommunityOf = computed(() => {
   for (const node of concept.value.nodes || []) if (membership[node.id] == null) membership[node.id] = '__unassigned__'
   return membership
 })
-const coloredCommunityOf = computed(() => Object.fromEntries(Object.entries(resolvedCommunityOf.value).filter(([, id]) => Number.isFinite(Number(id)))))
 const overviewConceptGraph = computed(() => filterConceptGraph(concept.value.nodes || [], concept.value.edges || [], {
   relations: relationFilter.value, origin: originFilter.value, showIsolated: showIsolated.value,
 }))
@@ -434,13 +461,15 @@ const isCommunityOverview = computed(() => layer.value === 'concept' && communit
 const expandedCommunityGraph = computed(() => expandCommunityGraph(overviewConceptGraph.value.nodes, overviewConceptGraph.value.edges,
   resolvedCommunityOf.value, communityFilter.value))
 /** The overview contains community stars; concrete concepts only mount after expansion. */
-const visibleConceptGraph = computed(() => communityFilter.value !== '' && !focus.value ? expandedCommunityGraph.value : filterConceptGraph(concept.value.nodes || [], concept.value.edges || [], {
-  relations: relationFilter.value, origin: originFilter.value,
-  communities: resolvedCommunityOf.value, focus: focus.value, showIsolated: showIsolated.value,
-}))
+const visibleConceptGraph = computed(() => {
+  if (!focus.value) return communityFilter.value === '' ? overviewConceptGraph.value : expandedCommunityGraph.value
+  return filterConceptGraph(concept.value.nodes || [], overviewConceptGraph.value.edges, { focus: focus.value })
+})
 const shownConceptEdges = computed(() => visibleConceptGraph.value.edges)
 const shownConceptNodes = computed(() => visibleConceptGraph.value.nodes)
-const graphMatches = computed(() => findGraphNodes(layer.value === 'concept' ? concept.value.nodes || [] : graph.value.nodes || [], graphQuery.value))
+const conceptSearch = computed(() => createGraphSearchIndex(concept.value.nodes || []))
+const documentSearch = computed(() => createGraphSearchIndex(graph.value.nodes || []))
+const graphMatches = computed(() => (layer.value === 'concept' ? conceptSearch.value : documentSearch.value)(graphQuery.value))
 const visibleDerivedCount = computed(() => shownConceptEdges.value.filter(e => e.origin === 'derived').length)
 const conceptNodeById = computed(() => new Map(concept.value.nodes.map(node => [node.id, node])))
 const communityOptions = computed(() => graphCommunityOptions(concept.value.nodes, communityGroups.value))
@@ -461,7 +490,7 @@ function resetGraphFilters() {
   focus.value = null
   focusRootId.value = ''
   communityFilter.value = ''
-  relationFilter.value = (concept.value.ontology || []).map(r => r.id)
+  relationFilter.value = conceptLoaded || concept.value.ontology?.length ? (concept.value.ontology || []).map(r => r.id) : null
   originFilter.value = 'direct'
   showIsolated.value = false
   graphQuery.value = ''
@@ -473,8 +502,7 @@ function resetGraphFilters() {
 function locateNode(node) {
   if (layer.value === 'concept') {
     communityFilter.value = ''
-    const edges = filterConceptGraph(concept.value.nodes || [], concept.value.edges || [], { relations: relationFilter.value, origin: originFilter.value }).edges
-    focus.value = expandGraphIds(node.id, edges, 1)
+    focus.value = expandGraphIds(node.id, overviewConceptGraph.value.edges, 1)
     focusRootId.value = node.id
   }
   onSelectNode(node)
@@ -528,13 +556,13 @@ async function generateCommunitySummaries() {
   try {
     if (summaryStatus.value?.communitiesStale) {
       await kgApi.recomputeCommunities()
-      await loadCommunities()
+      await loadCommunities(true)
     }
     const result = await kgApi.summarizeCommunities()
     const message = `已生成 ${result.written} 段，复用 ${result.cached} 段摘要${result.failed ? `，${result.failed} 段生成失败` : ''}`
     if (result.failed) ElMessage.warning(message)
     else ElMessage.success(message)
-    summaryStatus.value = await kgApi.communityStatus()
+    await loadCommunitySummaryStatus(true)
     if (graphProbeResult.value) await runGraphProbe()
   } catch { /* 请求拦截器显示错误 */ }
   finally { summaryBusy.value = false }
@@ -544,7 +572,7 @@ async function generateCommunitySummaries() {
 const conceptRelList = computed(() => {
   const cur = conceptSelected.value
   if (!cur || layer.value !== 'concept') return []
-  const byId = new Map((concept.value.nodes || []).map((n) => [n.id, n]))
+  const byId = conceptNodeById.value
   const out = []
   for (const e of shownConceptEdges.value) {
     if (e.source === cur.id) {
@@ -558,55 +586,126 @@ const conceptRelList = computed(() => {
   return out
 })
 
-async function loadConcept() {
-  conceptLoading.value = true
-  try {
-    concept.value = await kgApi.concept()
-    await loadCommunities()
-    // 默认只勾选"有代数性质"的关系会让图太空，所以默认全选 —— 过滤是给人收窄用的
-    if (relationFilter.value == null) {
-      relationFilter.value = (concept.value.ontology || []).map((r) => r.id)
-    }
-    if (conceptSelected.value) conceptSelected.value = concept.value.nodes.find(n => n.id === conceptSelected.value.id) || null
-  } catch (e) {
-    /* 拦截器已提示 */
-  } finally {
-    conceptLoading.value = false
+let conceptLoaded = false
+let conceptDataRequest = null
+let conceptRequest = null
+
+function fetchConceptData(refresh) {
+  if (conceptDataRequest) {
+    const readAgain = () => fetchConceptData(true)
+    return refresh ? conceptDataRequest.then(readAgain, readAgain) : conceptDataRequest
   }
+  if (conceptLoaded && !refresh) return Promise.resolve(concept.value)
+  conceptDataRequest = (async () => kgApi.concept())().finally(() => { conceptDataRequest = null })
+  return conceptDataRequest
+}
+
+function applyConcept(data) {
+  concept.value = data
+  conceptLoaded = true
+  if (relationFilter.value == null) relationFilter.value = (data.ontology || []).map(r => r.id)
+  if (conceptSelected.value) conceptSelected.value = conceptNodeById.value.get(conceptSelected.value.id) || null
+}
+
+async function prefetchConceptCount() {
+  try {
+    const data = await fetchConceptData(false)
+    if (!graphDisposed && !conceptRequest && !conceptLoaded) applyConcept(data)
+  } catch {
+    /* 拦截器已提示 */
+  }
+}
+
+function loadConcept(refresh = false) {
+  if (graphDisposed) return
+  if (conceptRequest) return refresh ? conceptRequest.then(() => loadConcept(true)) : conceptRequest
+  conceptLoading.value = true
+  conceptRequest = (async () => {
+    try {
+      const [data, communities] = await Promise.all([fetchConceptData(refresh), refresh || !communitiesLoaded ? fetchCommunities(refresh) : null])
+      if (graphDisposed) return
+      applyCommunities(communities)
+      applyConcept(data)
+      if (refresh && maintenanceOpen.value) void loadCommunitySummaryStatus(true)
+    } catch {
+      /* 拦截器已提示 */
+    }
+  })().finally(() => {
+    conceptRequest = null
+    conceptLoading.value = false
+  })
+  return conceptRequest
 }
 
 // ---- GraphRAG 社区层 ----
-const communityOf = ref({})            // 节点 id → 社区编号（给图谱着色）
-const communityGroups = ref([])        // 按社区聚合（规模 + 成员，给侧栏用）
+const communityOf = shallowRef({})     // 节点 id → 社区编号（给图谱着色）
+const communityGroups = shallowRef([]) // 按社区聚合（规模 + 成员，给侧栏用）
 const communityModularity = ref(0)
 const communityLoading = ref(false)
+let communitiesLoaded = false
+let communityRequest = null
+let communityRevision = 0
 
-/**
- * 读社区划分。**失败不打断概念图**：社区是叠加信息，拿不到就按节点类型着色，
- * 不该让整页因为"社区算过没有"而空着。
- */
-async function loadCommunities() {
+async function readCommunityGroups() {
   try {
-    const rows = await kgApi.communities()
-    const map = {}
-    let modularity = 0
-    for (const r of rows || []) {
-      map[r.nodeId] = r.communityId
-      modularity = Number(r.modularity) || modularity
+    // 分组接口已包含每个成员和模块度，正常情况只需要一次请求。
+    return await kgApi.groupedCommunities()
+  } catch {
+    const groups = new Map()
+    for (const { communityId, nodeId, modularity, computedAt } of await kgApi.communities() || []) {
+      if (!groups.has(communityId)) groups.set(communityId, { communityId, modularity, computedAt, nodeIds: [] })
+      groups.get(communityId).nodeIds.push(nodeId)
     }
-    communityOf.value = map
-    communityModularity.value = modularity
-    communityGroups.value = await kgApi.groupedCommunities()
-    try { summaryStatus.value = await kgApi.communityStatus() } catch { summaryStatus.value = null }
-  } catch (e) {
-    /* 拦截器已提示；保持原样着色 */
+    return [...groups.values()].map(group => ({ ...group, size: group.nodeIds.length })).sort((a, b) => b.size - a.size)
   }
 }
 
-/** 与 KnowledgeGraph 内同一套色相算法（黄金角步进），图例色块才和节点颜色对得上 */
+function fetchCommunities(refresh = false) {
+  if (graphDisposed) return
+  if (communityRequest) return refresh ? communityRequest.then(() => fetchCommunities(true)) : communityRequest
+  const revision = ++communityRevision
+  communityRequest = readCommunityGroups().then(groups => {
+    const membership = Object.create(null)
+    let modularity = 0
+    for (const group of groups || []) {
+      for (const id of group.nodeIds || []) membership[id] = group.communityId
+      modularity = Number(group.modularity) || modularity
+    }
+    return { groups: groups || [], membership, modularity, revision }
+  }).catch(() => null).finally(() => { communityRequest = null })
+  return communityRequest
+}
+
+function applyCommunities(snapshot) {
+  // 社区读取失败时保留已有分组，概念图仍可正常打开。
+  if (!snapshot || graphDisposed || snapshot.revision !== communityRevision) return
+  communitiesLoaded = true
+  communityOf.value = snapshot.membership
+  communityGroups.value = snapshot.groups
+  communityModularity.value = snapshot.modularity
+}
+
+async function loadCommunities(refresh = false) {
+  applyCommunities(await fetchCommunities(refresh))
+}
+
+let summaryRequest = null
+function loadCommunitySummaryStatus(refresh = false) {
+  if (graphDisposed) return
+  if (summaryRequest) return refresh ? summaryRequest.then(() => loadCommunitySummaryStatus(true)) : summaryRequest
+  summaryRequest = (async () => {
+    try {
+      const status = await kgApi.communityStatus()
+      if (!graphDisposed) summaryStatus.value = status
+    } catch {
+      if (!graphDisposed) summaryStatus.value = null
+    }
+  })().finally(() => { summaryRequest = null })
+  return summaryRequest
+}
+
 function communityColor(id) {
-  if (!Number.isFinite(Number(id))) return 'var(--app-brand)'
-  return `hsl(${Math.round((Number(id) * 137.508) % 360)} 46% 48%)`
+  return graph3dCommunityColor(id)
 }
 
 /** 重算社区：纯本地计算（Leiden），不花 token，所以可以放心给按钮 */
@@ -614,7 +713,8 @@ async function recomputeCommunities() {
   communityLoading.value = true
   try {
     const r = await kgApi.recomputeCommunities()
-    await loadCommunities()
+    await loadCommunities(true)
+    if (maintenanceOpen.value) void loadCommunitySummaryStatus(true)
     ElMessage.success(`社区已重算：${r.communities} 个社区 · 模块度 ${Number(r.modularity).toFixed(3)} · ${r.ms}ms`)
   } catch (e) {
     /* 拦截器已提示 */
@@ -625,7 +725,7 @@ async function recomputeCommunities() {
 
 /** 点社区里的某个成员 → 选中它（右栏就展开它的关系） */
 function selectCommunityMember(nodeId) {
-  const node = concept.value.nodes.find((n) => n.id === nodeId)
+  const node = conceptNodeById.value.get(nodeId)
   if (node) locateNode(node)
 }
 
@@ -668,7 +768,7 @@ async function pollConceptJob(jobId) {
       if (j.status === 'done') {
         ElMessage.success(`GraphRAG 已重建：实体 ${j.entities} 个 · 新增三元组 ${j.triples} 条`)
         focus.value = null
-        await loadConcept()
+        await loadConcept(true)
       } else {
         ElMessage.error('重建失败：' + (j.error || ''))
       }
@@ -684,7 +784,7 @@ async function reasonConcept() {
   try {
     const r = await kgApi.reason()
     ElMessage.success(`推理完成：直接事实 ${r.direct} 条 → 新增隐含事实 ${r.derivedAdded} 条`)
-    await loadConcept()
+    await loadConcept(true)
   } catch (e) {
     /* 拦截器已提示 */
   } finally {
@@ -695,8 +795,7 @@ async function reasonConcept() {
 /** 展开 N 跳：把可达子图设为"聚焦集合"，画布只显示这一片（这就是多跳遍历的可视化） */
 async function expandConcept(id, hops) {
   communityFilter.value = ''
-  const edges = filterConceptGraph(concept.value.nodes, concept.value.edges, { relations: relationFilter.value, origin: originFilter.value }).edges
-  focus.value = expandGraphIds(id, edges, hops)
+  focus.value = expandGraphIds(id, overviewConceptGraph.value.edges, hops)
   focusRootId.value = id
   nextTick(() => graphRef.value?.resetView())
 }
@@ -722,7 +821,7 @@ async function removeConceptNode(n) {
       conceptSelected.value = null
     }
     focus.value = null
-    await loadConcept()
+    await loadConcept(true)
   } catch (e) {
     /* 拦截器已提示 */
   } finally {
@@ -1198,13 +1297,18 @@ const maintenanceBusy = computed(() => maintenance.value?.running || kbBusy.valu
 const indexState = computed(() => kbView.value.label)
 const formatCount = value => value == null ? '—' : Number(value).toLocaleString('zh-CN')
 
-watch(tab, (v) => {
-  if (v === 'graph') {
-    if (!graph.value.nodes.length) loadGraph()
+function syncGraphLayer() {
+  if (documentGraphActive()) {
     startPoll()
-  } else {
-    stopPoll()
+    void checkVersion()
+    return
   }
+  stopPoll()
+  if (tab.value === 'graph' && (!conceptLoaded || !communitiesLoaded)) void loadConcept()
+}
+
+watch([tab, layer], syncGraphLayer)
+watch(tab, (v) => {
   if (v === 'wiki' && (!topics.value.length || !activeTopic.value)) loadTopics()
   else if (v === 'wiki' && !wikiLoading.value) loadWikiDependencies()
 })
@@ -1219,24 +1323,18 @@ onMounted(() => {
   window.addEventListener('lh-open-wiki', openWikiFromReference)
   window.addEventListener(MODEL_CONFIGURATION_CHANGED_EVENT, modelConfigurationChanged)
   doSearch()
-  if (tab.value === 'graph') { loadGraph(); startPoll() }
+  syncGraphLayer()
   if (tab.value === 'wiki') loadTopics()
   else loadTopicsQuiet()
   loadAutoRefresh()
   loadWikiTargets()
   loadKb()
   maintenanceLoader.start()
-  loadConcept()
-})
-
-// 切到概念层时才确保数据是新的（进页面就查一次是为了让标签上的实体数先显示出来）
-watch(layer, (v) => {
-  if (v === 'concept' && !concept.value.nodes.length) {
-    loadConcept()
-  }
+  if (tab.value !== 'graph') void prefetchConceptCount()
 })
 
 onBeforeUnmount(() => {
+  graphDisposed = true
   window.removeEventListener('lh-open-wiki', openWikiFromReference)
   window.removeEventListener(MODEL_CONFIGURATION_CHANGED_EVENT, modelConfigurationChanged)
   kbStatusLoader.dispose()
@@ -1257,7 +1355,7 @@ onBeforeUnmount(() => {
         <h1>知识库</h1>
         <div class="knowledge-header-actions">
           <span class="index-indicator" :class="{ stale: kbView.warning, unavailable: kbView.unavailable || kbView.keywordOnly }" :title="kbView.description"><i />{{ indexState }}</span>
-          <el-button size="small" :icon="Setting" @click="maintenanceOpen = true">知识库维护<span v-if="maintenanceBusy" class="maintenance-running">进行中</span></el-button>
+          <el-button :icon="Setting" @click="maintenanceOpen = true">知识库维护<span v-if="maintenanceBusy" class="maintenance-running">进行中</span></el-button>
         </div>
       </div>
       <div class="knowledge-navigation">
@@ -1285,8 +1383,8 @@ onBeforeUnmount(() => {
           </div>
           <span class="graph-description">{{ layer === 'concept' ? '先看社区星系，再展开概念与原文关系' : '查看笔记、资料与速查卡之间的联系' }}</span>
           <div class="graph-actions">
-            <el-button size="small" @click="resetGraphFilters">重置视图</el-button>
-<el-button size="small" @click="maintenanceOpen = true">管理图谱</el-button>
+            <el-button @click="resetGraphFilters">重置视图</el-button>
+            <el-button @click="maintenanceOpen = true">管理图谱</el-button>
           </div>
         </div>
         <div v-if="layer === 'concept'" class="graph-filters">
@@ -1297,16 +1395,14 @@ onBeforeUnmount(() => {
               :placeholder="'全部社区（' + communityOverview.totalCommunities + '）'"
               :options="communitySelectionOptions"
               filterable
-              size="small"
-              style="width: 220px"
               @change="onCommunityChange"
             />
           </label>
-          <el-select v-model="relationFilter" aria-label="筛选关系" multiple collapse-tags collapse-tags-tooltip size="small" placeholder="选择关系" class="graph-relation-filter">
+          <el-select v-model="relationFilter" aria-label="筛选关系" multiple collapse-tags collapse-tags-tooltip placeholder="选择关系" class="graph-relation-filter">
             <el-option v-for="r in concept.ontology || []" :key="r.id" :label="r.label" :value="r.id" />
           </el-select>
           <label class="graph-select-label">依据
-            <el-select v-model="originFilter" aria-label="筛选关系依据" size="small" style="width: 130px">
+            <el-select v-model="originFilter" aria-label="筛选关系依据">
               <el-option label="原文抽取" value="direct" />
               <el-option label="抽取 + 推导" value="all" />
               <el-option label="仅规则推导" value="derived" />
@@ -1315,7 +1411,7 @@ onBeforeUnmount(() => {
           <label class="graph-checkbox"><input v-model="showIsolated" type="checkbox" />显示孤立概念</label>
         </div>
         <nav v-if="layer === 'concept' && !isCommunityOverview" class="graph-view-navigation" aria-label="图谱层级导航">
-          <el-button size="small" @click="returnToCommunityOverview">← 社区星系</el-button>
+          <el-button @click="returnToCommunityOverview">← 社区星系</el-button>
           <span :title="focus ? '概念邻域' : activeCommunityTitle">{{ focus ? '概念邻域' : activeCommunityTitle }}</span>
           <small v-if="!focus && expandedCommunityGraph.boundaryIds.size">包含 {{ expandedCommunityGraph.boundaryIds.size }} 个外部关联概念</small>
         </nav>
@@ -1325,14 +1421,21 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="graph-workspace" :class="{ 'graph-workspace-overview': isCommunityOverview }">
-          <section class="graph-stage" :class="{ 'graph-stage-overview': isCommunityOverview }" aria-label="知识图谱">
+          <section class="graph-stage" :class="{ 'graph-stage-overview': isCommunityOverview, 'graph-stage-3d': layer === 'concept' }" aria-label="知识图谱">
             <div class="graph-stage-head">
               <div><b>{{ isCommunityOverview ? '社区星系' : focus ? '概念邻域' : communityFilter !== '' ? '社区视图' : '知识地图' }}</b><span class="hint">{{ isCommunityOverview ? `${communityOverview.totalCommunities} 个社区 · ${communityOverview.totalNodes} 个概念` : `${canvasNodes.length} 个${layer === 'concept' ? '概念' : '节点'} · ${canvasEdges.length} 条关系` }}</span></div>
               <span v-if="layer === 'concept'" class="hint">{{ visibleDerivedCount ? `包含 ${visibleDerivedCount} 条推导` : '仅展示原文抽取' }}</span>
             </div>
             <div class="kg-box" v-loading="layer === 'doc' ? graphLoading : conceptLoading">
-              <CommunityGalaxy v-if="layer === 'concept' && overviewConceptGraph.nodes.length" v-show="isCommunityOverview" ref="galaxyRef" :active="isCommunityOverview" :overview-data="communityOverview" :nodes="overviewConceptGraph.nodes" :edges="overviewConceptGraph.edges" :communities="resolvedCommunityOf" :groups="communityOptions" @expand="focusCommunity" />
-              <KnowledgeGraph v-if="!isCommunityOverview && canvasNodes.length" ref="graphRef" :key="layer" :nodes="canvasNodes" :edges="canvasEdges" :communities="layer === 'concept' ? coloredCommunityOf : {}" :active-id="selectedNode?.id || ''" :layout-root-id="layer === 'concept' && focus ? focusRootId : ''" @select="onSelectNode" @open="openNode" />
+              <KnowledgeGraph3D v-if="layer === 'concept' && communityOverview.nodes.length" v-show="isCommunityOverview"
+                ref="galaxyRef" v-model:auto-rotate="graphAutoRotate" mode="overview" :active="isCommunityOverview"
+                :nodes="communityOverview.nodes" :edges="communityOverview.edges" @expand="focusCommunity" />
+              <KnowledgeGraph3D v-if="layer === 'concept' && !isCommunityOverview && canvasNodes.length"
+                ref="graphRef" v-model:auto-rotate="graphAutoRotate" mode="concept" :nodes="canvasNodes" :edges="canvasEdges"
+                :communities="resolvedCommunityOf" :active-id="selectedNode?.id || ''" :layout-root-id="focus ? focusRootId : ''"
+                @select="onSelectNode" @open="openNode" />
+              <KnowledgeGraph v-else-if="layer === 'doc' && canvasNodes.length" ref="graphRef"
+                :nodes="canvasNodes" :edges="canvasEdges" :active-id="selectedNode?.id || ''" @select="onSelectNode" @open="openNode" />
               <el-empty v-if="isCommunityOverview ? !overviewConceptGraph.nodes.length : !canvasNodes.length" :description="layer === 'doc' ? '还没有内容，先写几篇笔记' : concept.nodes.length ? '当前筛选下没有关联，可调整筛选或显示孤立概念' : '还没有概念，重建 GraphRAG 后即可探索'" />
             </div>
             <div class="graph-stage-foot">
@@ -1412,7 +1515,7 @@ onBeforeUnmount(() => {
                       <el-radio-button label="local">局部检索</el-radio-button>
                       <el-radio-button label="global">全局概览</el-radio-button>
                     </el-radio-group>
-                    <el-button type="primary" size="small" native-type="submit" :disabled="!graphProbeQuestion.trim()" :loading="graphProbeBusy">检索材料</el-button>
+                    <el-button type="primary" native-type="submit" :disabled="!graphProbeQuestion.trim()" :loading="graphProbeBusy">检索材料</el-button>
                   </div>
                 </form>
                 <div class="probe-examples"><button type="button" @click="graphProbeQuestion = 'ReAct 和 Planning 有什么关系？'; runGraphProbe()">概念关系</button><button type="button" @click="graphProbeQuestion = '知识库整体涵盖哪些学习方向？'; runGraphProbe()">学习概览</button></div>
@@ -1485,21 +1588,17 @@ onBeforeUnmount(() => {
                 <el-select
                   v-if="wikiTargets.length > 1"
                   v-model="wikiTarget"
-                  size="small"
-                  style="width: 190px"
                   :disabled="generating"
                 >
                   <el-option v-for="t in wikiTargets" :key="t.id" :label="t.label" :value="t.id" />
                 </el-select>
                 <el-button
-                  size="small"
                   type="primary"
                   :loading="generating"
                   :disabled="wikiPage.topicType !== 'entity' && !wikiPage.itemCount"
                   @click="generate"
                 >{{ wikiPage.topicType === 'entity' ? '重新生成此页' : wikiPage.generated ? '重新生成' : '生成 wiki' }}</el-button>
                 <el-button
-                  size="small"
                   :loading="deletingKey === wikiPage.topicKey"
                   @click="removeTopic(wikiPage)"
                 >删除</el-button>
@@ -1696,9 +1795,16 @@ onBeforeUnmount(() => {
 .knowledge-header { flex-shrink: 0; margin-bottom: 12px; }
 .knowledge-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; }
 .knowledge-heading h1 { margin: 0; font-size: 22px; line-height: 32px; letter-spacing: -.4px; font-weight: 700; }
-.knowledge-header-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; max-width: 100%; margin-left: auto; }
-.index-indicator { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--app-text-2); }
-.index-indicator i { width: 6px; height: 6px; border-radius: 50%; background: var(--app-brand); }
+.knowledge-header-actions { display: flex; align-items: center; gap: var(--space-sm); min-width: 0; max-width: 100%; margin-inline-start: auto; }
+.knowledge-header-actions > .el-button { flex: none; width: var(--control-w); }
+.knowledge-header-actions > .el-button:has(.maintenance-running) { width: auto; }
+:is(.graph-actions, .graph-view-navigation, .graph-probe-form, .page-acts, .maintenance-content) .el-button {
+  min-width: min(100%, var(--control-w));
+  max-width: 100%;
+  height: var(--control-h);
+}
+.index-indicator { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; color: var(--app-text-2); }
+.index-indicator i { flex: 0 0 6px; height: 6px; border-radius: 50%; background: var(--app-brand); }
 .index-indicator.stale i { background: #c58519; }
 .index-indicator.unavailable i { background: var(--app-text-3); }
 .maintenance-running { margin-left: 8px; font-size: 12px; color: var(--app-brand-deep); }
@@ -1709,11 +1815,12 @@ onBeforeUnmount(() => {
 .knowledge-summary dd { margin: 0; font-size: 14px; font-weight: 650; line-height: 1.5; font-variant-numeric: tabular-nums; color: var(--app-text-1); }
 .knowledge-summary small { margin-left: 4px; font-weight: 400; color: var(--app-text-3); font-size: 12px; }
 .summary-stale { font-size: 11px; font-weight: 400; color: var(--app-text-3); margin-left: 6px; }
-.workspace-tabs { display: flex; align-items: stretch; gap: 4px; min-width: 0; max-width: 100%; overflow-x: auto; }
-.workspace-tabs button { position: relative; display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 8px 14px; border: 0; border-radius: 6px 6px 0 0; background: transparent; text-align: left; color: var(--app-text-2); font: inherit; cursor: pointer; transition: background var(--dur-fast); }
+.workspace-tabs { display: flex; align-items: stretch; gap: 4px; min-width: 0; max-width: 100%; overflow-x: auto; overflow-y: hidden; }
+.workspace-tabs button { position: relative; display: flex; align-items: center; gap: var(--space-sm); min-height: var(--control-h); padding: 0 14px; border: 0; border-radius: 6px 6px 0 0; background: transparent; text-align: left; color: var(--app-text-2); font: inherit; cursor: pointer; transition: background var(--dur-fast); }
 .workspace-tabs button:hover { background: var(--app-card); }
+.workspace-tabs button:focus-visible { outline-offset: -2px; }
 .workspace-tabs button.active { color: var(--app-brand-deep); background: color-mix(in srgb, var(--app-brand-soft) 55%, transparent); }
-.workspace-tabs button.active::after { content: ''; position: absolute; bottom: -1px; left: 12px; right: 12px; height: 2px; border-radius: 2px 2px 0 0; background: var(--app-brand); }
+.workspace-tabs button.active::after { content: ''; position: absolute; bottom: 0; left: 12px; right: 12px; height: 2px; border-radius: 2px 2px 0 0; background: var(--app-brand); }
 .workspace-tabs .el-icon { font-size: 17px; }
 .workspace-tabs b { font-size: 13px; font-weight: 600; white-space: nowrap; }
 /* Keep containment below the page: drawers/dialogs remain viewport-positioned siblings. */
@@ -1751,16 +1858,17 @@ onBeforeUnmount(() => {
 .maintenance-section > summary small { font-size: 12px; font-weight: 400; color: var(--app-text-3); }
 .maintenance-section-body { border-top: 1px solid var(--app-border-weak); padding: 16px; }
 .maintenance-section-body > .hint { line-height: 1.8; margin-top: 0; }
-.maintenance-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.maintenance-actions { display: flex; flex-wrap: wrap; gap: var(--space-sm); margin: 12px 0; }
 .maintenance-actions .el-button + .el-button { margin-left: 0; }
 .maintenance-metrics { display: flex; gap: 20px; margin: 20px 0 8px; color: var(--app-text-3); font-size: 12px; }
 .maintenance-toggle { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 0; margin-top: 20px; border-top: 1px solid var(--app-border); }
 .maintenance-toggle b { font-size: 14px; }
 .maintenance-toggle p { margin: 4px 0 0; line-height: 1.7; }
-.maintenance-content .kb-bar { align-items: flex-start; flex-direction: column; gap: 10px; padding: 0; margin-bottom: 20px; }
+.maintenance-content .kb-bar { align-items: flex-start; flex-direction: column; padding: 0; margin-bottom: 20px; }
 .maintenance-content .kb-bar .hint { line-height: 1.8; overflow-wrap: anywhere; }
-.maintenance-content .probe-bar { gap: 8px; flex-wrap: wrap; padding: 0; }
-.maintenance-content .probe-bar .search-input { flex: 1 1 100%; }
+.maintenance-content .probe-bar { padding: 0; }
+.maintenance-content .probe-bar .search-input { flex: 0 1 var(--control-search-w); min-width: 0; max-width: 100%; --el-component-size: var(--control-h); }
+.maintenance-content .probe-bar .el-button { margin-left: 0; }
 .maintenance-content .probe-result { margin-top: 12px; grid-template-columns: 1fr; gap: 16px; }
 .maintenance-content .summary-status { margin-bottom: 0; }
 .maintenance-content .el-button .el-icon { margin-left: 8px; }
@@ -1777,6 +1885,7 @@ onBeforeUnmount(() => {
 .layer {
   display: inline-flex;
   flex-wrap: wrap;
+  min-height: var(--control-h);
   max-width: 100%;
   padding: 2px;
   border-radius: 8px;
@@ -1786,7 +1895,7 @@ onBeforeUnmount(() => {
 .layer button {
   border: 0;
   background: transparent;
-  padding: 3px 10px;
+  padding: 0 10px;
   border-radius: 6px;
   font-size: 12px;
   color: var(--app-text-2);
@@ -2289,8 +2398,10 @@ onBeforeUnmount(() => {
   align-items: center;
   flex-wrap: wrap;
   max-width: 100%;
-  gap: 8px;
+  gap: var(--space-sm);
 }
+.page-acts .el-select { width: var(--control-w); max-width: 100%; }
+.page-acts :deep(.el-select__wrapper) { min-height: var(--control-h); }
 .page-acts .el-button + .el-button { margin-left: 0; }
 .wiki-body {
   padding-top: 4px;
@@ -2349,7 +2460,7 @@ onBeforeUnmount(() => {
 .probe-bar {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-sm);
   margin-bottom: 10px;
   flex-wrap: wrap;
 }
@@ -2388,22 +2499,21 @@ onBeforeUnmount(() => {
 /* Graph exploration: the canvas stays stable while evidence scrolls independently. */
 
 .graph-fill { min-height: 0; gap: 8px; }
-.graph-view-navigation { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; flex-shrink: 0; }
+.graph-view-navigation { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-sm); flex-shrink: 0; }
 .graph-view-navigation > span { min-width: 0; flex: 0 1 auto; max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--app-text-1); }
 .graph-view-navigation small, .graph-overview-help { font-size: 12px; color: var(--app-text-2); line-height: 1.7; }
 .head { flex-shrink: 0; }
-.graph-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex-shrink: 0; }
+.graph-toolbar { display: flex; align-items: center; gap: var(--space-sm); flex-wrap: wrap; flex-shrink: 0; }
 .graph-description { font-size: 12px; color: var(--app-text-3); }
-.graph-actions { display: flex; flex-wrap: wrap; gap: 8px; max-width: 100%; margin-left: auto; }
+.graph-actions { display: flex; flex-wrap: wrap; gap: var(--space-sm); max-width: 100%; margin-left: auto; }
 .graph-actions .el-button + .el-button { margin-left: 0; }
-.graph-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 6px 10px; border: 1px solid var(--app-border-weak); border-radius: 8px; background: var(--app-card); flex-shrink: 0; }
+.graph-filters { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-sm); padding: 6px 10px; border: 1px solid var(--app-border-weak); border-radius: 8px; background: var(--app-card); flex-shrink: 0; }
 .graph-fill > .kb-progress { flex-shrink: 0; }
-.graph-select-label { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--app-text-3); min-width: 0; }
-.graph-select-label select { max-width: 235px; }
-.graph-filters select, .graph-probe-form select { height: 28px; padding: 2px 24px 2px 8px; color: var(--app-text-1); border: 1px solid var(--app-border); border-radius: 6px; background: var(--app-card); font-size: 12px; }
-.graph-relation-filter { width: 164px; }
-.graph-filters > *, .graph-select-label :deep(.el-select), .graph-select-label :deep(.el-select-v2) { max-width: 100%; min-width: 0; }
-.graph-checkbox { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--app-text-2); cursor: pointer; }
+.graph-select-label { display: inline-flex; align-items: center; gap: var(--space-sm); font-size: 12px; color: var(--app-text-3); min-width: 0; }
+.graph-filters .el-select { width: var(--control-w); }
+.graph-filters :deep(.el-select__wrapper) { min-height: var(--control-h); }
+.graph-filters > *, .graph-select-label .el-select { max-width: 100%; min-width: 0; }
+.graph-checkbox { display: inline-flex; align-items: center; min-height: var(--control-h); gap: 5px; font-size: 12px; color: var(--app-text-2); cursor: pointer; }
 .graph-checkbox input { accent-color: var(--app-brand); }
 .text-action { border: 0; padding: 2px 0; background: none; color: var(--app-brand-deep); font-size: 12px; cursor: pointer; }
 .text-action:hover { text-decoration: underline; }
@@ -2413,15 +2523,16 @@ onBeforeUnmount(() => {
 .graph-stage-head > div { display: flex; flex-wrap: wrap; min-width: 0; gap: 4px 12px; align-items: center; }
 .graph-stage-head b { font-size: 13px; color: var(--app-text-1); }
 .graph-stage .kg-box { border: 0; border-radius: 0; min-height: 320px; flex: 1 1 0; }
+.graph-stage-3d .kg-box { background: #fff; color-scheme: light; }
 .graph-stage-foot { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; border-top: 1px solid var(--app-border-weak); padding: 6px 12px; flex-shrink: 0; }
 .line-direct { border-top-color: var(--app-brand); }
 .line-derived { border-top-color: var(--app-text-3); }
 .graph-inspector { display: flex; flex-direction: column; min-width: 0; min-height: 0; border: 1px solid var(--app-border-weak); border-radius: 12px; background: var(--app-card); overflow: hidden; }
 .inspector-tabs { display: flex; padding: 7px; gap: 4px; border-bottom: 1px solid var(--app-border-weak); }
-.inspector-tabs button { flex: 1; border: 0; border-radius: 6px; background: transparent; padding: 8px; color: var(--app-text-3); cursor: pointer; font-size: 12px; }
+.inspector-tabs button { flex: 1; min-height: var(--control-h); border: 0; border-radius: 6px; background: transparent; padding: 0 var(--space-sm); color: var(--app-text-3); cursor: pointer; font-size: 12px; }
 .inspector-tabs button.on { background: var(--app-brand-soft); color: var(--app-brand-deep); font-weight: 600; }
 .inspector-scroll { padding: 14px; overflow-y: auto; flex: 1; min-height: 0; overscroll-behavior: contain; }
-.graph-search { width: 100%; box-sizing: border-box; border: 1px solid var(--app-border); border-radius: 8px; color: var(--app-text-1); background: var(--app-bg); padding: 9px 11px; font: inherit; font-size: 12px; }
+.graph-search { width: min(100%, var(--control-search-w)); height: var(--control-h); box-sizing: border-box; border: 1px solid var(--app-border); border-radius: var(--radius); color: var(--app-text-1); background: var(--app-bg); padding: 0 11px; font: inherit; font-size: 12px; }
 .graph-search:focus, .graph-probe-form textarea:focus { outline: 2px solid var(--app-brand); outline-offset: 2px; }
 .inspector-label { display: flex; justify-content: space-between; color: var(--app-text-3); font-size: 11px; margin: 18px 0 9px; }
 .graph-node-list { display: flex; flex-direction: column; gap: 3px; }
@@ -2458,8 +2569,8 @@ onBeforeUnmount(() => {
 .probe-heading { font-size: 15px; margin: 0 0 8px; color: var(--app-text-1); }
 .probe-heading + p { line-height: 1.7; margin-bottom: 14px; }
 .graph-probe-form textarea { width: 100%; box-sizing: border-box; resize: vertical; min-height: 82px; padding: 9px; border: 1px solid var(--app-border); border-radius: 8px; color: var(--app-text-1); background: var(--app-bg); font: inherit; font-size: 12px; line-height: 1.6; }
-.graph-probe-form > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; margin-top: 8px; }
-.graph-probe-form :deep(.el-select) { max-width: 100%; }
+.graph-probe-form > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-sm); margin-top: 8px; }
+.graph-probe-form :deep(.el-radio-button__inner) { display: inline-flex; align-items: center; height: var(--control-h); }
 .probe-examples { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
 .probe-examples button, .probe-concepts button { font-size: 11px; padding: 4px 8px; border: 1px solid var(--app-border); border-radius: 5px; background: transparent; color: var(--app-text-2); cursor: pointer; }
 .probe-examples button:hover, .probe-concepts button:hover { border-color: var(--app-brand); color: var(--app-brand-deep); }
@@ -2480,9 +2591,8 @@ onBeforeUnmount(() => {
 .graph-stage-overview .kg-box { min-height: 640px; flex: 1 1 auto; overflow: visible; background: #fff; border-color: #e6e9ef; }
 .graph-workspace-overview .graph-inspector { height: 720px; }
 @media (min-width: 1600px) { .graph-workspace { grid-template-columns: minmax(0, 1fr) 350px; } }
-@media (max-width: 1050px) { .graph-description { display: none; } .graph-workspace { grid-template-columns: minmax(0, 1fr) 280px; gap: 10px; } .graph-select-label select { max-width: 180px; } .graph-stage-head .hint { font-size: 11px; } }
+@media (max-width: 1050px) { .graph-description { display: none; } .graph-workspace { grid-template-columns: minmax(0, 1fr) 280px; gap: 10px; } .graph-stage-head .hint { font-size: 11px; } }
 @media (max-width: 1100px) {
-  .knowledge-header-actions { gap: 8px; }
   .wiki { grid-template-columns: 260px minmax(0, 1fr); }
   .page-head { grid-template-columns: 1fr; }
   .page-acts { flex-wrap: wrap; }
@@ -2499,7 +2609,6 @@ onBeforeUnmount(() => {
   .graph-stage-overview { height: auto; min-height: 680px; }
   .graph-stage-overview .kg-box { min-height: 580px; }
   .graph-workspace-overview .graph-inspector { height: 460px; }
-  .graph-toolbar, .graph-filters { gap: 8px; }
   .graph-stage-foot { gap: 10px; }
   .wiki { grid-template-columns: 1fr; }
   .wiki > .wiki-navigator { position: static; height: auto; max-height: 520px; }
@@ -2511,7 +2620,7 @@ onBeforeUnmount(() => {
   .knowledge-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 12px; }
   .knowledge-summary dt, .knowledge-summary small { font-size: 11px; }
   .workspace-tabs { gap: 0; width: 100%; }
-  .workspace-tabs button { flex: 1; justify-content: center; padding: 8px 6px; gap: 5px; }
+  .workspace-tabs button { flex: 1; justify-content: center; padding: 0 6px; gap: 5px; }
   .workspace-tabs .el-icon { font-size: 16px; }
   .graph-stage-head > div { flex-wrap: wrap; gap: 4px 12px; }
   .graph-actions { margin-left: 0; }
@@ -2520,8 +2629,6 @@ onBeforeUnmount(() => {
   .graph-stage { height: 440px; }
   .graph-stage-overview { height: auto; }
   .wiki-main { padding: 16px; }
-  .page-acts { gap: 8px; }
-  .page-acts .el-button + .el-button { margin-left: 0; }
   .page-title { overflow-wrap: anywhere; }
   .maintenance-section > summary small { display: none; }
 }
@@ -2540,9 +2647,8 @@ onBeforeUnmount(() => {
 }
 @container knowledge-workspace (max-width: 440px) {
   .graph-filters .graph-select-label { flex: 1 1 100%; flex-wrap: wrap; }
-  .graph-filters .graph-select-label :deep(.el-select),
-  .graph-filters .graph-select-label :deep(.el-select-v2) { flex: 1 1 160px; }
-  .graph-relation-filter { flex: 1 1 100%; width: auto; }
+  .graph-filters .graph-select-label .el-select { flex: 1 1 var(--control-w); }
+  .graph-relation-filter { flex: 1 1 100%; }
   .graph-actions { margin-left: 0; }
   .graph-stage { height: 440px; }
   .graph-stage-overview { height: auto; }

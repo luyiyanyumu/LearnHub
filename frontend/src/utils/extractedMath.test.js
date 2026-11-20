@@ -13,6 +13,19 @@ function parse(html) {
   return root
 }
 
+test('structured OCR formulas stay in candidate mode even when the original crop is unavailable', () => {
+  const block = { type: 'formula', latex: 'x_1', latexStatus: 'needs_review' }
+  const state = extractedFormulaState(block, 'x_1', { hasImage: false })
+  assert.equal(state.candidatePreview, true)
+  assert.equal(state.mainPreview, false)
+  assert.equal(state.needsReview, true)
+  const confirmed = extractedFormulaState({ ...block, latexStatus: 'recognized', latexMessage: '已人工核对' }, 'x_1', { hasImage: true })
+  assert.equal(confirmed.mainPreview, true)
+  assert.equal(confirmed.manual, true)
+  assert.equal(confirmed.visual, false)
+  assert.equal(confirmed.needsReview, false)
+})
+
 test('restored fractions, indexed roots, sub/superscripts and matrices produce MathML', () => {
   for (const latex of [String.raw`\frac{a+b}{\sqrt{x}}`, String.raw`\sqrt[3]{x_1^2}`, String.raw`\sum_{i=1}^{n} x_i`, String.raw`\begin{pmatrix}a&b\\c&d\end{pmatrix}`]) {
     const rendered = renderExtractedMath(latex)
@@ -34,6 +47,12 @@ test('inline and display delimiters render while keeping surrounding prose and M
   assert.ok(root.textContent.startsWith('Use energy'))
   assert.ok(root.textContent.trim().endsWith('.'))
   assert.deepEqual(result.errors, [])
+})
+
+test('extracted verification text follows standard soft and explicit hard line breaks', () => {
+  const root = parse(renderExtractedText('同一段软行\n继续本段  \n明确硬行').html)
+  assert.equal(root.querySelectorAll('br').length, 1)
+  assert.match(root.textContent, /软行\n继续本段/)
 })
 
 test('recovery equations keep primes attached alongside subscripts and nested trajectory parentheses', () => {

@@ -419,7 +419,7 @@ onMounted(() => {
   themeObserver = new MutationObserver(() => {
     paletteDirty = true; graphDirty = true; scheduleCanvasDraw()
   })
-  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] })
+  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style', 'data-theme', 'data-skin'] })
   scheduleCanvasDraw(); scheduleLabels()
 })
 onBeforeUnmount(() => {

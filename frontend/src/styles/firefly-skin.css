@@ -1,0 +1,292 @@
+/* 流萤：白色透光面板、完整角色壁纸与银绿翼纹。
+   只让工作区容器透光；全局实色 token 留给输入、弹层和正文阅读。 */
+html[data-skin="firefly"] {
+  --app-border: #ceded2;
+  --app-border-weak: #e0ebe2;
+  --app-text-1: #17352d;
+  --app-text-2: #426657;
+  --app-text-3: #576e62;
+  --app-brand: #167052;
+  --app-brand-deep: #125840;
+  --app-brand-soft: #dfefe2;
+  --app-brand-glow: rgb(22 112 82 / 16%);
+  --app-code-bg: #e9f2eb;
+  --shadow-sm: 0 1px 2px rgb(24 71 51 / 5%), 0 3px 8px rgb(24 71 51 / 4%);
+  --shadow-md: 0 2px 4px rgb(24 71 51 / 6%), 0 12px 28px -8px rgb(24 71 51 / 16%);
+  --shadow-lg: 0 4px 12px rgb(24 71 51 / 8%), 0 24px 56px -12px rgb(24 71 51 / 22%);
+
+  --firefly-gold: #a77113;
+  --firefly-gold-glow: rgb(223 171 70 / 25%);
+  --firefly-aurora: rgb(153 219 178 / 25%);
+  --firefly-control-border: #788f82;
+  --firefly-trail: url('../assets/firefly-flight.svg');
+  --firefly-wings: url('../assets/firefly-wings.svg');
+  --firefly-surface: rgb(255 255 255 / 78%);
+  --firefly-surface-soft: rgb(255 255 255 / 72%);
+  --firefly-surface-reading: rgb(255 255 255 / 92%);
+  --firefly-canvas-start: 90%;
+  --firefly-canvas-middle: 55%;
+  --firefly-canvas-end: 16%;
+
+  --el-color-primary: var(--app-brand);
+  --el-color-primary-rgb: 22, 112, 82;
+  --el-color-primary-light-3: #1b785b;
+  --el-color-primary-light-5: #80b8a0;
+  --el-color-primary-light-7: #aad0bd;
+  --el-color-primary-light-8: #c7e1d2;
+  --el-color-primary-light-9: var(--app-brand-soft);
+  --el-color-primary-dark-2: var(--app-brand-deep);
+  --el-bg-color: var(--app-card);
+  --el-bg-color-page: var(--app-bg);
+  --el-bg-color-overlay: var(--app-card);
+  --el-fill-color-blank: var(--app-card);
+  --el-fill-color: var(--app-code-bg);
+  --el-fill-color-light: var(--app-bg);
+  --el-fill-color-lighter: var(--app-side);
+  --el-fill-color-extra-light: var(--app-side);
+  --el-fill-color-dark: var(--app-border-weak);
+  --el-fill-color-darker: var(--app-border);
+  --el-border-color: var(--firefly-control-border);
+  --el-border-color-light: var(--app-border-weak);
+  --el-border-color-lighter: var(--app-border-weak);
+  --el-border-color-extra-light: var(--app-border-weak);
+  --el-border-color-dark: color-mix(in srgb, var(--firefly-control-border) 80%, var(--app-text-3));
+  --el-border-color-darker: color-mix(in srgb, var(--firefly-control-border) 65%, var(--app-text-3));
+  --el-border-color-hover: var(--app-brand);
+  --el-text-color-primary: var(--app-text-1);
+  --el-text-color-regular: var(--app-text-2);
+  --el-text-color-secondary: var(--app-text-3);
+  --el-text-color-placeholder: var(--app-text-3);
+}
+
+html.dark[data-skin="firefly"] {
+  --app-bg: #0d1918;
+  --app-side: #12221e;
+  --app-card: #172823;
+  --app-border: #2f483d;
+  --app-border-weak: #233830;
+  --app-text-1: #e7f4eb;
+  --app-text-2: #a2b9ac;
+  --app-text-3: #8da99a;
+  --app-brand: #77e7b4;
+  --app-brand-deep: #a5f0c8;
+  --app-brand-soft: #213c30;
+  --app-brand-glow: rgb(119 231 180 / 17%);
+  --app-code-bg: #10201d;
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 22%);
+  --shadow-md: 0 8px 24px rgb(0 0 0 / 28%);
+  --shadow-lg: 0 16px 48px rgb(0 0 0 / 38%);
+
+  --firefly-gold: #f5ce78;
+  --firefly-gold-glow: rgb(245 206 120 / 34%);
+  --firefly-aurora: rgb(68 178 131 / 17%);
+  --firefly-on-mint: #0c2b22;
+  --firefly-control-border: #59796d;
+  --firefly-surface: rgb(23 40 35 / 84%);
+  --firefly-surface-soft: rgb(23 40 35 / 84%);
+  --firefly-surface-reading: rgb(23 40 35 / 95%);
+  --firefly-canvas-start: 95%;
+  --firefly-canvas-middle: 66%;
+  --firefly-canvas-end: 42%;
+
+  --el-color-primary-rgb: 119, 231, 180;
+  --el-color-primary-light-3: #58b990;
+  --el-color-primary-light-5: #408e70;
+  --el-color-primary-light-7: #2c644f;
+  --el-color-primary-light-8: #275443;
+}
+
+/* 壁纸铺满滚动容器的可视区，角色自然透过面板。
+   不使用 filter/transform 或额外定位层，以免改变 fixed 菜单和弹窗的包含块。 */
+html[data-skin="firefly"] .layout > .content {
+  background-image:
+    linear-gradient(100deg,
+      color-mix(in srgb, var(--app-bg) var(--firefly-canvas-start), transparent),
+      color-mix(in srgb, var(--app-bg) var(--firefly-canvas-middle), transparent) 48%,
+      color-mix(in srgb, var(--app-bg) var(--firefly-canvas-end), transparent)),
+    url('../assets/firefly-wallpaper.webp');
+  background-position: center, right center;
+  background-size: cover;
+  background-repeat: no-repeat;
+  background-attachment: scroll;
+}
+
+html[data-skin="firefly"] .layout > .side {
+  background-image: var(--firefly-trail),
+    radial-gradient(ellipse 185px 255px at right bottom, var(--firefly-aurora), transparent);
+  background-position: right -4px bottom 125px, right bottom;
+  background-size: 320px auto, auto;
+  background-repeat: no-repeat;
+}
+
+/* 容器透光，文字保持完全不透明。采用明确的页面类，避免嵌套弹窗一起透明。 */
+html[data-skin="firefly"] .content .el-card:is(.stat-card, .lower-card, .note-content, .library-content, .ref-card) {
+  --el-card-bg-color: var(--firefly-surface);
+  border-color: color-mix(in srgb, var(--app-border) 78%, transparent);
+}
+
+html[data-skin="firefly"] .content :is(.activity-card, .repo-card, .agentic-summary, .model-card, .score-card) {
+  background-color: var(--firefly-surface);
+  border-color: color-mix(in srgb, var(--app-border) 78%, transparent);
+}
+
+html[data-skin="firefly"] .content .activity-card {
+  background-color: var(--firefly-surface-soft);
+}
+
+html[data-skin="firefly"] .content :is(.recent-table, .note-table, .file-table).el-table {
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: transparent;
+  --el-table-header-bg-color: transparent;
+  --el-table-row-hover-bg-color: color-mix(in srgb, var(--app-brand-soft) 84%, transparent);
+}
+
+/* 只有横向滚动时固定列才覆盖其他列；无滚动时与整张表一起透光。 */
+html[data-skin="firefly"] .content :is(.note-table, .file-table).el-table:not(.is-scrolling-none) :is(th, td).el-table-fixed-column--right,
+html[data-skin="firefly"] .content :is(.note-table, .file-table).el-table:not(.is-scrolling-none) :is(th, td).el-table-fixed-column--left {
+  background-color: var(--app-card);
+}
+
+html[data-skin="firefly"] .content .edit-page {
+  background-color: transparent;
+}
+
+/* 编辑顶栏沿用透光白底，去掉与壁纸割裂的实心灰条；保留原有吸顶和控件层级。 */
+html[data-skin="firefly"] .content .edit-page .ed-top {
+  background-color: var(--firefly-surface);
+  border-radius: var(--radius);
+}
+
+html[data-skin="firefly"] .content .wiki-main,
+html[data-skin="firefly"] .content .agent-dock.embedded {
+  background-color: var(--firefly-surface-reading);
+}
+
+/* 蝶翼发饰的轮廓贯穿页标题和总览卡片，金色只落在细小的光点上。 */
+html[data-skin="firefly"] .content .page-h2::after {
+  content: '';
+  display: inline-block;
+  width: 34px;
+  height: 26px;
+  margin-left: 10px;
+  vertical-align: -5px;
+  background: var(--firefly-wings) center / contain no-repeat;
+  pointer-events: none;
+}
+
+html[data-skin="firefly"] .content .stat-glow {
+  top: 10px;
+  right: 8px;
+  width: 72px;
+  height: 64px;
+  border-radius: 0;
+  background: var(--firefly-wings) center / contain no-repeat;
+  opacity: .24;
+}
+
+html[data-skin="firefly"] .content .stat-icon {
+  border: 1px solid color-mix(in srgb, var(--firefly-gold) 22%, var(--app-border));
+  background: linear-gradient(135deg, var(--app-card), var(--app-brand-soft));
+}
+
+html[data-skin="firefly"] .workspace-nav .tn-item.on {
+  background-image: linear-gradient(110deg, transparent 52%, var(--firefly-gold-glow));
+  border-color: color-mix(in srgb, var(--app-brand) 28%, var(--app-border));
+}
+
+html[data-skin="firefly"] .workspace-nav .tn-item.on::after {
+  width: 6px;
+  height: 6px;
+  border-radius: 1px;
+  background: var(--firefly-gold);
+  box-shadow: 0 0 9px 2px var(--firefly-gold-glow);
+  rotate: 45deg;
+}
+
+html[data-skin="firefly"] :focus-visible {
+  outline-color: var(--app-brand);
+}
+
+/* 高亮薄荷绿作为实心背景时使用深色前景；纯文本/链接仍用亮色强调。 */
+html.dark[data-skin="firefly"] .el-button--primary:not(:where(.is-plain, .is-text, .is-link, .is-dashed)) {
+  --el-button-text-color: var(--firefly-on-mint);
+  --el-button-hover-text-color: var(--firefly-on-mint);
+  --el-button-active-text-color: var(--firefly-on-mint);
+}
+
+html.dark[data-skin="firefly"] .el-button--primary.is-plain {
+  --el-button-hover-text-color: var(--firefly-on-mint);
+  --el-button-active-text-color: var(--firefly-on-mint);
+}
+
+html[data-skin="firefly"] .el-button--primary:is(.is-link, .is-text) {
+  --el-button-hover-link-text-color: var(--app-brand-deep);
+  --el-button-hover-text-color: var(--app-brand-deep);
+  --el-button-active-text-color: var(--app-brand-deep);
+}
+
+html[data-skin="firefly"] .el-button--primary.is-dashed:not(.is-plain, .is-link, .is-text) {
+  --el-button-text-color: var(--app-brand);
+}
+
+html.dark[data-skin="firefly"] .el-radio-button {
+  --el-radio-button-checked-text-color: var(--firefly-on-mint);
+}
+
+html.dark[data-skin="firefly"] .el-checkbox-button {
+  --el-checkbox-button-checked-text-color: var(--firefly-on-mint);
+}
+
+html.dark[data-skin="firefly"] .el-segmented {
+  --el-segmented-item-selected-color: var(--firefly-on-mint);
+}
+
+html.dark[data-skin="firefly"] .el-tag--primary.el-tag--dark {
+  --el-tag-text-color: var(--firefly-on-mint);
+}
+
+html.dark[data-skin="firefly"] .el-tag--primary .el-tag__close:hover,
+html.dark[data-skin="firefly"] .el-pagination.is-background .el-pager li.is-active,
+html.dark[data-skin="firefly"] .el-switch.is-checked .el-switch__inner-wrapper,
+html.dark[data-skin="firefly"] .activity-years button.active,
+html.dark[data-skin="firefly"] .agent-root :is(.fab, .head-avatar, .avatar.av-ai, .bubble.user, .send-btn),
+html.dark[data-skin="firefly"] .agent-root .act-btn.primary {
+  color: var(--firefly-on-mint);
+}
+
+@media (max-width: 1024px) {
+  html[data-skin="firefly"] .layout > .side {
+    background-image: radial-gradient(ellipse 90px 225px at right bottom, var(--firefly-aurora), transparent);
+    background-position: right bottom;
+    background-size: auto;
+  }
+}
+
+@media (max-width: 600px) {
+  html[data-skin="firefly"] .layout > .content {
+    /* 移动端人物留在可视区，面板略加实，让小字号仍清楚。 */
+    background-position: center, 82% center;
+    --firefly-surface: color-mix(in srgb, var(--app-card) 86%, transparent);
+    --firefly-surface-soft: color-mix(in srgb, var(--app-card) 82%, transparent);
+  }
+  html.dark[data-skin="firefly"] .layout > .content {
+    --firefly-surface-soft: color-mix(in srgb, var(--app-card) 86%, transparent);
+  }
+}
+
+@media (forced-colors: active) {
+  html[data-skin="firefly"],
+  html[data-skin="firefly"] .layout > .content {
+    --firefly-surface: Canvas;
+    --firefly-surface-soft: Canvas;
+    --firefly-surface-reading: Canvas;
+  }
+  html[data-skin="firefly"] .layout > :is(.side, .content),
+  html[data-skin="firefly"] .workspace-nav .tn-item.on {
+    background-image: none;
+  }
+  html[data-skin="firefly"] .content .page-h2::after,
+  html[data-skin="firefly"] .content .stat-glow {
+    display: none;
+  }
+}

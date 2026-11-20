@@ -318,7 +318,9 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .model-page { min-width: 0; max-width: 1600px; margin: 0 auto; }
-.model-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-lg); margin-bottom: var(--space-lg); }
+.model-page .el-button, .job-detail .el-button { min-width: min(100%, var(--control-w)); max-width: 100%; height: var(--control-h); }
+.model-page :deep(.el-select__wrapper) { min-height: var(--control-h); }
+.model-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-sm); margin-bottom: var(--space-lg); }
 .model-header > div { flex: 1 1 320px; min-width: 0; }
 .page-kicker { display: flex; align-items: center; gap: var(--space-sm); color: var(--app-brand-deep); font-size: var(--font-caption); font-weight: 600; margin-bottom: var(--space-sm); }
 .page-description, .section-header p { margin: var(--space-sm) 0 0; color: var(--app-text-2); font-size: var(--font-caption); line-height: var(--lh-caption); }
@@ -353,9 +355,9 @@ h2 { margin: 0; color: var(--app-text-1); font-size: 16px; line-height: 1.5; fon
 .coverage-note, .query-hint, .detail-note { color: var(--app-text-2); font-size: var(--font-caption); line-height: 1.8; }
 .coverage-note { margin: var(--space-sm) 0 var(--space-lg); }
 .workspace-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 432px), 1fr)); gap: var(--space-lg); align-items: start; }
-.section-header { align-items: flex-start; gap: var(--space-md); margin-bottom: var(--space-md); }
+.section-header { align-items: flex-start; margin-bottom: var(--space-md); }
 .section-header > div { min-width: 0; }
-.job-filter { flex: 0 1 124px; width: 124px; max-width: 100%; }
+.job-filter { flex: 0 1 var(--control-w); width: var(--control-w); max-width: 100%; }
 .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 200px; padding: var(--space-lg); text-align: center; color: var(--app-text-3); font-size: var(--font-caption); line-height: 1.8; }
 .empty-state .el-icon { color: var(--app-brand); }
 .empty-state p { font-size: var(--font-body); color: var(--app-text-2); margin: var(--space-md) 0 var(--space-xs); }
@@ -370,7 +372,7 @@ h2 { margin: 0; color: var(--app-text-1); font-size: 16px; line-height: 1.5; fon
 .enqueue-panel { padding-top: var(--space-md); margin-top: var(--space-md); border-top: 1px solid var(--app-border-weak); }
 .enqueue-panel label, .query-label { display: block; font-size: var(--font-caption); font-weight: 500; margin-bottom: var(--space-sm); }
 .enqueue-controls { display: flex; flex-wrap: wrap; gap: var(--space-sm); }
-.enqueue-controls :deep(.el-select) { flex: 1 1 200px; min-width: 0; max-width: 100%; }
+.enqueue-controls .el-select { flex: 0 1 var(--control-search-w); min-width: 0; max-width: 100%; }
 .query-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-sm); margin: var(--space-md) 0; }
 .query-actions > span { color: var(--app-text-3); font-size: var(--font-caption); }
 .query-card :deep(.el-textarea__inner) { font-size: var(--font-body); line-height: 1.8; }
@@ -397,7 +399,7 @@ h2 { margin: 0; color: var(--app-text-1); font-size: 16px; line-height: 1.5; fon
 @media (max-width: 780px) { .score-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .model-identity { grid-template-columns: 1fr; gap: var(--space-md); } }
 @media (max-width: 540px) {
   .model-page { padding: var(--space-md) var(--space-sm); }
-  .model-header { align-items: flex-start; gap: var(--space-md); }
+  .model-header { align-items: flex-start; }
   .model-card { padding: var(--space-md); }
   .connection-top { align-items: flex-start; flex-direction: column; }
   .score-grid, .workspace-grid { gap: var(--space-sm); }
@@ -408,7 +410,7 @@ h2 { margin: 0; color: var(--app-text-1); font-size: 16px; line-height: 1.5; fon
   .job-row { flex-wrap: wrap; }
   .job-main { flex-basis: calc(100% - 30px); }
   .job-arrow { margin-left: auto; }
-  .enqueue-controls :deep(.el-select) { flex-basis: 100%; }
+  .enqueue-controls .el-select { flex-basis: min(100%, var(--control-search-w)); }
   .query-actions { flex-wrap: wrap; }
 }
 </style>

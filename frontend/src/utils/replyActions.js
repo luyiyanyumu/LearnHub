@@ -26,6 +26,7 @@ export function followUpMessage(action, question, answer) {
 
 /** Pending note mutations carry their target without exposing tool arguments to the UI. */
 export function pendingNoteId(action) {
+  if (action?.toolName === 'run_app_command') return action.noteId ?? null
   if (!['edit_note', 'update_note', 'append_to_note'].includes(action?.toolName)) return null
   return action.noteId ?? action.preview?.noteId ?? action.arguments?.note_id ?? action.args?.note_id ?? null
 }

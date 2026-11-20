@@ -93,8 +93,14 @@ final class DocumentMediaAssets {
     }
 
     Asset raster(Path source, int frame) throws Exception {
+        return raster(source, frame, null);
+    }
+
+    Asset raster(Path source, int frame, double[] rect) throws Exception {
         if (Files.size(source) > 64L * 1024 * 1024) throw new IOException("原图超过读取上限");
-        try (var input = ImageIO.createImageInputStream(source.toFile())) { return save(decode(input, frame)); }
+        try (var input = ImageIO.createImageInputStream(source.toFile())) {
+            return save(decode(input, frame, rect));
+        }
     }
 
     Asset word(Path source, String reference) throws Exception {
@@ -221,6 +227,10 @@ final class DocumentMediaAssets {
     }
 
     private static byte[] decode(javax.imageio.stream.ImageInputStream input, int frame) throws Exception {
+        return decode(input, frame, null);
+    }
+
+    private static byte[] decode(javax.imageio.stream.ImageInputStream input, int frame, double[] rect) throws Exception {
         if (input == null) throw new IOException("图片无法读取");
         var readers = ImageIO.getImageReaders(input); if (!readers.hasNext()) throw new IOException("不支持矢量图片或该图像格式");
         ImageReader reader = readers.next();
@@ -229,8 +239,18 @@ final class DocumentMediaAssets {
             reader.setInput(input, false, true);
             int width = reader.getWidth(frame), height = reader.getHeight(frame);
             if (width <= 0 || height <= 0 || (long) width * height > 100_000_000) throw new IOException("原图尺寸超过安全上限");
+            var parameters = reader.getDefaultReadParam();
+            if (rect != null) {
+                if (rect.length != 4 || java.util.Arrays.stream(rect).anyMatch(value -> !Double.isFinite(value)))
+                    throw new IOException("图片坐标无效");
+                int x0 = Math.max(0, (int) Math.floor(rect[0])), y0 = Math.max(0, (int) Math.floor(rect[1]));
+                int x1 = Math.min(width, (int) Math.ceil(rect[2])), y1 = Math.min(height, (int) Math.ceil(rect[3]));
+                if (x1 <= x0 || y1 <= y0) throw new IOException("图片区域位于页面外");
+                width = x1 - x0; height = y1 - y0;
+                parameters.setSourceRegion(new java.awt.Rectangle(x0, y0, width, height));
+            }
             int subsample = Math.max(1, (int) Math.ceil(Math.sqrt((double) width * height / MAX_PIXELS)));
-            var parameters = reader.getDefaultReadParam(); parameters.setSourceSubsampling(subsample, subsample, 0, 0);
+            parameters.setSourceSubsampling(subsample, subsample, 0, 0);
             BufferedImage bitmap = reader.read(frame, parameters);
             if ((long) bitmap.getWidth() * bitmap.getHeight() > MAX_PIXELS) throw new IOException("解码图片像素超过上限");
             try { return encode(bitmap); } finally { bitmap.flush(); }

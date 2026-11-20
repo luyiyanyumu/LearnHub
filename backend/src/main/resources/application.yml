@@ -6,8 +6,8 @@ spring:
     name: learn-hub-backend
   servlet:
     multipart:
-      max-file-size: 50MB
-      max-request-size: 60MB
+      max-file-size: 1000MB
+      max-request-size: 1001MB
   datasource:
     # 注意：宿主机 3306 已被另一个项目（报销系统）的 reimb-mysql-local 容器占用，
     # 且其 root 密码与本项目不同 —— 若连 3306 会报

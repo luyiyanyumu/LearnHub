@@ -3,6 +3,7 @@ import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from 'vue
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { categoryApi, tagApi, settingsApi, aiApi, wikiApi, modelApi } from '../api'
 import { knowledgeMaintenanceApi } from '../api/knowledgeMaintenance.js'
+import { isDark, setSkin, setThemeMode, skin, themeMode } from '../composables/useTheme'
 import { maintenanceUpdateHint } from '../utils/knowledgeIndexView'
 import { extractPromptFromMd } from '../utils/promptFromMd'
 import { MODEL_CONFIGURATION_CHANGED_EVENT, canRemoveProfile, chatProfiles, createModelDiscoveryLoader,
@@ -47,13 +48,18 @@ const emptyForm = () => ({
  * （其中一个"旧配置"就 182 行），滚起来又长又找不到东西；
  * 现在拆成左侧分组菜单 + 右侧只显示当前分组，一屏就能看完一组。
  */
-const pane = ref('model')
+const pane = ref('appearance')
+const APPEARANCE_SKINS = [
+  { id: 'default', name: '默认', detail: '经典青绿配色' },
+  { id: 'firefly', name: '流萤', detail: '流萤壁纸 · 透光面板 · 桌宠陪伴' },
+]
 const KnowledgeSettingsPanel = defineAsyncComponent(() => import('./KnowledgeSettingsPanel.vue'))
 const knowledgeMounted = ref(false)
 const knowledgePanel = ref(null)
 const knowledgeState = ref({ dirty: false, saving: false, loaded: false, view: 'parameters', count: 0 })
 watch(pane, value => { if (value === 'knowledge') knowledgeMounted.value = true })
 const PANES = [
+  { id: 'appearance', name: '外观' },
   { id: 'model', name: '模型档案与分工' },
   { id: 'knowledge', name: '知识库' },
   { id: 'legacy', name: '模型参数' },
@@ -851,23 +857,28 @@ async function confirmSkillUpload() {
   }
 }
 
-// immediate 必须开：本组件是被 AppLayout 懒加载的（defineAsyncComponent + v-if），
-// 「首次点设置」时挂载与 visible=true 发生在同一拍 —— 组件挂载好的瞬间 visible 就已经是
-// true，不存在 false→true 的变化。没有 immediate 的话这条 watch 永远不触发，
-// load / loadCategories / loadTags 一次都不会跑，设置表单和分类/标签表格全是空的。
-watch(visible, (v) => {
-  if (v) {
+// 外观只读取本地偏好；首次进入其它分组时才加载后端设置，每次打开最多加载一次。
+let settingsLoadedThisOpen = false
+watch(visible, (open) => {
+  if (open) {
+    pane.value = 'appearance'
     activeTab.value = 'ai'
     presetLabel.value = ''
-    load()
-    loadCategories()
-    loadTags()
-    loadSkills()
-    loadRouting()
-    refreshMaintenanceStatus()
   } else {
+    settingsLoadedThisOpen = false
     resetDiscovery()
   }
+}, { immediate: true })
+
+watch([visible, pane], ([open, section]) => {
+  if (!open || section === 'appearance' || settingsLoadedThisOpen) return
+  settingsLoadedThisOpen = true
+  load()
+  loadCategories()
+  loadTags()
+  loadSkills()
+  loadRouting()
+  refreshMaintenanceStatus()
 }, { immediate: true })
 
 async function load() {
@@ -1087,20 +1098,57 @@ function notifyMetaChanged() {
 </script>
 <template>
   <el-dialog v-model="visible" title="设置" :width="pane === 'knowledge' ? '1040px' : '880px'" :top="pane === 'knowledge' ? '5vh' : '8vh'" destroy-on-close class="settings-dialog" :class="{ 'has-knowledge': pane === 'knowledge' }">
-    <div class="settings-body">
-      <nav class="settings-nav">
+    <div class="settings-body" :class="{ 'settings-body--appearance': pane === 'appearance' }">
+      <nav class="settings-nav" aria-label="设置分组">
         <button
           v-for="g in PANES"
           :key="g.id"
           type="button"
           class="nav-item"
           :class="{ on: pane === g.id }"
+          :aria-current="pane === g.id ? 'true' : undefined"
           @focus="$event.currentTarget.scrollIntoView({ block: 'nearest', inline: 'nearest' })"
           @click="pane = g.id"
         >{{ g.name }}</button>
       </nav>
 
       <div class="settings-pane">
+        <div v-if="pane === 'appearance'" class="appearance-pane">
+          <header class="appearance-intro">
+            <h2>外观</h2>
+            <p>皮肤与深浅模式可分别设置，选择后立即生效。</p>
+          </header>
+          <section class="sec">
+            <h3 class="sec-title">界面皮肤</h3>
+            <el-radio-group :model-value="skin" class="appearance-skins" aria-label="界面皮肤" @update:model-value="setSkin">
+              <el-radio v-for="option in APPEARANCE_SKINS" :key="option.id" :value="option.id" class="appearance-skin">
+                <span
+                  class="skin-preview"
+                  :class="[`skin-preview--${option.id}`, { 'preview-dark': isDark }]"
+                  aria-hidden="true"
+                >
+                  <span class="skin-preview-window">
+                    <span class="skin-preview-sidebar"></span>
+                    <span class="skin-preview-paper"></span>
+                  </span>
+                  <span v-if="option.id === 'firefly'" class="skin-preview-pet"></span>
+                </span>
+                <span class="skin-caption">
+                  <strong>{{ option.name }}</strong>
+                  <span>{{ option.detail }}</span>
+                </span>
+              </el-radio>
+            </el-radio-group>
+          </section>
+          <section class="sec">
+            <h3 class="sec-title">显示模式</h3>
+            <el-radio-group :model-value="themeMode" class="appearance-modes" aria-label="显示模式" @update:model-value="setThemeMode">
+              <el-radio value="auto">跟随系统</el-radio>
+              <el-radio value="light">浅色</el-radio>
+              <el-radio value="dark">深色</el-radio>
+            </el-radio-group>
+          </section>
+        </div>
         <KnowledgeSettingsPanel
           v-if="knowledgeMounted"
           v-show="pane === 'knowledge'"
@@ -1564,6 +1612,7 @@ function notifyMetaChanged() {
         <el-button @click="visible = false">关闭</el-button>
         <el-button v-if="knowledgeState.view === 'parameters' || knowledgeState.dirty" type="primary" :loading="knowledgeState.saving" :disabled="knowledgeState.rebuilding || !knowledgeState.loaded || !knowledgeState.dirty" @click="knowledgePanel?.save()">保存知识库设置</el-button>
       </template>
+      <el-button v-else-if="pane === 'appearance'" @click="visible = false">关闭</el-button>
       <template v-else>
         <el-button @click="resetAll" :disabled="saving">全部恢复默认</el-button>
         <el-button @click="visible = false">关闭</el-button>
@@ -1695,11 +1744,169 @@ function notifyMetaChanged() {
   :global(.settings-dialog.has-knowledge .settings-body) { height: 64vh; }
   .knowledge-footer-hint { flex-basis: 100%; text-align: left; }
 }
+.settings-body.settings-body--appearance {
+  height: auto;
+  max-height: 62vh;
+}
 /* 分组内的 section 不再各占一大块：收紧间距与留白 */
 .settings-pane .sec + .sec {
   margin-top: 18px;
   padding-top: 16px;
   border-top: 1px dashed var(--app-border-weak);
+}
+/* 外观预览的颜色固定代表各皮肤，不随当前选中的皮肤变色。 */
+.appearance-pane {
+  padding: var(--space-xs);
+}
+.appearance-intro {
+  margin-bottom: var(--space-lg);
+}
+.appearance-intro h2 {
+  margin: 0 0 var(--space-xs);
+  color: var(--app-text-1);
+  font-size: var(--font-heading);
+  line-height: var(--lh-heading);
+}
+.appearance-intro p {
+  margin: 0;
+  color: var(--app-text-2);
+  font-size: var(--font-body);
+  line-height: var(--lh-body);
+}
+.appearance-skins {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-sm);
+  align-items: stretch;
+}
+.appearance-skin.el-radio {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto 1fr;
+  align-items: start;
+  gap: var(--space-sm);
+  height: auto;
+  min-width: 0;
+  margin: 0;
+  padding: var(--space-sm);
+  white-space: normal;
+  background: var(--app-card);
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-lg);
+}
+.appearance-skin:hover { border-color: var(--app-brand); }
+.appearance-skin.is-checked {
+  border-color: var(--app-brand-deep);
+  background: var(--app-brand-soft);
+}
+.appearance-skin:has(:focus-visible) {
+  outline: 2px solid var(--app-brand-deep);
+  outline-offset: 2px;
+}
+.appearance-skin :deep(.el-radio__input) {
+  grid-area: 2 / 1;
+  margin-top: 3px;
+}
+.appearance-skin :deep(.el-radio__label) { display: contents; }
+.skin-caption {
+  display: grid;
+  grid-area: 2 / 2;
+  color: var(--app-text-2);
+  font-size: var(--font-caption);
+  line-height: var(--lh-caption);
+}
+.skin-caption strong {
+  color: var(--app-text-1);
+  font-size: var(--font-body);
+}
+.skin-preview {
+  --sample-panel: #fff;
+  --sample-side: #f7f8fa;
+  --sample-line: #d0dcda;
+  --sample-accent: #0e9f8e;
+  --sample-border: #d0dfdc;
+  position: relative;
+  grid-area: 1 / 1 / 2 / -1;
+  display: grid;
+  align-items: center;
+  min-height: 100px;
+  overflow: hidden;
+  padding: var(--space-md);
+  border-radius: var(--radius);
+  border: 1px solid var(--sample-border);
+  background: linear-gradient(135deg, #f3f7f7, #deeeeb);
+}
+.skin-preview.preview-dark {
+  --sample-panel: #182221;
+  --sample-side: #131b1a;
+  --sample-line: #465d58;
+  --sample-accent: #2dd4bf;
+  --sample-border: #324f48;
+  background: linear-gradient(135deg, #182321, #1d3832);
+}
+.skin-preview.skin-preview--firefly {
+  --sample-panel: rgb(255 255 255 / 72%);
+  --sample-side: rgb(255 255 255 / 84%);
+  --sample-line: #bfddd0;
+  --sample-accent: #167052;
+  --sample-border: #bad9cd;
+  --sample-wash: linear-gradient(90deg, rgb(248 250 248 / 42%), transparent 75%);
+  background: var(--sample-wash), url('../assets/firefly-wallpaper.webp') right 20% / cover no-repeat #e0ece4;
+}
+.skin-preview--firefly.preview-dark {
+  --sample-panel: rgb(23 40 35 / 75%);
+  --sample-side: rgb(13 25 24 / 84%);
+  --sample-line: #496b61;
+  --sample-accent: #77e7b4;
+  --sample-border: #365f54;
+  --sample-wash: linear-gradient(90deg, rgb(13 25 24 / 64%), rgb(13 25 24 / 20%) 82%);
+}
+.skin-preview-window {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 28% minmax(0, 1fr);
+  width: min(76%, 158px);
+  height: 66px;
+  overflow: hidden;
+  border: 1px solid var(--sample-border);
+  border-radius: var(--radius);
+  background: var(--sample-panel);
+  box-shadow: 0 6px 18px #0e352519;
+}
+.skin-preview-sidebar,
+.skin-preview-paper {
+  position: relative;
+}
+.skin-preview-sidebar { background: var(--sample-side); }
+.skin-preview-sidebar::before,
+.skin-preview-paper::before {
+  content: '';
+  position: absolute;
+  inset: 11px 20% auto;
+  height: 4px;
+  border-radius: 4px;
+  background: var(--sample-accent);
+  box-shadow: 0 10px var(--sample-line), 0 20px var(--sample-line);
+}
+.skin-preview-paper::before { inset: 17px 15% auto; }
+.skin-preview-pet {
+  position: absolute;
+  z-index: 2;
+  right: 4px;
+  bottom: 2px;
+  width: 50px;
+  height: 50px;
+  background: url('../assets/firefly-pet.webp') center / contain no-repeat;
+}
+.appearance-modes {
+  gap: var(--space-sm) var(--space-md);
+}
+.appearance-modes :deep(.el-radio) { margin-right: 0; }
+@media (max-width: 520px) {
+  .appearance-skins { grid-template-columns: minmax(0, 1fr); }
+  .skin-preview { min-height: 76px; padding: var(--space-sm) var(--space-md); }
+  .skin-preview-window { height: 56px; }
 }
 /* 模型档案列表 */
 .profile-row {

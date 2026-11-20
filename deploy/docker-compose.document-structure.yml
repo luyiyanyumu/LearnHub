@@ -1,0 +1,37 @@
+services:
+  backend:
+    # Leave host memory for the scanner; JAVA_OPTS uses this cgroup limit for heap sizing.
+    mem_limit: ${LEARNHUB_DOCUMENT_BACKEND_MEMORY:-6g}
+    environment:
+      LEARNHUB_DOCUMENT_STRUCTURE_URL: http://document-structure:8084
+    networks: [document-structure-private]
+
+  document-structure:
+    build:
+      context: ..
+      dockerfile: tools/document-structure/Dockerfile
+      args:
+        DOCKER_REGISTRY: ${DOCKER_REGISTRY:-docker.io}
+    image: learn-hub-document-structure:local
+    restart: unless-stopped
+    init: true
+    user: "10001:10001"
+    expose: ["8084"]
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777,nosuid,nodev
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 6g
+    cpus: 4
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+    networks: [document-structure-private]
+
+networks:
+  document-structure-private:
+    internal: true

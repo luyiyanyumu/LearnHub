@@ -23,7 +23,9 @@ request.interceptors.response.use(
   },
   (err) => {
     const data = err.response?.data
-    const msg = (data && data.msg) || err.message || '网络错误'
+    const msg = data?.msg || (err.response?.status === 413 && err.config?.url === '/files/upload'
+      ? '资料超过上传大小限制。请按页拆分或压缩后重试。'
+      : err.message || '网络错误')
     // 链路层失败（连不上/5xx）登记成全局状态：页面级失败态说"这一块没加载出来"，
     // 横幅说"后端没连上"，两者分工不同。业务失败（4xx）不拉横幅。
     if (isLinkError(err)) markBackendDown(err)
@@ -54,7 +56,7 @@ export const tagApi = {
 
 export const noteApi = {
   page: (params) => request.get('/notes', { params }),
-  detail: (id) => request.get(`/notes/${id}`),
+  detail: (id, config) => request.get(`/notes/${id}`, config),
   add: (data) => request.post('/notes', data),
   update: (id, data) => request.put(`/notes/${id}`, data),
   remove: (id) => request.delete(`/notes/${id}`),
@@ -415,10 +417,27 @@ export const fileApi = {
     if (categoryId) fd.append('categoryId', categoryId)
     const target = typeof folderId === 'number' || typeof folderId === 'string' && /^\d+$/.test(folderId.trim()) ? Number(folderId) : null
     if (Number.isSafeInteger(target) && target > 0) fd.append('folderId', String(target))
-    return request.post('/files/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
+    return request.post('/files/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 0 })
   },
   /** 抽取出来的正文（阅读器用；**不含在 detail 里**，因为正文动辄十几万字） */
   text: (id) => request.get(`/files/${id}/text`),
+  /** Persisted extraction evidence; fetching this report never runs OCR. */
+  extraction: (id) => request.get(`/files/${id}/extraction`, { silentError: true }),
+  markdown: (id, version = 'latest') => request.get(`/files/${id}/markdown`, { params: { version }, silentError: true }),
+  downloadMarkdown: (id, bundle = false, { version = 'latest', sourceRevision, artifactRevision } = {}) => request.get(`/files/${id}/markdown/${bundle ? 'bundle' : 'download'}`, { params: { version, sourceRevision, artifactRevision }, responseType: 'blob', timeout: 0 }),
+  publishScan: (id, { sourceRevision, artifactRevision }) => request.post(`/files/${id}/publish-scan`, { sourceRevision, artifactRevision }, { silentError: true }),
+  processMedia: (id, force = false) => request.post(`/files/${id}/process-media`, { force }, { silentError: true, timeout: 30000 }),
+  mediaJob: (id) => request.get(`/files/media-jobs/${encodeURIComponent(id)}`, { silentError: true }),
+  processStructure: (id, { resume = false } = {}) => request.post(`/files/${encodeURIComponent(id)}/process-structure`, { resume }, { silentError: true }),
+  structureJob: (id) => request.get(`/files/structure-jobs/${encodeURIComponent(id)}`, { silentError: true }),
+  startExtraction: (id, { resume = false } = {}) => request.post(`/files/${encodeURIComponent(id)}/extraction-jobs`, { resume }, { silentError: true }),
+  extractionJob: (id) => request.get(`/files/extraction-jobs/${encodeURIComponent(id)}`, { silentError: true }),
+  confirmStructureFormula: (id, data) => request.post(`/files/${encodeURIComponent(id)}/confirm-structure-formula`, data, { silentError: true }),
+  migrateMarkdown: () => request.post('/files/markdown-migrations', { force: false, processMedia: true }, { silentError: true, timeout: 30000 }),
+  markdownMigration: (id) => request.get(`/files/markdown-migrations/${encodeURIComponent(id)}`, { silentError: true }),
+  extractionCaps: () => request.get('/files/document-extraction/capabilities', { silentError: true }),
+  extractionPageImageUrl: (id, page = 1, sourceRevision = '') => `/api/files/${id}/extraction-page-image?page=${encodeURIComponent(page)}${sourceRevision ? `&sourceRevision=${encodeURIComponent(sourceRevision)}` : ''}`,
+  sourceLocations: (id, text) => request.post(`/files/${id}/source-locations`, { text }, { silentError: true }),
   /** 原文件阅读预览：Word 保留文档结构，Markdown 返回上传的原始源码。 */
   originalPreview: (id) => request.get(`/files/${id}/original-preview`, { timeout: 120000 }),
   /**

@@ -1,7 +1,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { FullScreen, Refresh, Share, Warning, ZoomIn, ZoomOut } from '@element-plus/icons-vue'
-import { isDark } from '../composables/useTheme.js'
+import { isDark, skin } from '../composables/useTheme.js'
 import { createMermaidPreviewState, mermaidFrameDocument, mermaidSvgSize, readMermaidTheme } from '../utils/mermaidPreview.js'
 import { mermaidReadableSize, mermaidViewportSize } from '../utils/mermaidViewport.js'
 
@@ -99,9 +99,8 @@ function onCanvasKeydown(event, enlarged = false) {
 watch([() => props.source, () => props.active], refresh, { flush: 'sync' })
 watch(() => props.source, () => { zoom.value = 1; viewerZoom.value = 1; inlineOverview.value = false })
 watch(() => props.active, active => { if (!active) closeViewer() })
-watch(isDark, () => {
-  // useTheme changes the reactive flag before toggling html.dark. Invalidate now,
-  // but read CSS tokens after that synchronous theme application has finished.
+watch([isDark, skin], () => {
+  // Invalidate now, then read CSS tokens after the root theme has been applied.
   preview.invalidate()
   nextTick(refresh)
 }, { flush: 'sync' })

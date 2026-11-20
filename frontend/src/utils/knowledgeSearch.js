@@ -32,6 +32,7 @@ export function createKnowledgeSearchLoader({ loadFusion, loadKeyword, onState, 
           heading: r.heading,
           generatedGuide: r.generatedGuide,
           sourceRefs: r.sourceRefs,
+          sourceLocations: r.sourceLocations,
         })) : response.items || []
         onState({ loading: false, searched: true, error: '', items,
           keyword: mode === 'fusion' ? q : response.keyword || '', lastMode: mode })

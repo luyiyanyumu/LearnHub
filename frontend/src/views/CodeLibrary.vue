@@ -483,8 +483,8 @@ onBeforeUnmount(() => {
         </p>
       </div>
       <div class="head-actions">
-        <el-button size="small" :loading="importing" @click="pickFolder">上传文件夹</el-button>
-        <el-button size="small" type="primary" @click="openForm(null)">＋ 新增片段</el-button>
+        <el-button :loading="importing" @click="pickFolder">上传文件夹</el-button>
+        <el-button type="primary" @click="openForm(null)">＋ 新增片段</el-button>
         <input ref="folderInput" type="file" webkitdirectory multiple class="folder-input" @change="onFolderPicked" />
       </div>
     </div>
@@ -496,7 +496,7 @@ onBeforeUnmount(() => {
       <div class="section-head">
         <span class="section-title">项目</span>
         <span class="hint">文件夹导入会自动建项目；项目里可以挂仓库与演示站链接</span>
-        <el-button size="small" text @click="openRepoForm(null)">＋ 新建项目</el-button>
+        <el-button text @click="openRepoForm(null)">＋ 新建项目</el-button>
       </div>
       <div class="repo-grid">
         <div v-for="r in repos" :key="r.id" class="repo-card" role="button" tabindex="0"
@@ -533,16 +533,16 @@ onBeforeUnmount(() => {
       <div class="search-bar">
         <el-input v-model="keyword" :placeholder="inputHint" clearable aria-label="代码检索问题或关键词"
                   class="search-input" @keydown.enter="runSearch" />
-        <el-radio-group v-model="mode" size="small" aria-label="代码检索方式">
+        <el-radio-group v-model="mode" aria-label="代码检索方式">
           <el-radio-button value="agentic">智能检索</el-radio-button>
           <el-radio-button value="all">全部</el-radio-button>
           <el-radio-button value="symbol">符号</el-radio-button>
           <el-radio-button value="keyword">关键词</el-radio-button>
         </el-radio-group>
-        <el-select v-model="langFilter" placeholder="语言" clearable size="small" style="width: 110px" aria-label="按语言过滤">
+        <el-select v-model="langFilter" placeholder="语言" clearable aria-label="按语言过滤">
           <el-option v-for="l in LANGS" :key="l" :label="l" :value="l" />
         </el-select>
-        <el-button size="small" type="primary" :loading="loading" @click="runSearch">检索</el-button>
+        <el-button type="primary" :loading="loading" @click="runSearch">检索</el-button>
       </div>
       <p class="hint mode-hint">{{ modeHint }}</p>
     </template>
@@ -550,7 +550,7 @@ onBeforeUnmount(() => {
     <!-- ============ 片段层：某个项目内 / 搜索结果 ============ -->
     <template v-else>
       <div class="crumb">
-        <el-button size="small" text @click="backToProjects">← 返回项目</el-button>
+        <el-button text @click="backToProjects">← 返回项目</el-button>
         <span class="crumb-path">{{ pageTitle }}</span>
         <span class="spacer" />
         <span v-if="rows.length >= LIST_LIMIT" class="hint">仅显示前 {{ LIST_LIMIT }} 段，可用检索缩小范围</span>
@@ -559,17 +559,17 @@ onBeforeUnmount(() => {
       <div class="search-bar">
         <el-input v-model="keyword" :placeholder="inputHint" aria-label="代码检索问题或关键词"
                   clearable class="search-input" @keydown.enter="runSearch" />
-        <el-radio-group v-model="mode" size="small" aria-label="代码检索方式">
+        <el-radio-group v-model="mode" aria-label="代码检索方式">
           <el-radio-button value="agentic">智能检索</el-radio-button>
           <el-radio-button value="all">全部</el-radio-button>
           <el-radio-button value="symbol">符号</el-radio-button>
           <el-radio-button value="keyword">关键词</el-radio-button>
         </el-radio-group>
-        <el-select v-model="langFilter" placeholder="语言" clearable size="small" style="width: 110px" aria-label="按语言过滤">
+        <el-select v-model="langFilter" placeholder="语言" clearable aria-label="按语言过滤">
           <el-option v-for="l in LANGS" :key="l" :label="l" :value="l" />
         </el-select>
-        <el-button size="small" type="primary" :loading="loading" @click="runSearch">检索</el-button>
-        <el-button size="small" @click="resetFilters">重置</el-button>
+        <el-button type="primary" :loading="loading" @click="runSearch">检索</el-button>
+        <el-button @click="resetFilters">重置</el-button>
       </div>
       <p class="hint mode-hint">{{ modeHint }}</p>
 
@@ -741,7 +741,7 @@ onBeforeUnmount(() => {
   display: flex;
   flex-wrap: wrap;
   max-width: 100%;
-  gap: 8px;
+  gap: var(--space-sm);
   flex-shrink: 0;
   align-items: center;
 }
@@ -757,7 +757,7 @@ onBeforeUnmount(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-sm);
   margin-bottom: 8px;
 }
 .section-title {
@@ -814,15 +814,32 @@ onBeforeUnmount(() => {
 .search-bar {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-sm);
   flex-wrap: wrap;
 }
 .search-input {
-  flex: 1 1 280px;
+  --el-component-size: var(--control-h);
+  flex: 0 1 var(--control-search-w);
+  width: var(--control-search-w);
   min-width: 0;
 }
 .search-bar > * { max-width: 100%; }
-.search-bar :deep(.el-radio-group) { display: flex; flex-wrap: wrap; gap: 4px 0; }
+.head-actions > .el-button,
+.search-bar > .el-button,
+.search-bar > .el-select { width: var(--control-w); min-width: 0; max-width: 100%; }
+.head-actions > .el-button,
+.search-bar > .el-button,
+.section-head > .el-button,
+.crumb > .el-button { height: var(--control-h); }
+.search-bar :deep(.el-select__wrapper) { min-height: var(--control-h); }
+.search-bar :deep(.el-radio-group) { display: flex; flex-wrap: wrap; row-gap: var(--space-xs); }
+.search-bar :deep(.el-radio-button__inner) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--control-h);
+  padding-block: 0;
+}
 .head-actions :deep(.el-button + .el-button), .search-bar :deep(.el-button + .el-button) { margin-left: 0; }
 .agentic-summary {
   padding: 14px 16px;
@@ -1084,8 +1101,8 @@ onBeforeUnmount(() => {
   .repo-grid { grid-template-columns: minmax(0, 1fr); }
   .search-input { flex-basis: 100%; }
   .search-bar :deep(.el-radio-group) { display: flex; width: 100%; }
-  .search-bar :deep(.el-radio-button) { flex: 1; min-width: 0; }
-  .search-bar :deep(.el-radio-button__inner) { width: 100%; padding-left: 8px; padding-right: 8px; }
+  .search-bar :deep(.el-radio-button) { flex: 1 0 auto; min-width: 0; }
+  .search-bar :deep(.el-radio-button__inner) { width: 100%; padding-inline: var(--space-xs); font-size: 12px; }
   .card-title, .detail-head b, .repo-card-name { overflow-wrap: anywhere; }
   .card-foot > .hint { overflow-wrap: anywhere; min-width: 0; }
   .agentic-summary { padding: 12px; }

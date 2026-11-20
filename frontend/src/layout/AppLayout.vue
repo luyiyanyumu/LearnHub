@@ -2,7 +2,7 @@
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ArrowLeft, ArrowRight, ChatDotRound, Collection, Cpu, Document, FolderOpened, House, Moon, Notebook, Setting, Sunny } from '@element-plus/icons-vue'
-import { isDark, toggleTheme } from '../composables/useTheme'
+import { isDark, skin, toggleTheme } from '../composables/useTheme'
 import { focusMode } from '../composables/useViewMode'
 import AgentPanel from '../components/AgentPanel.vue'
 import { noteTabs, isNoteEditorRoute, openNoteRoute } from '../composables/useNoteTabs.js'
@@ -144,6 +144,14 @@ function toggleCollapse() {
           <span class="tn-name">{{ n.name }}</span>
         </router-link>
       </nav>
+
+      <div v-if="skin === 'firefly' && !sidebarCollapsed" class="firefly-signature" aria-label="流萤主题">
+        <div class="firefly-signature-copy">
+          <span class="firefly-signature-en" aria-hidden="true">FIREFLY</span>
+          <strong>流萤</strong>
+          <span class="firefly-signature-note">循着微光，继续前行</span>
+        </div>
+      </div>
 
       <div class="side-foot">
         <button v-if="!narrowScreen" class="theme-btn collapse-btn" type="button" :title="sidebarCollapsed ? '展开侧栏' : '收起侧栏'" :aria-label="sidebarCollapsed ? '展开侧栏' : '收起侧栏'" @click="toggleCollapse">
@@ -317,6 +325,76 @@ function toggleCollapse() {
 .theme-btn:focus-visible {
   outline: 2px solid var(--app-brand);
   outline-offset: -2px;
+}
+
+.firefly-signature {
+  position: relative;
+  flex-shrink: 0;
+  height: 140px;
+  margin: 0 16px 16px;
+  overflow: hidden;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-lg);
+  background-color: var(--app-side);
+  background-image:
+    linear-gradient(90deg, var(--app-side), color-mix(in srgb, var(--app-side) 84%, transparent) 28%, transparent 70%),
+    linear-gradient(0deg, color-mix(in srgb, var(--app-side) 90%, transparent), transparent 58%),
+    url('../assets/firefly-wallpaper.webp');
+  background-position: center, center, right -8px top -10px;
+  background-size: cover, cover, 340px auto;
+  background-repeat: no-repeat;
+}
+
+.firefly-signature::before {
+  content: '';
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  width: 54px;
+  height: 40px;
+  background: url('../assets/firefly-flight.svg') center / contain no-repeat;
+  opacity: .65;
+  pointer-events: none;
+}
+
+.firefly-signature-copy {
+  position: absolute;
+  inset: auto 12px 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+
+.firefly-signature-en {
+  color: var(--app-brand-deep);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: .2em;
+}
+
+.firefly-signature-copy strong {
+  color: var(--app-text-1);
+  font-size: var(--font-heading);
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: .14em;
+}
+
+.firefly-signature-note {
+  color: var(--app-text-2);
+  font-size: 10px;
+  line-height: var(--lh-caption);
+}
+
+/* 装饰不挤占短屏导航的可用高度。 */
+@media (max-height: 790px) {
+  .firefly-signature { display: none; }
+}
+
+@media (forced-colors: active) {
+  .firefly-signature { background-image: none; }
+  .firefly-signature::before { display: none; }
 }
 
 .side-foot {

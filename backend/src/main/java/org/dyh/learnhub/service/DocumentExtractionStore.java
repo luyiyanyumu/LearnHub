@@ -1,5 +1,8 @@
 package org.dyh.learnhub.service;
 
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonToken;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
 
@@ -8,13 +11,18 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 /** Version-bound provenance is stored with the uploads, so existing backup/delete lifecycles cover it. */
 @Service
@@ -22,6 +30,19 @@ public class DocumentExtractionStore {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final long MAX_REPORT_BYTES = 16L * 1024 * 1024;
     private record Saved(String sourceSha256, String textSha256, DocumentIngestionService.Extraction extraction, String markdownFile) { }
+    private record SavedScanProgress(long sourceSize, long sourceModified, Map<String,Object> summary) { }
+    public record Coverage(int totalPages, int processedPages, boolean partial, boolean truncated, Integer completedPages,
+                           List<DocumentExtractionLimits.Reason> limitReasons) { }
+    private record CachedCoverage(BasicFileAttributes attributes, String textDigest, Coverage coverage) {
+        boolean matches(BasicFileAttributes current, String expectedDigest) {
+            return textDigest.equals(expectedDigest) && attributes.size() == current.size()
+                    && attributes.lastModifiedTime().equals(current.lastModifiedTime())
+                    && Objects.equals(attributes.fileKey(), current.fileKey());
+        }
+    }
+    private final Map<Path, CachedCoverage> coverageCache = Collections.synchronizedMap(new LinkedHashMap<>(32, .75f, true) {
+        @Override protected boolean removeEldestEntry(Map.Entry<Path, CachedCoverage> eldest) { return size() > 512; }
+    });
     public record Asset(String name, String sha256, long bytes, String mediaType) { }
     private static final java.util.regex.Pattern ASSET = java.util.regex.Pattern.compile("assets/([a-f0-9]{64})\\.png");
 
@@ -50,11 +71,67 @@ public class DocumentExtractionStore {
         if (bytes.length > MAX_REPORT_BYTES) throw new IOException("抽取报告超出存储上限");
         // Content-addressed reports allow the DB transaction to keep reading the old version until it commits.
         Path destination = reportPath(source, id, extraction.text());
+        if (Files.isRegularFile(destination) && Files.size(destination)<=MAX_REPORT_BYTES) {
+            byte[] previous=Files.readAllBytes(destination);
+            if (!java.util.Arrays.equals(previous,bytes)) {
+                Path history=destination.resolveSibling("history-"+sha256(destination)+".json");
+                if (!Files.exists(history)) atomicWrite(history,previous);
+            }
+        }
         atomicWrite(destination, bytes);
+        coverageCache.remove(destination);
     }
 
     static Path reportPath(Path source, Long id, String text) {
         return target(source, id).resolveSibling("ingestion-" + digest(text) + ".json");
+    }
+
+    /** A new scan generation is resumable without replacing the published text or its navigation report. */
+    public void savePendingScan(Long id, Path source, DocumentIngestionService.Extraction extraction) throws IOException {
+        if (!DocumentIngestionService.STRUCTURED_PIPELINE_VERSION.equals(extraction.pipelineVersion())
+                || !sha256(source).equals(extraction.sourceSha256())) throw new IOException("扫描候选不属于当前原件或模型版本");
+        byte[] bytes = JSON.writeValueAsBytes(extraction);
+        if (bytes.length > MAX_REPORT_BYTES) throw new IOException("扫描候选报告超出存储上限");
+        atomicWrite(target(source, id).resolveSibling("pending-scan.json"), bytes);
+        var attributes = Files.readAttributes(source, BasicFileAttributes.class);
+        atomicWrite(target(source, id).resolveSibling("pending-scan-progress.json"), JSON.writeValueAsBytes(
+                new SavedScanProgress(attributes.size(), attributes.lastModifiedTime().toMillis(), summary(extraction))));
+    }
+
+    public Optional<DocumentIngestionService.Extraction> readPendingScan(Long id, Path source) {
+        Path path = target(source, id).resolveSibling("pending-scan.json");
+        try {
+            if (!Files.isRegularFile(source) || !Files.isRegularFile(path) || Files.size(path) > MAX_REPORT_BYTES)
+                return Optional.empty();
+            var extraction = JSON.readValue(Files.readAllBytes(path), DocumentIngestionService.Extraction.class);
+            if (!DocumentIngestionService.STRUCTURED_PIPELINE_VERSION.equals(extraction.pipelineVersion())
+                    || !sha256(source).equals(extraction.sourceSha256())) return Optional.empty();
+            int length = extraction.text() == null ? 0 : extraction.text().length();
+            if (extraction.pages().stream().flatMap(page -> page.blocks().stream())
+                    .anyMatch(block -> block.indexed() && (block.start() < 0 || block.end() <= block.start() || block.end() > length)))
+                return Optional.empty();
+            return Optional.of(extraction);
+        } catch (Exception invalid) { return Optional.empty(); }
+    }
+
+    public void clearPendingScan(Long id, Path source) throws IOException {
+        Files.deleteIfExists(target(source, id).resolveSibling("pending-scan.json"));
+        Files.deleteIfExists(target(source, id).resolveSibling("pending-scan-progress.json"));
+    }
+
+    /** Lists only inspect a bounded progress record; full source verification still precedes every resume and review. */
+    public Optional<Map<String,Object>> readPendingScanSummary(Long id, Path source) {
+        Path path = target(source, id).resolveSibling("pending-scan-progress.json");
+        try {
+            if (!Files.isRegularFile(path) || Files.size(path) > 128_000
+                    || !Files.isRegularFile(path.resolveSibling("pending-scan.json"))) return Optional.empty();
+            var saved = JSON.readValue(Files.readAllBytes(path), SavedScanProgress.class);
+            var attributes = Files.readAttributes(source, BasicFileAttributes.class);
+            if (attributes.size() != saved.sourceSize() || attributes.lastModifiedTime().toMillis() != saved.sourceModified()
+                    || !DocumentIngestionService.STRUCTURED_PIPELINE_VERSION.equals(saved.summary().get("pipelineVersion")))
+                return Optional.empty();
+            return Optional.of(saved.summary());
+        } catch (Exception invalid) { return Optional.empty(); }
     }
 
     private static void atomicWrite(Path destination, byte[] bytes) throws IOException {
@@ -94,6 +171,129 @@ public class DocumentExtractionStore {
         } catch (Exception invalid) { return Optional.empty(); }
     }
 
+    /** List metadata only. Original bytes and Markdown are verified by the full reader, not during pagination. */
+    Optional<Coverage> readCoverage(Long id, Path source, long expectedSize, String indexedText) {
+        String expectedDigest = digest(indexedText);
+        Path legacy = target(source, id);
+        Path report = legacy.resolveSibling("ingestion-" + expectedDigest + ".json");
+        if (!Files.isRegularFile(report)) report = legacy;
+        try {
+            var attrs = Files.readAttributes(report, BasicFileAttributes.class);
+            if (!attrs.isRegularFile() || attrs.size() > MAX_REPORT_BYTES) return Optional.empty();
+            var original = Files.readAttributes(source, BasicFileAttributes.class);
+            if (!original.isRegularFile() || (expectedSize > 0 && expectedSize != original.size())
+                    || original.lastModifiedTime().compareTo(attrs.lastModifiedTime()) > 0) return Optional.empty();
+            var cached = coverageCache.get(report);
+            if (cached != null && cached.matches(attrs, expectedDigest)) return Optional.ofNullable(cached.coverage());
+            Coverage coverage = parseCoverage(report, expectedDigest);
+            coverageCache.put(report, new CachedCoverage(attrs, expectedDigest, coverage));
+            return Optional.ofNullable(coverage);
+        } catch (IOException | RuntimeException invalid) { return Optional.empty(); }
+    }
+
+    private static Coverage parseCoverage(Path report, String expectedDigest) throws IOException {
+        try (JsonParser parser = JSON.getFactory().createParser(report.toFile())) {
+            if (parser.nextToken() != JsonToken.START_OBJECT) return null;
+            boolean matchingText = false;
+            Coverage coverage = null;
+            while (parser.nextToken() == JsonToken.FIELD_NAME) {
+                String field = parser.currentName();
+                parser.nextToken();
+                if ("textSha256".equals(field)) {
+                    if (!expectedDigest.equals(parser.getValueAsString())) return null;
+                    matchingText = true;
+                } else if ("extraction".equals(field) && parser.currentToken() == JsonToken.START_OBJECT) {
+                    coverage = parseExtractionCoverage(parser, matchingText);
+                } else parser.skipChildren();
+                if (matchingText && coverage != null) return coverage;
+            }
+            return null;
+        }
+    }
+
+    private static Coverage parseExtractionCoverage(JsonParser parser, boolean textAlreadyMatched) throws IOException {
+        Coverage coverage = null;
+        Integer completed = null;
+        Set<Integer> completedLegacyPages = null;
+        while (parser.nextToken() == JsonToken.FIELD_NAME) {
+            String field = parser.currentName();
+            parser.nextToken();
+            if ("report".equals(field) && parser.currentToken() == JsonToken.START_OBJECT) {
+                JsonNode report = JSON.readTree(parser);
+                int total = report.path("totalPages").asInt(-1), processed = report.path("processedPages").asInt(-1);
+                if (total >= 0 && processed >= 0 && processed <= total
+                        && report.path("partial").isBoolean() && report.path("truncated").isBoolean()) {
+                    List<String> warnings = new ArrayList<>();
+                    report.path("warnings").forEach(warning -> {
+                        if (warning.isTextual()) warnings.add(warning.textValue());
+                    });
+                    coverage = new Coverage(total, processed, report.path("partial").asBoolean(), report.path("truncated").asBoolean(),
+                            null, DocumentExtractionLimits.fromWarnings(warnings));
+                }
+            } else if ("completedPages".equals(field) && parser.currentToken() == JsonToken.VALUE_NUMBER_INT) {
+                completed = parser.getIntValue();
+            } else if ("pages".equals(field) && parser.currentToken() == JsonToken.START_ARRAY) {
+                completedLegacyPages = parseCompletedPages(parser);
+            } else parser.skipChildren();
+            if (textAlreadyMatched && coverage != null && completed != null && completed >= 0 && completed <= coverage.totalPages()) break;
+        }
+        if (coverage == null) return null;
+        int total = coverage.totalPages();
+        if (completed == null || completed < 0 || completed > total) {
+            completed = completedLegacyPages == null ? null
+                    : (int) completedLegacyPages.stream().filter(page -> page <= total).count();
+        }
+        return new Coverage(total, coverage.processedPages(), coverage.partial(), coverage.truncated(), completed, coverage.limitReasons());
+    }
+
+    /** Older reports only counted attempted pages. Stream the fields used by isCompletedPage without loading page text. */
+    private static Set<Integer> parseCompletedPages(JsonParser parser) throws IOException {
+        Set<Integer> completed = new HashSet<>();
+        while (parser.nextToken() != JsonToken.END_ARRAY) {
+            if (parser.currentToken() != JsonToken.START_OBJECT) throw new IOException("抽取报告页结构无效");
+            int page = 0;
+            boolean blank = false;
+            boolean usableBlocks = false;
+            while (parser.nextToken() == JsonToken.FIELD_NAME) {
+                String field = parser.currentName();
+                parser.nextToken();
+                if ("page".equals(field)) page = parser.getValueAsInt();
+                else if ("method".equals(field)) blank = "blank".equals(parser.getValueAsString());
+                else if ("blocks".equals(field) && parser.currentToken() == JsonToken.START_ARRAY)
+                    usableBlocks = hasUsableBlocks(parser);
+                parser.skipChildren();
+            }
+            if (parser.currentToken() != JsonToken.END_OBJECT) throw new IOException("抽取报告页结构无效");
+            if (page > 0 && (blank || usableBlocks)) completed.add(page);
+        }
+        return completed;
+    }
+
+    private static boolean hasUsableBlocks(JsonParser parser) throws IOException {
+        boolean indexed = false;
+        int count = 0;
+        boolean onlyFurniture = true;
+        while (parser.nextToken() != JsonToken.END_ARRAY) {
+            if (parser.currentToken() != JsonToken.START_OBJECT) throw new IOException("抽取报告块结构无效");
+            if (indexed) {
+                parser.skipChildren();
+                continue;
+            }
+            count++;
+            boolean furniture = false;
+            while (parser.nextToken() == JsonToken.FIELD_NAME) {
+                String field = parser.currentName();
+                parser.nextToken();
+                if ("indexed".equals(field)) indexed = parser.currentToken() == JsonToken.VALUE_TRUE;
+                else if ("quality".equals(field)) furniture = "page_furniture".equals(parser.getValueAsString());
+                parser.skipChildren();
+            }
+            if (parser.currentToken() != JsonToken.END_OBJECT) throw new IOException("抽取报告块结构无效");
+            onlyFurniture &= furniture;
+        }
+        return indexed || (count > 0 && onlyFurniture);
+    }
+
     public static Map<String, Object> summary(DocumentIngestionService.Extraction extraction) {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("status", extraction.status());
@@ -101,6 +301,11 @@ public class DocumentExtractionStore {
         result.put("pipelineVersion", extraction.pipelineVersion());
         result.put("format", extraction.format() == null ? "plain" : extraction.format());
         result.put("report", extraction.report());
+        result.put("completedPages", extraction.completedPages());
+        result.put("limitReasons", DocumentExtractionLimits.fromWarnings(extraction.report().warnings()));
+        result.put("canResumeCharacterLimit", DocumentIngestionService.canResumeCharacterLimit(extraction));
+        var localScan=DocumentMediaProcessor.localScanProgress(extraction);
+        if (localScan.requested()) result.put("localScanProgress",localScan);
         return result;
     }
 

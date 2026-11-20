@@ -746,30 +746,61 @@ function onAgentInsert(e) {
 }
 watch([id, () => form.value.title, dirty], publishAgentNote)
 
+let agentRefreshSeq = 0
+let agentRefreshingLoad = null
+
 async function onAgentNoteUpdated(e) {
   const noteId = e?.detail?.noteId
-  if (!matchesOpenNote(id.value, noteId)) return
-  if (dirty.value) {
-    agentEditConflict.value = true
-    if (props.active) ElMessage.warning('智能体已更新库中正文，本地草稿已保留，请加载最新正文后再编辑')
-    return
-  }
+  if (editorDisposed || !matchesOpenNote(id.value, noteId)) return
+  if (!noteReady.value) return loadNote()
+  const seq = ++agentRefreshSeq
+  const noteLoad = loadSeq
+  const isCurrent = () => !editorDisposed && seq === agentRefreshSeq && noteLoad === loadSeq && matchesOpenNote(id.value, noteId)
+  agentRefreshingLoad = noteLoad
   try {
-    const latest = await noteApi.detail(noteId)
-    if (!matchesOpenNote(id.value, noteId)) return
-    // 请求期间敲了字也保留草稿，不让网络响应覆盖本地编辑。
-    if (dirty.value) {
-      agentEditConflict.value = true
+    if (saveTask) await saveTask
+    if (!isCurrent()) return
+    const latest = loadedNoteForm(await noteApi.detail(noteId, { silentError: true }))
+    if (!isCurrent()) return
+
+    const latestSnapshot = formFingerprint(latest)
+    if (latestSnapshot === savedSnapshot.value) {
+      agentEditConflict.value = false
       return
     }
-    applyAgentContent(latest.content || '')
-    flushBlockContent()
-    if (!blockPreviewRef.value?.hasPendingContent?.()) previewUnsynced.value = false
+
+    const saved = savedForm.value
+    const titleComposing = titleInputRef.value?.composing
+    const titleDraft = titleComposing || form.value.title !== saved.title
+    const contentComposing = editorRef.value?.getEditorView?.()?.composing || blockPreviewRef.value?.hasPendingContent?.()
+    if (dirty.value || titleDraft || contentComposing) {
+      // A remote rename can update the saved title without marking other draft fields as saved.
+      const renamedSnapshot = formFingerprint({ ...saved, title: latest.title })
+      const titleConflict = latest.title !== saved.title && titleDraft && (titleComposing || form.value.title !== latest.title)
+      if (!titleConflict) {
+        if (!titleDraft) form.value.title = latest.title
+        savedSnapshot.value = renamedSnapshot
+      }
+      agentEditConflict.value = titleConflict || latestSnapshot !== renamedSnapshot
+      if (agentEditConflict.value && props.active) ElMessage.warning('库中的笔记已更新，本地草稿已保留，请先核对最新笔记')
+      return
+    }
+
+    if (latest.content !== form.value.content) {
+      applyAgentContent(latest.content)
+      flushBlockContent()
+      if (!blockPreviewRef.value?.hasPendingContent?.()) previewUnsynced.value = false
+    }
+    Object.assign(form.value, latest)
+    savedFolderId.value = latest.folderId
     savedSnapshot.value = formFingerprint()
     lastSavedAt.value = new Date()
+    agentEditConflict.value = false
     publishAgentNote()
   } catch {
-    if (matchesOpenNote(id.value, noteId)) agentEditConflict.value = true
+    if (isCurrent()) agentEditConflict.value = true
+  } finally {
+    if (seq === agentRefreshSeq) agentRefreshingLoad = null
   }
 }
 
@@ -777,7 +808,7 @@ async function reloadAfterAgentEdit() {
   const expectedId = id.value
   if (dirty.value) {
     try {
-      await ElMessageBox.confirm('加载会替换当前未保存的正文，请先复制需要保留的草稿。', '加载最新笔记', {
+      await ElMessageBox.confirm('加载会替换当前未保存的改动，请先复制需要保留的草稿。', '加载最新笔记', {
         confirmButtonText: '加载最新', cancelButtonText: '保留草稿', type: 'warning',
       })
     } catch { return }
@@ -1006,6 +1037,17 @@ function flatten(nodes, depth = 0, out = []) {
  */
 let loadSeq = 0
 
+function loadedNoteForm(note) {
+  return {
+    title: note.title,
+    // 修复粘贴内容里 HTML 标签内的弯引号，避免预览将标签显示成纯文本。
+    content: fixHtmlQuotes(note.content || ''),
+    categoryId: note.categoryId ?? undefined,
+    folderId: note.folderId || 0,
+    tagIds: (note.tags || []).map(tag => tag.id),
+  }
+}
+
 async function loadNote() {
   loadError.value = ''
   noteReady.value = false
@@ -1035,14 +1077,7 @@ async function loadNote() {
   try {
     const n = await noteApi.detail(id.value)
     if (seq !== loadSeq) return // 已经切到别的笔记了，丢弃这次响应
-    form.value = {
-      title: n.title,
-      // 修复粘贴内容里 HTML 标签内的弯引号，否则预览会把 <font style=”…”> 当纯文本显示
-      content: fixHtmlQuotes(n.content || ''),
-      categoryId: n.categoryId ?? undefined,
-      folderId: n.folderId || 0,
-      tagIds: (n.tags || []).map((t) => t.id),
-    }
+    form.value = loadedNoteForm(n)
     savedFolderId.value = form.value.folderId
   } catch (error) {
     if (seq === loadSeq) loadError.value = error?.message || '笔记加载失败，请重试'
@@ -1122,8 +1157,12 @@ function save(options = {}) {
 
 async function persistNote({ silent = false } = {}) {
   if (saving.value || loading.value || loadError.value || !noteReady.value) return false
+  if (agentRefreshingLoad === loadSeq) {
+    if (!silent) ElMessage.info('正在同步智能体改动，请稍后保存')
+    return false
+  }
   if (agentEditConflict.value) {
-    ElMessage.warning('库中正文已更新，请先点击「加载最新正文」，避免旧草稿覆盖智能体的改动')
+    ElMessage.warning('库中的笔记已更新，请先核对最新笔记，避免旧草稿覆盖智能体的改动')
     return false
   }
   if (!form.value.title.trim()) {
@@ -4006,7 +4045,7 @@ onBeforeUnmount(() => {
     </div>
 
     <el-alert v-if="agentEditConflict" type="warning" :closable="false" show-icon>
-      <template #title>库中正文已更新，当前草稿已保留。<el-button link type="primary" @click="reloadAfterAgentEdit">加载最新正文</el-button></template>
+      <template #title>库中的笔记已更新，当前草稿已保留。<el-button link type="primary" @click="reloadAfterAgentEdit">加载最新笔记</el-button></template>
     </el-alert>
 
     <!-- ======== 顶部第二行：语雀式工具条（单栏阅读模式也保留，作用于那一栏正文；源码对照下作用于当前有焦点的编辑区） ======== -->
@@ -4463,7 +4502,7 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
   flex-shrink: 0;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-sm);
   padding: 4px 2px 8px;
   /* 冻结在顶部：阅读长笔记时工具栏不跟着正文滚走。
      页面本身通常不滚（正文在预览栏内部滚），sticky 是兜底：窄屏/专注模式下万一整页滚动，
@@ -4476,20 +4515,23 @@ onBeforeUnmount(() => {
 }
 .ed-actions {
   display: flex;
-  flex: 1 1 370px;
+  /* 先为操作组留出完整宽度，空间不足时整组换行。 */
+  flex: 0 1 auto;
   flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   min-width: 0;
-  gap: 6px;
+  max-width: 100%;
+  margin-inline-start: auto;
+  gap: var(--space-sm);
 }
 
 .icon-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
+  width: var(--control-h);
+  height: var(--control-h);
   flex-shrink: 0;
   border: none;
   border-radius: 8px;
@@ -4509,10 +4551,10 @@ onBeforeUnmount(() => {
 
 /* 标题输入：无边框大字，像文档标题而不是表单控件 */
 .title-input {
-  flex: 1 1 180px;
+  flex: 1 1 var(--control-w);
   min-width: 0;
   max-width: 100%;
-  height: 34px;
+  height: var(--control-h);
   padding: 0 10px;
   font-size: 16px;
   font-weight: 650;
@@ -4543,13 +4585,9 @@ onBeforeUnmount(() => {
 }
 
 .mini-select {
-  width: 118px;
+  width: var(--control-w);
   flex-shrink: 0;
 }
-.mini-select.tag {
-  width: 150px;
-}
-.mini-select.folder { width: 148px; }
 
 /* 保存状态：安静的圆点 + 文案，绿/灰/琥珀三态 */
 .save-state {
@@ -4595,6 +4633,7 @@ onBeforeUnmount(() => {
   animation: none;
 }
 .save-retry {
+  min-height: var(--control-h);
   padding: 2px 8px;
   border: 1px solid var(--el-color-danger-light-5);
   border-radius: var(--radius);
@@ -4621,7 +4660,7 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  height: 30px;
+  height: var(--control-h);
   padding: 0 9px;
   flex-shrink: 0;
   font-size: 13px;
@@ -4658,7 +4697,9 @@ onBeforeUnmount(() => {
 }
 
 .save-btn {
-  height: 32px;
+  height: var(--control-h);
+  width: var(--control-w);
+  max-width: 100%;
   flex-shrink: 0;
   padding: 0 18px;
   border-radius: 8px;
@@ -5454,7 +5495,7 @@ html.dark .ol-item.active {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  height: 30px;
+  height: var(--control-h);
   padding: 0 12px;
   flex-shrink: 0;
   font-size: 12.5px;
@@ -5575,7 +5616,7 @@ html.dark .ol-item.active {
   color: var(--app-text-2);
 }
 
-.is-compact-layout .title-input { flex-basis: calc(100% - 46px); }
+.is-compact-layout .title-input { flex-basis: calc(100% - var(--control-h) - var(--space-sm)); }
 .is-compact-layout .mini-select { flex: 1 1 100px; width: auto; min-width: 0; }
 .is-compact-layout .ed-actions { flex-basis: 100%; }
 .is-small-layout .ed-actions { gap: 4px; }

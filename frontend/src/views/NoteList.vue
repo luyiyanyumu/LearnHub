@@ -348,6 +348,7 @@ async function reloadMeta() {
           <el-button @click="search">搜索</el-button>
         </template>
       </el-input>
+      <el-button v-if="query.categoryId || query.tagId || query.kw" text class="reset-filter" @click="resetFilter">重置筛选</el-button>
       <div class="note-filters">
       <el-select v-model="query.categoryId" placeholder="全部分类" aria-label="按分类筛选" clearable class="note-filter" @change="search">
         <el-option v-for="c in categories" :key="c.id" :label="'　'.repeat(c.depth) + c.name" :value="c.id" />
@@ -356,7 +357,6 @@ async function reloadMeta() {
         <el-option v-for="t in tags" :key="t.id" :label="t.name" :value="t.id" />
       </el-select>
       </div>
-      <el-button v-if="query.categoryId || query.tagId || query.kw" text class="reset-filter" @click="resetFilter">重置筛选</el-button>
     </div>
 
         <div class="folder-context">
@@ -365,8 +365,8 @@ async function reloadMeta() {
           </div>
           <div v-if="selectedIds.length" class="selection-actions">
             <span class="selection-count">已选 {{ selectedIds.length }} 篇</span>
-            <el-button size="small" @click="openMove()">移动到…</el-button>
-            <el-button size="small" text @click="noteTable?.clearSelection()">取消选择</el-button>
+            <el-button @click="openMove()">移动到…</el-button>
+            <el-button text @click="noteTable?.clearSelection()">取消选择</el-button>
           </div>
         </div>
       <StateView
@@ -486,28 +486,45 @@ async function reloadMeta() {
 </template>
 
 <style scoped>
-.notes-page { max-width: 1760px; width: 100%; box-sizing: border-box; margin: 0 auto; padding: 24px 28px 96px; }
+.notes-page {
+  --notes-controls-inset: 20px;
+  --notes-card-border: 1px;
+  --notes-heading-inset: calc(var(--notes-controls-inset) + var(--notes-card-border));
+  max-width: 1760px;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0 auto;
+  padding: 24px 28px 96px;
+}
 .notes-heading { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px 24px; margin-bottom: 16px; }
 .notes-heading-copy { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 16px; min-width: 0; }
 .notes-heading .page-h2 { font-size: var(--font-title); line-height: var(--lh-title); letter-spacing: -.04em; }
 .notes-description { color: var(--app-text-3); font-size: var(--font-caption); line-height: var(--lh-caption); }
-.notes-heading-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; max-width: 100%; }
-.notes-heading-actions :deep(.el-button) { height: 40px; padding: 0 18px; border-radius: var(--radius); margin: 0; }
-.note-workspace.el-card { min-width: 0; container: note-collection / inline-size; border-radius: var(--radius-xl); box-shadow: var(--shadow-sm); }
+.notes-heading-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  max-width: calc(100% - var(--notes-heading-inset));
+  margin-inline-start: auto;
+  margin-inline-end: var(--notes-heading-inset);
+}
+.notes-heading-actions :deep(.el-button) { width: var(--control-w); max-width: 100%; height: var(--control-h); padding: 0 12px; border-radius: var(--radius); margin: 0; }
+.note-workspace.el-card { min-width: 0; container: note-collection / inline-size; border-width: var(--notes-card-border); border-radius: var(--radius-xl); box-shadow: var(--shadow-sm); }
 .note-content :deep(.el-card__body) { padding: 0; }
-.note-toolbar { gap: 12px; margin: 0; padding: 16px 20px 8px; }
-.note-toolbar :deep(.el-input), .note-toolbar :deep(.el-select), .note-toolbar :deep(.el-button) { --el-component-size: 40px; }
+.note-toolbar { gap: var(--space-sm); margin: 0; padding: 16px var(--notes-controls-inset) 8px; }
+.note-toolbar :deep(.el-input), .note-toolbar :deep(.el-select), .note-toolbar :deep(.el-button) { --el-component-size: var(--control-h); }
 .note-toolbar :deep(.el-select__wrapper) { min-height: var(--control-h); }
-.note-toolbar .note-search { flex: 1 1 260px; width: auto; min-width: 0; max-width: min(100%, 420px); }
+.note-toolbar .note-search { flex: 0 1 var(--control-search-w); width: var(--control-search-w); min-width: 0; max-width: 100%; }
 .note-search :deep(.el-input-group__append) { background: var(--app-card); color: var(--app-text-2); }
-.note-filters { display: flex; flex-wrap: wrap; gap: 10px; margin-left: auto; min-width: 0; max-width: 100%; }
-.note-filter { width: 148px; max-width: 100%; }
+.note-filters { display: flex; flex-wrap: wrap; gap: var(--space-sm); margin-left: auto; min-width: 0; max-width: 100%; }
+.note-filter { width: var(--control-w); max-width: 100%; }
 .note-toolbar > .el-button + .el-button { margin-left: 0; }
-.reset-filter { padding: 0 8px; }
-.note-content :deep(.folder-explorer) { margin: 0; padding: 12px 20px; border-bottom: 1px solid var(--app-border-weak); }
-.note-content :deep(.explorer-toolbar) { padding: 0; border: 0; background: transparent; gap: 16px; }
+.reset-filter { height: var(--control-h); padding: 0 8px; }
+.note-content :deep(.folder-explorer) { margin: 0; padding: 12px var(--notes-controls-inset); border-bottom: 1px solid var(--app-border-weak); }
+.note-content :deep(.explorer-toolbar) { padding: 0; border: 0; background: transparent; }
 .note-content :deep(.explorer-path) { background: var(--app-bg); }
-.note-content :deep(.explorer-actions .el-button), .note-content :deep(.explorer-history .el-button) { height: var(--control-h-inline); }
 .folder-context, .folder-context-title, .selection-actions {
   display: flex;
   align-items: center;
@@ -518,7 +535,8 @@ async function reloadMeta() {
 .directory-count { color: var(--app-text-3); font-size: var(--font-caption); white-space: nowrap; }
 .directory-count span { margin: 0 4px; }
 .directory-count b { font-weight: 550; color: var(--app-text-2); font-variant-numeric: tabular-nums; }
-.selection-actions { min-height: 32px; flex-wrap: wrap; gap: 8px; max-width: 100%; }
+.selection-actions { min-height: var(--control-h); flex-wrap: wrap; gap: var(--space-sm); max-width: 100%; }
+.selection-actions > .el-button:not(.is-text) { width: var(--control-w); max-width: 100%; }
 .selection-actions :deep(.el-button + .el-button) { margin-left: 0; }
 .selection-count { color: var(--app-brand-deep); font-size: var(--font-caption); white-space: nowrap; }
 .note-table.el-table { width: calc(100% - 24px); margin: 0 12px; --el-table-header-bg-color: var(--app-bg); --el-table-border-color: var(--app-border-weak); --el-table-row-hover-bg-color: color-mix(in srgb, var(--app-brand-soft) 55%, var(--app-card)); }
@@ -594,22 +612,18 @@ async function reloadMeta() {
 @media (max-width: 1100px) {
   .notes-page { padding: 20px 24px 96px; }
   .notes-heading { gap: 16px; }
-  .note-filter { width: 132px; }
 }
 @media (max-width: 760px) {
-  .notes-page { padding: 16px 16px 96px; }
+  .notes-page { --notes-controls-inset: 16px; padding: 16px 16px 96px; }
   .notes-heading { align-items: stretch; flex-direction: column; gap: 12px; margin-bottom: 16px; }
   .notes-heading .page-h2 { font-size: 26px; }
   .notes-description { font-size: 12px; }
-  .notes-heading-actions { width: 100%; }
-  .notes-heading-actions :deep(.el-button--primary) { flex: 1; }
-  .note-toolbar { padding: 12px 16px 8px; gap: 10px; }
+  .notes-heading-actions { margin-inline-start: var(--notes-heading-inset); }
+  .notes-heading-actions :deep(.el-button) { flex: 1 1 var(--control-w); min-width: min(var(--control-w), 100%); }
+  .note-toolbar { padding-block-start: 12px; }
   .note-toolbar .note-search { flex-basis: 100%; max-width: none; width: 100%; }
   .note-filters { width: 100%; margin-left: 0; }
-  .note-filter { flex: 1; min-width: 0; width: 0; }
-  .reset-filter { height: 28px; }
-  .note-content :deep(.folder-explorer) { padding: 12px 16px; }
-  .note-content :deep(.explorer-toolbar) { gap: 6px; }
+  .note-filter { flex: 1 1 var(--control-w); min-width: min(var(--control-w), 100%); width: var(--control-w); }
   .note-content :deep(.explorer-actions) { justify-content: flex-end; }
   .folder-context { padding: 4px 16px 10px; }
   .folder-context-title { gap: 6px 10px; }
@@ -624,16 +638,11 @@ async function reloadMeta() {
   .note-table :deep(.el-table-fixed-column--right::before),
   .note-table :deep(.el-table-fixed-column--right::after) { display: none; box-shadow: none !important; }
 }
-@media (max-width: 480px) {
-  .note-content :deep(.explorer-history) { gap: 0; }
-  .note-content :deep(.explorer-history .el-button) { width: 28px; padding: 4px; }
-  .note-content :deep(.explorer-actions .el-button) { padding-right: 8px; padding-left: 8px; }
-}
 /* The collection can be narrow even on a wide screen with navigation open. */
 @container note-collection (max-width: 680px) {
   .note-toolbar .note-search { flex-basis: 100%; max-width: 100%; }
   .note-filters { flex: 1 1 100%; margin-left: 0; }
-  .note-filter { flex: 1 1 132px; min-width: 0; width: auto; }
+  .note-filter { flex: 1 1 var(--control-w); min-width: min(var(--control-w), 100%); width: var(--control-w); }
   .note-table :deep(.el-table-fixed-column--right) { position: static !important; right: auto !important; }
   .note-table :deep(.el-table-fixed-column--right::before),
   .note-table :deep(.el-table-fixed-column--right::after) { display: none; box-shadow: none !important; }

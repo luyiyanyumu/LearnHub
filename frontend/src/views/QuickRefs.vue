@@ -220,8 +220,8 @@ onBeforeUnmount(() => {
       <el-input
         v-model="query.kw"
         placeholder="搜索速查内容"
+        aria-label="搜索速查内容"
         clearable
-        style="width: 200px"
         @keyup.enter="search"
         @clear="search"
       >
@@ -229,7 +229,7 @@ onBeforeUnmount(() => {
           <el-button @click="search">搜索</el-button>
         </template>
       </el-input>
-      <el-select v-model="query.categoryId" placeholder="全部分类" clearable style="width: 130px" @change="search">
+      <el-select v-model="query.categoryId" placeholder="全部分类" aria-label="按分类筛选速查卡" clearable @change="search">
         <el-option v-for="c in categories" :key="c.id" :label="'　'.repeat(c.depth) + c.name" :value="c.id" />
       </el-select>
       <el-button v-if="query.categoryId || query.kw" @click="resetFilter">重置</el-button>
@@ -364,8 +364,11 @@ onBeforeUnmount(() => {
 .ref-toolbar > * { max-width: 100%; }
 .ref-toolbar .tip { flex: 1 1 240px; }
 .ref-toolbar .spacer { display: none; }
-.ref-toolbar :deep(.el-input) { flex: 1 1 200px; min-width: 0; max-width: 320px; }
-.ref-toolbar :deep(.el-select) { flex: 0 1 130px; min-width: 0; }
+.ref-toolbar > .el-input { flex: 0 1 var(--control-search-w); width: var(--control-search-w); min-width: 0; }
+.ref-toolbar > .el-select,
+.ref-toolbar > .el-button { width: var(--control-w); min-width: 0; }
+.ref-toolbar :deep(.el-select__wrapper) { min-height: var(--control-h); }
+.ref-toolbar :deep(.el-button) { height: var(--control-h); }
 .ref-toolbar :deep(.el-button + .el-button) { margin-left: 0; }
 .tip {
   font-size: 12px;

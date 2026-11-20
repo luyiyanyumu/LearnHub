@@ -1,0 +1,7 @@
+# Do not send local documents, keys, databases or the app tree to the builder.
+**
+!tools
+!tools/document-structure
+!tools/document-structure/**
+**/__pycache__
+**/*.pyc

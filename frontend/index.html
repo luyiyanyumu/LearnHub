@@ -11,8 +11,10 @@
       ;(function () {
         try {
           var s = localStorage.getItem('learnhub-theme')
-          var dark = s ? s === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches
-          if (dark) document.documentElement.classList.add('dark')
+          var dark = s === 'dark' || (s !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+          var root = document.documentElement
+          if (dark) root.classList.add('dark')
+          if (localStorage.getItem('learnhub-skin') === 'firefly') root.setAttribute('data-skin', 'firefly')
         } catch (e) {}
       })()
     </script>

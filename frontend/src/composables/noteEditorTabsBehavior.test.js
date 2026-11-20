@@ -7,7 +7,7 @@ import MarkdownIt from 'markdown-it'
 import { EditorState } from '@codemirror/state'
 import { history, undo } from '@codemirror/commands'
 import * as tabUtils from './useNoteTabs.js'
-import { prepareAgentNote, insertAgentNote } from '../utils/agentNoteEdit.js'
+import { AGENT_NOTE_UPDATED_EVENT, prepareAgentNote, insertAgentNote } from '../utils/agentNoteEdit.js'
 
 const source = readFileSync(new URL('../views/NoteEdit.vue', import.meta.url), 'utf8')
 const compiled = compileScript(parse(source).descriptor, { id: 'note-edit-tab-script-test' }).content
@@ -120,6 +120,89 @@ test('agent preparation saves only the active matching editor and preserves back
     assert.equal(b.state.dirty, true)
     await assert.rejects(prepareAgentNote({ noteId: 2, editorKey: 'note:2' }), /已切换|尚未就绪/)
     assert.equal(h.writes.length, 1)
+  } finally { await h.cleanup() }
+})
+
+test('a confirmed rename updates the open editor and its tab without reapplying unchanged content', async () => {
+  let title = '原笔记标题'
+  let replaced = 0
+  const h = await harness({ detail: async id => ({ id, title, content: '合成正文', folderId: 3, tags: [] }) })
+  try {
+    const tab = h.manager.openNoteRoute({ path: '/notes/1', params: { id: 1 } })
+    const a = await h.mount({ noteId: 1, tabKey: tab.key, active: true })
+    a.state.blockPreviewRef = vue.markRaw({ applyMarkdownChange() { replaced++; return true } })
+    title = '智能体改名后'
+    h.windowMock.dispatchEvent(new CustomEvent(AGENT_NOTE_UPDATED_EVENT, { detail: { noteId: 1, changed: true } }))
+    await flush()
+    assert.equal(a.state.form.title, title)
+    assert.equal(tab.title, title)
+    assert.equal(a.state.form.content, '合成正文')
+    assert.equal(a.state.dirty, false)
+    assert.equal(replaced, 0)
+    assert.equal(h.writes.length, 0)
+  } finally { await h.cleanup() }
+})
+
+test('a background tab adopts the renamed title and keeps its local body draft', async () => {
+  let renamed = false
+  const h = await harness({ detail: async id => ({
+    id, title: String(id) === '2' && renamed ? '后台新标题' : `笔记 ${id}`, content: `body ${id}`, folderId: 3, tags: [],
+  }) })
+  try {
+    const tab = h.manager.openNoteRoute({ path: '/notes/2', params: { id: 2 } })
+    const a = await h.mount({ noteId: 1, tabKey: 'note:1', active: true })
+    const b = await h.mount({ noteId: 2, tabKey: tab.key, active: false })
+    b.state.form.content = '后台正文草稿'
+    renamed = true
+    h.windowMock.dispatchEvent(new CustomEvent(AGENT_NOTE_UPDATED_EVENT, { detail: { noteId: 2, changed: true } }))
+    await flush()
+    assert.deepEqual(h.reads.map(String), ['1', '2', '2'])
+    assert.equal(a.state.form.title, '笔记 1')
+    assert.equal(b.state.form.title, '后台新标题')
+    assert.equal(tab.title, '后台新标题')
+    assert.equal(tab.dirty, true)
+    assert.equal(b.state.form.content, '后台正文草稿')
+    assert.equal(b.state.agentEditConflict, false)
+    assert.equal(await b.state.save({ silent: true }), true)
+    assert.equal(h.writes[0].payload.title, '后台新标题')
+    assert.equal(h.writes[0].payload.content, '后台正文草稿')
+  } finally { await h.cleanup() }
+})
+
+test('typing a title while the agent refreshes preserves the draft and blocks a conflicting save', async () => {
+  const response = defer()
+  let refreshing = false
+  const h = await harness({ detail: id => refreshing ? response.promise : { id, title: '原名', content: '合成正文', tags: [] } })
+  try {
+    const a = await h.mount({ noteId: 1, tabKey: 'note:1', active: true })
+    refreshing = true
+    h.windowMock.dispatchEvent(new CustomEvent(AGENT_NOTE_UPDATED_EVENT, { detail: { noteId: 1, changed: true } }))
+    a.state.form.title = '本地标题草稿'
+    assert.equal(await a.state.save({ silent: true }), false)
+    response.resolve({ id: 1, title: '远端新标题', content: '合成正文', tags: [] })
+    await flush()
+    assert.equal(a.state.form.title, '本地标题草稿')
+    assert.equal(a.state.agentEditConflict, true)
+    assert.equal(await a.state.save({ silent: true }), false)
+    assert.equal(h.writes.length, 0)
+  } finally { await h.cleanup() }
+})
+
+test('an older agent refresh cannot restore a stale title after a later response', async () => {
+  const first = defer(), second = defer()
+  let reads = 0
+  const h = await harness({ detail: id => [ { id, title: '原名', content: '合成正文', tags: [] }, first.promise, second.promise ][reads++] })
+  try {
+    const a = await h.mount({ noteId: 1, tabKey: 'note:1', active: true })
+    const signalRename = () => h.windowMock.dispatchEvent(new CustomEvent(AGENT_NOTE_UPDATED_EVENT, { detail: { noteId: 1, changed: true } }))
+    signalRename()
+    signalRename()
+    second.resolve({ id: 1, title: '第二次改名', content: '合成正文', tags: [] })
+    await flush()
+    first.resolve({ id: 1, title: '第一次改名', content: '合成正文', tags: [] })
+    await flush()
+    assert.equal(a.state.form.title, '第二次改名')
+    assert.equal(a.state.dirty, false)
   } finally { await h.cleanup() }
 })
 

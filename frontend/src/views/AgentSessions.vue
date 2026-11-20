@@ -192,7 +192,7 @@ onBeforeUnmount(() => {
       <aside class="sess-side">
         <div class="side-head">
           <span class="side-title">会话</span>
-          <el-button size="small" type="primary" :loading="creating" @click="createSession">新建</el-button>
+          <el-button type="primary" :loading="creating" @click="createSession">新建</el-button>
         </div>
 
         <div class="side-list" v-loading="loading">
@@ -234,9 +234,9 @@ onBeforeUnmount(() => {
           <el-select
             v-if="activeId"
             :model-value="activeProfile"
-            size="small"
-            style="width: 100%; margin-top: 6px"
+            class="session-profile"
             placeholder="默认（当前生效档案）"
+            aria-label="选择当前会话模型"
             @change="setModel"
           >
             <el-option label="默认（当前生效档案）" value="" />
@@ -256,7 +256,7 @@ onBeforeUnmount(() => {
         <div v-else class="chat-empty">
           <p class="empty-t">{{ emptyText }}</p>
           <p class="hint">会话会存在库里：刷新页面、重启后端，回来都还在。</p>
-          <el-button size="small" type="primary" :loading="creating" @click="createSession">新建一个会话</el-button>
+          <el-button type="primary" :loading="creating" @click="createSession">新建一个会话</el-button>
         </div>
       </section>
     </div>
@@ -298,7 +298,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-sm);
   flex-shrink: 0;
   padding: 10px 12px;
   border-bottom: 1px solid var(--app-border-weak);
@@ -415,6 +415,14 @@ onBeforeUnmount(() => {
   min-width: 0;
   overflow-wrap: anywhere;
 }
+.session-profile { width: 100%; margin-top: var(--space-xs); }
+.session-profile :deep(.el-select__wrapper) { min-height: var(--control-h); }
+.side-head > .el-button,
+.chat-empty > .el-button {
+  width: min(var(--control-w), 100%);
+  height: var(--control-h);
+  padding-inline: var(--space-sm);
+}
 
 /* ---- 对话区 ---- */
 .chat-area {
@@ -433,7 +441,7 @@ onBeforeUnmount(() => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: var(--space-sm);
   text-align: center;
   padding: 16px;
 }
@@ -473,7 +481,7 @@ onBeforeUnmount(() => {
   .side-row + .side-row { margin-top: 0; }
   .side-foot { grid-column: 1 / -1; padding: 4px 8px; }
   .side-foot > .hint { display: none; }
-  .side-foot :deep(.el-select) { margin-top: 0 !important; }
+  .session-profile { margin-top: 0; }
   .row-del { visibility: visible; }
   .head { flex-shrink: 0; }
   .head-sub { margin: 4px 0 10px; font-size: 12px; }

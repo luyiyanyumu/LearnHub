@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 64" fill="none">
+  <!-- Original UI ornament: silver-green hairpin wings and a warm gold core. -->
+  <path d="M39 35C25 32 13 21 7 5c18 1 31 12 32 30Z" fill="#EDF6ED" stroke="#77A98D" stroke-width="1.4"/>
+  <path d="M41 35C55 32 67 21 73 5 55 6 42 17 41 35Z" fill="#D0EDDB" stroke="#77A98D" stroke-width="1.4"/>
+  <path d="M37 37C23 32 12 33 7 39c11 8 22 9 30-2Z" fill="#A8D7BE" stroke="#77A98D" stroke-width="1.2"/>
+  <path d="M43 37c14-5 25-4 30 2-11 8-22 9-30-2Z" fill="#EDF6ED" stroke="#77A98D" stroke-width="1.2"/>
+  <path d="m13 10 25 26M67 10 42 36m-8 6-7 15m19-15 7 15" stroke="#93B79B" stroke-width="1.1" stroke-linecap="round"/>
+  <path d="m40 28 5 9-5 11-5-11 5-9Z" fill="#EBCB7C" stroke="#B38939" stroke-width="1.2"/>
+  <path d="m40 33 2 4-2 5-2-5 2-4Z" fill="#FFFADE"/>
+  <path d="m58 49 1.5 4.5L64 55l-4.5 1.5L58 61l-1.5-4.5L52 55l4.5-1.5L58 49Z" fill="#C5A257"/>
+  <circle cx="20" cy="48" r="1.5" fill="#C5A257"/>
+</svg>

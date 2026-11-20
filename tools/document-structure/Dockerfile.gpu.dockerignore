@@ -1,0 +1,5 @@
+# This derived build needs no local document or application files.
+**
+!tools
+!tools/document-structure
+!tools/document-structure/Dockerfile.gpu

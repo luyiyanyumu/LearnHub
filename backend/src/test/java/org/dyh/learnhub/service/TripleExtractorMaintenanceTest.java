@@ -161,10 +161,27 @@ class TripleExtractorMaintenanceTest {
         assertDoesNotThrow(() -> extractor.extractSourceStrict("资料#1", "合成长公式", source, List.of()));
     }
 
+    @Test void unmatchedBracketLiteralDoesNotProtectFollowingProseOrShadowALaterFormula() {
+        String prose = "这是合成正文，用于检验普通段落可以分批读取。\n".repeat(2000);
+        String code = "```text\n\\]\n合成代码\n```\n";
+        String formula = "\\[\n" + "x = y + z \\\\\n".repeat(500) + "\\]\n";
+        String source = "合成说明。\n\\[\n" + prose + code + "\\[\n合成普通段落。\n" + formula;
+
+        List<String> parts = TripleExtractor.splitSource(source, 4000);
+
+        assertEquals(source, String.join("", parts));
+        assertTrue(parts.stream().anyMatch(part -> part.contains(code)));
+        assertTrue(parts.contains(formula));
+        assertTrue(parts.stream().allMatch(part -> part.equals(formula) || part.length() <= 4000));
+    }
+
     @Test void atomicFormulaBeyondHardCeilingFailsClearlyWithoutAnyModelRequest() {
-        IllegalStateException error = assertThrows(IllegalStateException.class,
-                () -> TripleExtractor.splitSource("$$\n" + "x".repeat(32_001) + "\n$$\n", 4000));
-        assertTrue(error.getMessage().contains("32000"));
+        String body = "x".repeat(32_001);
+        for (String source : List.of("$$\n" + body + "\n$$\n", "\\[\n" + body + "\n\\]\n")) {
+            IllegalStateException error = assertThrows(IllegalStateException.class,
+                    () -> TripleExtractor.splitSource(source, 4000));
+            assertTrue(error.getMessage().contains("32000"));
+        }
         verifyNoInteractions(client);
     }
 }

@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { compileScript, parse } from '@vue/compiler-sfc'
 import * as vue from 'vue'
 import * as profileView from './modelProfileView.js'
+import * as theme from '../composables/useTheme.js'
 import { extractPromptFromMd } from './promptFromMd.js'
 import { maintenanceUpdateHint } from './knowledgeIndexView.js'
 
@@ -37,6 +38,7 @@ function mountSettings(initialProfiles = [], maintenance = { enabled: true, pend
     vue, 'element-plus': { ElMessage: { success: message('success'), warning: message('warning'), error: message('error'), info: message('info') }, ElMessageBox: { confirm: async () => {} } },
     '../api': { modelApi, settingsApi, categoryApi: {}, tagApi: {}, aiApi: {}, wikiApi: {} },
     '../utils/modelProfileView': profileView, '../utils/promptFromMd': { extractPromptFromMd },
+    '../composables/useTheme': theme,
     '../api/knowledgeMaintenance.js': { knowledgeMaintenanceApi: { async status() { return maintenance } } },
     '../utils/knowledgeIndexView': { maintenanceUpdateHint },
   }

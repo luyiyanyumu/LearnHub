@@ -163,3 +163,12 @@ test('Wiki results retain their page, section and guide metadata for navigation 
   assert.equal(item.generatedGuide, true)
   assert.deepEqual(item.sourceRefs, ['note:3'])
 })
+
+test('fusion search keeps source locations and source revision for opening exact OCR evidence', async () => {
+  const h = harness()
+  const locations = [{ page: 2, rect: [20, 30, 120, 80], width: 800, height: 600, method: 'ocr', sourceRevision: 'a'.repeat(64) }]
+  const pending = h.loader.search({ query: '合成检索' })
+  h.requests[0].resolve([{ sourceType: 'file', sourceId: 41, text: '合成检索正文', sourceLocations: locations }])
+  await pending
+  assert.deepEqual(h.state.items[0].sourceLocations, locations)
+})

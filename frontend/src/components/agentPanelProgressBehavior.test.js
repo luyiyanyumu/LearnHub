@@ -23,6 +23,7 @@ const deferred = () => { let resolve, reject; const promise = new Promise((ok, f
 const flush = async () => { for (let i = 0; i < 7; i++) { await Promise.resolve(); await vue.nextTick() } }
 const result = (sessionId, reply, extra = {}) => ({ sessionId, reply, events: [], progress: [], retrieved: [], pendingActions: [], ...extra })
 const action = { id: 91, toolName: 'edit_note', summary: '更新合成目录', preview: { noteId: 701 } }
+const renameAction = { id: 91, toolName: 'run_app_command', summary: '改合成笔记名', noteId: 701, preview: { command: 'note.update' } }
 
 function harness(options = {}) {
   const previousWindow = globalThis.window, previousStorage = globalThis.localStorage
@@ -194,17 +195,19 @@ test('approval results stay with the action-owning reply while a newer reply exi
 
 test('approval finishing after switching does not modify another session but still broadcasts the actual note change', async () => {
   const approval = deferred(), h = harness({ saved: 'a', approve: () => approval.promise })
+  const rename = { id: 91, toolName: 'update_note', summary: '改合成笔记名', noteId: 701 }
+  const noteChange = { noteId: 701, title: '合成新标题', changed: true }
   try {
     await flush()
     h.state.messages = [{ role: 'assistant', content: '甲预览', progress: [] }]
-    h.state.pending = [action]
+    h.state.pending = [rename]
     h.history.set('b', { messages: [{ role: 'assistant', content: '乙回答' }], pendingActions: [{ ...action, id: 92 }] })
-    const approving = h.state.resolveAction(action, true)
+    const approving = h.state.resolveAction(rename, true)
     await h.state.switchSession('b')
-    approval.resolve({ ok: true, hint: '合成完成', noteEdit: { noteId: 701, changed: true } }); await approving
+    approval.resolve({ ok: true, hint: '合成完成', noteEdit: noteChange }); await approving
     assert.equal(h.state.messages[0].content, '乙回答')
     assert.deepEqual(h.state.pending.map(item => item.id), [92])
-    assert.deepEqual(h.updates, [{ noteId: 701, changed: true }])
+    assert.deepEqual(h.updates, [noteChange])
   } finally { h.dispose() }
 })
 
@@ -522,16 +525,16 @@ test('an approval remains locked until its response arrives and double clicks ne
   } finally { h.dispose() }
 })
 
-test('approval timeout queries status once, keeps an executing card locked and later recovers completion without replay', async () => {
+test('a timed out rename stays locked while executing and refreshes the note after confirmed success without replay', async () => {
   let status = 'executing'
   const h = harness({ saved: 'a', approve: async () => { throw Object.assign(new Error('合成超时'), { code: 'ECONNABORTED' }) },
-    actionState: id => ({ id, status, summary: '下载合成资料' }) })
+    actionState: id => ({ id, status, summary: renameAction.summary }) })
   try {
     await flush()
     h.state.messages = [{ role: 'assistant', content: '合成预览', progress: [{ id: 'write', actionId: 91, status: 'waiting' }] }]
-    h.state.pending = [action]
+    h.state.pending = [renameAction]
     const originalReads = h.reads.length
-    await h.state.resolveAction(action, true)
+    await h.state.resolveAction(renameAction, true)
     assert.deepEqual(h.approvals, [91])
     assert.deepEqual(h.checks, [91])
     assert.equal(h.reads.length, originalReads)
@@ -539,6 +542,7 @@ test('approval timeout queries status once, keeps an executing card locked and l
     assert.equal(h.state.messages[0].progress[0].status, 'running')
     assert.equal(h.state.actionLocked(h.state.pending[0]), true)
     assert.equal(h.state.messages[0].content, '合成预览')
+    assert.deepEqual(h.updates, [])
     assert.equal(h.notices.some(notice => notice.type === 'error' || notice.type === 'success'), false)
     await h.state.resolveAction(h.state.pending[0], true)
     await h.state.resolveAction(h.state.pending[0], false)
@@ -550,9 +554,9 @@ test('approval timeout queries status once, keeps an executing card locked and l
     assert.deepEqual(h.approvals, [91])
     assert.equal(h.state.pending.length, 0)
     assert.ok(h.state.messages[0].progress.every(step => step.status === 'completed'))
-    assert.match(h.state.messages[0].content, /已执行：下载合成资料/)
+    assert.match(h.state.messages[0].content, /已执行：改合成笔记名/)
     assert.equal(h.notices.filter(notice => notice.type === 'success').length, 1)
-    assert.deepEqual(h.updates, [], 'status recovery must not invent a note-edit payload')
+    assert.deepEqual(h.updates, [{ noteId: 701, changed: true }])
   } finally { h.dispose() }
 })
 
@@ -583,15 +587,17 @@ test('unreachable status stays uncertain, prevents a repeated write and unlocks 
 })
 
 test('status after timeout can confirm success or failure but unknown statuses never claim a terminal result', async () => {
-  for (const status of ['approved', 'failed', 'rejected', 'unexpected']) {
+  for (const status of ['approved', 'executed', 'failed', 'rejected', 'unexpected']) {
     const h = harness({ saved: 'a', approve: async () => { throw new Error('合成超时') }, actionState: id => ({ id, status }) })
     try {
       await flush()
       h.state.messages = [{ role: 'assistant', content: '合成预览', progress: [{ id: 'write', actionId: 91, status: 'waiting' }] }]
-      h.state.pending = [action]
-      await h.state.resolveAction(action, true)
+      h.state.pending = [renameAction]
+      await h.state.resolveAction(renameAction, true)
       assert.deepEqual(h.approvals, [91])
       assert.deepEqual(h.checks, [91])
+      const approved = status === 'approved' || status === 'executed'
+      assert.deepEqual(h.updates, approved ? [{ noteId: 701, changed: true }] : [])
       if (status === 'unexpected') {
         assert.equal(h.state.pending.length, 1)
         assert.equal(h.state.uncertainActions.has(91), true)
@@ -600,10 +606,24 @@ test('status after timeout can confirm success or failure but unknown statuses n
       } else {
         assert.equal(h.state.pending.length, 0)
         assert.equal(h.state.messages[0].progress[0].status, status === 'failed' ? 'error' : 'completed')
-        assert.match(h.state.messages[0].content, status === 'approved' ? /已确认执行/ : status === 'failed' ? /执行失败/ : /已取消/)
+        assert.match(h.state.messages[0].content, approved ? /已确认执行/ : status === 'failed' ? /执行失败/ : /已取消/)
       }
     } finally { h.dispose() }
   }
+})
+
+test('recovering an approved note deletion does not request a note refresh', async () => {
+  const deleted = { ...renameAction, preview: { command: 'note.delete' } }
+  const h = harness({ actionState: id => ({ id, status: 'approved' }) })
+  try {
+    await flush()
+    h.state.pending = [deleted]
+    await h.state.checkActionState(deleted)
+    assert.deepEqual(h.checks, [91])
+    assert.deepEqual(h.approvals, [])
+    assert.deepEqual(h.updates, [])
+    assert.equal(h.state.pending.length, 0)
+  } finally { h.dispose() }
 })
 
 test('a restored executing action is locked immediately and concurrent status clicks use one GET', async () => {
@@ -625,7 +645,7 @@ test('a restored executing action is locked immediately and concurrent status cl
   } finally { h.dispose() }
 })
 
-test('a late recovery GET never changes the newly selected session', async () => {
+test('a late recovery GET refreshes the matching note without changing the newly selected session', async () => {
   const check = deferred(), h = harness({ saved: 'a', approve: async () => { throw new Error('合成超时') }, actionState: () => check.promise })
   try {
     await flush()
@@ -639,7 +659,7 @@ test('a late recovery GET never changes the newly selected session', async () =>
     check.resolve({ id: 91, status: 'approved' }); await approving
     assert.equal(h.state.messages[0].content, '乙回答')
     assert.deepEqual(h.state.pending.map(item => item.id), [92])
-    assert.deepEqual(h.updates, [])
+    assert.deepEqual(h.updates, [{ noteId: 701, changed: true }])
     assert.equal(h.notices.some(notice => notice.type === 'success'), false)
   } finally { h.dispose() }
 })

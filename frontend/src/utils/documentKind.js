@@ -4,7 +4,7 @@ export function documentKind(file) {
   if (ext === 'pdf') return 'pdf'
   if (['doc', 'docx', 'docm'].includes(ext)) return 'word'
   if (['md', 'markdown'].includes(ext)) return 'markdown'
-  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'].includes(ext)) return 'image'
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'tif', 'tiff'].includes(ext)) return 'image'
   if (['mp4', 'webm', 'ogg'].includes(ext)) return 'video'
   if (['mp3', 'wav', 'flac', 'm4a'].includes(ext)) return 'audio'
   return 'other'

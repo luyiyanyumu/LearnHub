@@ -100,7 +100,8 @@ class DocumentMarkdownWriterTest {
     }
 
     @Test void anAtomicBlockOverTheIndexLimitIsReportedAndNeverSilentlyCut() {
-        String source = "synthetic code line\n".repeat(22000);
+        String line="synthetic code line\n";
+        String source = line.repeat(DocumentTextService.MAX_TEXT_CHARS/line.length()+1);
         var result = DocumentMarkdownWriter.render(extraction(List.of(block("code", source, 0, true, "accepted", null, null, null, null))));
         assertTrue(result.text().isEmpty());
         assertTrue(result.markdown().contains(source));

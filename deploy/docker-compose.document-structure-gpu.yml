@@ -1,0 +1,14 @@
+# Add after docker-compose.document-structure.yml, with an NVIDIA-compatible Docker runtime.
+# Build the CPU image from current source first; this layer only changes the inference runtime.
+services:
+  document-structure:
+    build:
+      context: ..
+      dockerfile: tools/document-structure/Dockerfile.gpu
+      args:
+        CPU_IMAGE: ${LEARNHUB_STRUCTURE_CPU_IMAGE:-learn-hub-document-structure:local}
+    image: learn-hub-document-structure:gpu-local
+    environment:
+      LEARNHUB_STRUCTURE_DEVICE: gpu:0
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    gpus: all

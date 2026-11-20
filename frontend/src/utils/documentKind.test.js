@@ -10,3 +10,9 @@ test('uploaded Word and Markdown original files use their native reading paths',
   assert.equal(documentKind({ ext: 'zip' }), 'other')
   assert.equal(documentKind(null), 'other')
 })
+
+test('multi-frame TIFF sources use the image reader and preserve filename fallback', () => {
+  assert.equal(documentKind({ ext: 'tif' }), 'image')
+  assert.equal(documentKind({ ext: '.TIFF' }), 'image')
+  assert.equal(documentKind({ originName: '合成扫描件.TIFF' }), 'image')
+})

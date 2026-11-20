@@ -3,7 +3,7 @@ import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import { parse, compileScript } from '@vue/compiler-sfc'
 import * as vue from 'vue'
-import { isDark, setThemeMode } from '../composables/useTheme.js'
+import { isDark, setThemeMode, skin } from '../composables/useTheme.js'
 import { createMermaidAdapter, createMermaidPreviewState, mermaidFrameDocument, mermaidFrameHtml, mermaidSvgSize, readMermaidTheme } from './mermaidPreview.js'
 import { mermaidReadableSize, mermaidViewportSize } from './mermaidViewport.js'
 
@@ -16,7 +16,7 @@ function previewHarness(render) {
   const script = content.replace(/^import .*\n/gm, '').replace('export default', 'return')
   const mounted = [], unmounted = []
   const bindings = { computed: vue.computed, nextTick: vue.nextTick, reactive: vue.reactive, ref: vue.ref, watch: vue.watch,
-    isDark, onMounted: callback => mounted.push(callback), onBeforeUnmount: callback => unmounted.push(callback),
+    isDark, skin, onMounted: callback => mounted.push(callback), onBeforeUnmount: callback => unmounted.push(callback),
     createMermaidPreviewState: options => createMermaidPreviewState({ ...options, render }),
     mermaidFrameDocument, mermaidSvgSize, readMermaidTheme, mermaidViewportSize, mermaidReadableSize }
   const component = new Function(...Object.keys(bindings), script)(...Object.values(bindings))

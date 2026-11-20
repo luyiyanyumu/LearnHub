@@ -8,6 +8,7 @@ import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import { ElMessage } from 'element-plus'
 import { fileApi } from '../api'
 import ReaderTranslation from './ReaderTranslation.vue'
+import { sourceRegionStyle } from '../utils/sourceLocation.js'
 
 /**
  * 自研 PDF 阅读器（不用浏览器内置查看器）。
@@ -35,6 +36,7 @@ const props = defineProps({
   /** 上次的阅读位置（来自资料详情），打开时恢复 */
   initial: { type: Object, default: () => ({}) },
   translationCaps: { type: Object, default: () => ({}) },
+  sourceLocation: { type: Object, default: null },
 })
 
 /**
@@ -74,9 +76,11 @@ let observedWidth = 0
 let io = null
 let saveTimer = null
 let pendingJump = null
+let pendingLocate = false
 
 const displayScale = computed(() => scale.value)
 const pageLabel = computed(() => `${pageNo.value} / ${totalPages.value || '–'}`)
+const regionStyle = computed(() => sourceRegionStyle(props.sourceLocation))
 
 // ------------------------------------------------------------------
 // 打开与索引
@@ -218,7 +222,8 @@ async function buildContinuous() {
  * @param fixed true = 固定模式（单页/双页），false = 连续模式里的懒渲染
  */
 async function renderOne(n, holder, fixed) {
-  if (!holder || holder.dataset.done === '1') return
+  if (!holder) return
+  if (holder.dataset.done === '1') { await revealSourceRegion(n, holder); return }
   holder.dataset.done = '1'
   try {
     const page = await doc.getPage(n)
@@ -271,11 +276,19 @@ async function renderOne(n, holder, fixed) {
       if (row) row.spans = spans
       textSpans.value += spans
     }
+    await revealSourceRegion(n, holder)
   } catch (e) {
     if (!/cancel/i.test(String(e?.name || e?.message))) {
       error.value = '渲染第 ' + n + ' 页失败：' + (e?.message || e)
     }
   }
+}
+
+async function revealSourceRegion(n, holder) {
+  if (!pendingLocate || Number(props.sourceLocation?.page) !== n) return
+  await nextTick()
+  holder.querySelector('.pdf-source-highlight')?.scrollIntoView({ block: 'center', inline: 'nearest' })
+  pendingLocate = false
 }
 
 function go(delta) {
@@ -397,7 +410,11 @@ function onKey(e) {
 }
 
 watch(() => props.src, open)
-defineExpose({ jump })
+watch(() => props.sourceLocation, location => {
+  pendingLocate = !!location?.rect
+  if (location?.page) jump(location.page)
+}, { immediate: true })
+defineExpose({ jump, focusSource: () => wrap.value?.focus({ preventScroll: true }) })
 onBeforeUnmount(() => {
   if (renderTask) { try { renderTask.cancel() } catch (e) { /* ignore */ } }
   if (resizeObserver) resizeObserver.disconnect()
@@ -421,7 +438,7 @@ window.addEventListener('keydown', onKey)
       </button>
       <button type="button" class="reader-btn" :disabled="pageNo <= 1" @click="go(-1)">‹</button>
       <span class="pdf-page">
-        <input :value="pageNo" class="pdf-input" @change="(e) => jump(e.target.value)" />
+        <input :value="pageNo" class="pdf-input" inputmode="numeric" aria-label="PDF 页码" @change="(e) => jump(e.target.value)" />
         {{ pageLabel.replace(String(pageNo), '').trim() }}
       </span>
       <button type="button" class="reader-btn" :disabled="pageNo >= totalPages" @click="go(1)">›</button>
@@ -458,7 +475,7 @@ window.addEventListener('keydown', onKey)
         </template>
       </aside>
 
-      <div ref="wrap" class="pdf-canvas-wrap" @scroll="onScroll">
+      <div ref="wrap" class="pdf-canvas-wrap" tabindex="-1" aria-label="PDF 原文页面" @scroll="onScroll">
         <div v-if="loading" class="pdf-state">正在解析 PDF…</div>
         <div v-else-if="error" class="pdf-state pdf-error">{{ error }}</div>
         <div class="pdf-pages" :class="'mode-' + mode">
@@ -472,6 +489,7 @@ window.addEventListener('keydown', onKey)
             <canvas class="pdf-canvas"></canvas>
             <!-- 透明文字层：让页面里的文字可选中（pdf.js 的 textLayer 样式在全局 CSS 里） -->
             <div class="pdf-textlayer textLayer"></div>
+            <div v-if="regionStyle && Number(sourceLocation?.page) === p.n" class="pdf-source-highlight" :style="regionStyle" role="img" aria-label="原文定位区域"></div>
             <span class="pdf-page-no">
               {{ p.n }} / {{ totalPages }}
               <template v-if="p.spans"> · {{ p.spans }} 段文字</template>
@@ -495,6 +513,9 @@ window.addEventListener('keydown', onKey)
 }
 .pdf-toolbar {
   flex: 0 0 auto;
+  flex-wrap: wrap;
+  max-height: min(120px, 28dvh);
+  overflow: auto;
 }
 .pdf-page {
   color: var(--app-text-2);
@@ -601,6 +622,15 @@ window.addEventListener('keydown', onKey)
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
   flex-shrink: 0;
 }
+.pdf-source-highlight {
+  position: absolute;
+  z-index: 4;
+  box-sizing: border-box;
+  border: 2px solid #0d9488;
+  background: rgb(20 184 166 / 20%);
+  box-shadow: 0 0 0 2px rgb(255 255 255 / 70%);
+  pointer-events: none;
+}
 .pdf-canvas {
   display: block;
   position: relative;
@@ -634,5 +664,10 @@ window.addEventListener('keydown', onKey)
   background: rgba(0, 0, 0, 0.4);
   padding: 2px 8px;
   border-radius: 6px;
+}
+@media (max-width: 600px) {
+  .pdf-outline { width: min(180px, 42%); min-width: 0; }
+  .pdf-main { min-width: 0; gap: 4px; }
+  .pdf-canvas-wrap { min-width: 0; padding: 6px; }
 }
 </style>

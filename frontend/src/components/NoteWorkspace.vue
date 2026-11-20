@@ -1,7 +1,9 @@
 <script setup>
-import { computed, defineAsyncComponent, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import NoteTabs from './NoteTabs.vue'
+import { noteApi } from '../api'
+import { AGENT_NOTE_UPDATED_EVENT, matchesOpenNote } from '../utils/agentNoteEdit'
 import {
   noteTabs, openNoteRoute, findNoteRouteTab, updateNoteTab, closeNoteTab,
   isNoteEditorRoute, newNoteDraftQuery, noteTabRoute,
@@ -13,6 +15,7 @@ const router = useRouter()
 const closingKey = ref('')
 const visitedKeys = ref(new Set())
 const editors = new Map()
+const titleRequests = new Map()
 const isEditor = computed(() => isNoteEditorRoute(route))
 const activeTab = computed(() => isEditor.value ? findNoteRouteTab(route) : null)
 const activeKey = computed(() => activeTab.value?.key || '')
@@ -22,6 +25,26 @@ watch(() => route.fullPath, () => {
   const tab = openNoteRoute(route)
   if (tab) visitedKeys.value = new Set([...visitedKeys.value, tab.key])
 }, { immediate: true })
+
+async function refreshUnvisitedTabTitle(event) {
+  const tab = noteTabs.value.find(item => matchesOpenNote(item.id, event.detail?.noteId))
+  if (!tab || visitedKeys.value.has(tab.key)) return
+  const request = Symbol()
+  titleRequests.set(tab, request)
+  try {
+    const latest = await noteApi.detail(tab.id, { silentError: true })
+    if (titleRequests.get(tab) === request && noteTabs.value.includes(tab) && !visitedKeys.value.has(tab.key)) {
+      updateNoteTab(tab.key, { title: latest?.title })
+    }
+  } catch { /* The editor loads the current title when the user opens this tab. */ }
+  finally { if (titleRequests.get(tab) === request) titleRequests.delete(tab) }
+}
+
+onMounted(() => window.addEventListener(AGENT_NOTE_UPDATED_EVENT, refreshUnvisitedTabTitle))
+onBeforeUnmount(() => {
+  window.removeEventListener(AGENT_NOTE_UPDATED_EVENT, refreshUnvisitedTabTitle)
+  titleRequests.clear()
+})
 
 function setEditor(key, editor) {
   if (editor) editors.set(key, editor)

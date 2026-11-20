@@ -105,7 +105,7 @@ public class WebService {
             });
 
     /**
-     * 二进制下载（入库用）的上限：与后端 multipart 上限对齐（50MB）。
+     * 从外部下载文件入库时的独立上限（50 MB）。
      * 独立于 {@link #MAX_RESPONSE_BYTES}（5MB）—— 那个是"别把网页正文吃爆"，
      * 而论文 PDF 动辄 2~20MB，用同一个上限会导致正常论文全被拒。
      */

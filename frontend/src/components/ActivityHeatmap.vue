@@ -299,10 +299,10 @@ function selectYear(year) {
 
 .activity-years {
   grid-column: 2;
-  grid-row: 2;
+  grid-row: 1 / -1;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: var(--space-sm);
   width: 68px;
   flex-shrink: 0;
 }
@@ -311,8 +311,8 @@ function selectYear(year) {
   display: flex;
   align-items: center;
   justify-content: center;
-  flex: 1;
-  min-height: 0;
+  height: var(--control-h);
+  flex-shrink: 0;
   border: 0;
   border-radius: 7px;
   padding: 0 9px;
@@ -353,15 +353,10 @@ function selectYear(year) {
   }
 
   .activity-years {
-    flex-direction: row;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(42px, 1fr));
     width: auto;
     margin-top: 12px;
-    overflow-x: auto;
-  }
-
-  .activity-years button {
-    min-height: 32px;
-    padding: 7px 9px;
   }
 }
 </style>

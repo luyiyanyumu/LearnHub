@@ -1,9 +1,10 @@
 import MarkdownIt from 'markdown-it'
 import katex from 'katex'
+import { isManuallyReviewedFormula } from './documentExtraction.js'
 
 export const MAX_EXTRACTED_LATEX_CHARS = 12000
 const MAX_MATH_PER_BLOCK = 100
-const md = new MarkdownIt({ html: false, linkify: false, breaks: true })
+const md = new MarkdownIt({ html: false, linkify: false, breaks: false })
 const UNSAFE_TEX = /\\(?:href|url|includegraphics|htmlClass|htmlId|htmlStyle|htmlData|class|style)\b/
 
 // Extracted Markdown image references must not trigger requests to remote/local paths.
@@ -157,13 +158,14 @@ export function extractedFormulaState(block, source, { baseline, recognition, ha
   const original = baseline === undefined ? extractedFormulaLatex(block) : normalizeExtractedLatex(baseline)
   const edited = rendered.latex !== original
   const status = recognition?.status || block?.latexStatus || 'unavailable'
-  const visual = !!recognition || status === 'recognized' || /视觉模型/.test(block?.latexMessage || '')
-  const mainPreview = rendered.ok && (edited || !hasImage || status === 'restored' || status === 'recognized')
+  const manual = !recognition && isManuallyReviewedFormula(block)
+  const visual = !manual && (!!recognition || status === 'recognized' || /视觉模型/.test(block?.latexMessage || ''))
+  const mainPreview = rendered.ok && (edited || !hasImage && status !== 'needs_review' || status === 'restored' || status === 'recognized')
   return {
-    rendered, edited, status, visual, mainPreview,
+    rendered, edited, status, visual, manual, mainPreview,
     candidatePreview: rendered.ok && !mainPreview,
     originalOpen: hasImage && !mainPreview,
-    needsReview: !rendered.ok || (!edited && status !== 'restored'),
+    needsReview: !rendered.ok || (!edited && !manual && status !== 'restored'),
   }
 }
 

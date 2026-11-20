@@ -1,11 +1,15 @@
 package org.dyh.learnhub.service;
 
+import org.apache.pdfbox.cos.COSName;
+import org.apache.pdfbox.io.IOUtils;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.PDPageContentStream;
+import org.apache.pdfbox.pdmodel.common.PDRectangle;
 import org.apache.pdfbox.pdmodel.font.PDType1Font;
 import org.apache.pdfbox.pdmodel.font.Standard14Fonts;
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
+import org.apache.pdfbox.pdmodel.common.PDStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -14,10 +18,14 @@ import javax.imageio.IIOImage;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -81,6 +89,111 @@ class DocumentIngestionServiceTest {
             assertArrayEquals(before, Files.readAllBytes(path));
             assertOffsets(extraction);
             verify(client, times(1)).recognize(any(), any());
+        }
+    }
+
+    @Test void oversizedPdfScansFitBothOcrEnginesAndKeepRotatedCropCoordinatesOnResume() throws Exception {
+        Path path = temp.resolve("synthetic-oversized.pdf");
+        try (PDDocument pdf = new PDDocument()) {
+            var scan = new PDPage(new PDRectangle(2600, 3300));
+            scan.setCropBox(new PDRectangle(100, 150, 2400, 3000));
+            scan.setRotation(90);
+            pdf.addPage(scan);
+            var pixels = new ByteArrayOutputStream();
+            ImageIO.write(new BufferedImage(120, 80, BufferedImage.TYPE_INT_RGB), "png", pixels);
+            try (var content = new PDPageContentStream(pdf, scan)) {
+                content.drawImage(PDImageXObject.createFromByteArray(pdf, pixels.toByteArray(), "synthetic"), 100, 150, 2400, 3000);
+            }
+            pdf.save(path.toFile());
+        }
+        byte[] original = Files.readAllBytes(path);
+        var basic = mock(DocumentOcrClient.class);
+        when(basic.configured()).thenReturn(true);
+        when(basic.recognize(any(), any())).thenAnswer(call -> {
+            var size = assertAdaptiveRaster(call.getArgument(0));
+            return new DocumentOcrClient.Result("tesseract", "synthetic", size[0], size[1],
+                    List.of(new DocumentOcrClient.Block("b1", "para", "Synthetic adaptive OCR", centralRect(size), 0.96, 3)),
+                    List.of());
+        });
+        var structure = mock(DocumentStructureClient.class);
+        when(structure.configured()).thenReturn(true);
+        when(structure.recognize(any(), any())).thenAnswer(call -> {
+            var size = assertAdaptiveRaster(call.getArgument(0));
+            return new DocumentStructureClient.Result(size[0], size[1], List.of(new DocumentStructureClient.Block(
+                    "para", "Synthetic adaptive layout", centralRect(size), 0.96, 0, List.of(), null)), List.of());
+        });
+        try (var service = closeable(new DocumentIngestionService(new PdfLayoutExtractor(), basic, structure))) {
+            var plain = service.value.extract(path, "pdf", false, null, null);
+            assertAdaptiveCoordinates(plain);
+            var previous = new DocumentIngestionService.Extraction("empty", "", 0, null, plain.sourceSha256(),
+                    plain.pipelineVersion(), List.of(new DocumentIngestionService.Page(1, 3000, 2400, "pt", "text", List.of())),
+                    new DocumentIngestionService.QualityReport(1, 1, 0, 1, null,
+                            List.of("第 1 页未进入索引：图像像素预算超限"), true, true));
+            var structured = service.value.extract(path, "pdf", true, previous, null);
+            assertAdaptiveCoordinates(structured);
+            assertEquals(plain.sourceSha256(), structured.sourceSha256());
+            assertFalse(structured.report().warnings().stream().anyMatch(warning -> warning.contains("图像像素预算超限")));
+            assertArrayEquals(original, Files.readAllBytes(path));
+            verify(basic, times(1)).recognize(any(), any());
+            verify(structure, times(1)).recognize(any(), any());
+        }
+    }
+
+    private static int[] assertAdaptiveRaster(byte[] png) {
+        // PNG stores pixel dimensions in the IHDR chunk. Checking it avoids decoding another large bitmap in the test.
+        var header = ByteBuffer.wrap(png, 16, 8);
+        int width = header.getInt(), height = header.getInt();
+        assertTrue((long) width * height <= 12_000_000);
+        assertTrue(width > height);
+        assertTrue(width >= 3800, "use the highest useful resolution within the budget");
+        return new int[]{width, height};
+    }
+
+    private static double[] centralRect(int[] size) {
+        return new double[]{size[0] / 4.0, size[1] / 5.0, size[0] * 0.75, size[1] * 0.8};
+    }
+
+    private static void assertAdaptiveCoordinates(DocumentIngestionService.Extraction extraction) {
+        assertEquals("ok", extraction.status());
+        assertFalse(extraction.report().partial());
+        assertFalse(extraction.report().truncated());
+        assertEquals(1, extraction.completedPages());
+        var scan = extraction.pages().getFirst();
+        assertEquals("ocr", scan.method());
+        assertEquals("pt", scan.coordinateUnit());
+        assertEquals(3000, scan.width());
+        assertEquals(2400, scan.height());
+        assertArrayEquals(new double[]{750, 480, 2250, 1920}, scan.blocks().getFirst().rect(), 0.001);
+        assertTrue(extraction.report().warnings().stream().anyMatch(warning -> warning.contains("自适应渲染至")));
+        assertOffsets(extraction);
+    }
+
+    @Test void pdfOverOldSizeLimitStillReachesTheExtractor() throws Exception {
+        Path path = temp.resolve("large.pdf");
+        try (PDDocument pdf = new PDDocument(IOUtils.createTempFileOnlyStreamCache())) {
+            PDPage page = new PDPage();
+            pdf.addPage(page);
+            try (var content = new PDPageContentStream(pdf, page)) {
+                content.beginText();
+                content.setFont(new PDType1Font(Standard14Fonts.FontName.HELVETICA), 12);
+                content.newLineAtOffset(50, 700);
+                content.showText("Synthetic knowledge in a large PDF.");
+                content.endText();
+            }
+            var padding = new PDStream(pdf);
+            pdf.getDocumentCatalog().getCOSObject().setItem(COSName.getPDFName("SyntheticPadding"), padding);
+            try (var out = padding.createOutputStream()) {
+                byte[] zeroes = new byte[1024 * 1024];
+                for (int mib = 0; mib < 65; mib++) out.write(zeroes);
+            }
+            pdf.save(path.toFile());
+        }
+        assertTrue(Files.size(path) > 64L * 1024 * 1024);
+        try (var service = closeable(new DocumentIngestionService(new PdfLayoutExtractor(), new DocumentOcrClient("")))) {
+            var extraction = service.value.extract(path, "pdf");
+            assertEquals("ok", extraction.status());
+            assertTrue(extraction.text().contains("Synthetic knowledge in a large PDF."));
+            assertEquals(1, extraction.report().processedPages());
         }
     }
 
@@ -222,7 +335,7 @@ class DocumentIngestionServiceTest {
         }
     }
 
-    @Test void ocrPageCapIsExplicitForMultipageTiff() throws Exception {
+    @Test void tiffResumesPastTheOcrCapAndRetriesRejectedPagesAfterMissingPages() throws Exception {
         Path path = temp.resolve("synthetic-multipage.tiff");
         var writer = ImageIO.getImageWritersByFormatName("TIFF").next();
         try (var output = ImageIO.createImageOutputStream(path.toFile())) {
@@ -231,25 +344,131 @@ class DocumentIngestionServiceTest {
                     new IIOImage(new BufferedImage(120, 80, BufferedImage.TYPE_INT_RGB), null, null), null);
             writer.endWriteSequence();
         } finally { writer.dispose(); }
-        var client = client(List.of(block("Synthetic TIFF page", 0.9)));
+        var client = mock(DocumentOcrClient.class);
+        var calls = new AtomicInteger();
+        when(client.configured()).thenReturn(true);
+        when(client.recognize(any(), any())).thenAnswer(call -> {
+            int number = calls.incrementAndGet();
+            var diagnostics = number == 2 ? IntStream.range(0, 205)
+                    .mapToObj(index -> "ocr_text_only: synthetic advisory " + index).toList() : List.<String>of();
+            return new DocumentOcrClient.Result("tesseract", "synthetic", 120, 80,
+                    List.of(block("Synthetic TIFF OCR attempt " + number, number == 1 ? 0.2 : 0.9)), diagnostics);
+        });
         try (var service = closeable(new DocumentIngestionService(new PdfLayoutExtractor(), client))) {
-            var result = service.value.extract(path, "tiff");
+            List<DocumentIngestionService.Progress> progress = new ArrayList<>();
+            var result = service.value.extract(path, "tiff", false, null, progress::add);
             assertEquals("ok", result.status());
             assertEquals(21, result.report().totalPages());
+            assertEquals(20, result.report().processedPages());
+            assertEquals(19, result.completedPages());
             assertEquals(20, result.report().ocrPages());
             assertTrue(result.report().partial()); assertTrue(result.report().truncated());
             assertTrue(result.report().warnings().stream().anyMatch(w -> w.contains("20 页")));
-            verify(client, times(20)).recognize(any(), any());
+            assertEquals(200, result.report().warnings().size());
+            assertEquals(new DocumentIngestionService.Progress("extracting", 19, 21, 20), progress.getLast());
+
+            progress.clear();
+            var resumed = service.value.extract(path, "tiff", false, result, progress::add);
+            assertEquals(21, resumed.report().processedPages());
+            assertEquals(21, resumed.completedPages());
+            assertEquals(21, resumed.report().ocrPages());
+            assertEquals(List.of(21, 1), progress.stream().map(DocumentIngestionService.Progress::currentPage)
+                    .filter(page -> page > 0).distinct().toList());
+            assertEquals(new DocumentIngestionService.Progress("extracting", 19, 21, 0), progress.get(1));
+            assertEquals(new DocumentIngestionService.Progress("extracting", 21, 21, 1), progress.getLast());
+            assertTrue(resumed.text().startsWith("Synthetic TIFF OCR attempt 22\n\nSynthetic TIFF OCR attempt 2"));
+            assertTrue(resumed.text().endsWith("Synthetic TIFF OCR attempt 21"));
+            assertEquals(21, resumed.pages().getLast().page());
+            assertFalse(resumed.report().partial()); assertFalse(resumed.report().truncated());
+            assertFalse(resumed.report().warnings().stream().anyMatch(w -> w.contains("20 页") || w.contains("low_confidence")));
+            assertOffsets(resumed);
+            verify(client, times(22)).recognize(any(), any());
         }
+    }
+
+    @Test void changedSourceNeverReusesEarlierIndexedText() throws Exception {
+        Path path = image();
+        var ocr = client(List.of(block("Prior document text", 0.9)));
+        try (var service = closeable(new DocumentIngestionService(new PdfLayoutExtractor(), ocr))) {
+            var previous = service.value.extract(path, "png");
+            BufferedImage replacement = new BufferedImage(120, 80, BufferedImage.TYPE_INT_RGB);
+            replacement.setRGB(0, 0, 0xFFFFFF);
+            ImageIO.write(replacement, "png", path.toFile());
+            doReturn(new DocumentOcrClient.Result("tesseract", "synthetic", 120, 80,
+                    List.of(block("Current document text", 0.9)), List.of())).when(ocr).recognize(any(), any());
+            var result = service.value.extract(path, "png", false, previous, null);
+            assertNotEquals(previous.sourceSha256(), result.sourceSha256());
+            assertEquals("Current document text", result.text());
+            verify(ocr, times(2)).recognize(any(), any());
+        }
+    }
+
+    @Test void resumeKeepsPriorAcceptedBlocksWhenAdditionalPagesRevealRepeatedHeaders() throws Exception {
+        Path path = temp.resolve("margins.pdf");
+        try (PDDocument pdf = new PDDocument()) {
+            for (int i = 0; i < 3; i++) pdf.addPage(new PDPage());
+            pdf.save(path.toFile());
+        }
+        var layout = mock(PdfLayoutExtractor.class);
+        when(layout.extractPage(any(), anyInt())).thenAnswer(call -> nativePage(call.getArgument(1)));
+        when(layout.extractPage(any(), eq(3))).thenThrow(new IllegalStateException("synthetic unavailable page"))
+                .thenReturn(nativePage(3));
+        try (var service = closeable(new DocumentIngestionService(layout, new DocumentOcrClient("")))) {
+            var previous = service.value.extract(path, "pdf");
+            assertEquals(2, previous.completedPages());
+            var resumed = service.value.extract(path, "pdf", false, previous, null);
+            assertEquals(3, resumed.completedPages());
+            for (int i = 0; i < 2; i++) {
+                var original = previous.pages().get(i).blocks().getFirst();
+                var retained = resumed.pages().get(i).blocks().getFirst();
+                assertEquals(original, retained);
+                assertTrue(retained.indexed());
+            }
+            assertEquals("page_furniture", resumed.pages().getLast().blocks().getFirst().quality());
+            assertFalse(resumed.report().partial());
+            assertOffsets(resumed);
+            verify(layout, times(1)).extractPage(any(), eq(1));
+            verify(layout, times(1)).extractPage(any(), eq(2));
+            verify(layout, times(2)).extractPage(any(), eq(3));
+        }
+    }
+
+    @Test void emptyPdfPageIsCompleteWithoutAnOcrAttempt() throws Exception {
+        Path path = temp.resolve("with-blank.pdf");
+        try (PDDocument pdf = new PDDocument()) {
+            pdf.addPage(new PDPage());
+            pdf.addPage(new PDPage());
+            pdf.save(path.toFile());
+        }
+        var layout = mock(PdfLayoutExtractor.class);
+        when(layout.extractPage(any(), eq(1))).thenReturn(new PdfLayoutExtractor.PageLayout(1, 1, List.of()));
+        when(layout.extractPage(any(), eq(2))).thenReturn(nativePage(2));
+        var ocr = mock(DocumentOcrClient.class);
+        try (var service = closeable(new DocumentIngestionService(layout, ocr))) {
+            var result = service.value.extract(path, "pdf");
+            assertEquals("blank", result.pages().getFirst().method());
+            assertEquals(2, result.completedPages());
+            assertEquals(0, result.report().rejectedPages());
+            assertFalse(result.report().partial());
+            verifyNoInteractions(ocr);
+        }
+    }
+
+    private static PdfLayoutExtractor.PageLayout nativePage(int number) {
+        return new PdfLayoutExtractor.PageLayout(number, 1, List.of(
+                new PdfLayoutExtractor.Block("para", "Repeated margin text", 0, null, number,
+                        new double[]{10, 10, 100, 20}, null, null, null),
+                new PdfLayoutExtractor.Block("para", "Original body on page " + number, 0, null, number,
+                        new double[]{30, 200, 400, 230}, null, null, null)));
     }
 
     @Test void totalCharacterCapDoesNotSplitBlocksAndLegacyWrappingDoesNotRejectExistingText() throws Exception {
         Path path = temp.resolve("long-native.pdf");
         try (PDDocument pdf = new PDDocument()) { pdf.addPage(new PDPage()); pdf.save(path.toFile()); }
         var layout = mock(PdfLayoutExtractor.class);
-        String first = "a".repeat(DocumentTextService.MAX_TEXT_CHARS - 10);
+        String first = "a".repeat(DocumentTextService.MAX_TEXT_CHARS - 20);
         when(layout.extractPage(any(), eq(1))).thenReturn(new PdfLayoutExtractor.PageLayout(1, 1, List.of(
-                new PdfLayoutExtractor.Block("para", first, 0), new PdfLayoutExtractor.Block("para", "Another whole paragraph", 0))));
+                new PdfLayoutExtractor.Block("para", first, 0), new PdfLayoutExtractor.Block("para", "Whole tail paragraph", 0))));
         try (var service = closeable(new DocumentIngestionService(layout, new DocumentOcrClient("")))) {
             var result = service.value.extract(path, "pdf");
             assertEquals(first, result.text());
@@ -277,7 +496,11 @@ class DocumentIngestionServiceTest {
             assertEquals(501, result.report().totalPages()); assertEquals(500, result.report().processedPages());
             assertTrue(result.report().partial()); assertTrue(result.report().truncated());
             assertEquals(500, result.pages().getLast().page());
-            verify(layout, times(500)).extractPage(any(), anyInt());
+            var resumed = service.value.extract(path, "pdf", false, result, null);
+            assertEquals(501, resumed.completedPages());
+            assertEquals(501, resumed.pages().getLast().page());
+            assertFalse(resumed.report().partial()); assertFalse(resumed.report().truncated());
+            verify(layout, times(501)).extractPage(any(), anyInt());
         }
     }
 

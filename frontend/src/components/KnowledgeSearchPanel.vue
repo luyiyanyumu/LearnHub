@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { ArrowRight, Close, Connection, Document, Download, Reading, Refresh, Search } from '@element-plus/icons-vue'
 import { isGeneratedGuide, retrievalChannels, retrievalPosition, retrievalRelations, retrievalSnippet, retrievalSourcePath, retrievalTitle } from '../utils/retrievalDisplay.js'
 import { highlightKnowledgeText, KNOWLEDGE_SOURCE_LABELS, knowledgeResultRows, knowledgeSourceFilters, knowledgeSourceType } from '../utils/knowledgeResultView.js'
+import { firstSourceLocation } from '../utils/sourceLocation.js'
 
 const props = defineProps({
   query: { type: String, default: '' },
@@ -122,6 +123,7 @@ function clearQuery() {
               <span v-if="row.item.categoryName" class="result-category">{{ row.item.categoryName }}</span>
               <span v-if="sourceFileName(row.item)">{{ sourceFileName(row.item) }}<template v-if="row.item.textChars"> · {{ row.item.textChars }} 字</template></span>
               <span v-if="retrievalPosition(row.item)" class="passage-position">{{ retrievalPosition(row.item) }}</span>
+              <el-button v-if="knowledgeSourceType(row.item) === 'file' && firstSourceLocation(row.item)" class="result-source-locate" size="small" link type="primary" @click="emit('open', row.item)">定位原文</el-button>
               <span v-if="retrievalChannels(row.item).length" class="retrieval-channels"><span class="metadata-label">召回</span><span v-for="channel in retrievalChannels(row.item)" :key="channel" class="channel-label">{{ channel }}</span></span>
               <span v-if="scoreLabel(row.item)" class="result-score" title="检索排序分，用于比较同一次检索的结果相关性">{{ lastMode === 'fusion' ? '融合分' : '排序分' }} {{ scoreLabel(row.item) }}</span>
               <time v-if="row.item.updatedAt" :datetime="row.item.updatedAt">{{ row.item.updatedAt }}</time>
@@ -146,27 +148,28 @@ function clearQuery() {
 </template>
 
 <style scoped>
+.result-source-locate.el-button { color: var(--app-brand-deep); }
 .knowledge-search-panel { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
-.query-panel { padding: 16px; border: 1px solid var(--app-border); border-radius: var(--radius-lg); background: var(--app-card); }
+.query-panel { container: knowledge-query / inline-size; padding: 16px; border: 1px solid var(--app-border); border-radius: var(--radius-lg); background: var(--app-card); }
 .query-heading { margin-bottom: 10px; }
 .query-heading h2, .results-heading h2 { margin: 0; font-size: 16px; line-height: 1.4; font-weight: 650; letter-spacing: -.3px; }
-.query-form { display: flex; align-items: stretch; gap: 8px; }
-.query-input-wrap { display: flex; align-items: center; flex: 1; min-width: 0; min-height: 44px; gap: 10px; border: 1px solid var(--app-border); border-radius: var(--radius); padding: 0 12px; background: var(--app-bg); transition: border-color var(--dur-fast), box-shadow var(--dur-fast); }
+.query-form { display: flex; align-items: center; gap: var(--space-sm); }
+.query-input-wrap { display: flex; align-items: center; flex: 0 1 var(--control-search-w); min-width: 0; height: var(--control-h); gap: var(--space-sm); border: 1px solid var(--app-border); border-radius: var(--radius); padding: 0 12px; background: var(--app-bg); transition: border-color var(--dur-fast), box-shadow var(--dur-fast); }
 .query-input-wrap:focus-within { border-color: var(--app-brand); box-shadow: 0 0 0 3px var(--app-brand-glow); }
 .query-input-icon { width: 19px; height: 19px; color: var(--app-text-3); flex-shrink: 0; }
-.query-input { width: 100%; min-width: 0; border: 0; outline: 0; box-shadow: none; background: transparent; color: var(--app-text-1); font: inherit; font-size: 14px; padding: 10px 0; }
+.query-input { width: 100%; height: 100%; min-width: 0; border: 0; outline: 0; box-shadow: none; background: transparent; color: var(--app-text-1); font: inherit; font-size: 14px; padding: 0; }
 .query-input::placeholder { color: var(--app-text-3); }
 .query-input:focus-visible { outline: 0; }
 .clear-query { display: grid; place-items: center; width: 28px; height: 28px; flex-shrink: 0; border: 0; border-radius: var(--radius); background: transparent; color: var(--app-text-3); cursor: pointer; }
 .clear-query:hover { background: var(--app-border); color: var(--app-text-1); }
 .clear-query svg { width: 16px; height: 16px; }
-.search-submit { height: auto; min-height: 44px; min-width: 88px; padding: 0 16px; font-weight: 600; }
+.search-submit { flex: none; width: var(--control-w); max-width: 100%; height: var(--control-h); padding: 0 16px; font-weight: 600; }
 .search-submit svg { width: 16px; height: 16px; margin-left: 8px; }
 .query-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; margin-top: 10px; }
 .query-options { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .query-options > span { color: var(--app-text-3); font-size: 12px; }
-.mode-switch { display: flex; gap: 2px; background: var(--app-bg); border-radius: var(--radius); padding: 3px; }
-.mode-switch button { border: 0; border-radius: 6px; padding: 5px 10px; background: transparent; color: var(--app-text-2); font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; }
+.mode-switch { display: flex; gap: 2px; background: var(--app-bg); border-radius: var(--radius); padding: 0 3px; }
+.mode-switch button { height: var(--control-h); border: 0; border-radius: 6px; padding: 0 10px; background: transparent; color: var(--app-text-2); font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; }
 .mode-switch button.active { color: var(--app-brand-deep); background: var(--app-card); box-shadow: var(--shadow-sm); font-weight: 600; }
 .query-examples { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; color: var(--app-text-3); }
 .query-examples button { color: var(--app-text-2); background: transparent; border: 0; font: inherit; padding: 2px 0; cursor: pointer; text-align: left; }
@@ -177,8 +180,8 @@ function clearQuery() {
 .results-heading h2 > span { font-size: 12px; font-weight: 500; color: var(--app-text-2); background: var(--app-border-weak); padding: 1px 7px; border-radius: 6px; }
 .results-heading p { margin: 4px 0 0; color: var(--app-text-3); font-size: 12px; overflow-wrap: anywhere; }
 .filter-status { color: var(--app-text-3); font-size: 12px; white-space: nowrap; }
-.source-filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
-.source-filters button { display: flex; align-items: center; gap: 7px; border: 1px solid var(--app-border); background: var(--app-card); border-radius: var(--radius); color: var(--app-text-2); padding: 6px 12px; font: inherit; font-size: 12px; cursor: pointer; }
+.source-filters { display: flex; gap: var(--space-sm); flex-wrap: wrap; margin-bottom: 16px; }
+.source-filters button { display: flex; align-items: center; justify-content: center; min-width: min(100%, var(--control-w)); max-width: 100%; height: var(--control-h); gap: var(--space-sm); border: 1px solid var(--app-border); background: var(--app-card); border-radius: var(--radius); color: var(--app-text-2); padding: 0 12px; font: inherit; font-size: 12px; cursor: pointer; }
 .source-filters button:hover { border-color: var(--app-brand); }
 .source-filters button.selected { border-color: var(--app-brand-soft); background: var(--app-brand-soft); color: var(--app-brand-deep); font-weight: 600; }
 .source-filters button span { font-size: 11px; opacity: .85; }
@@ -218,8 +221,8 @@ function clearQuery() {
 .search-feedback strong { font-size: 15px; font-weight: 600; }
 .search-feedback p { color: var(--app-text-2); margin: 8px 0 16px; overflow-wrap: anywhere; }
 .feedback-error { border-color: var(--el-color-danger-light-7); }
-.feedback-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.feedback-actions .el-button { margin-left: 0; }
+.feedback-actions { display: flex; align-items: center; gap: var(--space-sm); flex-wrap: wrap; }
+.search-feedback .el-button { min-width: min(100%, var(--control-w)); max-width: 100%; height: var(--control-h); margin-left: 0; }
 .feedback-actions svg { width: 14px; height: 14px; margin-right: 5px; }
 .feedback-empty { align-items: center; text-align: center; padding: 40px 24px; }
 .empty-icon { color: var(--app-text-3); width: 36px; height: 36px; margin-bottom: 12px; }
@@ -231,9 +234,7 @@ function clearQuery() {
 .result-skeleton span:last-child { width: 70%; }
 @media (max-width: 600px) {
   .query-panel { padding: 14px 12px; }
-  .query-input-wrap { padding: 0 10px; min-height: 44px; gap: 6px; }
-  .query-input { font-size: 14px; }
-  .search-submit { min-width: 64px; min-height: 44px; padding: 0 12px; }
+  .query-input-wrap { padding: 0 10px; }
   .search-submit svg { display: none; }
   .query-options { gap: 8px; }
   .query-options > span { width: 100%; }
@@ -247,5 +248,9 @@ function clearQuery() {
   .result-metadata { gap: 6px 8px; }
   .feedback-actions { justify-content: flex-start; }
   .search-feedback { padding: 24px 16px; }
+}
+@container knowledge-query (max-width: 330px) {
+  .query-form { flex-wrap: wrap; }
+  .query-input-wrap { flex-basis: 100%; }
 }
 </style>

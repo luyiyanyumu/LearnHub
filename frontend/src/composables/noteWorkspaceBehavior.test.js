@@ -5,6 +5,7 @@ import { compileScript, parse } from '@vue/compiler-sfc'
 import * as vue from 'vue'
 import { Close, Document, Menu, Plus } from '@element-plus/icons-vue'
 import * as tabUtils from './useNoteTabs.js'
+import * as noteEditUtils from '../utils/agentNoteEdit.js'
 
 function compileComponent(name, modules) {
   const source = readFileSync(new URL(`../components/${name}.vue`, import.meta.url), 'utf8')
@@ -41,10 +42,13 @@ const renderer = vue.createRenderer({
 async function flush() { for (let index = 0; index < 8; index++) { await Promise.resolve(); await vue.nextTick() } }
 function locate(root, predicate) { if (predicate(root)) return root; for (const child of root.children || []) { const hit = locate(child, predicate); if (hit) return hit } return null }
 
-async function workspaceHarness() {
-  const manager = tabUtils.createNoteTabsManager()
+async function workspaceHarness(options = {}) {
+  const previousWindow = globalThis.window
+  globalThis.window = new EventTarget()
+  let stored = JSON.stringify(options.savedTabs || [])
+  const manager = tabUtils.createNoteTabsManager({ getItem: () => stored, setItem: (_key, value) => { stored = value } })
   const route = vue.reactive({ path: '/notes/1', fullPath: '/notes/1', params: { id: '1' }, query: {}, hash: '' })
-  const navigation = [], instances = new Map(), mountCounts = new Map(), closeChecks = []
+  const navigation = [], instances = new Map(), mountCounts = new Map(), closeChecks = [], titleReads = []
   let allowClose = true
   function changeRoute(location) {
     const path = typeof location === 'string' ? location : location.path
@@ -75,14 +79,73 @@ async function workspaceHarness() {
     vue, 'vue-router': { useRoute: () => route, useRouter: () => router }, NoteEdit,
     '@element-plus/icons-vue': { Close, Document, Menu, Plus },
     '../composables/useNoteTabs.js': { ...tabUtils, ...manager, findNoteRouteTab: manager.findRouteTab },
+    '../utils/agentNoteEdit': noteEditUtils,
+    '../api': { noteApi: { async detail(id, config) {
+      titleReads.push([id, config])
+      return options.detail?.(id)
+    } } },
   }
   modules['./NoteTabs.vue'] = compileComponent('NoteTabs', modules)
   const component = compileComponent('NoteWorkspace', modules)
   const app = renderer.createApp(component), root = hostElement('root')
   app.mount(root)
   await flush()
-  return { app, root, manager, route, navigation, instances, mountCounts, closeChecks, changeRoute, setAllowClose(value) { allowClose = value } }
+  return { root, manager, route, navigation, instances, mountCounts, closeChecks, titleReads, changeRoute,
+    setAllowClose(value) { allowClose = value },
+    persistedTabs: () => JSON.parse(stored),
+    notifyUpdate(noteId) { window.dispatchEvent(new CustomEvent(noteEditUtils.AGENT_NOTE_UPDATED_EVENT, { detail: { noteId, changed: true } })) },
+    dispose() { app.unmount(); globalThis.window = previousWindow },
+  }
 }
+
+test('an agent update refreshes only the matching restored tab without mounting its editor', async () => {
+  const h = await workspaceHarness({ savedTabs: [{ id: 2, title: '旧标题' }, { id: 3, title: '其他笔记' }],
+    detail: id => ({ id, title: '合成新标题' }),
+  })
+  try {
+    h.notifyUpdate(1)
+    h.notifyUpdate(8)
+    h.notifyUpdate('2')
+    await flush()
+    assert.deepEqual(h.titleReads, [[2, { silentError: true }]])
+    assert.equal(h.mountCounts.has('note:2'), false)
+    assert.equal(locate(h.root, node => node.props?.role === 'tab' && node.props?.title === '合成新标题').props.id, 'note-tab-note%3A2')
+    assert.equal(h.persistedTabs().find(tab => tab.id === 2).title, '合成新标题')
+    assert.equal(h.persistedTabs().find(tab => tab.id === 3).title, '其他笔记')
+  } finally { h.dispose() }
+})
+
+test('late title reads cannot update a newer, visited, or reopened tab', async () => {
+  const responses = []
+  const h = await workspaceHarness({ savedTabs: [2, 3].map(id => ({ id, title: `旧标题 ${id}` })),
+    detail: () => new Promise(resolve => responses.push(resolve)),
+  })
+  try {
+    h.notifyUpdate(2)
+    h.notifyUpdate(2)
+    responses[1]({ title: '最新标题' })
+    await flush()
+    responses[0]({ title: '过期标题' })
+    await flush()
+    assert.equal(h.persistedTabs().find(tab => tab.id === 2).title, '最新标题')
+
+    h.notifyUpdate(3)
+    h.changeRoute({ path: '/notes/3' })
+    await flush()
+    responses[2]({ title: '过期标题' })
+    await flush()
+    assert.equal(h.persistedTabs().find(tab => tab.id === 3).title, '笔记 3')
+
+    h.notifyUpdate(2)
+    locate(h.root, node => node.props?.['aria-label'] === '关闭 最新标题').props.onClick()
+    await flush()
+    h.manager.openNoteRoute({ path: '/notes/2' })
+    h.manager.updateNoteTab('note:2', { title: '重新打开后的标题' })
+    responses[3]({ title: '过期标题' })
+    await flush()
+    assert.equal(h.persistedTabs().find(tab => tab.id === 2).title, '重新打开后的标题')
+  } finally { h.dispose() }
+})
 
 test('switching notes and visiting the list keep mounted editor content and active flags independent', async () => {
   const h = await workspaceHarness()
@@ -107,7 +170,7 @@ test('switching notes and visiting the list keep mounted editor content and acti
     assert.equal(h.mountCounts.get('note:1'), 1)
     assert.equal(h.mountCounts.get('note:2'), 1)
     assert.equal(h.manager.noteTabs.value[0].dirty, true)
-  } finally { h.app.unmount() }
+  } finally { h.dispose() }
 })
 
 test('closing a background dirty tab confirms, cancellation preserves it, and the last active close returns to the list', async () => {
@@ -132,7 +195,7 @@ test('closing a background dirty tab confirms, cancellation preserves it, and th
     assert.equal(h.route.path, '/notes')
     assert.equal(h.manager.noteTabs.value.length, 0)
     assert.equal(h.instances.size, 0)
-  } finally { h.app.unmount() }
+  } finally { h.dispose() }
 })
 
 test('left/right tab navigation selects and focuses the adjacent tab without remounting either editor', async () => {
@@ -150,7 +213,7 @@ test('left/right tab navigation selects and focuses the adjacent tab without rem
     assert.equal(tabOne.focused, true)
     assert.equal(h.mountCounts.get('note:1'), 1)
     assert.equal(h.mountCounts.get('note:2'), 1)
-  } finally { h.app.unmount() }
+  } finally { h.dispose() }
 })
 
 test('external active-key changes reveal only the current tab without focusing it or selecting a note', async () => {
@@ -216,7 +279,7 @@ test('saving a draft changes its note ID while keeping the same mounted editor a
     assert.equal(draft.content.value, 'new draft body')
     assert.equal(h.mountCounts.get('draft:a'), 1)
     assert.equal(h.manager.noteTabs.value.filter(tab => tab.id === 55).length, 1)
-  } finally { h.app.unmount() }
+  } finally { h.dispose() }
 })
 
 test('a close confirmation that finishes after switching tabs cannot navigate away from the newly selected note', async () => {
@@ -234,5 +297,5 @@ test('a close confirmation that finishes after switching tabs cannot navigate aw
     assert.equal(h.manager.noteTabs.value.length, 1)
     assert.equal(h.manager.noteTabs.value[0].id, 2)
     assert.deepEqual(h.navigation, [])
-  } finally { h.app.unmount() }
+  } finally { h.dispose() }
 })
